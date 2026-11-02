@@ -1176,7 +1176,7 @@ d="$OUT/sdkobservation"; mkdir -p "$d"
   extract guest/azstem/sdk_export.c '^int azstem_deck_observation_v1\('; } > "$d/real.inc"
 $CC "${CFLAGS[@]}" -Iguest/azmod -DOBS_INC="\"$d/real.inc\"" -o "$d/real" $T/sdkobservation_test.c
 suite "sdk native observation size and lifetime" "$d/real"
-mutate "$d/real.inc" "$d/control.inc" 's/out->size < sizeof \*out/0/'
+mutate "$d/real.inc" "$d/control.inc" 's/azdeck_record_size\(out\) < sizeof \*out/0/'
 $CC "${CFLAGS[@]}" -Iguest/azmod -DOBS_INC="\"$d/control.inc\"" -o "$d/control" $T/sdkobservation_test.c
 control "sdk native observation: small output buffers accepted" "$d/control"
 mutate "$d/real.inc" "$d/padding.inc" 's/memset\(id \+ 12, 0, 4\);/;/'
@@ -1194,8 +1194,8 @@ from pathlib import Path
 import os, sys
 s=Path(sys.argv[1]).read_text()
 a=s.index('int azstem_loop_observation_v'+os.environ['V'])
-b=s.index('out->size < sizeof *out',a)
-s=s[:b]+s[b:].replace('out->size < sizeof *out','0',1)
+b=s.index('azdeck_record_size(out) < sizeof *out',a)
+s=s[:b]+s[b:].replace('azdeck_record_size(out) < sizeof *out','0',1)
 Path(sys.argv[2]).write_text(s)
 PYX
     $CC "${CFLAGS[@]}" -Iguest/azmod -DLOOP_EXPORT_INC="\"$d/size-$v.inc\"" -o "$d/size-$v" $T/sdkloopexport_test.c
