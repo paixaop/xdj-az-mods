@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* Production probe logger: separate revisions, copied records, age and file bounds. */
 #include "../common/azdeckinfo.h"
+#include "../common/aztimestamp.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
