@@ -6,7 +6,8 @@
  * Hooks EP147's own waveform path rather than drawing over it. The slot-6 point
  * accessors of the DetailedWaveform*DataProvider classes (3-band, RGB, blue) are
  * fed a per-track, per-stem-mask scaled copy of the point array, so stem mutes
- * reshape the native waveform; the deck-tile overview bar is scaled the same way.
+ * reshape the native waveform. Overview scaling requires a verified owned native entry;
+ * manual overview refreshes render stock until an owning boundary is established.
  * The deck comes from the constructors' deck argument (WaveformWidgetBase+0x197F0,
  * SimpleWaveform2DeckWidget+0x98); a lookup that cannot answer means unknown.
  * Also forces the native STEMS pad grid (gated on azmod-wavestems.on).
@@ -19,6 +20,7 @@
  *
  * Entry points: apply_ui60(), install_wave_scale(), wave_prov_report().
  */
+#include "../common/azoverviewlease.h"
 /* ---- Force the native STEMS pad grid on the WAVEFORM center screen ----
  * PadStatusWidget (ctor 0x01df6240) builds 8 children at this+0xe0..0x110; its
  * mode switch FUN_01df6010 shows exactly one, chosen by the pad-mode enum from
@@ -671,12 +673,14 @@ int azmod_wave_zoom(int deck, double *ppc, double *phcol, double *ncol, double *
 /* ---- Deck-tile overview bar (the preview under the track title) ----------
  * Not fed by the slot-6 provider. FUN_01dfb328 (the overview draw) reads it
  * inline: ldar[this+0x80] -> ldar[obj+0x28] = Content, Content+0x28 = element
- * array, Content+0x30 = count (1200), 12 bytes per element. Bytes 0-2 and 6-8
- * are color, 4-5 and 10-11 heights.
+ * array, Content+0x30 = count (1200), 12 bytes per element. Native RGB is at
+ * bytes 0-2, the blue palette index at 3 and the two draw heights at 4-5.
+ * Bytes 6-11 retain the original six PWV4 bytes, rather than another draw point.
  *
- * It renders once per track load into a cached image, so a stem toggle
- * re-renders it from the paint hook (message thread) with our scaled copy;
- * EP147's shared array is never left modified. */
+ * It renders once per track load into a cached image. Scaling is limited to the verified
+ * native updater's owned entry. A stem toggle can request a manual repaint, which uses
+ * stock rendering because it has no such Content holder. Unknown deck or absent stems
+ * also select the original draw. Scoped cleanup restores only our installed array. */
 #define WAVE_OVERVIEW EP_1dfb328
 /* FUN_01dfc710, the only caller: setOverview(this, &sharedObj, mode, width).
  * Passing the object it already holds takes the fast path (no refcounting),
@@ -687,9 +691,9 @@ typedef void (*ovset_fn)(long self, long *objslot, int mode, int width);
 #define OV_STRIDE 12
 #define OV_MAX 2048
 #define OV_COL_A 0 /* color bytes */
-#define OV_COL_B 6
+#define OV_COL_B 6 /* preserve the existing tint mirror into retained wire bytes */
 #define OV_HGT_A 4 /* height bytes */
-#define OV_HGT_B 10
+#define OV_HGT_B 5
 static void (*g_orig_ov)(long);
 #define OVINST_MAX 24 /* several tile sets exist (2-deck / 4-deck layouts) */
 /* Per overview widget. `snap`/`scaled` are our own buffers: EP147's array is never
@@ -709,6 +713,16 @@ static _Atomic int g_ovi_n = 0;
 static _Atomic int g_ov_refresh = 0; /* bit d: deck d's overview tiles need a re-render */
 static _Atomic long g_ov_calls = 0;
 static _Atomic long g_ov_applied = 0;
+enum ov_lease_binding_status {
+    OV_LEASE_UNBOUND = 0,
+    OV_LEASE_MISSING = 1,
+    OV_LEASE_QUERY_REJECTED = 2,
+    OV_LEASE_INCOMPATIBLE = 3,
+    OV_LEASE_PROFILE_UNAVAILABLE = 4,
+    OV_LEASE_READY = 5
+};
+static _Atomic int g_ov_bind_status = OV_LEASE_UNBOUND;
+static _Atomic long g_ov_acquired = 0;
 /* ErP (deck-bus) frames by CRC on arrival. Single writer (the bus read), read
  * racily for /tmp/azmod-waveprov. */
 static long g_erp_crc_ok, g_erp_crc_bad;
@@ -1884,73 +1898,39 @@ static int install_wave_scale(void) {
 
 /* azstem.so: usable stem frames for a deck (0 = none). */
 static int (*g_stem_frames)(int deck);
-/* /tmp/azmod-waveprov: the waveform hooks' counters and zoom models, rewritten each slow
- * tick of the overlay (only with azmod-logs.on). */
+/* Optional overlay-thread report: only counters published with atomic operations.
+ * UI cache fields and native widget/provider pointers have no lifetime here. */
 static void wave_prov_report(void) {
     FILE *f = azlog_open("/tmp/azmod-waveprov", "w");
-    if (f) {
-        {
-            int on = __atomic_load_n(&g_ovi_n, __ATOMIC_ACQUIRE);
-            fprintf(f, "overview: calls=%ld applied=%ld instances=%d\n",
-                    __atomic_load_n(&g_ov_calls, __ATOMIC_RELAXED),
-                    __atomic_load_n(&g_ov_applied, __ATOMIC_RELAXED), on);
-            fprintf(f, "erp crc: ok=%ld bad=%ld\n", g_erp_crc_ok, g_erp_crc_bad);
-            for (int i = 0; i < on; i++) {
-                long s = g_ovi[i].self;
-                /* Diagnostic: ints around self (SimpleWaveform2DeckWidget keeps
-                 * its deck at +0x98). */
-                int pr[8];
-                const int off[8] = {0x80, 0x88, 0x90, 0x94, 0x98, 0x9c, 0xa0, 0xb0};
-                for (int q = 0; q < 8; q++)
-                    pr[q] = s ? *(volatile int *) (s + off[q]) : -999;
-                fprintf(f,
-                        "  ov %d: self=%#lx cnt=%d deck=%d  probe[80=%d 88=%d 90=%d 94=%d 98=%d "
-                        "9c=%d a0=%d b0=%d]\n",
-                        i, (unsigned long) s, g_ovi[i].cnt, g_ovi[i].deck, pr[0], pr[1], pr[2],
-                        pr[3], pr[4], pr[5], pr[6], pr[7]);
-            }
-        }
-        static const char *const kname[WSK_N] = {"rgb", "blue", "3band"};
-        for (int d = 0; d < AZMOD_STEM_DECKS; d++) {
-            double ppc = 0, ph = 0, nc = 0, tt = 0;
-            fprintf(f, "zoom d%d: ok=%d kind=%d ppc=%.3f phcol=%.1f ncol=%.0f total=%.0f\n", d,
-                    azmod_wave_zoom(d, &ppc, &ph, &nc, &tt), wave_active_kind(d), ppc, ph, nc, tt);
-            for (int k = 0; k < WSK_N; k++) {
-                const wzoom *z = &g_wz[d][k];
-                if (!z->total && !z->active && !z->pd_n)
-                    continue;
-                fprintf(f,
-                        "  d%d %s: active=%d ok=%d ppc=%.3f total=%d pend=%d/%d age=%d\n", d,
-                        kname[k], z->active, __atomic_load_n(&z->ok, __ATOMIC_RELAXED), z->ppc,
-                        z->total, z->pd_n, z->pd_max - z->pd_min, z->pd_age);
-            }
-        }
-        /* Why a deck is or is not reflecting: calls>0 = the scaling hook fires,
-         * scaled[d]>0 = deck d reflects, the other counters name the exit. */
-        fprintf(f, "calls=%lu gateoff=%lu nocnt=%lu nodeck=%lu noid=%d\n", g_wp_calls,
-                g_wp_gateoff, g_wp_nocnt, g_wp_nodeck, g_wave_noid);
-        fprintf(f, "wpaint: calls=%ld memo=%d  (widget paint -> deck context)\n",
-                __atomic_load_n(&g_wpaint_calls, __ATOMIC_RELAXED),
-                __atomic_load_n(&g_wpmemo_n, __ATOMIC_RELAXED));
-        fprintf(f, "wwbctor: calls=%d ctmap=%d  (Content -> deck table built at construction)\n",
-                __atomic_load_n(&g_wwbctor_calls, __ATOMIC_RELAXED),
-                __atomic_load_n(&g_ctmap_n, __ATOMIC_RELAXED));
-        fprintf(f,
-                "upd: calls=%ld bound=%d wp_updhit=%lu wp_cthit=%lu  (deck via the live "
-                "DetailedWaveformWidget::update hook / the Content table)\n",
-                __atomic_load_n(&g_upd_calls, __ATOMIC_RELAXED),
-                __atomic_load_n(&g_upd_bound, __ATOMIC_RELAXED), g_wp_updhit, g_wp_cthit);
-        fprintf(f, "sw2d: paints=%ld last_deck=%d cur_deck=%d  (widget deck-index binding)\n",
-                __atomic_load_n(&g_sw2d_paints, __ATOMIC_RELAXED),
-                __atomic_load_n(&g_sw2d_last_deck, __ATOMIC_RELAXED),
-                __atomic_load_n(&g_cur_paint_deck, __ATOMIC_RELAXED));
-        for (int d = 0; d < AZMOD_STEM_DECKS; d++)
-            fprintf(f, "  deck %d: scaled=%lu gated=%lu\n", d, g_wp_scaled[d], g_wp_gated[d]);
-        for (int d = 0; d < AZMOD_STEM_DECKS; d++)
-            fprintf(f, "deck %d: frames=%d att=%d\n", d, g_stem_frames ? g_stem_frames(d) : 0,
-                    __atomic_load_n(&g_att_have[d], __ATOMIC_RELAXED));
-        fclose(f);
+    if (!f)
+        return;
+    fprintf(f, "overview: calls=%ld applied=%ld instances=%d\n",
+            __atomic_load_n(&g_ov_calls, __ATOMIC_RELAXED),
+            __atomic_load_n(&g_ov_applied, __ATOMIC_RELAXED),
+            __atomic_load_n(&g_ovi_n, __ATOMIC_RELAXED));
+    int binding = __atomic_load_n(&g_ov_bind_status, __ATOMIC_ACQUIRE);
+    const char *binding_name = "unknown";
+    switch (binding) {
+    case OV_LEASE_UNBOUND: binding_name = "unbound"; break;
+    case OV_LEASE_MISSING: binding_name = "missing"; break;
+    case OV_LEASE_QUERY_REJECTED: binding_name = "query-rejected"; break;
+    case OV_LEASE_INCOMPATIBLE: binding_name = "incompatible"; break;
+    case OV_LEASE_PROFILE_UNAVAILABLE: binding_name = "profile-unavailable"; break;
+    case OV_LEASE_READY: binding_name = "ready"; break;
     }
+    fprintf(f, "overview lease: binding=%s(%d) acquired=%ld\n", binding_name, binding,
+            __atomic_load_n(&g_ov_acquired, __ATOMIC_RELAXED));
+    fprintf(f, "wpaint: calls=%ld memo=%d\n",
+            __atomic_load_n(&g_wpaint_calls, __ATOMIC_RELAXED),
+            __atomic_load_n(&g_wpmemo_n, __ATOMIC_RELAXED));
+    fprintf(f, "wwbctor: calls=%d ctmap=%d\n",
+            __atomic_load_n(&g_wwbctor_calls, __ATOMIC_RELAXED),
+            __atomic_load_n(&g_ctmap_n, __ATOMIC_RELAXED));
+    fprintf(f, "upd: calls=%ld bound=%d\n",
+            __atomic_load_n(&g_upd_calls, __ATOMIC_RELAXED),
+            __atomic_load_n(&g_upd_bound, __ATOMIC_RELAXED));
+    fprintf(f, "sw2d: paints=%ld\n", __atomic_load_n(&g_sw2d_paints, __ATOMIC_RELAXED));
+    fclose(f);
 }
 
 /* Per track position, the fraction of the four stems' peak still audible, each
@@ -2032,16 +2012,15 @@ static void ov_repaint(long self) {
     ((ovset_fn) WAVE_OV_SET)(self, &slot, mode, width);
 }
 
-/* The overview is scaled in a copy, never in EP147's array: that array is per
- * track and shared by the overview widgets of every layout, so writing into it
- * and restoring later poisons other widgets' snapshots until EP147 restarts.
+/* The overview samples are scaled in a private copy. The broker installs that copy only
+ * while it holds a genuine Content lease, then restores its own installation before
+ * releasing the lease. Other widgets may share the native Content, so its sample bytes
+ * remain untouched. Only the proved native updater entry supplies acquisition ownership;
+ * manual and unknown entry contexts render stock.
  *
- * Same shape as the main waveform (azm_rw_enter): ov_hook wraps the only render
- * of this widget (0x1dfb328, called only from setOverview 0x1dfc710), points
- * content+0x28 at the scaled copy for that call and puts EP147's pointer back.
- * The copy rebuilds when the array, count, curve generation, tint or the
- * array's bytes change (EP147 re-analyzing in place). Unknown deck -> stock.
- * Message thread only (ov_hook, build_atten). */
+ * The copy rebuilds when source identity, count, curve generation, tint or source bytes
+ * differ. This defensive byte comparison does not assert native in-place reanalysis.
+ * Unknown deck -> stock. Message thread only (ov_hook, build_atten). */
 static unsigned char *ov_scaled_for(int i, const unsigned char *arr, int cnt) {
     int deck = g_ovi[i].deck;
     if (deck < 0 || deck >= AZMOD_STEM_DECKS || !arr || cnt <= 0 || cnt > OV_MAX)
@@ -2220,18 +2199,72 @@ static int ov_deck_via_tile(long self) {
     return -1;
 }
 static _Atomic int g_ovprobe = 12;
-static void ov_hook(long self) {
+static struct azov_lease_api g_ovlease;
+static int g_ovlease_bound;
+static int ov_lease_bind(void) {
+    if (!g_ovlease_bound) {
+        g_ovlease_bound = 1; /* Message thread only; older helpers render stock. */
+        int (*query)(uint32_t, struct azov_lease_api *, size_t) = NULL;
+        *(void **) &query = dlsym(RTLD_DEFAULT, "azstem_overview_lease_v1");
+        struct azov_lease_api api = {0};
+        int binding = OV_LEASE_MISSING;
+        if (query) {
+            binding = OV_LEASE_QUERY_REJECTED;
+            if (query(AZOV_LEASE_ABI, &api, sizeof api)) {
+                binding = OV_LEASE_INCOMPATIBLE;
+                if (api.struct_size == sizeof api && api.abi_version == AZOV_LEASE_ABI &&
+                    !api.reserved && api.begin && api.install && api.finish) {
+                    if (api.flags == AZOV_LEASE_PROFILE_UNAVAILABLE)
+                        binding = OV_LEASE_PROFILE_UNAVAILABLE;
+                    else if (!api.flags) {
+                        g_ovlease = api;
+                        binding = OV_LEASE_READY;
+                    }
+                }
+            }
+        }
+        __atomic_store_n(&g_ov_bind_status, binding, __ATOMIC_RELEASE);
+    }
+    return g_ovlease.begin != NULL;
+}
+struct ov_lease_scope {
+    uint64_t token[2];
+    int held;
+};
+static void ov_lease_cleanup(struct ov_lease_scope *scope) {
+    if (scope->held) {
+        scope->held = 0;
+        int released = g_ovlease.finish(scope->token); /* Restore while pinned, then release. */
+        /* Caller authentication must see an azmod return PC on normal returns too. */
+        __asm__ volatile("" : "+r"(released) : : "memory");
+    }
+}
+static void ov_hook_owned(long self, uintptr_t held, uintptr_t native_return, uintptr_t native_stack)
+    __attribute__((used));
+static void ov_hook_owned(long self, uintptr_t held, uintptr_t native_return, uintptr_t native_stack) {
     __atomic_fetch_add(&g_ov_calls, 1, __ATOMIC_RELAXED);
-    long obj = *(volatile long *) (self + 0x80);
+    if (!on_msg_thread()) {
+        g_orig_ov(self);
+        return;
+    }
+    struct azov_lease lease = {0};
+    struct azov_owned_entry capture = {(uintptr_t) self, held, native_return, native_stack};
+    if (!ov_lease_bind() || !g_ovlease.begin(&capture, &lease, sizeof lease)) {
+        g_orig_ov(self);
+        return;
+    }
+    __atomic_fetch_add(&g_ov_acquired, 1, __ATOMIC_RELAXED);
+    struct ov_lease_scope scope __attribute__((cleanup(ov_lease_cleanup))) = {
+        {lease.token[0], lease.token[1]}, 1};
+    long content = (long) lease.content_key; /* Identity only; the broker owns dereferences. */
+    const unsigned char *arr = lease.points;
+    int cnt = lease.count;
     /* Budgeted log of the first few overview draws and their tile binding. */
     if (__atomic_fetch_sub(&g_ovprobe, 1, __ATOMIC_RELAXED) > 0) {
-        wwb_log("ovprobe: self=%lx obj=%lx tile=%lx -> deck=%d (table n=%d)", (unsigned long) self,
-                (unsigned long) obj, (unsigned long) (self - OV_IN_TILE), ov_deck_via_tile(self),
+        wwb_log("ovprobe: self=%lx content=%lx tile=%lx -> deck=%d (table n=%d)", (unsigned long) self,
+                (unsigned long) content, (unsigned long) (self - OV_IN_TILE), ov_deck_via_tile(self),
                 __atomic_load_n(&g_ovtile_n, __ATOMIC_RELAXED));
     }
-    long content = obj ? *(volatile long *) (obj + 0x28) : 0;
-    unsigned char *arr = content ? *(unsigned char **) (content + 0x28) : 0;
-    int cnt = content ? *(volatile int *) (content + 0x30) : 0;
     int n = __atomic_load_n(&g_ovi_n, __ATOMIC_ACQUIRE), slot = -1;
     for (int i = 0; i < n; i++)
         if (g_ovi[i].self == self) {
@@ -2258,13 +2291,24 @@ static void ov_hook(long self) {
         g_orig_ov(self);
         return;
     }
-    unsigned char **ap = (unsigned char **) (content + 0x28);
-    *ap = sc; /* for this render only */
+    if (!g_ovlease.install(scope.token, sc)) {
+        g_orig_ov(self);
+        return;
+    }
     __atomic_fetch_add(&g_ov_applied, 1, __ATOMIC_RELAXED);
     g_orig_ov(self);
-    if (*ap == sc)
-        *ap = arr; /* EP147 replaced it mid-render: keep theirs */
 }
+/* Only the native entry shim captures the updater's verified ownership.
+ * Manual refreshes call the original renderer and retain stock rendering. */
+#if defined(__aarch64__)
+__asm__(".text\n.align 2\n.globl azm_ov_entry\n.hidden azm_ov_entry\n"
+        ".type azm_ov_entry,%function\nazm_ov_entry:\n"
+        "   mov x1,x24\n" /* Native updater's already-held Content. */
+        "   mov x2,x30\n" /* Native setter's return PC. */
+        "   mov x3,sp\n"  /* Native entry stack before any C frame exists. */
+        "   b ov_hook_owned\n.size azm_ov_entry,.-azm_ov_entry\n");
+void azm_ov_entry(long self);
+#endif
 /* Find (or create) the g_ovi slot for a census overview widget, keyed by self. */
 static int ov_slot_for(long self, int deck) {
     int n = __atomic_load_n(&g_ovi_n, __ATOMIC_ACQUIRE);
@@ -2329,14 +2373,10 @@ static void ov_refresh_if_needed(void) {
             if (!own_u32((uintptr_t) self, &vt) || vt != (unsigned) OV_WIDGET_VT)
                 continue;
         }
-        long obj = *(volatile long *) (self + 0x80);
-        long content = obj ? *(volatile long *) (obj + 0x28) : 0;
-        unsigned char *arr = content ? *(unsigned char **) (content + 0x28) : 0;
-        int cnt = content ? *(volatile int *) (content + 0x30) : 0;
-        if (!arr || cnt <= 0 || cnt > OV_MAX)
-            continue;
         if (ov_slot_for(self, deck) < 0)
             continue;
-        ov_repaint(self); /* re-renders through ov_hook */
+        /* The native renderer handles absent/empty analysis. The refresh path has no
+         * owning Content boundary of its own and must not preflight that borrowed slot. */
+        ov_repaint(self); /* Manual refresh uses the stock native renderer. */
     }
 }

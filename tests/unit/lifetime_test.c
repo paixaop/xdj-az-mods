@@ -40,13 +40,65 @@ static const int STEM_SLOT[NDECK] = {0, 1, 2, 3};
 #define IDMAP_SUB_OFF 0x48UL
 static _Atomic(void *) g_deck_self[MAX_DECKS];
 static _Atomic unsigned g_ctor_calls[MAX_DECKS], g_ap_rebind, g_ap_ctor;
+static _Atomic uintptr_t g_djpu_vt = 0x289f878;
+static int g_sdk_loop_on, loop_registrations, loop_retired_mask, loop_bad_owner;
+static int azsdk_loop_register(int deck, void *unit) {
+    loop_registrations++;
+    loop_bad_owner |= atomic_load(&g_deck_self[STEM_SLOT[deck]]) != unit;
+    return 1;
+}
+static void azsdk_loop_retire(int deck) { loop_retired_mask |= 1 << deck; }
+static int g_sdk_live_on, live_registrations, live_retired_mask, live_bad_owner, live_dtor_late;
+static int azsdk_live_register(int deck, void *unit) {
+    live_registrations++;
+    live_bad_owner |= atomic_load(&g_deck_self[STEM_SLOT[deck]]) != unit;
+    live_bad_owner |= *(uintptr_t *) unit != atomic_load(&g_djpu_vt);
+    return 1;
+}
+static void azsdk_live_retire(int deck) { live_retired_mask |= 1 << deck; }
+static int cue_registrations, cue_retired_mask, cue_bad_owner, cue_dtor_late;
+static void *cue_completed_ctor;
+static int azsdk_cue_register(int deck, void *unit) {
+    ++cue_registrations;
+    cue_bad_owner |= atomic_load(&g_deck_self[STEM_SLOT[deck]]) != unit;
+    cue_bad_owner |= *(uintptr_t *)unit != atomic_load(&g_djpu_vt) || cue_completed_ctor != unit;
+    return 1;
+}
+static void azsdk_cue_retire(int deck) { cue_retired_mask |= 1 << deck; }
+static _Atomic int g_sdk_load_on;
+static int load_registrations, load_retired_mask, load_bad_owner, load_before_ctor, load_dtor_late;
+static void *load_completed_ctor;
+static int azsdk_load_register(int deck, void *unit) {
+    load_registrations++;
+    if (deck < 0 || deck >= NDECK) { load_bad_owner = 1; return 0; }
+    load_bad_owner |= atomic_load(&g_deck_self[STEM_SLOT[deck]]) != unit;
+    load_bad_owner |= *(uintptr_t *) unit != atomic_load(&g_djpu_vt);
+    load_before_ctor |= load_completed_ctor != unit;
+    return 1;
+}
+static void azsdk_load_retire(int deck) { load_retired_mask |= 1 << deck; }
+static int azsdk_exit_register(int deck, void *unit) {
+    (void) deck; (void) unit; return 0;
+}
+static void azsdk_exit_retire(int deck) { (void) deck; }
 #include LIFE_INC
 #include "check.h"
+
+/* Fakes stay mapped throughout every late-read check. Only after the final joined
+ * thread and assertion are they released, so LSan needs no harness suppression. */
+static void *fake_allocations[64];
+static unsigned fake_allocation_count;
+static void *fake_alloc(size_t bytes) {
+    void *p = aligned_alloc(16, bytes);
+    if (!p || fake_allocation_count == sizeof fake_allocations / sizeof *fake_allocations) abort();
+    fake_allocations[fake_allocation_count++] = p;
+    return p;
+}
 
 /* a fake gui::LoadedTrackInfo (vtable +0, TrackID +0x08, title +0x38, artist +0x40) and a fake
  * gui::LoadState (vtable +0, LoadedTrackInfo* +0x150, deck +0x47c, magic +0x4a8) */
 static void *mk_lti(void) {
-    unsigned char *p = aligned_alloc(16, 0x80);
+    unsigned char *p = fake_alloc(0x80);
     memset(p, 0, 0x80);
     uintptr_t vt = LTI_VT;
     static const char empty[] = "";
@@ -57,7 +109,7 @@ static void *mk_lti(void) {
     return p;
 }
 static void *mk_ls(int deck) {
-    unsigned char *p = aligned_alloc(16, 0x4b0);
+    unsigned char *p = fake_alloc(0x4b0);
     memset(p, 0, 0x4b0);
     uintptr_t vt = EP_2ddb878, lti = (uintptr_t) mk_lti();
     unsigned d = (unsigned) deck, m = LS_MAGIC;
@@ -118,10 +170,18 @@ static void fake_djctor(void *s, const void *id, void *ctx, int cap) {
     (void) cap;
     if (atomic_load(&g_deck_self[watch_slot]) == s)
         djctor_saw_slot = 1; /* published before the ctor finished */
+    load_completed_ctor = s;
+    cue_completed_ctor = s;
 }
 static void fake_djdtor(void *s) {
     if (atomic_load(&g_deck_self[watch_slot]) == s)
         djdtor_saw_slot = 1;
+    if (g_sdk_live_on && s == watch_self && !(live_retired_mask & (1 << watch_slot)))
+        live_dtor_late = 1;
+    if (g_sdk_live_on && s == watch_self && !(cue_retired_mask & (1 << watch_slot)))
+        cue_dtor_late = 1;
+    if (g_sdk_load_on && s == watch_self && !(load_retired_mask & (1 << watch_slot)))
+        load_dtor_late = 1;
 }
 static void *dtor_thread(void *ls) {
     lsdtor_hook(ls);
@@ -132,7 +192,7 @@ static void sleep_ms(int ms) {
     nanosleep(&ts, NULL);
 }
 static uintptr_t fake_obj(uintptr_t vt) {
-    uintptr_t *p = aligned_alloc(16, 0x200);
+    uintptr_t *p = fake_alloc(0x200);
     memset(p, 0, 0x200);
     p[0] = vt;
     return (uintptr_t) p;
@@ -276,11 +336,22 @@ int main(void) {
     watch_self = (void *) unit;
     watch_slot = STEM_SLOT[2];
     djctor_saw_slot = 0;
+    g_sdk_loop_on = 1;
+    g_sdk_live_on = 1;
+    g_sdk_load_on = 1;
     djpuctor_hook((void *) unit, &idu, 0, 0);
     CHECK("DjPlayerUnit ctor: published only after the ctor returned",
           atomic_load(&g_deck_self[STEM_SLOT[2]]) == (void *) unit && !djctor_saw_slot);
     CHECK("DjPlayerUnit ctor: its KeyControlFGPR read inside the ctor call",
           atomic_load(&g_djpu_fgpr[2]) == fg);
+    CHECK("DjPlayerUnit ctor: loop listener registered only for its claimed unit",
+          loop_registrations == 1 && !loop_bad_owner);
+    CHECK("DjPlayerUnit ctor: live listener registered only for its completed claimed unit",
+          live_registrations == 1 && !live_bad_owner);
+    CHECK("DjPlayerUnit ctor: cue listener registered only for its completed claimed unit",
+          cue_registrations == 1 && !cue_bad_owner);
+    CHECK("DjPlayerUnit ctor: load observer registered only after its verified owned ctor",
+          load_registrations == 1 && !load_bad_owner && !load_before_ctor);
     struct {
         unsigned char no;
         unsigned char pad[7];
@@ -303,6 +374,25 @@ int main(void) {
     djpuctor_hook(unit2, &bad, 0, 0);
     CHECK("DjPlayerUnit ctor: disagreeing deck copies publish nothing",
           atomic_load(&g_deck_self[1]) == NULL && atomic_load(&g_djpu_fgpr[1]) == 0);
+    CHECK("DjPlayerUnit ctor: no loop listener for a disagreeing deck id", loop_registrations == 2);
+    CHECK("DjPlayerUnit ctor: no live listener for a disagreeing deck id", live_registrations == 2);
+    CHECK("DjPlayerUnit ctor: no cue listener for a disagreeing deck id", cue_registrations == 2);
+    CHECK("DjPlayerUnit ctor: no load observer for a disagreeing deck id", load_registrations == 2);
+    struct {
+        unsigned char no;
+        unsigned char pad[7];
+        unsigned no32;
+    } out_of_range = {4, {0}, 4};
+    djpuctor_hook(unit2, &out_of_range, 0, 0);
+    CHECK("DjPlayerUnit ctor: no load observer for an agreed out-of-range deck", load_registrations == 2);
+    uintptr_t occupied = fake_obj(0x289f878);
+    djpuctor_hook((void *) occupied, &idu, 0, 0);
+    CHECK("DjPlayerUnit ctor: another unit cannot borrow an occupied deck's load observer",
+          load_registrations == 2 && atomic_load(&g_deck_self[STEM_SLOT[2]]) == (void *) unit);
+    djpudtor_hook((void *) occupied);
+    CHECK("DjPlayerUnit dtor: an unclaimed unit cannot retire the deck's load observer", load_retired_mask == 0);
+    CHECK("DjPlayerUnit ctor/dtor: unclaimed and out-of-range units cannot borrow/retire cue observer",
+          cue_registrations == 2 && !cue_retired_mask);
     static char unit0[0x1a8];
     struct {
         unsigned char no;
@@ -310,11 +400,33 @@ int main(void) {
         unsigned no32;
     } id0 = {0, {0}, 0};
     djpuctor_hook(unit0, &id0, 0, 0);
+    CHECK("DjPlayerUnit ctor: no loop listener without the expected native unit vtable", loop_registrations == 2);
+    CHECK("DjPlayerUnit ctor: no live listener without the expected native unit vtable", live_registrations == 2);
+    CHECK("DjPlayerUnit ctor: no cue listener without the expected native unit vtable", cue_registrations == 2);
+    CHECK("DjPlayerUnit ctor: no load observer without the expected native unit vtable", load_registrations == 2);
     djdtor_saw_slot = 0;
     djpudtor_hook((void *) unit);
     CHECK("DjPlayerUnit dtor: its slot and FGPR cleared before the original destructor ran",
           atomic_load(&g_deck_self[STEM_SLOT[2]]) == NULL && atomic_load(&g_djpu_fgpr[2]) == 0 &&
               !djdtor_saw_slot);
     CHECK("DjPlayerUnit dtor: other decks' slots untouched", atomic_load(&g_deck_self[STEM_SLOT[0]]) == unit0);
+    CHECK("DjPlayerUnit dtor: retires only its loop listener generation", loop_retired_mask == (1 << 2));
+    CHECK("DjPlayerUnit dtor: retires only its live listener before the native destructor",
+          live_retired_mask == (1 << 2) && !live_dtor_late);
+    CHECK("DjPlayerUnit dtor: retires only its cue listener before native teardown",
+          cue_retired_mask == (1 << 2) && !cue_dtor_late);
+    CHECK("DjPlayerUnit dtor: retires only its load observer before native teardown",
+          load_retired_mask == (1 << 2) && !load_dtor_late);
+    g_sdk_load_on = 0;
+    uintptr_t disabled = fake_obj(0x289f878);
+    djpuctor_hook((void *) disabled, &idu, 0, 0);
+    CHECK("DjPlayerUnit ctor: disabled load observation never registers an otherwise valid unit",
+          load_registrations == 2);
+    djpudtor_hook((void *) disabled);
+    CHECK("DjPlayerUnit dtor: disabled load observation adds no retirement", load_retired_mask == (1 << 2));
+    for (unsigned i = 0; i < fake_allocation_count; ++i) {
+        free(fake_allocations[i]);
+        fake_allocations[i] = NULL;
+    }
     return ut_summary();
 }

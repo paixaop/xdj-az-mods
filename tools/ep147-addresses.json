@@ -1,0 +1,2449 @@
+{
+  "schema": 1,
+  "builds": {
+    "1.30": {
+      "size": 57874328,
+      "md5": "3518275e8b4d5d63636d8d7b4468d7ba",
+      "sha256": "736bdc9322c00e5770af459c92cace33d8680825c07f00f909f74dfc473a77a6"
+    },
+    "2.00": {
+      "size": 62461736,
+      "md5": "8daa1de55d7328f458f6d855cdc3cdde",
+      "sha256": "6577f42532375936c7e3fa830efa35b7daa9cde8e0a265c1fc7143f824321925"
+    }
+  },
+  "libraries": {
+    "azmod": {
+      "EP_424d40": {
+        "v200": "0x0426570",
+        "basis": "hand: operator new: the new(0x230) for the sub column button in the TrackListHeader ctor"
+      },
+      "EP_5acb58": {
+        "v200": "0x05d8a70",
+        "basis": "code w=12"
+      },
+      "EP_6742d8": {
+        "v200": "0x06b5d88",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_6ac3c0": {
+        "v200": "0x06ede50",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_6b7958": {
+        "v200": "0x06f93e8",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_708a10": {
+        "v200": "0x074a460",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_7a01e0": {
+        "v200": "0x07e27c8",
+        "basis": "hand: the only regObject instance whose adrp+add+add chain materialises the __PRETTY_FUNCT"
+      },
+      "EP_9d1ae8": {
+        "v200": "0x0a17120",
+        "basis": "ptr 1 agree"
+      },
+      "EP_9d4ac0": {
+        "v200": "0x0a1a0f8",
+        "basis": "xref 1/1 agree"
+      },
+      "EP_a28550": {
+        "v200": "0x0a6d960",
+        "basis": "reviewed cache: Reception callback entered under native slot13 strong promotion; no source/load inference; exact function bytes"
+      },
+      "EP_a77770": {
+        "v200": "0x0abda68",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_a77a20": {
+        "v200": "0x0abdd18",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_aa9a48": {
+        "v200": "0x0aefcd0",
+        "basis": "code w=12 | xref 1/1 agree | ptr 1 agree"
+      },
+      "EP_aabb78": {
+        "v200": "0x0af1ec0",
+        "basis": "code w=12 | xref 1/1 agree | ptr 1 agree"
+      },
+      "EP_c85838": {
+        "v200": "0x0d00f08",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_d34790": {
+        "v200": "0x0dbe648",
+        "basis": "code w=12 | xref 4/6 agree"
+      },
+      "EP_d85a08": {
+        "v200": "0x0e10800",
+        "basis": "code w=12 | xref 2/2 agree"
+      },
+      "EP_e33830": {
+        "v200": "0x0ebd910",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_10b29f8": {
+        "v200": "0x1142bc8",
+        "basis": "reviewed cache: selected LoadInfoRequestTicket reply processing; receiver remains a genuine weak owner; exact function bytes"
+      },
+      "EP_11755a0": {
+        "v200": "0x122f860",
+        "basis": "hand: FolderEntryDigger: re-read one analysed folder from disk (digger, folderID) (masked-"
+      },
+      "EP_1176c88": {
+        "v200": "0x1230f48",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_11881d8": {
+        "v200": "0x12424a8",
+        "basis": "code w=96 | ptr 1 agree"
+      },
+      "EP_11fc670": {
+        "v200": "0x12b7b88",
+        "basis": "reviewed cache: LoadTrackInfo cache destructor; exact function bytes"
+      },
+      "EP_1224270": {
+        "v200": "0x12df7e8",
+        "basis": "code w=12 | xref 3/3 agree"
+      },
+      "EP_12246a0": {
+        "v200": "0x12dfc18",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_123d560": {
+        "v200": "0x12f8c58",
+        "basis": "reviewed cache: TrackInfo cache destructor; exact function bytes"
+      },
+      "EP_123d6c8": {
+        "v200": "0x12f8dc0",
+        "basis": "reviewed cache: TrackInfo setter; exact function bytes"
+      },
+      "EP_123dc78": {
+        "v200": "0x12f9370",
+        "basis": "reviewed cache: TrackInfo setup; exact function bytes"
+      },
+      "EP_123e7e0": {
+        "v200": "0x12f9ed8",
+        "basis": "reviewed cache: Fallback supported standard factory; exact function bytes"
+      },
+      "EP_123f738": {
+        "v200": "0x12fae60",
+        "basis": "reviewed cache: TrackInfo fallback adapter; exact function bytes"
+      },
+      "EP_1243350": {
+        "v200": "0x12feae0",
+        "basis": "reviewed cache: Collector clear; exact function bytes"
+      },
+      "EP_12439e8": {
+        "v200": "0x12ff178",
+        "basis": "code w=96 | xref 3/3 agree"
+      },
+      "EP_1243a58": {
+        "v200": "0x12ff1e8",
+        "basis": "code w=96 | xref 4/4 agree"
+      },
+      "EP_1243b38": {
+        "v200": "0x12ff2c8",
+        "basis": "hand: RTTI: the function whose lambda manager returns the type_info of ListCacheCollector:"
+      },
+      "EP_1243ba8": {
+        "v200": "0x12ff338",
+        "basis": "hand: RTTI: the function whose lambda manager returns the type_info of ListCacheCollector:"
+      },
+      "EP_1243c18": {
+        "v200": "0x12ff3a8",
+        "basis": "hand: RTTI: the function whose lambda manager returns the type_info of ListCacheCollector:"
+      },
+      "EP_1243c88": {
+        "v200": "0x12ff418",
+        "basis": "hand: RTTI: the function whose lambda manager returns the type_info of ListCacheCollector:"
+      },
+      "EP_1243cf8": {
+        "v200": "0x12ff488",
+        "basis": "hand: RTTI: the function whose lambda manager returns the type_info of ListCacheCollector:"
+      },
+      "EP_1243d68": {
+        "v200": "0x12ff4f8",
+        "basis": "hand: RTTI: the function whose lambda manager returns the type_info of ListCacheCollector:"
+      },
+      "EP_1243dd8": {
+        "v200": "0x12ff568",
+        "basis": "hand: RTTI: the function whose lambda manager returns the type_info of ListCacheCollector:"
+      },
+      "EP_1243e48": {
+        "v200": "0x12ff5d8",
+        "basis": "xref 1/1 agree"
+      },
+      "EP_1243eb8": {
+        "v200": "0x12ff648",
+        "basis": "code w=96"
+      },
+      "EP_1243f28": {
+        "v200": "0x12ff6b8",
+        "basis": "code w=96 | xref 1/1 agree"
+      },
+      "EP_1243f98": {
+        "v200": "0x12ff728",
+        "basis": "code w=96 | xref 1/1 agree"
+      },
+      "EP_1244008": {
+        "v200": "0x12ff798",
+        "basis": "hand: ListCacheCollector::removeFolderListCache(u32) (masked-signature match, unique)"
+      },
+      "EP_12441d8": {
+        "v200": "0x12ff968",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_1244850": {
+        "v200": "0x12fffe0",
+        "basis": "reviewed cache: Collector create; exact function bytes"
+      },
+      "EP_1246c50": {
+        "v200": "0x13023e0",
+        "basis": "reviewed cache: ListServer selected clear; exact function bytes"
+      },
+      "EP_1246e08": {
+        "v200": "0x1302598",
+        "basis": "reviewed cache: ListServer reset; exact function bytes"
+      },
+      "EP_1248420": {
+        "v200": "0x1303bb0",
+        "basis": "reviewed cache: ListServer query; exact function bytes"
+      },
+      "EP_1248530": {
+        "v200": "0x1303cc0",
+        "basis": "reviewed cache: ListServer destructor; exact function bytes"
+      },
+      "EP_124a558": {
+        "v200": "0x1305ce0",
+        "basis": "reviewed cache: ListServer selected store; exact function bytes"
+      },
+      "EP_124a7a8": {
+        "v200": "0x1305f30",
+        "basis": "reviewed cache: ListServer selection; exact function bytes"
+      },
+      "EP_1254b88": {
+        "v200": "0x1310310",
+        "basis": "reviewed cache: Primary Creator; exact function bytes"
+      },
+      "EP_12571c8": {
+        "v200": "0x1312958",
+        "basis": "reviewed cache: Generic primary adapter; exact function bytes"
+      },
+      "EP_12671d0": {
+        "v200": "0x1322908",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_126eab0": {
+        "v200": "0x132a1f0",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1272830": {
+        "v200": "0x132df70",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_12c0760": {
+        "v200": "0x137c368",
+        "basis": "reviewed cache: Collector deleting destructor; exact function bytes"
+      },
+      "EP_12c0b20": {
+        "v200": "0x137c728",
+        "basis": "reviewed cache: Collector complete destructor; exact function bytes"
+      },
+      "EP_12c0f18": {
+        "v200": "0x137d890",
+        "basis": "reviewed cache: Collector control dispose; exact function bytes"
+      },
+      "EP_12c1fa8": {
+        "v200": "0x137dd40",
+        "basis": "reviewed cache: Pool record grow; exact function bytes"
+      },
+      "EP_1348c48": {
+        "v200": "0x1403f98",
+        "basis": "hand: NetworkManager::onLinkMemberRemoved (masked-signature match, unique)"
+      },
+      "EP_1349130": {
+        "v200": "0x1404480",
+        "basis": "hand: NetworkManager::onLinkMemberAdded (masked-signature match, unique)"
+      },
+      "EP_1453e80": {
+        "v200": "0x150f568",
+        "basis": "code w=12 | xref 2/3 agree"
+      },
+      "EP_14553d8": {
+        "v200": "0x1510ac0",
+        "basis": "code w=12 | xref 2/2 agree"
+      },
+      "EP_14574f8": {
+        "v200": "0x1512bc0",
+        "basis": "code w=12"
+      },
+      "EP_1457b4c": {
+        "v200": "0x1513214",
+        "basis": "code w=12"
+      },
+      "EP_14754e8": {
+        "v200": "0x1530af0",
+        "basis": "code w=12 back=8 | xref 4/4 agree"
+      },
+      "EP_14a3e10": {
+        "v200": "0x155f500",
+        "basis": "ptr 1 agree"
+      },
+      "EP_1891d10": {
+        "v200": "0x19ef578",
+        "basis": "code w=96 | ptr 2 agree"
+      },
+      "EP_18d8d18": {
+        "v200": "0x1a384a8",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_195cc98": {
+        "v200": "0x1abfdd0",
+        "basis": "code w=12 back=8 | xref 6/6 agree"
+      },
+      "EP_1960f70": {
+        "v200": "0x1ac4f40",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_1987038": {
+        "v200": "0x1aeb1a0",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_19ab418": {
+        "v200": "0x1b0f618",
+        "basis": "code w=12 | xref 1/1 agree | ptr 4 agree"
+      },
+      "EP_19ab6d8": {
+        "v200": "0x1b0f8d8",
+        "basis": "code w=12 back=32 | xref 1/1 agree | ptr 4 agree"
+      },
+      "EP_19ac3c8": {
+        "v200": "0x1b106c0",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_19ac568": {
+        "v200": "0x1b10860",
+        "basis": "code w=12 | xref 2/2 agree | ptr 3 agree"
+      },
+      "EP_19bcf68": {
+        "v200": "0x1b21130",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_19bcf80": {
+        "v200": "0x1b21148",
+        "basis": "code w=12"
+      },
+      "EP_19d6760": {
+        "v200": "0x1b3aaa0",
+        "basis": "code w=24 | ptr 1 agree"
+      },
+      "EP_19d7b60": {
+        "v200": "0x1b3bea0",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_19dd430": {
+        "v200": "0x1b3fa60",
+        "basis": "code w=12"
+      },
+      "EP_1a29670": {
+        "v200": "0x1b8d998",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_1a29830": {
+        "v200": "0x1b8db58",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_1a79ea0": {
+        "v200": "0x1bdf2f8",
+        "basis": "hand: gui::source_select::DevicelessLoginWidgetController timer tick (crash guard): 2.00 v"
+      },
+      "EP_1ac7848": {
+        "v200": "0x1c2ded8",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1ac7998": {
+        "v200": "0x1c2e028",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1ac7e50": {
+        "v200": "0x1c2e4e0",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1ac9268": {
+        "v200": "0x1c2f8f8",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1ac9cb0": {
+        "v200": "0x1c30340",
+        "basis": "code w=12 | xref 3/4 agree"
+      },
+      "EP_1aca09c": {
+        "v200": "0x1c3072c",
+        "basis": "code w=12"
+      },
+      "EP_1aca178": {
+        "v200": "0x1c30808",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_1acc7b0": {
+        "v200": "0x1c32e40",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1acc820": {
+        "v200": "0x1c32eb0",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1acd240": {
+        "v200": "0x1c338d0",
+        "basis": "code w=12 | xref 2/2 agree"
+      },
+      "EP_1ace798": {
+        "v200": "0x1c34e48",
+        "basis": "code w=12 | xref 4/4 agree"
+      },
+      "EP_1ad0d40": {
+        "v200": "0x1c373f0",
+        "basis": "code w=12"
+      },
+      "EP_1afde70": {
+        "v200": "0x1c67308",
+        "basis": "code w=24 | ptr 1 agree"
+      },
+      "EP_1b57640": {
+        "v200": "0x1cc0c58",
+        "basis": "code w=24 | ptr 1 agree"
+      },
+      "EP_1b59b98": {
+        "v200": "0x1cc31b0",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1b5bab0": {
+        "v200": "0x1cc50c8",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_1b5bab8": {
+        "v200": "0x1cc50d0",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_1b5bb90": {
+        "v200": "0x1cc51a8",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_1b8f950": {
+        "v200": "0x1cf8f50",
+        "basis": "code w=12 | xref 2/2 agree"
+      },
+      "EP_1b93a28": {
+        "v200": "0x1cfd028",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1b948d0": {
+        "v200": "0x1cfded0",
+        "basis": "code w=48 | ptr 1 agree"
+      },
+      "EP_1b949b8": {
+        "v200": "0x1cfdfb8",
+        "basis": "code w=48 | ptr 1 agree"
+      },
+      "EP_1b95e80": {
+        "v200": "0x1cff480",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_1b97d98": {
+        "v200": "0x1d01398",
+        "basis": "code w=48 back=8 | xref 1/1 agree"
+      },
+      "EP_1ba2e28": {
+        "v200": "0x1d0c428",
+        "basis": "code w=12 | xref 1/3 agree"
+      },
+      "EP_1bad940": {
+        "v200": "0x1d16f40",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_1bb99f0": {
+        "v200": "0x1d22f70",
+        "basis": "hand: the sub column button's image (juce::Image sret) from the resources: the TrackListHe"
+      },
+      "EP_1bc41b0": {
+        "v200": "0x1d2d598",
+        "basis": "hand: the image resources getter the TrackListHeader ctor calls before the button's image"
+      },
+      "EP_1bc5668": {
+        "v200": "0x1d2ea98",
+        "basis": "code w=12"
+      },
+      "EP_1bcfb78": {
+        "v200": "0x1d38fa8",
+        "basis": "code w=12 | xref 2/2 agree"
+      },
+      "EP_1bcff88": {
+        "v200": "0x1d393b8",
+        "basis": "hand: gui::browse::TrackListHeader ctor(this, mode): stores BC_HDR_VT and the mode at +0x1"
+      },
+      "EP_1bd03f0": {
+        "v200": "0x1d39858",
+        "basis": "hand: TrackListHeader: add a listener to [this+0x138] (only in mode 0: ldr w2,[x0,#0x134];"
+      },
+      "EP_1bd0600": {
+        "v200": "0x1d39a68",
+        "basis": "hand: TrackListHeader: places its sub column button at the right of the sub column (getInd"
+      },
+      "EP_1bd06b8": {
+        "v200": "0x1d39b20",
+        "basis": "hand: gui::browse::TrackListHeader column layout(header, row height): the only function th"
+      },
+      "EP_1bdb7e0": {
+        "v200": "0x1d447f0",
+        "basis": "ptr 1 agree"
+      },
+      "EP_1bdcf98": {
+        "v200": "0x1d466f8",
+        "basis": "hand: TrackListWidget vtable slot +0x58 in both builds (neighbouring slots +0x40..+0x68 un"
+      },
+      "EP_1c192a0": {
+        "v200": "0x1d82a20",
+        "basis": "code w=12 | xref 2/2 agree"
+      },
+      "EP_1c1fad0": {
+        "v200": "0x1d89250",
+        "basis": "code w=12 | xref 2/2 agree"
+      },
+      "EP_1c296b8": {
+        "v200": "0x1d931d0",
+        "basis": "hand: SubCategorySelectPopupWidget: ldr x0,[x0,#0x58] then a tail call to the TableListBox"
+      },
+      "EP_1c296d8": {
+        "v200": "0x1d931f0",
+        "basis": "hand: SubCategorySelectPopupWidget: appends a juce::String to the label array at +0x60 (gr"
+      },
+      "EP_1c348c8": {
+        "v200": "0x1d9e3f0",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_1c6e420": {
+        "v200": "0x1dd7f60",
+        "basis": "hand: gui::status_area::browse::FunctionButtonWidgetController ctor: called by the StatusA"
+      },
+      "EP_1c6e788": {
+        "v200": "0x1dd82c8",
+        "basis": "hand: PREVIEW set on gui::status_area::browse::FunctionButtonWidgetController: the Browse "
+      },
+      "EP_1c70fd0": {
+        "v200": "0x1ddab20",
+        "basis": "xref 1/1 agree"
+      },
+      "EP_1c71030": {
+        "v200": "0x1ddab80",
+        "basis": "code w=12 | xref 2/3 agree"
+      },
+      "EP_1c71728": {
+        "v200": "0x1ddb278",
+        "basis": "code w=12 | xref 3/5 agree"
+      },
+      "EP_1ca31a8": {
+        "v200": "0x1e0cfe0",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1ca4650": {
+        "v200": "0x1e0e488",
+        "basis": "code w=12"
+      },
+      "EP_1d5ef18": {
+        "v200": "0x1ec91d8",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_1d6bc60": {
+        "v200": "0x1ed5f28",
+        "basis": "hand: instruction fingerprint mov x0,#0x1dc; movk x0,#0x207,lsl#32 unique in both builds ("
+      },
+      "EP_1d6bff0": {
+        "v200": "0x1ed6308",
+        "basis": "hand: SimpleWaveform2DeckWidget Label setText(this+Label, text, 0): 1.30 slot 13 = ldr x0,"
+      },
+      "EP_1d6f280": {
+        "v200": "0x1ed9d50",
+        "basis": "hand: SimpleWaveform4DeckWidget: same as HT_SW_ORIG2 (2.00 slot 14; slot 13 0x1ed9d10 is t"
+      },
+      "EP_1d82b08": {
+        "v200": "0x1eedca0",
+        "basis": "code w=12 | xref 4/4 agree"
+      },
+      "EP_1d9fb68": {
+        "v200": "0x1f0ad70",
+        "basis": "hand: TrackInfo2DeckWidget title setText: 1.30 slot 14 = ldr x0,[x0,#360]; mov w2,#0; b 0x"
+      },
+      "EP_1da09b0": {
+        "v200": "0x1f0c3a0",
+        "basis": "hand: TrackInfo4DeckWidget: same as HT_ORIG2 (2.00 slot 15; slot 14 0x1f0c380 is the new s"
+      },
+      "EP_1ddd8d8": {
+        "v200": "0x1f49c08",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1dde9e8": {
+        "v200": "0x1f4ad18",
+        "basis": "code w=12 | xref 3/3 agree"
+      },
+      "EP_1de0148": {
+        "v200": "0x1f4c428",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1de01d8": {
+        "v200": "0x1f4c4b8",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1de1020": {
+        "v200": "0x1f4d300",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1de1550": {
+        "v200": "0x1f4d830",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_1de4ee0": {
+        "v200": "0x1f511c0",
+        "basis": "code w=12 | xref 3/3 agree"
+      },
+      "EP_1de4fb8": {
+        "v200": "0x1f51298",
+        "basis": "code w=12 | xref 3/3 agree"
+      },
+      "EP_1de50e0": {
+        "v200": "0x1f513c0",
+        "basis": "code w=12"
+      },
+      "EP_1de5120": {
+        "v200": "0x1f51400",
+        "basis": "code w=96"
+      },
+      "EP_1de51f0": {
+        "v200": "0x1f514d0",
+        "basis": "code w=96 | xref 1/1 agree"
+      },
+      "EP_1de52c0": {
+        "v200": "0x1f515a0",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1de5d90": {
+        "v200": "0x1f52070",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1de5e30": {
+        "v200": "0x1f52110",
+        "basis": "code w=12"
+      },
+      "EP_1de5ea0": {
+        "v200": "0x1f52180",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1de7b20": {
+        "v200": "0x1f53e00",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1dea048": {
+        "v200": "0x1f56328",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1deb250": {
+        "v200": "0x1f57530",
+        "basis": "code w=12"
+      },
+      "EP_1df3ae0": {
+        "v200": "0x1f5fdc0",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1df4908": {
+        "v200": "0x1f60be8",
+        "basis": "code w=24 | xref 2/2 agree"
+      },
+      "EP_1df57c8": {
+        "v200": "0x1f61aa8",
+        "basis": "code w=96 | xref 1/1 agree"
+      },
+      "EP_1df6010": {
+        "v200": "0x1f622f0",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_1df6240": {
+        "v200": "0x1f62520",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_1df69f8": {
+        "v200": "0x1f62cd8",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1dfb328": {
+        "v200": "0x1f675c8",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1dfc710": {
+        "v200": "0x1f689b0",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1dfed18": {
+        "v200": "0x1f6afb8",
+        "basis": "code w=12"
+      },
+      "EP_1dff558": {
+        "v200": "0x1f6b808",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1dffe10": {
+        "v200": "0x1f6c0b8",
+        "basis": "code w=12 back=32 | xref 1/3 agree"
+      },
+      "EP_1e00dd0": {
+        "v200": "0x1f6d048",
+        "basis": "code w=12 | xref 1/3 agree"
+      },
+      "EP_1e02d18": {
+        "v200": "0x1f6ef50",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_1e06450": {
+        "v200": "0x1f72658",
+        "basis": "hand: the sub column button's ctor (btn, &name, &image, &image, &image, 1, 1, 0.3f, 0.5f):"
+      },
+      "EP_1e071a0": {
+        "v200": "0x1f733a8",
+        "basis": "code w=12 | ptr 4 agree"
+      },
+      "EP_1e461f8": {
+        "v200": "0x1fb25f8",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_1e46af0": {
+        "v200": "0x1fb2ef0",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_1e678f0": {
+        "v200": "0x1fd3fa8",
+        "basis": "code w=12 | xref 2/2 agree"
+      },
+      "EP_1eaacd8": {
+        "v200": "0x20173f0",
+        "basis": "code w=12 back=8 | xref 4/6 agree"
+      },
+      "EP_1ec495c": {
+        "v200": "0x2030354",
+        "basis": "hand: return address of the indirect call `ldr x1,[x0]; ldr x1,[x1,#0x70]; blr x1` inside "
+      },
+      "EP_1f05520": {
+        "v200": "0x2071608",
+        "basis": "code w=24 back=8 | ptr 1 agree"
+      },
+      "EP_1f25838": {
+        "v200": "0x2091660",
+        "basis": "hand: gui::browser_logic::TrackListDisplayFormatEventFacade ctor: stores BR_FC_VT (1.30 0x"
+      },
+      "EP_1f3fb18": {
+        "v200": "0x20ac490",
+        "basis": "hand: gui::disp_data::BrowseDispData ctor: stores B2_BDD_VT and builds its sub objects, th"
+      },
+      "EP_1f40998": {
+        "v200": "0x20ad318",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1f44418": {
+        "v200": "0x20b0ca8",
+        "basis": "hand: the only BrowseLineData-vtable referrer between its independently relocated neighbou"
+      },
+      "EP_1f45660": {
+        "v200": "0x20b1d78",
+        "basis": "xref 2/2 agree"
+      },
+      "EP_1f4a3f0": {
+        "v200": "0x20b6768",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1f4a590": {
+        "v200": "0x20b6908",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_1f4ac90": {
+        "v200": "0x20b7008",
+        "basis": "code w=12 | xref 5/6 agree"
+      },
+      "EP_1f5da20": {
+        "v200": "0x20c9d90",
+        "basis": "hand: callers 1/1 agree; normalized disassembly 0.96 identical over 400 instructions"
+      },
+      "EP_1fa7a28": {
+        "v200": "0x2115140",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_1fb72e0": {
+        "v200": "0x21249f8",
+        "basis": "reviewed Slip source-constructor; function signature"
+      },
+      "EP_1fb9488": {
+        "v200": "0x2126ba8",
+        "basis": "reviewed Slip weak-listener-append; function signature"
+      },
+      "EP_1fc9bf8": {
+        "v200": "0x2137298",
+        "basis": "reviewed Slip parent-publication; function signature"
+      },
+      "EP_1fcbe30": {
+        "v200": "0x2139500",
+        "basis": "reviewed Slip source-disposal; function signature"
+      },
+      "EP_1fce368": {
+        "v200": "0x213ba38",
+        "basis": "reviewed Slip parent-disposal; entry-prefix signature"
+      },
+      "EP_1fefa78": {
+        "v200": "0x215d140",
+        "basis": "hand: masked code signature (12 words, unique); the only caller on both builds is PlayerIn"
+      },
+      "EP_1ff1250": {
+        "v200": "0x215e9e0",
+        "basis": "hand: masked code signature (12 words, unique) and its only caller (1.30 0x1ff34e0 -> 2.00"
+      },
+      "EP_1ffbc60": {
+        "v200": "0x2169498",
+        "basis": "hand: masked code signature (12 words, unique) and its only caller, TrackInfoUpdater::upda"
+      },
+      "EP_201281c": {
+        "v200": "0x21800c8",
+        "basis": "hand: the return address of the only call to the gui::FontManager ctor (v1.30 0x1f4ac90, v"
+      },
+      "EP_2085768": {
+        "v200": "0x21f2df8",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_2086748": {
+        "v200": "0x21f3dd8",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_211c0e8": {
+        "v200": "0x2289588",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_211c840": {
+        "v200": "0x2289ce0",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_211c918": {
+        "v200": "0x2289db8",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_212f988": {
+        "v200": "0x229ce28",
+        "basis": "code w=12"
+      },
+      "EP_212fb94": {
+        "v200": "0x229d034",
+        "basis": "code w=12"
+      },
+      "EP_218a6d8": {
+        "v200": "0x22f7b78",
+        "basis": "hand: TrackInfoQueue vtable slot +0x20 on both builds (1.30 vt 0x2e509c8, 2.00 vt 0x3203ee"
+      },
+      "EP_218a890": {
+        "v200": "0x22f7d30",
+        "basis": "hand: TrackInfoQueue vtable slot +0x58 on both builds (1.30 0x2e50a20, 2.00 0x3203f40); bo"
+      },
+      "EP_21b6560": {
+        "v200": "0x2323a00",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_21c81c0": {
+        "v200": "0x2335660",
+        "basis": "code w=12 | ptr 4 agree"
+      },
+      "EP_21e1090": {
+        "v200": "0x234e530",
+        "basis": "code w=12 | ptr 4 agree"
+      },
+      "EP_21e3440": {
+        "v200": "0x23508e0",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_21e4550": {
+        "v200": "0x23519f0",
+        "basis": "code w=12 | xref 4/4 agree"
+      },
+      "EP_21e48b0": {
+        "v200": "0x2351d50",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_21e6de0": {
+        "v200": "0x2354280",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_21e7540": {
+        "v200": "0x23549e0",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_21e8590": {
+        "v200": "0x2355a30",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_21ea450": {
+        "v200": "0x23578f0",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_21ea670": {
+        "v200": "0x2357b10",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_2224f60": {
+        "v200": "0x2392400",
+        "basis": "code w=12 | xref 2/2 agree"
+      },
+      "EP_22fb7d0": {
+        "v200": "0x2468c70",
+        "basis": "code w=12 | xref 6/6 agree | ptr 1 agree"
+      },
+      "EP_22fc600": {
+        "v200": "0x2469aa0",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_230b460": {
+        "v200": "0x2478900",
+        "basis": "code w=12 | xref 4/6 agree"
+      },
+      "EP_230d790": {
+        "v200": "0x247ac30",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_230e3e0": {
+        "v200": "0x247b880",
+        "basis": "code w=48 | xref 5/6 agree"
+      },
+      "EP_230f530": {
+        "v200": "0x247c9d0",
+        "basis": "code w=24 | xref 6/6 agree"
+      },
+      "EP_2333ce0": {
+        "v200": "0x24a1180",
+        "basis": "code w=96 | xref 6/6 agree"
+      },
+      "EP_233c340": {
+        "v200": "0x24a97e0",
+        "basis": "hand: juce::String(CharPointer_UTF8) (this, &utf8): the call the sub item formatter makes"
+      },
+      "EP_2398900": {
+        "v200": "0x2505da0",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_239cda0": {
+        "v200": "0x250a240",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_23a2e60": {
+        "v200": "0x2510300",
+        "basis": "code w=48 | xref 6/6 agree"
+      },
+      "EP_23a45f0": {
+        "v200": "0x2511a90",
+        "basis": "code w=24 | xref 5/6 agree"
+      },
+      "EP_23aee40": {
+        "v200": "0x251c2e0",
+        "basis": "code w=24 | xref 6/6 agree"
+      },
+      "EP_23aeef0": {
+        "v200": "0x251c390",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_23aef40": {
+        "v200": "0x251c3e0",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_23af140": {
+        "v200": "0x251c5e0",
+        "basis": "code w=12 | xref 2/6 agree"
+      },
+      "EP_23af680": {
+        "v200": "0x251cb20",
+        "basis": "code w=12 | xref 3/6 agree"
+      },
+      "EP_23af6c0": {
+        "v200": "0x251cb60",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_23afeb0": {
+        "v200": "0x251d350",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_23b04e0": {
+        "v200": "0x251d980",
+        "basis": "code w=12 | xref 4/6 agree"
+      },
+      "EP_23b12b0": {
+        "v200": "0x251e750",
+        "basis": "hand: juce::Image(): the two empty images the TrackListHeader ctor passes to the button ct"
+      },
+      "EP_23b1410": {
+        "v200": "0x251e8b0",
+        "basis": "code w=24 | xref 6/6 agree"
+      },
+      "EP_23b1440": {
+        "v200": "0x251e8e0",
+        "basis": "code w=48 | xref 6/6 agree"
+      },
+      "EP_23b4be0": {
+        "v200": "0x2522080",
+        "basis": "code w=12 | xref 5/5 agree"
+      },
+      "EP_23de290": {
+        "v200": "0x254b730",
+        "basis": "code w=12 | xref 4/6 agree"
+      },
+      "EP_23ed7c0": {
+        "v200": "0x255ac60",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_23ee2a0": {
+        "v200": "0x255b740",
+        "basis": "code w=12 | xref 4/6 agree"
+      },
+      "EP_23f1370": {
+        "v200": "0x255e810",
+        "basis": "code w=12 | ptr 2 agree"
+      },
+      "EP_23fde20": {
+        "v200": "0x256b2c0",
+        "basis": "code w=12 | ptr 2 agree"
+      },
+      "EP_23fe810": {
+        "v200": "0x256bcb0",
+        "basis": "hand: SoftwareRenderer vtable (1.30 0x3142bc0) slot +0xc0, fillPath: the slot value read l"
+      },
+      "EP_2401dd0": {
+        "v200": "0x256f270",
+        "basis": "code w=12 | ptr 2 agree"
+      },
+      "EP_2402ff0": {
+        "v200": "0x2570490",
+        "basis": "code w=12 | ptr 2 agree"
+      },
+      "EP_242d0a0": {
+        "v200": "0x259a540",
+        "basis": "code w=24 | xref 6/6 agree | ptr 4 agree"
+      },
+      "EP_243d1d0": {
+        "v200": "0x25aa670",
+        "basis": "code w=12 | xref 4/6 agree"
+      },
+      "EP_243d200": {
+        "v200": "0x25aa6a0",
+        "basis": "code w=12 | xref 4/4 agree"
+      },
+      "EP_2459540": {
+        "v200": "0x25c69e0",
+        "basis": "hand: juce::TableHeaderComponent::getIndexOfColumnId(id, onlyVisible): called by the heade"
+      },
+      "EP_2459640": {
+        "v200": "0x25c6ae0",
+        "basis": "hand: juce::TableHeaderComponent::getColumnPosition(index) (Rectangle<int> sret): the head"
+      },
+      "EP_24597e0": {
+        "v200": "0x25c6c80",
+        "basis": "hand: juce::TableHeaderComponent::isColumnVisible(id): the call BR_LAYOUT makes for each c"
+      },
+      "EP_2465c70": {
+        "v200": "0x25d3110",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_2482f30": {
+        "v200": "0x25f03d0",
+        "basis": "hand: juce::Component::getComponentAt(const Point<int> &): the only self-recursive functio"
+      },
+      "EP_2485d40": {
+        "v200": "0x25f31e0",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_2488570": {
+        "v200": "0x25f5a10",
+        "basis": "code w=24 | xref 6/6 agree"
+      },
+      "EP_248a250": {
+        "v200": "0x25f76f0",
+        "basis": "code w=12 | xref 3/3 agree"
+      },
+      "EP_248a8f0": {
+        "v200": "0x25f7d90",
+        "basis": "hand: juce::TableHeaderComponent::setColumnVisible(id, bool): identical bodies (search [th"
+      },
+      "EP_248ab00": {
+        "v200": "0x25f7fa0",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_248bfc0": {
+        "v200": "0x25f9460",
+        "basis": "hand: juce::TableHeaderComponent::columnClicked(this, columnId, mods): a sortable column,"
+      },
+      "EP_2491ed0": {
+        "v200": "0x25ff370",
+        "basis": "hand: RTTI: slot 0 (complete-object destructor) of the primary vtable whose type_info name"
+      },
+      "EP_24924f0": {
+        "v200": "0x25ff990",
+        "basis": "code w=12 | xref 1/6 agree"
+      },
+      "EP_249d6b0": {
+        "v200": "0x260ab50",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_249daf0": {
+        "v200": "0x260af90",
+        "basis": "code w=12 | xref 6/6 agree | ptr 4 agree"
+      },
+      "EP_249efe0": {
+        "v200": "0x260c480",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_249f200": {
+        "v200": "0x260c6a0",
+        "basis": "hand: juce::Component::setSize(w, h): setSize(0x50, 0x3c) on the new sub column button in"
+      },
+      "EP_24a0890": {
+        "v200": "0x260dd30",
+        "basis": "hand: juce::Component::setBounds(const Rectangle<int> &): the header's button placement ca"
+      },
+      "EP_24f5bc0": {
+        "v200": "0x2663060",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_24f6b34": {
+        "v200": "0x2663fd4",
+        "basis": "code w=12"
+      },
+      "EP_24fa6f0": {
+        "v200": "0x2667b90",
+        "basis": "code w=12 | xref 2/2 agree"
+      },
+      "EP_24fac14": {
+        "v200": "0x26680b4",
+        "basis": "code w=12"
+      },
+      "EP_24fac4c": {
+        "v200": "0x26680ec",
+        "basis": "code w=12"
+      },
+      "EP_24fb350": {
+        "v200": "0x26687f0",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_25c0aa0": {
+        "v200": "0x28fa0c0",
+        "basis": "hand: section headers: .rodata sh_addr (v1.30 value reproduces azmod's literal)"
+      },
+      "EP_25e0550": {
+        "v200": "0x2919bb0",
+        "basis": "vtable N12midi_adapter14ReceiveManagerE +0x0 | xref 2/2 agree"
+      },
+      "EP_25e9ba0": {
+        "v200": "0x2923200",
+        "basis": "vtable N23connection_with_hostapp15IPcAppliSetMode4ModeE +0x0 | xref 5/6 agree"
+      },
+      "EP_26a3f60": {
+        "v200": "0x29de458",
+        "basis": "vtable N7usecase12library_edit28PlaylistRenewalNoticeHandlerE +0x0"
+      },
+      "EP_26a4838": {
+        "v200": "0x29ded30",
+        "basis": "vtable N7usecase12library_edit13TaglistEditorE +0x0 | xref 5/6 agree"
+      },
+      "EP_26cf590": {
+        "v200": "0x2a0a000",
+        "basis": "vtable N7usecase5mixer7ChannelE +0x0 | xref 6/6 agree"
+      },
+      "EP_26e1b68": {
+        "v200": "0x2a1c5d8",
+        "basis": "vtable N7usecase11phase_meter11LocalPlayerE +0x0"
+      },
+      "EP_27d18b8": {
+        "v200": "0x2b1e4d8",
+        "basis": "vtable N23connection_with_hostapp14AlphaThetaCertE +0x0 | xref 2/2 agree"
+      },
+      "EP_2847138": {
+        "v200": "0x2b991d0",
+        "basis": "hand: music_library::FolderEntryDigger vtable (vtable relocation, RTTI)"
+      },
+      "EP_284ab30": {
+        "v200": "0x2b9cbe0",
+        "basis": "vtable N13music_library21SqlitePlaylistUpdaterE +0x0 | xref 3/3 agree"
+      },
+      "EP_284b090": {
+        "v200": "0x2b9d140",
+        "basis": "hand: RTTI: the vtable address point of N13music_library15SqliteSortEntryE; slot +0x10 rea"
+      },
+      "EP_284b2b8": {
+        "v200": "0x2b9d368",
+        "basis": "vtable N13music_library14SqliteDataBaseE +0x0 | xref 4/4 agree"
+      },
+      "EP_2854578": {
+        "v200": "0x2ba6768",
+        "basis": "vtable N13music_library14TrackListCacheE +0x0 | xref 3/3 agree"
+      },
+      "EP_2857330": {
+        "v200": "0x2ba9520",
+        "basis": "vtable N13music_library18InformationUpdaterE +0x0 | xref 3/3 agree"
+      },
+      "EP_285f078": {
+        "v200": "0x2bb1268",
+        "basis": "vtable N13music_library18MusicLibraryServerE +0x0 | xref 1/2 agree"
+      },
+      "EP_28729f8": {
+        "v200": "0x2bc4c38",
+        "basis": "hand: network::NetworkManager vtable (onLinkMemberAdded +0x48, onLinkMemberRemoved +0x50) "
+      },
+      "EP_2874158": {
+        "v200": "0x2bc63a0",
+        "basis": "vtable N12player_basis10PlayerCoreE +0x0 | xref 2/2 agree"
+      },
+      "EP_2896b90": {
+        "v200": "0x2be9658",
+        "basis": "vtable N9dj_player18VinylSpeedAdjustorE +0x0 | xref 1/1 agree"
+      },
+      "EP_29672e0": {
+        "v200": "0x2cd9588",
+        "basis": "hand: RTTI: the vtable address point of N3gui9disp_data19SubCategoryDispListE; slots 2..4"
+      },
+      "EP_2967378": {
+        "v200": "0x2cd9620",
+        "basis": "vtable N3gui9disp_data14BrowseLineDataE +0x0"
+      },
+      "EP_29674c8": {
+        "v200": "0x2cd9780",
+        "basis": "vtable N3gui18ToggleImagesButtonE +0x0 | xref 5/6 agree"
+      },
+      "EP_2967678": {
+        "v200": "0x2cd9930",
+        "basis": "vtable N3gui18ToggleImagesButtonE +0x0 | xref 5/6 agree"
+      },
+      "EP_29676a8": {
+        "v200": "0x2cd9960",
+        "basis": "vtable N3gui18ToggleImagesButtonE +0x0 | xref 4/6 agree"
+      },
+      "EP_29676d0": {
+        "v200": "0x2cd9988",
+        "basis": "vtable N3gui16GuiObjectManagerE +0x0 | xref 1/2 agree"
+      },
+      "EP_29676f0": {
+        "v200": "0x2cd99a8",
+        "basis": "vtable N2ui14UiLayerObjectsE +0x0 | xref 3/3 agree"
+      },
+      "EP_2968548": {
+        "v200": "0x2cda800",
+        "basis": "vtable 16EP147Application +0x0 | xref 2/2 agree"
+      },
+      "EP_29c2b00": {
+        "v200": "0x2d3ad00",
+        "basis": "vtable St23_Sp_counted_ptr_inplaceIN3gui7caution7browser17DuplicatedCautionESaIS3_ELN9__gn"
+      },
+      "EP_29c3b38": {
+        "v200": "0x2d3bd78",
+        "basis": "vtable St23_Sp_counted_ptr_inplaceIN3gui7caution6simple18PlayerErrorCautionESaIS3_ELN9__gn"
+      },
+      "EP_29c5028": {
+        "v200": "0x2d3d268",
+        "basis": "vtable N3gui9disp_data10BrowseMenuE +0x0 | xref 1/2 agree"
+      },
+      "EP_29c98c0": {
+        "v200": "0x2d41b00",
+        "basis": "vtable N3gui24DisplayRefreshCycleTimerE +0x0 | xref 2/2 agree"
+      },
+      "EP_29d4830": {
+        "v200": "0x2d4ca88",
+        "basis": "vtable N3gui6browse14BrowseListViewE +0x0 | xref 2/2 agree"
+      },
+      "EP_29d67a0": {
+        "v200": "0x2d4ea68",
+        "basis": "vtable N3gui6browse10BrowseViewE +0x0 | xref 6/6 agree"
+      },
+      "EP_29da0e8": {
+        "v200": "0x2d523c8",
+        "basis": "vtable N3gui6browse12PlaylistViewE +0x0 | xref 6/6 agree"
+      },
+      "EP_29daee8": {
+        "v200": "0x2d531e8",
+        "basis": "vtable N3gui6browse10SearchViewE +0x0 | xref 2/2 agree"
+      },
+      "EP_29db4c8": {
+        "v200": "0x2d537e8",
+        "basis": "xref 2/2 agree"
+      },
+      "EP_29dbec8": {
+        "v200": "0x2d541e8",
+        "basis": "vtable N3gui6browse11TagListViewE +0x0 | xref 6/6 agree"
+      },
+      "EP_29e0f18": {
+        "v200": "0x2d59258",
+        "basis": "vtable N3gui8shortcut12ShortcutViewE +0x0 | xref 2/2 agree"
+      },
+      "EP_29e2858": {
+        "v200": "0x2d5ab98",
+        "basis": "vtable N3gui13source_select16SourceSelectViewE +0x0 | xref 2/2 agree"
+      },
+      "EP_29e9540": {
+        "v200": "0x2d61890",
+        "basis": "vtable N3gui15ImagesComponentE +0x0 | xref 6/6 agree"
+      },
+      "EP_29e9790": {
+        "v200": "0x2d61ae0",
+        "basis": "vtable N3gui8waveform12WaveformViewE +0x0 | xref 2/2 agree"
+      },
+      "EP_2a19970": {
+        "v200": "0x2d91cc0",
+        "basis": "vtable of the streaming-login widget controller +0x0 | xref 6/6 agree"
+      },
+      "EP_2a92ae0": {
+        "v200": "0x2e0b900",
+        "basis": "vtable N3gui13source_select16SourceTableModelE +0x0 | xref 3/3 agree"
+      },
+      "EP_2aa6448": {
+        "v200": "0x2e20228",
+        "basis": "vtable N3gui8shortcut26VinylSpeedAdjustTimeWidgetE +0x0 | xref 2/2 agree"
+      },
+      "EP_2abc588": {
+        "v200": "0x2e36388",
+        "basis": "vtable N3gui11device_icon30WaveformLoadedDeviceIconWidgetE +0x0 | xref 2/2 agree"
+      },
+      "EP_2b37908": {
+        "v200": "0x2eb1778",
+        "basis": "vtable N3gui16BrowseMenuWidgetE +0x0 | xref 2/2 agree"
+      },
+      "EP_2b44be8": {
+        "v200": "0x2ebea58",
+        "basis": "vtable N3gui26BrowseMenuWidgetControllerE +0x0 | xref 2/2 agree"
+      },
+      "EP_2b44c50": {
+        "v200": "0x2ebeac0",
+        "basis": "vtable N3gui26BrowseMenuWidgetControllerE +0x0 | xref 2/2 agree"
+      },
+      "EP_2b63770": {
+        "v200": "0x2edd5e0",
+        "basis": "vtable N3gui17detailed_waveform8LoopIconE +0x0 | xref 6/6 agree | ptr 1 agree"
+      },
+      "EP_2b668b8": {
+        "v200": "0x2ee0728",
+        "basis": "vtable N3gui17detailed_waveform21PlayPositionBarWidgetE +0x0 | xref 6/6 agree"
+      },
+      "EP_2b66d98": {
+        "v200": "0x2ee0c08",
+        "basis": "vtable N3gui8waveform22DetailedWaveformWidgetIN14appnd_trk_info21DetailedWaveform_BlueENS0"
+      },
+      "EP_2b67408": {
+        "v200": "0x2ee1278",
+        "basis": "vtable N3gui8waveform22DetailedWaveformWidgetIN14appnd_trk_info20DetailedWaveform_RGBENS0_"
+      },
+      "EP_2b67a78": {
+        "v200": "0x2ee18e8",
+        "basis": "vtable N3gui8waveform22DetailedWaveformWidgetIN14appnd_trk_info22DetailedWaveform_3BandENS"
+      },
+      "EP_2b6f208": {
+        "v200": "0x2ee9078",
+        "basis": "vtable N3gui17detailed_waveform8own_deck14WaveformWidgetE +0x0 | xref 2/2 agree | ptr 1 ag"
+      },
+      "EP_2b6f460": {
+        "v200": "0x2ee92d0",
+        "basis": "vtable N3gui17detailed_waveform8own_deck14WaveformWidgetE +0x0 | xref 2/2 agree | ptr 1 ag"
+      },
+      "EP_2b72f00": {
+        "v200": "0x2eecd70",
+        "basis": "vtable N3gui8waveform28DetailedWaveformDataProviderIN14appnd_trk_info21DetailedWaveform_Bl"
+      },
+      "EP_2b72f50": {
+        "v200": "0x2eecdc0",
+        "basis": "vtable N3gui8waveform28DetailedWaveformDataProviderIN14appnd_trk_info20DetailedWaveform_RG"
+      },
+      "EP_2b72fa0": {
+        "v200": "0x2eece10",
+        "basis": "vtable N3gui8waveform35DetailedWaveformLayeredDataProviderIN14appnd_trk_info22DetailedWave"
+      },
+      "EP_2b74558": {
+        "v200": "0x2eee3c8",
+        "basis": "vtable N3gui27DetailedWaveformFieldWidgetE +0x0 | xref 2/2 agree | ptr 1 agree"
+      },
+      "EP_2b747e0": {
+        "v200": "0x2eee650",
+        "basis": "vtable N3gui27DetailedWaveformFieldWidgetE +0x0 | xref 2/2 agree | ptr 1 agree"
+      },
+      "EP_2b79058": {
+        "v200": "0x2ef2ec8",
+        "basis": "vtable N3gui6browse19HierarchyListWidgetE +0x0 | xref 6/6 agree | ptr 1 agree"
+      },
+      "EP_2b79158": {
+        "v200": "0x2ef2fc8",
+        "basis": "vtable N3gui6browse19HierarchyListWidgetE +0x0 | xref 6/6 agree"
+      },
+      "EP_2b799c0": {
+        "v200": "0x2ef3830",
+        "basis": "vtable N3gui23IconHoldableScrollLabelE +0x0 | xref 2/2 agree"
+      },
+      "EP_2b7d8d0": {
+        "v200": "0x2ef7800",
+        "basis": "hand: RTTI: the primary vtable address point of N3gui6browse15TrackListHeaderE, stored by "
+      },
+      "EP_2b7da80": {
+        "v200": "0x2ef79b0",
+        "basis": "hand: the 8 bytes the TrackListHeader ctor loads (ldr d0) and stores at button+0x1c0"
+      },
+      "EP_2b7f408": {
+        "v200": "0x2ef9338",
+        "basis": "vtable N3gui6browse15TrackListWidgetE +0x0 | xref 2/2 agree | ptr 1 agree"
+      },
+      "EP_2b7f588": {
+        "v200": "0x2ef94c0",
+        "basis": "vtable N3gui6browse15TrackListWidgetE +0x0 | xref 4/4 agree"
+      },
+      "EP_2b7f6d8": {
+        "v200": "0x2ef9618",
+        "basis": "vtable N3gui6browse15TrackListWidgetE +0x0 | xref 4/4 agree"
+      },
+      "EP_2b9eb88": {
+        "v200": "0x2f18ab8",
+        "basis": "vtable N3gui31OverviewWaveform1200PointWidgetE +0x0 | xref 6/6 agree"
+      },
+      "EP_2bcc810": {
+        "v200": "0x2f77aa0",
+        "basis": "hand: RTTI: the vtable of N3gui6browse28SubCategorySelectPopupWidgetE with offset-to-top -"
+      },
+      "EP_2bcdec0": {
+        "v200": "0x2f79150",
+        "basis": "vtable N3gui11ScrollLabelE +0x0 | xref 6/6 agree"
+      },
+      "EP_2c29228": {
+        "v200": "0x2fd44b8",
+        "basis": "vtable N3gui22SoftwareKeyboardWidgetE +0x0 | xref 2/2 agree"
+      },
+      "EP_2c51010": {
+        "v200": "0x2ffc2a0",
+        "basis": "hand: the vtable address point BR_FB_CTOR stores in both builds (typeinfo N3gui11status_ar"
+      },
+      "EP_2c510a0": {
+        "v200": "0x2ffc330",
+        "basis": "vtable N3gui11status_area6browse20BrowseFunctionWidgetE +0x0 | xref 2/2 agree"
+      },
+      "EP_2c52ff0": {
+        "v200": "0x2ffe280",
+        "basis": "vtable N3gui11status_area6browse26StatusAreaWidgetControllerE +0x0 | xref 2/2 agree"
+      },
+      "EP_2c5ad08": {
+        "v200": "0x3006a58",
+        "basis": "vtable N3gui11status_area8waveform16StatusAreaWidgetE +0x0 | xref 2/2 agree"
+      },
+      "EP_2c5bb40": {
+        "v200": "0x3007890",
+        "basis": "vtable N3gui11status_area8waveform27WaveformSettingButtonWidgetE +0x0 | xref 2/2 agree"
+      },
+      "EP_2c667f8": {
+        "v200": "0x3012548",
+        "basis": "vtable N3gui11status_area21RecordingStatusWidgetE +0x0 | xref 2/2 agree"
+      },
+      "EP_2cd4b28": {
+        "v200": "0x3084a68",
+        "basis": "hand: RTTI: the only vtable whose type_info names N3gui14LinkInfoWidgetE (typeinfo 0x3084a"
+      },
+      "EP_2ce30d0": {
+        "v200": "0x3093008",
+        "basis": "vtable N3gui8waveform25SimpleWaveform2DeckWidgetE +0x0"
+      },
+      "EP_2ce7c50": {
+        "v200": "0x3098688",
+        "basis": "vtable N3gui8waveform25SimpleWaveform4DeckWidgetE +0x0"
+      },
+      "EP_2cee580": {
+        "v200": "0x309f8c0",
+        "basis": "vtable N3gui8waveform24DeckInfo2DeckFieldWidgetE +0x0 | xref 2/2 agree"
+      },
+      "EP_2cfe0f0": {
+        "v200": "0x30af430",
+        "basis": "vtable N3gui8waveform19DeckInfo2DeckWidgetE +0x0 | xref 2/2 agree"
+      },
+      "EP_2cfe5c0": {
+        "v200": "0x30af900",
+        "basis": "vtable N3gui8waveform19DeckInfo4DeckWidgetE +0x0 | xref 2/2 agree"
+      },
+      "EP_2d0b700": {
+        "v200": "0x30bca40",
+        "basis": "vtable N3gui8waveform19DeckInfoFieldWidgetE +0x0 | xref 1/2 agree"
+      },
+      "EP_2d1b678": {
+        "v200": "0x30cc9b8",
+        "basis": "vtable N3gui8waveform17DeckNo2DeckWidgetE +0x0 | xref 4/6 agree"
+      },
+      "EP_2d1dbe8": {
+        "v200": "0x30cef28",
+        "basis": "vtable N3gui8waveform17DeckNo4DeckWidgetE +0x0 | xref 4/6 agree"
+      },
+      "EP_2d21548": {
+        "v200": "0x30d2888",
+        "basis": "vtable N3gui8waveform11OnAirWidgetE +0x0 | xref 3/3 agree"
+      },
+      "EP_2d37158": {
+        "v200": "0x30e84b0",
+        "basis": "vtable N3gui8waveform20TrackInfo2DeckWidgetE +0x0"
+      },
+      "EP_2d37408": {
+        "v200": "0x30e8778",
+        "basis": "hand: RTTI TrackInfo2DeckWidget: its 6th (juce::Component base) vtable; the other five kee"
+      },
+      "EP_2d387d0": {
+        "v200": "0x30ea650",
+        "basis": "vtable N3gui8waveform20TrackInfo4DeckWidgetE +0x0"
+      },
+      "EP_2d38a80": {
+        "v200": "0x30ea918",
+        "basis": "hand: RTTI TrackInfo4DeckWidget: same as HT_CVT2 (6th vtable, ott -368 -> -472)"
+      },
+      "EP_2d3ca00": {
+        "v200": "0x30ef370",
+        "basis": "vtable N3gui8waveform21PlayerInfo2DeckWidgetE +0x0 | xref 2/2 agree | ptr 1 agree"
+      },
+      "EP_2d3cc28": {
+        "v200": "0x30ef598",
+        "basis": "vtable N3gui8waveform21PlayerInfo2DeckWidgetE +0x0 | xref 2/2 agree | ptr 1 agree"
+      },
+      "EP_2d3d9b8": {
+        "v200": "0x30f0328",
+        "basis": "vtable N3gui8waveform21PlayerInfo4DeckWidgetE +0x0 | xref 2/2 agree | ptr 1 agree"
+      },
+      "EP_2d3dbe0": {
+        "v200": "0x30f0550",
+        "basis": "vtable N3gui8waveform21PlayerInfo4DeckWidgetE +0x0 | xref 2/2 agree | ptr 1 agree"
+      },
+      "EP_2d6c498": {
+        "v200": "0x311ee28",
+        "basis": "vtable N3gui8waveform17BeatFxParamWidgetE +0x0 | xref 2/2 agree"
+      },
+      "EP_2d6cac0": {
+        "v200": "0x311f450",
+        "basis": "vtable N3gui8waveform18EffectReverbWidgetE +0x0 | xref 2/2 agree"
+      },
+      "EP_2d72b48": {
+        "v200": "0x31254d8",
+        "basis": "vtable N3gui8waveform15XPadParamWidgetE +0x0 | xref 2/2 agree"
+      },
+      "EP_2d72cb0": {
+        "v200": "0x3125640",
+        "basis": "vtable N3gui8waveform15XPadParamWidgetE +0x168 | xref 2/2 agree"
+      },
+      "EP_2d74bb0": {
+        "v200": "0x3127540",
+        "basis": "vtable N3gui8waveform10XPadWidgetE +0x0 | xref 2/2 agree"
+      },
+      "EP_2d7a800": {
+        "v200": "0x312d190",
+        "basis": "vtable N3gui8waveform8FxWidgetE +0x0 | xref 2/2 agree"
+      },
+      "EP_2d824e0": {
+        "v200": "0x3134e70",
+        "basis": "hand: content: identical 622-byte PNG (md5 20d75b6995f0); 2 copies in both builds, this is"
+      },
+      "EP_2d84b60": {
+        "v200": "0x31374f0",
+        "basis": "vtable N3gui8waveform12PadCueWidgetE +0x0 | xref 2/2 agree"
+      },
+      "EP_2d8d300": {
+        "v200": "0x313fc90",
+        "basis": "vtable N3gui8waveform19PadModeStatusWidgetE +0x0 | xref 2/2 agree"
+      },
+      "EP_2d8d4d8": {
+        "v200": "0x313fe68",
+        "basis": "vtable N3gui8waveform17PadSlipLoopWidgetE +0x0 | xref 2/3 agree"
+      },
+      "EP_2d8d7a0": {
+        "v200": "0x3140130",
+        "basis": "vtable N3gui8waveform17PadSlipLoopWidgetE +0x2c8"
+      },
+      "EP_2d8da20": {
+        "v200": "0x31403b0",
+        "basis": "vtable N3gui8waveform17PadSlipLoopWidgetE +0x548"
+      },
+      "EP_2d8f570": {
+        "v200": "0x3141f00",
+        "basis": "ptr 1 agree"
+      },
+      "EP_2d8f880": {
+        "v200": "0x3142210",
+        "basis": "vtable N3gui8waveform15PadStatusWidgetE +0x0 | xref 2/2 agree"
+      },
+      "EP_2d95250": {
+        "v200": "0x3147be0",
+        "basis": "ptr 1 agree"
+      },
+      "EP_2d994e8": {
+        "v200": "0x314be78",
+        "basis": "vtable N3gui19PreviewableWaveformE +0x0 | xref 2/3 agree"
+      },
+      "EP_2da1c28": {
+        "v200": "0x31545b8",
+        "basis": "vtable N3gui11player_info11LocalPlayerE +0x0 | xref 2/2 agree"
+      },
+      "EP_2dae640": {
+        "v200": "0x3161130",
+        "basis": "vtable N3gui13browser_logic32MusicLibraryCommunicationAdaptor14IReplyListenerE +0x8"
+      },
+      "EP_2dc1820": {
+        "v200": "0x3174628",
+        "basis": "vtable N3gui13browser_logic15MenuEventFacadeE +0x0 | xref 2/5 agree"
+      },
+      "EP_2dc7888": {
+        "v200": "0x317a690",
+        "basis": "hand: RTTI: the vtable address point of N3gui13browser_logic33TrackListDisplayFormatEventF"
+      },
+      "EP_2dcc3a0": {
+        "v200": "0x317f388",
+        "basis": "vtable N3gui9disp_data14BrowseDispDataE +0x0 | xref 2/3 agree"
+      },
+      "EP_2dcc760": {
+        "v200": "0x317f748",
+        "basis": "vtable N3gui9disp_data21BrowseDispDataCreatorE +0x0 | xref 1/1 agree"
+      },
+      "EP_2dccc70": {
+        "v200": "0x317fc58",
+        "basis": "vtable N3gui11FontManagerE +0x0 | xref 5/5 agree"
+      },
+      "EP_2dede68": {
+        "v200": "0x31a1278",
+        "basis": "hand: RTTI: the vtable whose type_info names St23_Sp_counted_ptr_inplaceIN3gui8BpmStateESa"
+      },
+      "EP_2defe68": {
+        "v200": "0x31a3270",
+        "basis": "hand: RTTI: the only vtable whose type_info names St23_Sp_counted_ptr_inplaceIN3gui15Playe"
+      },
+      "EP_2df55e8": {
+        "v200": "0x31a89f0",
+        "basis": "hand: RTTI: the vtable address point of N3gui11sub_display14PlayerInfoDataE (offset-to-top"
+      },
+      "EP_2df7ff8": {
+        "v200": "0x31ab400",
+        "basis": "hand: RTTI: the primary vtable whose type_info names N3gui11sub_display20CurrentHotCueColl"
+      },
+      "EP_2dfbde0": {
+        "v200": "0x31af1e0",
+        "basis": "vtable N3gui7caution7browser14CautionManagerE +0x0 | xref 1/1 agree"
+      },
+      "EP_2dfbe08": {
+        "v200": "0x31af208",
+        "basis": "vtable N3gui7caution6simple14CautionManagerE +0x0 | xref 1/1 agree"
+      },
+      "EP_2e15028": {
+        "v200": "0x31c8448",
+        "basis": "vtable N4meow16AsyncTaskBoxBase9AsyncTaskIZN13input_devices23DeckOperationPadHandlerINS2_1"
+      },
+      "EP_2e15058": {
+        "v200": "0x31c8478",
+        "basis": "vtable N4meow16AsyncTaskBoxBase9AsyncTaskIZN13input_devices23DeckOperationPadHandlerINS2_1"
+      },
+      "EP_2e41538": {
+        "v200": "0x31f4a58",
+        "basis": "vtable N14device_adapter22MainDisplayUpdateTimerE +0x0 | xref 6/6 agree"
+      },
+      "EP_2e509c8": {
+        "v200": "0x3203ee8",
+        "basis": "hand: RTTI: the vtable whose type_info names N14device_adapter11subcpu_comm9deck_ucom14Tra"
+      },
+      "EP_2e5fe90": {
+        "v200": "0x32133a0",
+        "basis": "vtable N4meow16TouchableListBox3RowE +0x0 | xref 6/6 agree"
+      },
+      "EP_2e600a0": {
+        "v200": "0x32135b0",
+        "basis": "vtable N4meow16TouchableListBox12ListViewportE +0x0 | xref 6/6 agree"
+      },
+      "EP_2e605b8": {
+        "v200": "0x3213ac8",
+        "basis": "vtable N4meow21TouchableTableListBox7RowCompE +0x0 | xref 6/6 agree"
+      },
+      "EP_2e67bb0": {
+        "v200": "0x321b0c0",
+        "basis": "vtable N4meow12TimerTaskBox4ImplE +0x0"
+      },
+      "EP_3141a38": {
+        "v200": "0x34f4f18",
+        "basis": "vtable N4juce5Timer11TimerThread17CallTimersMessageE +0x0 | xref 1/1 agree"
+      },
+      "EP_3142bc0": {
+        "v200": "0x34f60a0",
+        "basis": "vtable N4juce32LowLevelGraphicsSoftwareRendererE +0x0 | xref 2/2 agree"
+      },
+      "EP_3142d48": {
+        "v200": "0x34f6228",
+        "basis": "vtable N4juce17SoftwarePixelDataE +0x0 | xref 6/6 agree"
+      },
+      "EP_314cae0": {
+        "v200": "0x34fffc0",
+        "basis": "vtable N4juce28StandardCachedComponentImageE +0x0 | xref 3/3 agree"
+      },
+      "EP_31592e0": {
+        "v200": "0x350c7c0",
+        "basis": "vtable N4juce5LabelE +0x0 | xref 2/2 agree"
+      },
+      "EP_315e560": {
+        "v200": "0x3511a40",
+        "basis": "vtable N4juce18LinuxComponentPeer19LinuxRepaintManagerE +0x0 | xref 3/3 agree"
+      },
+      "EP_3480128": {
+        "v200": "0x384b430",
+        "basis": "hand: section headers: .rodata sh_addr+sh_size (v1.30 value reproduces azmod's literal)"
+      },
+      "EP_3b25a60": {
+        "v200": "0x3f84a88",
+        "basis": "hand: dynamic relocations: the .rela.plt R_AARCH64_JUMP_SLOT r_offset for symbol XNextEven"
+      },
+      "EP_3b35728": {
+        "v200": "0x3f953b8",
+        "basis": "xref 2/2 agree"
+      },
+      "EP_3b35f40": {
+        "v200": "0x3f95bd0",
+        "basis": "xref 2/2 agree"
+      },
+      "EP_3b35fb8": {
+        "v200": "0x3f95c48",
+        "basis": "xref 2/2 agree"
+      },
+      "EP_3b8dcb8": {
+        "v200": "0x3ff5f50",
+        "basis": "xref 6/6 agree"
+      },
+      "EP_3b8e9f8": {
+        "v200": "0x3ff6c90",
+        "basis": "hand: the juce::String the TrackListWidget button listener's click slot (vtable +0x10: v1."
+      }
+    },
+    "azstem": {
+      "EP_7670a8": {
+        "v200": "0x07a8928",
+        "basis": "code w=12 | xref 1/1 agree | ptr 1 agree"
+      },
+      "EP_77e260": {
+        "v200": "0x07bfb60",
+        "basis": "code w=12 | xref 3/3 agree"
+      },
+      "EP_7820d0": {
+        "v200": "0x07c39d0",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_782dc0": {
+        "v200": "0x07c46c0",
+        "basis": "code w=12 | xref 2/2 agree"
+      },
+      "EP_783010": {
+        "v200": "0x07c4910",
+        "basis": "code w=12 | xref 3/3 agree"
+      },
+      "EP_783fe0": {
+        "v200": "0x07c58e0",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_784e90": {
+        "v200": "0x07c6790",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_785228": {
+        "v200": "0x07c6b28",
+        "basis": "code w=12 | xref 2/2 agree"
+      },
+      "EP_d58ee0": {
+        "v200": "0x0de3c08",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_d9c9d8": {
+        "v200": "0x0e277e0",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_d9ea00": {
+        "v200": "0x0e29660",
+        "basis": "code w=12 | xref 3/3 agree"
+      },
+      "EP_d9f320": {
+        "v200": "0x0e29f80",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_da07d8": {
+        "v200": "0x0e2b4f0",
+        "basis": "code w=12 | xref 2/2 agree"
+      },
+      "EP_da2f68": {
+        "v200": "0x0e2dc80",
+        "basis": "code w=12 | xref 1/1 agree | ptr 1 agree"
+      },
+      "EP_da3df0": {
+        "v200": "0x0e2eb28",
+        "basis": "code w=12 | xref 1/1 agree | ptr 1 agree"
+      },
+      "EP_dabb48": {
+        "v200": "0x0e365a8",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_1381538": {
+        "v200": "0x143c760",
+        "basis": "code w=12 | ptr 1 agree"
+      },
+      "EP_14a2270": {
+        "v200": "0x155d700",
+        "basis": "hand: RTTI: slot 0 (complete-object destructor) of the vtable whose type_info names N9dj_p"
+      },
+      "EP_14a2560": {
+        "v200": "0x155d9f0",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_14ab0d0": {
+        "v200": "0x1566500",
+        "basis": "code w=12 | ptr 4 agree"
+      },
+      "EP_1f91210": {
+        "v200": "0x20fd5e0",
+        "basis": "hand: RTTI: gui::LoadedTrackInfo vtable (1.30 0x2dd9288, 2.00 0x318c260): 1.30 slot +0x88,"
+      },
+      "EP_1f9c498": {
+        "v200": "0x2109d20",
+        "basis": "code w=12 | xref 1/1 agree"
+      },
+      "EP_1fa16d0": {
+        "v200": "0x210edf0",
+        "basis": "hand: RTTI: slot 0 (complete-object destructor) of the vtable whose type_info names N3gui9"
+      },
+      "EP_22043f0": {
+        "v200": "0x2371890",
+        "basis": "hand: masked code signature (12 words, unique) and 6/6 sampled callers agree; the function"
+      },
+      "EP_25f9c00": {
+        "v200": "0x2933258",
+        "basis": "vtable N6pcmbuf7pagebuf10PageBufferINS0_23DefaultPageStaticConfigEEE +0x0 | xref 3/3 agree"
+      },
+      "EP_2754518": {
+        "v200": "0x2a9cfa8",
+        "basis": "vtable N4meow21UpdatableSharedObjectIN14appnd_trk_info8BeatGridEEE +0x0 | xref 6/6 agree"
+      },
+      "EP_2798328": {
+        "v200": "0x2ae4df8",
+        "basis": "vtable N14appnd_trk_info8BeatGrid7ContentE +0x0 | xref 4/4 agree"
+      },
+      "EP_27b8a50": {
+        "v200": "0x2b05708",
+        "basis": "vtable N11time_domain26CascadedTimeStretchManagerE +0x0 | xref 2/2 agree"
+      },
+      "EP_27ba108": {
+        "v200": "0x2b06dd0",
+        "basis": "vtable N11time_domain14KeyControlFGPRE +0x0 | xref 2/2 agree"
+      },
+      "EP_27bb148": {
+        "v200": "0x2b07de8",
+        "basis": "vtable N11time_domain11TimeStretchE +0x90"
+      },
+      "EP_289f798": {
+        "v200": "0x2bf2268",
+        "basis": "vtable N12player_basis15PlayerBasisUnitE +0x0 | xref 2/2 agree"
+      },
+      "EP_289f878": {
+        "v200": "0x2bf2348",
+        "basis": "vtable N9dj_player12DjPlayerUnitE +0x0 | xref 2/2 agree"
+      },
+      "EP_2dd9288": {
+        "v200": "0x318c260",
+        "basis": "vtable N3gui15LoadedTrackInfoE +0x0"
+      },
+      "EP_2ddb878": {
+        "v200": "0x318ec68",
+        "basis": "hand: RTTI: the primary vtable (offset-to-top 0) whose type_info names N3gui9LoadStateE; t"
+      }
+    }
+  },
+  "cache_entries": {
+    "EP_124a7a8": {
+      "role": "ListServer selection",
+      "profiles": {
+        "1.30": {
+          "entry": "0x124a7a8",
+          "end": "0x124ac9c",
+          "first16": "fd7bb8a9fd030091f35301a9740040f9",
+          "sha256": "162b49dd099731d0ab2349b7aaac0013280d434c9167a085fc55938fca4b7b8a"
+        },
+        "2.00": {
+          "entry": "0x1305f30",
+          "end": "0x1306424",
+          "first16": "fd7bb8a9fd030091f35301a9740040f9",
+          "sha256": "db7e917c329770149366bb988ec71795e8dbeaba91c58a868776288fe76d2c47"
+        }
+      },
+      "kind": "AZCE_KIND_SELECTION",
+      "hook": "default"
+    },
+    "EP_1248420": {
+      "role": "ListServer query",
+      "profiles": {
+        "1.30": {
+          "entry": "0x1248420",
+          "end": "0x1248530",
+          "first16": "fd7bb9a9fd030091f35301a9341c0012",
+          "sha256": "4bb1d69a6986af492e397e228d96dae584da5355db1e27f2b0427896930553f2"
+        },
+        "2.00": {
+          "entry": "0x1303bb0",
+          "end": "0x1303cc0",
+          "first16": "fd7bb9a9fd030091f35301a9341c0012",
+          "sha256": "3eac5d7d91ac78a9acaf7f80a2bdf961d13f0efa791be7dba98882a6b649dbfb"
+        }
+      },
+      "kind": "AZCE_KIND_QUERY",
+      "hook": "default"
+    },
+    "EP_1244850": {
+      "role": "Collector create",
+      "profiles": {
+        "1.30": {
+          "entry": "0x1244850",
+          "end": "0x124593c",
+          "first16": "fd7bb2a9fd030091f96b04a9f90301aa",
+          "sha256": "85e7670e99adeaf239059798c7a83b07d4bf385f3917b52717b17aca05ec4c52"
+        },
+        "2.00": {
+          "entry": "0x12fffe0",
+          "end": "0x13010cc",
+          "first16": "fd7bb2a9fd030091f96b04a9f90301aa",
+          "sha256": "d5ff94203dc302e22b8f594ce15b38c14ee84f160db8a6422f44b4fe9c07a703"
+        }
+      },
+      "kind": "AZCE_KIND_CREATE",
+      "hook": "default"
+    },
+    "EP_1254b88": {
+      "role": "Primary Creator",
+      "profiles": {
+        "1.30": {
+          "entry": "0x1254b88",
+          "end": "0x1254c18",
+          "first16": "fd7bbda9fd030091f35301a9f30300aa",
+          "sha256": "9acd6da38a9d17d9723e38703bd460d4284c485ca809a9fb98a22bffea416141"
+        },
+        "2.00": {
+          "entry": "0x1310310",
+          "end": "0x13103a0",
+          "first16": "fd7bbda9fd030091f35301a9f30300aa",
+          "sha256": "976f61f4fad210204f4ae07fa8a47ac76a3e59262ae18e6fcd166744bac9c70c"
+        }
+      },
+      "kind": "AZCE_KIND_PRIMARY_FACTORY",
+      "hook": "default"
+    },
+    "EP_123e7e0": {
+      "role": "Fallback supported standard factory",
+      "profiles": {
+        "1.30": {
+          "entry": "0x123e7e0",
+          "end": "0x123ef48",
+          "first16": "fd7bb6a9fd030091f35301a9f55b02a9",
+          "sha256": "9a7593ab50307df46ac80d739bc2cb7ded06db9bc7c3f4682eeddf75617d515e"
+        },
+        "2.00": {
+          "entry": "0x12f9ed8",
+          "end": "0x12fa640",
+          "first16": "fd7bb6a9fd030091f35301a9f55b02a9",
+          "sha256": "4b32010787593cb59e69d99999bfad44d43fb585d5c3e70f9613baac69a673c9"
+        }
+      },
+      "kind": "AZCE_KIND_STANDARD_FACTORY",
+      "hook": "default"
+    },
+    "EP_12571c8": {
+      "role": "Generic primary adapter",
+      "profiles": {
+        "1.30": {
+          "entry": "0x12571c8",
+          "end": "0x12573b4",
+          "first16": "fd7bb8a9fd030091f76303a9170440f9",
+          "sha256": "6f40cefa0d840db184f30e19b1326c1b1cefc436ec82982c15b14f0f7ab2d541"
+        },
+        "2.00": {
+          "entry": "0x1312958",
+          "end": "0x1312b44",
+          "first16": "fd7bb8a9fd030091f76303a9170440f9",
+          "sha256": "6d35a792a7b2907d54e97d814c6a43e8f2459e7c9d97ead77802f1bf57e98623"
+        }
+      },
+      "kind": "AZCE_KIND_GENERIC",
+      "hook": "default"
+    },
+    "EP_123f738": {
+      "role": "TrackInfo fallback adapter",
+      "profiles": {
+        "1.30": {
+          "entry": "0x123f738",
+          "end": "0x12414ac",
+          "first16": "ff030ed1fd7b00a9fd030091f76303a9",
+          "sha256": "071cf37adcd79efad8efbb2a776a2ecf7fadba840df73dde53d9161b8486fa14"
+        },
+        "2.00": {
+          "entry": "0x12fae60",
+          "end": "0x12fcc0c",
+          "first16": "ff030ed1fd7b00a9fd030091f76303a9",
+          "sha256": "27fbc5a9f99ddcc6654c7de81b1918754b767c70b05f82c1bb4488f7f5ca584e"
+        }
+      },
+      "kind": "AZCE_KIND_TRACKINFO",
+      "hook": "default"
+    },
+    "EP_123dc78": {
+      "role": "TrackInfo setup",
+      "profiles": {
+        "1.30": {
+          "entry": "0x123dc78",
+          "end": "0x123e1b4",
+          "first16": "fd7bb7a9fd030091f55b02a9f76303a9",
+          "sha256": "85138c97a0fd169dbe05a602ee3a4c684cdbaacd1f4df301ac645b2aa65db938"
+        },
+        "2.00": {
+          "entry": "0x12f9370",
+          "end": "0x12f98ac",
+          "first16": "fd7bb7a9fd030091f55b02a9f76303a9",
+          "sha256": "30ca7e193c9535b2285c058f45a959a71c3cf38f9e18d1fbd5914b6bcda1d8b5"
+        }
+      },
+      "kind": "AZCE_KIND_SETUP",
+      "hook": "default"
+    },
+    "EP_123d6c8": {
+      "role": "TrackInfo setter",
+      "profiles": {
+        "1.30": {
+          "entry": "0x123d6c8",
+          "end": "0x123d9e8",
+          "first16": "fd7bbba9fd030091041840f9441000b4",
+          "sha256": "96586dd249bb4573bdbaaaa8f5bb35389b7234d6bb27b19dca08f8dda1bcd730"
+        },
+        "2.00": {
+          "entry": "0x12f8dc0",
+          "end": "0x12f90e0",
+          "first16": "fd7bbba9fd030091041840f9441000b4",
+          "sha256": "d962078b7547906b3fbef6c757ad3d6a363db2d32f14b965dae71f847d59bb19"
+        }
+      },
+      "kind": "AZCE_KIND_LAYOUT",
+      "hook": "island"
+    },
+    "EP_1243350": {
+      "role": "Collector clear",
+      "profiles": {
+        "1.30": {
+          "entry": "0x1243350",
+          "end": "0x1243624",
+          "first16": "fd7bbba9fd030091f76303a9f70300aa",
+          "sha256": "8193fa08d95ae5c13df4eb027890c779988edd7256d56172f4cb23fbe45e3073"
+        },
+        "2.00": {
+          "entry": "0x12feae0",
+          "end": "0x12fedb4",
+          "first16": "fd7bbba9fd030091f76303a9f70300aa",
+          "sha256": "63a9e60c1935922e104e6d558c05556151d8b9ab52a119da8bd19b5617c573cd"
+        }
+      },
+      "kind": "AZCE_KIND_CLEAR",
+      "hook": "default"
+    },
+    "EP_12c0f18": {
+      "role": "Collector control dispose",
+      "profiles": {
+        "1.30": {
+          "entry": "0x12c0f18",
+          "end": "0x12c11a0",
+          "first16": "fd7bbda9fd030091f35301a9140840f9",
+          "sha256": "e46d9a3a7b912240ab091c7aa78509e9a8a13e1b251112e7af10137dcc306af2"
+        },
+        "2.00": {
+          "entry": "0x137d890",
+          "end": "0x137da8c",
+          "first16": "fd7bbda9fd030091f35301a9140840f9",
+          "sha256": "ee959dc4438f1cb587f26e3cfed762d1cf8b263e473a5ded6ffd3fc685e6f20c"
+        }
+      },
+      "kind": "AZCE_KIND_COLLECTOR_DISPOSE",
+      "hook": "default"
+    },
+    "EP_12c1fa8": {
+      "role": "Pool record grow",
+      "profiles": {
+        "1.30": {
+          "entry": "0x12c1fa8",
+          "end": "0x12c2170",
+          "first16": "fd7bbaa9e3f301b2635595f2fd030091",
+          "sha256": "c4c9930d96d9ab9953b6ae305a1c504518828f6904920a02dc2f3a67d9ffa014"
+        },
+        "2.00": {
+          "entry": "0x137dd40",
+          "end": "0x137df08",
+          "first16": "fd7bbaa9e3f301b2635595f2fd030091",
+          "sha256": "b208456fd66a7c22b0fcafd54ffd7d16a0fbaf0b2ae9bf809c2aed9aadbc474a"
+        }
+      },
+      "kind": "AZCE_KIND_POOL_GROW",
+      "hook": "default"
+    },
+    "EP_124a558": {
+      "role": "ListServer selected store",
+      "profiles": {
+        "1.30": {
+          "entry": "0x124a558",
+          "end": "0x124a7a4",
+          "first16": "fd7bbba9e5f301b2655595f2fd030091",
+          "sha256": "e2b99ac96b8603494453bd5898468dff704f86f15d7f65a3043eda3c4d61fc37"
+        },
+        "2.00": {
+          "entry": "0x1305ce0",
+          "end": "0x1305f2c",
+          "first16": "fd7bbba9e5f301b2655595f2fd030091",
+          "sha256": "d452004784078afc72f590e2b9be88f4a883e03eaa7a0cea4e6b1705d51e0456"
+        }
+      },
+      "kind": "AZCE_KIND_SELECTION_STORE",
+      "hook": "default"
+    },
+    "EP_1246c50": {
+      "role": "ListServer selected clear",
+      "profiles": {
+        "1.30": {
+          "entry": "0x1246c50",
+          "end": "0x1246dd0",
+          "first16": "031045a97f0004eba00b00540004004f",
+          "sha256": "b4cc119f9682d5f5a5a5628e096fde632553169b974878d1f70ae0b6e55b01b6"
+        },
+        "2.00": {
+          "entry": "0x13023e0",
+          "end": "0x1302560",
+          "first16": "031045a97f0004eba00b00540004004f",
+          "sha256": "d707c175734ad862bf6ca2b1c2008fa8a09583e632b5eb25fbaac04212b2f65e"
+        }
+      },
+      "kind": "AZCE_KIND_SELECTION_CLEAR",
+      "hook": "island"
+    },
+    "EP_1246e08": {
+      "role": "ListServer reset",
+      "profiles": {
+        "1.30": {
+          "entry": "0x1246e08",
+          "end": "0x12472b4",
+          "first16": "fd7bb4a9fd030091f35301a9131840f9",
+          "sha256": "feb965f6b25329c630e1c5d21a627d1cffcca1376ccdf10d6dce950cf023210f"
+        },
+        "2.00": {
+          "entry": "0x1302598",
+          "end": "0x1302a44",
+          "first16": "fd7bb4a9fd030091f35301a9131840f9",
+          "sha256": "f65f699664be1317b1d38a99dc42c64678a0b8b355989395573627e4b54aa40c"
+        }
+      },
+      "kind": "AZCE_KIND_SERVER_RESET",
+      "hook": "default"
+    },
+    "EP_1248530": {
+      "role": "ListServer destructor",
+      "profiles": {
+        "1.30": {
+          "entry": "0x1248530",
+          "end": "0x12489a4",
+          "first16": "fd7bb9a961b000d021002691fd030091",
+          "sha256": "a4a886fa2b3a0dc8dff1862e9f775b42261bfbf26ba45a46ab5e22908dea297c"
+        },
+        "2.00": {
+          "entry": "0x1303cc0",
+          "end": "0x130412c",
+          "first16": "fd7bb9a921c500b021c02d91fd030091",
+          "sha256": "5fe78a30778bdd93dd829d1af98db8ec88aff15c7956c64fc13b4f5df74ef588"
+        }
+      },
+      "kind": "AZCE_KIND_SERVER_DESTROY",
+      "hook": "default"
+    },
+    "EP_123d560": {
+      "role": "TrackInfo cache destructor",
+      "profiles": {
+        "1.30": {
+          "entry": "0x123d560",
+          "end": "0x123d6a0",
+          "first16": "fd7bbea9fd030091f35301a9f30300aa",
+          "sha256": "6e950eff26ed90364eb2962be38e6c9132d9ce3e51aeb9d29e2bfca1455805f3"
+        },
+        "2.00": {
+          "entry": "0x12f8c58",
+          "end": "0x12f8d98",
+          "first16": "fd7bbea9fd030091f35301a9f30300aa",
+          "sha256": "aea24067a01ce110abaf2e969f8f190b9790c5ce5688295296fecc58f2b9a5e9"
+        }
+      },
+      "kind": "AZCE_KIND_CACHE_DESTROY",
+      "hook": "default"
+    },
+    "EP_11fc670": {
+      "role": "LoadTrackInfo cache destructor",
+      "profiles": {
+        "1.30": {
+          "entry": "0x11fc670",
+          "end": "0x11fc798",
+          "first16": "fd7bbea902a00191a1b200d0fd030091",
+          "sha256": "25ea5ceb6a1d8d3d8ab1740f33416c3200ead32e0e98c8594d714a94e23e3e36"
+        },
+        "2.00": {
+          "entry": "0x12b7b88",
+          "end": "0x12b7cb0",
+          "first16": "fd7bbea902a0019161c700b0fd030091",
+          "sha256": "19dd63eef214f63c04fcb4493e03203040613df01ae6cfc39c392508311ed5ac"
+        }
+      },
+      "kind": "AZCE_KIND_LOADINFO_DESTROY",
+      "hook": "default"
+    },
+    "EP_12c0b20": {
+      "role": "Collector complete destructor",
+      "profiles": {
+        "1.30": {
+          "entry": "0x12c0b20",
+          "end": "0x12c0d78",
+          "first16": "fd7bbda901ad00d021c02691fd030091",
+          "sha256": "ac55d2876a5039267446aa321ee3e5c8b4679102a78ec003e3441386c316ccd1"
+        },
+        "2.00": {
+          "entry": "0x137c728",
+          "end": "0x137c980",
+          "first16": "fd7bbda9c1c1009021c02e91fd030091",
+          "sha256": "0cd8f0c1140594bcfb0484840e2a6150a214163ab053536dd6a292e31198cb2e"
+        }
+      },
+      "kind": "AZCE_KIND_COLLECTOR_DESTROY",
+      "hook": "default"
+    },
+    "EP_12c0760": {
+      "role": "Collector deleting destructor",
+      "profiles": {
+        "1.30": {
+          "entry": "0x12c0760",
+          "end": "0x12c09b8",
+          "first16": "fd7bbda901ad00d021c02691fd030091",
+          "sha256": "31c5acf60127d71389a09898b847223df504bd5a3899d79cab238dca8ff90a27"
+        },
+        "2.00": {
+          "entry": "0x137c368",
+          "end": "0x137c5c0",
+          "first16": "fd7bbda9c1c1009021c02e91fd030091",
+          "sha256": "ef1a442a93d0769e0d4a778c501441e964334ce2bd0e3fff55df62836960f1f7"
+        }
+      },
+      "kind": "AZCE_KIND_COLLECTOR_DELETE",
+      "hook": "default"
+    },
+    "EP_10b29f8": {
+      "kind": "AZCE_KIND_REPLY_TICKET",
+      "hook": "default",
+      "role": "selected LoadInfoRequestTicket reply processing; receiver remains a genuine weak owner",
+      "profiles": {
+        "1.30": {
+          "entry": "0x10b29f8",
+          "end": "0x10b2cf8",
+          "first16": "fd7bbba9fd030091f35301a9f30300aa",
+          "sha256": "319128c48e6c39b3fce441b1c2f8e5a78a2ddc0d56ddaf2df8188007835cd1c4"
+        },
+        "2.00": {
+          "entry": "0x1142bc8",
+          "end": "0x1142efc",
+          "first16": "fd7bbba9fd030091f35301a9f30300aa",
+          "sha256": "449a9ebf9493b3071575df3de9c28bfeacd58a9e3adcb9a191283e09fa6ca02b"
+        }
+      }
+    },
+    "EP_a28550": {
+      "kind": "AZCE_KIND_REPLY_RECEPTION",
+      "hook": "default",
+      "role": "Reception callback entered under native slot13 strong promotion; no source/load inference",
+      "profiles": {
+        "1.30": {
+          "entry": "0xa28550",
+          "end": "0xa28c08",
+          "first16": "fd7ba9a9c2dc009042702a91fd030091",
+          "sha256": "217c545e2ffed0794a73044354223f8b8677e3abe5371d9d80d45cc0516677f9"
+        },
+        "2.00": {
+          "entry": "0xa6d960",
+          "end": "0xa6e018",
+          "first16": "fd7ba9a962f400b042d00291fd030091",
+          "sha256": "a0122622d4fb6e5a83a84cdfeef8b1d601eddcd504cdfaaf447bc32545972f6b"
+        }
+      }
+    }
+  },
+  "reply_promotion": {
+    "control_register": 21,
+    "profiles": {
+      "1.30": {
+        "entry": "0x10b3bd0",
+        "end": "0x10b4684",
+        "return_pc": "0x10b408c",
+        "sha256": "c59631a94527a086d234aed973bbdb1939cbf1d635ec0076078b4bc658c7de42"
+      },
+      "2.00": {
+        "entry": "0x1143e20",
+        "end": "0x1144948",
+        "return_pc": "0x1144490",
+        "sha256": "56620fedbf85917fe0e8d3326dbe0055c7025c28aafbc6a0578d706429dbf991"
+      }
+    }
+  },
+  "slip_observer": {
+    "entries": [
+      {
+        "name": "EP_1fb72e0",
+        "role": "source-constructor",
+        "scope": "function",
+        "profiles": {
+          "1.30": {
+            "entry": "0x1fb72e0",
+            "end": "0x1fb9484",
+            "first16": "fd7baea9fd030091e83300fd2800679e",
+            "sha256": "c78aa8b3c0c3e2457b117948585938adf9a63430631e419af8bb2d669ed38156"
+          },
+          "2.00": {
+            "entry": "0x21249f8",
+            "end": "0x2126ba4",
+            "first16": "fd7baea9fd030091e83300fd2800679e",
+            "sha256": "256bb337981daa146c2c4a9aab2852f98661154ef860e18b63222a14b940ed9f"
+          }
+        }
+      },
+      {
+        "name": "EP_1fc9bf8",
+        "role": "parent-publication",
+        "scope": "function",
+        "profiles": {
+          "1.30": {
+            "entry": "0x1fc9bf8",
+            "end": "0x1fcad58",
+            "first16": "fd7baea9bf0c0071fd030091f35301a9",
+            "sha256": "4ab783073616421a2aa45b981b5dd77a5cceb83aceb660fb60174b9bc197956a"
+          },
+          "2.00": {
+            "entry": "0x2137298",
+            "end": "0x2138428",
+            "first16": "fd7baea9bf0c0071fd030091f35301a9",
+            "sha256": "e18b8f642ed97e80a618d53d18763a7b5e28bbfdf8d665892dc043d89945399e"
+          }
+        }
+      },
+      {
+        "name": "EP_1fcbe30",
+        "role": "source-disposal",
+        "scope": "function",
+        "profiles": {
+          "1.30": {
+            "entry": "0x1fcbe30",
+            "end": "0x1fcbf04",
+            "first16": "fd7bbda9fd030091f35301a913d052a9",
+            "sha256": "04abfa237a917c3be8f4d49b067138b0ff8b423d4f9b2ad1a76235d05123d6c5"
+          },
+          "2.00": {
+            "entry": "0x2139500",
+            "end": "0x21395d4",
+            "first16": "fd7bbda9fd030091f35301a913d052a9",
+            "sha256": "abb87f8131b1b9e48b3980d20f37fec09b6ef0ca689fa9ef7a1a8862df98e270"
+          }
+        }
+      },
+      {
+        "name": "EP_1fce368",
+        "role": "parent-disposal",
+        "scope": "entry-prefix",
+        "profiles": {
+          "1.30": {
+            "entry": "0x1fce368",
+            "end": "0x1fce378",
+            "first16": "fd7bbaa9fd030091f55b02a915bc48f9",
+            "sha256": "e53ce3f0d4442a49735a67f987c08c06890f7ad3d49bfb2120ed9f4e9203e9c8"
+          },
+          "2.00": {
+            "entry": "0x213ba38",
+            "end": "0x213ba48",
+            "first16": "fd7bbaa9fd030091f55b02a915bc48f9",
+            "sha256": "e53ce3f0d4442a49735a67f987c08c06890f7ad3d49bfb2120ed9f4e9203e9c8"
+          }
+        }
+      }
+    ],
+    "profiles": {
+      "1.30": {
+        "construct_return": "0x1fca6e4",
+        "parent_returns": [
+          "0x1fcc5f4",
+          "0x1fcc654",
+          "0x1fcc6b4",
+          "0x1fcc714"
+        ],
+        "source_control_vtable": "0x2dee098",
+        "parent_control_vtable": "0x2defe68",
+        "owner_scope": {
+          "entry": "0x1fcc520",
+          "end": "0x1fcd170",
+          "first16": "fd7bb0a9fd030091f35301a9f40300aa",
+          "sha256": "da341b82d22ccfae1a6bb4200f759952fc13bdc9d5888cc3aa1ce2f7f2ab669d"
+        },
+        "producer": {
+          "entry": "0x1fb5ce8",
+          "end": "0x1fb72dc",
+          "sha256": "5e18b4cc786eeb3aeb272fb7e8091d02dbb487a2322cf992d197c5b0803167da"
+        },
+        "getter_sites": [
+          "0x1fb5d34",
+          "0x1fb5e78",
+          "0x1fb5e9c"
+        ]
+      },
+      "2.00": {
+        "construct_return": "0x2137db4",
+        "parent_returns": [
+          "0x2139cc4",
+          "0x2139d24",
+          "0x2139d84",
+          "0x2139de4"
+        ],
+        "source_control_vtable": "0x31a14a8",
+        "parent_control_vtable": "0x31a3270",
+        "owner_scope": {
+          "entry": "0x2139bf0",
+          "end": "0x213a840",
+          "first16": "fd7bb0a9fd030091f35301a9f40300aa",
+          "sha256": "9a8087e73a8b8e875a06381925f219ae7b7abfdae1fa277ffc4d453600989ee1"
+        },
+        "producer": {
+          "entry": "0x2123400",
+          "end": "0x21249f4",
+          "sha256": "e8915d93b2166e9e014c5c57c690f1f8472052e36f85637bc71e067cc394a599"
+        },
+        "getter_sites": [
+          "0x212344c",
+          "0x2123590",
+          "0x21235b4"
+        ]
+      }
+    },
+    "registration": {
+      "name": "EP_1fb9488",
+      "role": "weak-listener-append",
+      "scope": "function",
+      "profiles": {
+        "1.30": {
+          "entry": "0x1fb9488",
+          "end": "0x1fb9568",
+          "first16": "fd7bbda9427100f0fd030091f35301a9",
+          "sha256": "37b873bce2a37ab5eab6ba16c218f37bc4d473dae5649ea4097eacc8d15a24ae"
+        },
+        "2.00": {
+          "entry": "0x2126ba8",
+          "end": "0x2126c88",
+          "first16": "fd7bbda9828300b0fd030091f35301a9",
+          "sha256": "4e52de13df3a973b20282cfc8e26e7ee39bf4b0660908d0107980dd1f9e45cfc"
+        }
+      }
+    }
+  }
+}

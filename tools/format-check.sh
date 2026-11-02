@@ -35,6 +35,7 @@ EXCLUDE=(
     # GENERATED tables (a generator writes them; run.sh's addrgen check compares ep147addr.h byte for byte)
     '^guest/azmod/ep147addr\.h$'        # per-firmware address table
     '^guest/azstem/ep147addr\.h$'       # per-firmware address table
+    '^guest/azstem/sdk_exit_profiles\.h$' # tools/sdk-exit-profile.py
     '^guest/azmod/ep147png\.h$'         # tools/ep147-pngtable.py
     # GENERATED art: image bytes as C arrays, each header written by its own art tool
     '^guest/azmod/eyeicon\.h$'          # the Hide Title eye icon

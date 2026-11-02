@@ -10,5 +10,5 @@ FROM ubuntu:18.04
 # azmod.so and azstem.so from the same source.
 #
 #   docker build --platform=linux/arm64 -f docker/azmod-build.Dockerfile -t azmod-build:18.04 .
-RUN apt-get update -qq && apt-get install -y -qq gcc libc6-dev make \
+RUN apt-get update -qq && apt-get install -y -qq gcc g++ libc6-dev make \
     libx11-dev libxext-dev libfreetype6-dev libasound2-dev pkg-config

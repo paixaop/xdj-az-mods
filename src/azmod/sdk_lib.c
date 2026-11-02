@@ -145,9 +145,21 @@ static int sdk_db_sig(const char *db, long long *sig) {
 }
 
 static void *sdk_db_open(const char *db) {
-    char uri[300];
-    if (snprintf(uri, sizeof uri, "file:%s?immutable=1", db) >= (int) sizeof uri)
-        return NULL;
+    /* A filesystem path is not a URI: escape delimiters and existing percent sequences
+     * before adding our own immutable parameter. In-source symlink targets can contain
+     * these bytes even when the mount point and exported alias use conventional names. */
+    char uri[3 * PATH_MAX + 32] = "file:";
+    static const char suffix[] = "?immutable=1", hex[] = "0123456789ABCDEF";
+    size_t n = 5;
+    for (const unsigned char *p = (const unsigned char *) db; *p; p++) {
+        if (n + 3 + sizeof suffix > sizeof uri) return NULL;
+        if (*p == '%' || *p == '?' || *p == '#') {
+            uri[n++] = '%';
+            uri[n++] = hex[*p >> 4];
+            uri[n++] = hex[*p & 15];
+        } else uri[n++] = (char) *p;
+    }
+    memcpy(uri + n, suffix, sizeof suffix);
     void *h = NULL;
     if (g_sdk_sq.open_v2(uri, &h, 0x01 | 0x40 /* READONLY | URI */, NULL) != 0 || !h) {
         if (h)

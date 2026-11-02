@@ -723,6 +723,8 @@ suite "leadin jump" "$d/real"
 # ---------------------------------------------------------------- sdk drawing logic
 # guest/azmod/sdk_surface_logic.h natively, and against copies with one rule broken each.
 d="$OUT/sdkdraw"
+mkdir -p "$d/common"
+cp guest/common/aztimestamp.h "$d/common/"
 for v in real ctl-limit ctl-blend ctl-view ctl-long ctl-drop ctl-xwinsize ctl-blendwrap ctl-xwinowned ctl-draglong; do mkdir -p "$d/$v"; done
 cp guest/azmod/sdk_surface_logic.h "$d/real/"
 mutate "$d/real/sdk_surface_logic.h" "$d/ctl-limit/sdk_surface_logic.h" 's/if \(mine >= SDK_SURF_PER_MOD\)/if (mine > SDK_SURF_PER_MOD)/'
@@ -1102,18 +1104,21 @@ suite "drum feed" "$d/real"
 # ---------------------------------------------------------------- BpmState (shared_ptr pin)
 d="$OUT/bpmstate"; mkdir -p "$d"
 { grep -E '^#define (BPMSTATE_(DECK|TRACK|PIN_MAX)|BPMCTRL_(OFF|USE|WEAK)) ' guest/azmod/stems_display.c
-  grep -E '^static (unsigned long|int) g_bpmstate' guest/azmod/stems_display.c
+  grep -E '^static (unsigned long|int|pthread_mutex_t) g_bpmstate' guest/azmod/stems_display.c
   extract guest/azmod/stems_display.c '^static int bpmstate_capture\('
+  extract guest/azmod/stems_display.c '^static int bpmstate_hold\('
+  extract guest/azmod/stems_display.c '^static void bpmstate_release\('
+  extract guest/azmod/stems_display.c '^static int bpmstate_sample\('
   extract guest/azmod/stems_display.c '^static int bpmstate_read\('; } > "$d/real.inc"
-grep -q 'BPMCTRL_WEAK), 1' "$d/real.inc" && grep -q 'g_bpmstate_id\[d\]' "$d/real.inc" ||
+grep -q 'bpmstate_hold(obj - BPMCTRL_OFF)' "$d/real.inc" && grep -q 'g_bpmstate_id\[d\]' "$d/real.inc" ||
     { echo "extraction of bpmstate_capture/bpmstate_read failed"; exit 2; }
-mutate "$d/real.inc" "$d/ctl-nouse.inc" 's/__atomic_load_n\(use, (__ATOMIC_ACQUIRE|__ATOMIC_RELAXED)\) <= 0/0/g'   # use count never read
-mutate "$d/real.inc" "$d/ctl-noweak.inc" 's/    __atomic_add_fetch\(\(int \*\) \(ctrl \+ BPMCTRL_WEAK\), 1, __ATOMIC_ACQ_REL\);[^\n]*\n//'  # no weak reference
+mutate "$d/real.inc" "$d/ctl-nouse.inc" 's/count > 0 && count < INT_MAX/count < INT_MAX/' # resurrects a disposed object
+mutate "$d/real.inc" "$d/ctl-noweak.inc" 's/__atomic_compare_exchange_n\(weak, &count, count \+ 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE\)/1/' # no weak reference
 mutate "$d/real.inc" "$d/ctl-novt.inc" 's/if \(\*\(volatile uintptr_t \*\) ctrl != want_vt\)/if (0)/'    # block vtable not checked
-mutate "$d/real.inc" "$d/ctl-noid.inc" 's/if \(id != __atomic_load_n\(&g_bpmstate_id\[d\], __ATOMIC_RELAXED\)\)/if (0)/'  # object identity not re-checked
-mutate "$d/real.inc" "$d/ctl-nocap.inc" 's/> BPMSTATE_PIN_MAX\)/> 1000000)/'                     # pins unbounded
+mutate "$d/real.inc" "$d/ctl-noid.inc" 's/same = id == expected &&/same = ((void) expected, 1) \&\&/' # object identity not re-checked
+mutate "$d/real.inc" "$d/ctl-nocap.inc" 's/pins >= BPMSTATE_PIN_MAX/pins >= 1000000/' # pins unbounded
 for v in real ctl-nouse ctl-noweak ctl-novt ctl-noid ctl-nocap; do
-    $CC "${CFLAGS[@]}" -I$T -DBPM_INC="\"$d/$v.inc\"" -o "$d/$v" $T/bpmstate_test.c
+    $CC "${CFLAGS[@]}" -pthread -I$T -DBPM_INC="\"$d/$v.inc\"" -o "$d/$v" $T/bpmstate_test.c
 done
 suite "bpmstate" "$d/real"
 # ---------------------------------------------------------------- the audio unit's deck (azstem)
@@ -1163,17 +1168,87 @@ for v in real ctl-nostale ctl-norecheck ctl-nolock; do
     $CC "${CFLAGS[@]}" -pthread -I$T -DLIFE_INC="\"$d/$v.inc\"" -o "$d/snap-$v" $T/ltisnap_test.c
 done
 suite "ltisnap" "$d/snap-real" 1.0
+# The new native observation export uses a separate versioned size contract.
+d="$OUT/sdkobservation"; mkdir -p "$d"
+{ region "$DT" '^#define LTI_STR ' '^static unsigned lti_wlock'
+  extract "$DT" '^static void lti_snap_get\('
+  extract "$DT" '^static int lti_id_zero\('
+  extract guest/azstem/sdk_export.c '^int azstem_deck_observation_v1\('; } > "$d/real.inc"
+$CC "${CFLAGS[@]}" -Iguest/azmod -DOBS_INC="\"$d/real.inc\"" -o "$d/real" $T/sdkobservation_test.c
+suite "sdk native observation size and lifetime" "$d/real"
+mutate "$d/real.inc" "$d/control.inc" 's/azdeck_record_size\(out\) < sizeof \*out/0/'
+$CC "${CFLAGS[@]}" -Iguest/azmod -DOBS_INC="\"$d/control.inc\"" -o "$d/control" $T/sdkobservation_test.c
+control "sdk native observation: small output buffers accepted" "$d/control"
+mutate "$d/real.inc" "$d/padding.inc" 's/memset\(id \+ 12, 0, 4\);/;/'
+$CC "${CFLAGS[@]}" -Iguest/azmod -DOBS_INC="\"$d/padding.inc\"" -o "$d/padding" $T/sdkobservation_test.c
+control "sdk native observation: padding creates a loaded ID" "$d/padding"
+d="$OUT/sdkloopexport"; mkdir -p "$d"
+{ extract guest/azstem/sdk_export.c '^int azstem_loop_observation_v1\('
+  extract guest/azstem/sdk_export.c '^int azstem_loop_observation_v2\('; } > "$d/real.inc"
+$CC "${CFLAGS[@]}" -Iguest/azmod -DLOOP_EXPORT_INC="\"$d/real.inc\"" -o "$d/real" $T/sdkloopexport_test.c
+suite "sdk loop observation v1/v2 ABI" "$d/real"
+# Mutate each size guard independently: a v1 client may have only 40 bytes.
+for v in 1 2; do
+    V=$v python3 - "$d/real.inc" "$d/size-$v.inc" <<'PYX'
+from pathlib import Path
+import os, sys
+s=Path(sys.argv[1]).read_text()
+a=s.index('int azstem_loop_observation_v'+os.environ['V'])
+b=s.index('azdeck_record_size(out) < sizeof *out',a)
+s=s[:b]+s[b:].replace('azdeck_record_size(out) < sizeof *out','0',1)
+Path(sys.argv[2]).write_text(s)
+PYX
+    $CC "${CFLAGS[@]}" -Iguest/azmod -DLOOP_EXPORT_INC="\"$d/size-$v.inc\"" -o "$d/size-$v" $T/sdkloopexport_test.c
+    control "sdk loop observation v$v: small output buffers accepted" "$d/size-$v"
+done
+# Public snapshot sizes preserve the earlier development prefix; loop receipt is separate
+# from LTI capture and cannot provide a track-load generation.
+d="$OUT/sdkdeckdata"; mkdir -p "$d"
+{ extract guest/azmod/sdk_deck.c '^static int sd_native_load_read\('
+  extract guest/azmod/sdk_deck.c '^static int sd_native_cue_read\('
+  extract guest/azmod/sdk_deck.c '^static uint32_t sd_live_fields\('
+  extract guest/azmod/sdk_deck.c '^static int sd_deck_snapshot_v1\('; } > "$d/real.inc"
+$CC "${CFLAGS[@]}" -Iguest/azmod -DDECK_DATA_INC="\"$d/real.inc\"" -o "$d/real" $T/sdkdeckdata_test.c
+suite "sdk deck data independent streams and sizes" "$d/real"
+mutate "$d/real.inc" "$d/control.inc" 's/memcpy\(out, &v, bytes\);/memcpy(out, \&v, bytes + (sizeof v - bytes));/'
+$CC "${CFLAGS[@]}" -Iguest/azmod -DDECK_DATA_INC="\"$d/control.inc\"" -o "$d/control" $T/sdkdeckdata_test.c
+control "sdk deck data: older output buffer overwritten" "$d/control"
+# The reconstructed GNU weak-listener ABI is an isolated C++ module. ELF image guards
+# require Linux; this is a real skip on other hosts, not an ABI pass.
+if [ "$(uname -s)" = Linux ]; then
+    d="$OUT/sdkloopobserver"; mkdir -p "$d"
+    cp guest/azstem/sdk_loop_observer.cpp "$d/real.cpp"
+    mutate "$d/real.cpp" "$d/ctl-player.cpp" 's/player != deck/false/'
+    mutate "$d/real.cpp" "$d/ctl-generation.cpp" 's/p\.active_generation\.load\(std::memory_order_acquire\) != generation/false/g'
+    mutate "$d/real.cpp" "$d/ctl-reason.cpp" 's/p\.bounds_reason\.store\(bounds.reason, std::memory_order_relaxed\);/p.bounds_reason.store(0, std::memory_order_relaxed);/'
+    mutate "$d/real.cpp" "$d/ctl-numeric.cpp" 's/p\.check_in_samples\.store\(bounds.check_in_samples, std::memory_order_relaxed\);/p.check_in_samples.store(bounds.check_in_samples ^ 1u, std::memory_order_relaxed);/'
+    for v in real ctl-player ctl-generation ctl-reason ctl-numeric; do
+        ${HOST_CXX:-c++} -std=c++11 -O1 -g -pthread "${SANFLAGS[@]}" \
+            -Iguest/common -Iguest/azstem -fvisibility=hidden -fvisibility-inlines-hidden \
+            -Wl,--version-script=guest/azstem/sdk_native_cpp.map \
+            "$d/$v.cpp" $T/sdkloopobserver_test.cpp -ldl -o "$d/$v"
+    done
+    suite "sdk GNU loop listener ABI and lifetime" "$d/real"
+    control "sdk loop listener: wrong native player accepted" "$d/ctl-player"
+    control "sdk loop listener: retired callback allowed to publish" "$d/ctl-generation"
+    control "sdk loop listener: bounds rejection reason discarded" "$d/ctl-reason"
+    control "sdk loop listener: copied numeric input corrupted" "$d/ctl-numeric"
+else
+    echo 'SKIP  sdk GNU loop listener ABI: Linux ELF image guards required'; skipped=$((skipped+1))
+fi
 # ---------------------------------------------------------------- community mod services: deck and UI
 d="$OUT/sdk"; mkdir -p "$d"
+mkdir -p "$OUT/common"
+cp guest/common/aztimestamp.h "$OUT/common/"
 L=guest/azmod/sdk_logic.h
 region $DR '^/\* Correction for unmeasured cases' '^/\* ---- EP147.s own beat grid' > "$d/grid.inc"
-region guest/azstem/sdk_export.c '^int azstem_deck_beat_phase\(int deck, double \*phase\);' '^NEVER_MATCHES$' >> "$d/grid.inc"
+extract guest/azstem/sdk_export.c '^int azstem_deck_beat_phase\(int deck, double \*phase\) \{' >> "$d/grid.inc"
 grep -q 'drum_grid_publish' "$d/grid.inc" && grep -q '^int azstem_deck_beat_phase(int deck, double \*phase) {' "$d/grid.inc" ||
     { echo "extraction of the beat grid seqlock / azstem_deck_beat_phase failed"; exit 2; }
 cp $L "$d/real.h"; cp "$d/grid.inc" "$d/real.inc"
 mutate "$d/grid.inc" "$d/ctl-norecheck.inc" 's/atomic_load_explicit\(&g->seq, memory_order_relaxed\) != s1 \|\| //'   # reader without the second look
 mutate "$d/grid.inc" "$d/ctl-nodemand.inc" 's/(        atomic_store_explicit\(&g_grid_demand, 1, memory_order_relaxed\);)/        ;/'  # never asks for grids
-mutate $L "$d/ctl-anymove.h"   's/if \(pos > p->last_pos\) \{/if (pos != p->last_pos) {/'          # any movement is playing
+mutate $L "$d/ctl-anymove.h"   's/compare_timestamps\(pos, p->last_pos, 1, 1, 1\) == AZ_TIME_AFTER/compare_timestamps(pos, p->last_pos, 1, 1, 1) != AZ_TIME_EQUAL/' # any movement is playing
 mutate $L "$d/ctl-nobase.h"    's/if \(pv->loaded != -2\) \{/if (1) {/'                             # the first state is an event
 mutate $L "$d/ctl-closed.h"    's/    if \(c->state == SC_SHOWN && !can_show\)\n.*?\n//s'           # dialog gone, no answer
 mutate $L "$d/ctl-clickyes.h"  's/        return \*sel \? 1 : 0;/        return 1;/'                     # a click on Cancel says yes
@@ -2545,7 +2620,7 @@ mutate guest/azmod/sdk_input.c "$SI/ctl1.c" 's/                g_sdk_touch_decid
 mutate guest/azmod/sdk_input.c "$SI/ctl2.c" 's/    __atomic_store_n\(off, 1, __ATOMIC_RELEASE\);\n//'
 mutate guest/azmod/sdk_input.c "$SI/ctl3.c" 's/ff->fn\(bus, copy, m, ff->user\);/ff->fn(bus, (unsigned char *) f, m, ff->user);/'
 # control 4: the owner of a touch is called whatever its state, and never timed (the old path)
-mutate guest/azmod/sdk_input.c "$SI/ctl4.c" 's/                if \(!__atomic_load_n\(&tf->off, __ATOMIC_ACQUIRE\) && tf->c->state == AZCM_LOADED\) \{\n                    g_cm_in_frame = 1;\n                    uint64_t t0 = sdk_ticks\(\);\n                    tf->fn\(&t, tf->user\);\n                    if \(sdk_ticks\(\) - t0 > g_sdk_budget_ticks\)\n                        sdk_strike\(tf->c, &tf->strikes, &tf->off, "touch filter"\);\n                    g_cm_in_frame = 0;\n                \}/                g_cm_in_frame = 1;\n                tf->fn(\&t, tf->user);\n                g_cm_in_frame = 0;/'
+mutate guest/azmod/sdk_input.c "$SI/ctl4.c" 's/                if \(!__atomic_load_n\(&tf->off, __ATOMIC_ACQUIRE\) && tf->c->state == AZCM_LOADED\) \{\n                    g_cm_in_frame = 1;\n                    uint64_t t0 = sdk_ticks\(\);\n                    tf->fn\(&t, tf->user\);\n                    if \(sdk_elapsed_ticks\(t0, sdk_ticks\(\)\) > g_sdk_budget_ticks\)\n                        sdk_strike\(tf->c, &tf->strikes, &tf->off, "touch filter"\);\n                    g_cm_in_frame = 0;\n                \}/                g_cm_in_frame = 1;\n                tf->fn(\&t, tf->user);\n                g_cm_in_frame = 0;/'
 for k in 1 2 3 4; do si_build "$SI/ctl$k.c" "$SI/ctl$k" || failures=$((failures + 1)); done
 echo
 
@@ -3302,6 +3377,33 @@ done
 suite "sdk: row_set" "$d/real"
 
 # deck_info (sdk_deck.c): exactly the caller's .size written, unknown never mistaken for a value
+# Stored track snapshots: shared production cache and parser, no firmware assets.
+d="$OUT/sdkdata"; mkdir -p "$d"
+cp guest/azmod/sdk_data_engine.h guest/azmod/sdk_analysis.h guest/azmod/hc_anlz.h guest/azmod/azmod-mod.h "$d/"
+$CC "${CFLAGS[@]}" -pthread -I"$d" -o "$d/real" $T/sdkdata_test.c -lm
+suite "sdk track data, parser, timing and concurrent consumers" "$d/real"
+python3 "$T/sdk_review_controls.py" guest/azmod "$d/review"
+for v in timing-size timing-version; do
+    $CC "${CFLAGS[@]}" -pthread -I"$d/review/$v" -Iguest/azmod -o "$d/$v" $T/sdkdata_test.c -lm
+    control "sdk timing: $v validation omitted" "$d/$v"
+done
+$CC "${CFLAGS[@]}" -Iguest/azmod -o "$d/waveform" $T/sdkwaveform_test.c
+suite "sdk stored detail waveform bounds and ranges" "$d/waveform"
+mutate "$d/sdk_data_engine.h" "$d/broken.h" 's/return a->source_id == b->source_id && a->source_generation == b->source_generation &&\n\s*a->library_id == b->library_id && a->track_id == b->track_id;/return a->track_id == b->track_id;/'
+$CC "${CFLAGS[@]}" -pthread -I"$d" -DST_ENGINE_HEADER='"broken.h"' -o "$d/control" $T/sdkdata_test.c -lm
+control "sdk track data: duplicate IDs merged across sources" "$d/control"
+
+if [ "$(uname -s)" = Linux ]; then
+    $CC "${CFLAGS[@]}" $SDK_EXPORT -pthread -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$OUT/sdkdata/provider" $T/sdktrack_test.c -lsqlite3 -ldl -lm
+    suite "sdk stored track disk provider" "$OUT/sdkdata/provider"
+    for v in database-alias database-uri missing-parent wave-errors analysis-binding track-fifo wave-fifo analysis-path-limit preview-extension; do
+        $CC "${CFLAGS[@]}" $SDK_EXPORT -pthread -I"$d/review/$v" -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$d/$v" $T/sdktrack_test.c -lsqlite3 -ldl -lm
+        control "sdk stored track: $v regression" "$d/$v"
+    done
+else
+    skip "sdk stored track disk provider" "needs Linux mount/stat interfaces"
+fi
+
 d="$OUT/sdkdeck"; mkdir -p "$d"
 { grep -E '^static _Atomic\(azstem_deck_snapshot_fn\) g_sd_snap;|^static _Atomic int g_sd_playing\[' guest/azmod/sdk_deck.c
   extract guest/azmod/sdk_deck.c '^static int sd_snapshot\('

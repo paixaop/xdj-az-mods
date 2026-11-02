@@ -1,10 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
-/* Generated per firmware build. Do not edit by hand. 34 EP147 addresses for azstem.
- *
- * Code names an EP147 address by its v1.30 value (EP_1b93a28). ep147_addr_init(build)
- * fills ep147_addr[] for the running build, which common/ep147build.h
- * identified by md5; until then, and on an unknown build, every entry is 0.
- * v2.00 values are hand-resolved where the automatic re-anchor was ambiguous. */
+/* Generated per firmware build. Do not edit by hand. 33 EP147 addresses for azstem.
+ * tools/ep147-addrgen.py validates explicit mappings against the exact stock ELFs.
+ * EP_ names use their 1.30 values; unknown builds remain inert. Mapping validation
+ * establishes addresses and bytes, never a native ABI, ownership or hook readiness.
+ */
 #ifndef EP147ADDR_H
 #define EP147ADDR_H
 #include "../common/ep147build.h"
@@ -23,7 +22,6 @@ enum {
     EPI_d9ea00,
     EPI_d9f320,
     EPI_da07d8,
-    EPI_da2f68,
     EPI_da3df0,
     EPI_dabb48,
     EPI_1381538,
@@ -60,7 +58,6 @@ static const uint32_t ep147_addr_v130[EPI_N] = {
     0x0d9ea00,
     0x0d9f320,
     0x0da07d8,
-    0x0da2f68,
     0x0da3df0,
     0x0dabb48,
     0x1381538,
@@ -96,7 +93,6 @@ static const uint32_t ep147_addr_v200[EPI_N] = {
     0x0e29660,   /* code w=12 | xref 3/3 agree */
     0x0e29f80,   /* code w=12 | xref 1/1 agree */
     0x0e2b4f0,   /* code w=12 | xref 2/2 agree */
-    0x0e2dc80,   /* code w=12 | xref 1/1 agree | ptr 1 agree */
     0x0e2eb28,   /* code w=12 | xref 1/1 agree | ptr 1 agree */
     0x0e365a8,   /* code w=12 | ptr 1 agree */
     0x143c760,   /* code w=12 | ptr 1 agree */
@@ -142,7 +138,6 @@ static int ep147_addr_init(int build){
 #define EP_d9ea00 ((uintptr_t)ep147_addr[EPI_d9ea00])
 #define EP_d9f320 ((uintptr_t)ep147_addr[EPI_d9f320])
 #define EP_da07d8 ((uintptr_t)ep147_addr[EPI_da07d8])
-#define EP_da2f68 ((uintptr_t)ep147_addr[EPI_da2f68])
 #define EP_da3df0 ((uintptr_t)ep147_addr[EPI_da3df0])
 #define EP_dabb48 ((uintptr_t)ep147_addr[EPI_dabb48])
 #define EP_1381538 ((uintptr_t)ep147_addr[EPI_1381538])

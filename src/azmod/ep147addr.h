@@ -1,37 +1,37 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
-/* Generated per firmware build. Do not edit by hand. 398 EP147 addresses for azmod.
- *
- * Code names an EP147 address by its v1.30 value (EP_1b93a28). ep147_addr_init(build)
- * fills ep147_addr[] for the running build, which common/ep147build.h
- * identified by md5; until then, and on an unknown build, every entry is 0.
- * v2.00 values are hand-resolved where the automatic re-anchor was ambiguous. */
+/* Generated per firmware build. Do not edit by hand. 409 EP147 addresses for azmod.
+ * tools/ep147-addrgen.py validates explicit mappings against the exact stock ELFs.
+ * EP_ names use their 1.30 values; unknown builds remain inert. Mapping validation
+ * establishes addresses and bytes, never a native ABI, ownership or hook readiness.
+ */
 #ifndef EP147ADDR_H
 #define EP147ADDR_H
 #include "../common/ep147build.h"
 
 enum {
     EPI_424d40,
-    EPI_5acb58,
     EPI_6742d8,
-    EPI_6ac3c0,
-    EPI_6b7958,
-    EPI_708a10,
     EPI_7a01e0,
     EPI_9d1ae8,
     EPI_9d4ac0,
+    EPI_a28550,
     EPI_a77770,
     EPI_a77a20,
     EPI_aa9a48,
     EPI_aabb78,
     EPI_c85838,
     EPI_d34790,
-    EPI_d85a08,
-    EPI_e33830,
+    EPI_10b29f8,
     EPI_11755a0,
-    EPI_1176c88,
     EPI_11881d8,
+    EPI_11fc670,
     EPI_1224270,
-    EPI_12246a0,
+    EPI_123d560,
+    EPI_123d6c8,
+    EPI_123dc78,
+    EPI_123e7e0,
+    EPI_123f738,
+    EPI_1243350,
     EPI_12439e8,
     EPI_1243a58,
     EPI_1243b38,
@@ -47,9 +47,22 @@ enum {
     EPI_1243f98,
     EPI_1244008,
     EPI_12441d8,
+    EPI_1244850,
+    EPI_1246c50,
+    EPI_1246e08,
+    EPI_1248420,
+    EPI_1248530,
+    EPI_124a558,
+    EPI_124a7a8,
+    EPI_1254b88,
+    EPI_12571c8,
     EPI_12671d0,
     EPI_126eab0,
     EPI_1272830,
+    EPI_12c0760,
+    EPI_12c0b20,
+    EPI_12c0f18,
+    EPI_12c1fa8,
     EPI_1348c48,
     EPI_1349130,
     EPI_1453e80,
@@ -64,7 +77,6 @@ enum {
     EPI_1960f70,
     EPI_1987038,
     EPI_19ab418,
-    EPI_19ab6d8,
     EPI_19ac3c8,
     EPI_19ac568,
     EPI_19bcf68,
@@ -103,7 +115,6 @@ enum {
     EPI_1bad940,
     EPI_1bb99f0,
     EPI_1bc41b0,
-    EPI_1bc5668,
     EPI_1bcfb78,
     EPI_1bcff88,
     EPI_1bd03f0,
@@ -123,7 +134,6 @@ enum {
     EPI_1c71728,
     EPI_1ca31a8,
     EPI_1ca4650,
-    EPI_1d5ef18,
     EPI_1d6bc60,
     EPI_1d6bff0,
     EPI_1d6f280,
@@ -172,13 +182,17 @@ enum {
     EPI_1f25838,
     EPI_1f3fb18,
     EPI_1f40998,
-    EPI_1f44418,
     EPI_1f45660,
     EPI_1f4a3f0,
     EPI_1f4a590,
     EPI_1f4ac90,
     EPI_1f5da20,
     EPI_1fa7a28,
+    EPI_1fb72e0,
+    EPI_1fb9488,
+    EPI_1fc9bf8,
+    EPI_1fcbe30,
+    EPI_1fce368,
     EPI_1fefa78,
     EPI_1ff1250,
     EPI_1ffbc60,
@@ -192,7 +206,6 @@ enum {
     EPI_212fb94,
     EPI_218a6d8,
     EPI_218a890,
-    EPI_21b6560,
     EPI_21c81c0,
     EPI_21e1090,
     EPI_21e3440,
@@ -264,13 +277,11 @@ enum {
     EPI_24fac4c,
     EPI_24fb350,
     EPI_25c0aa0,
-    EPI_25e0550,
     EPI_25e9ba0,
     EPI_26a3f60,
     EPI_26a4838,
     EPI_26cf590,
     EPI_26e1b68,
-    EPI_27d18b8,
     EPI_2847138,
     EPI_284ab30,
     EPI_284b090,
@@ -282,7 +293,6 @@ enum {
     EPI_2874158,
     EPI_2896b90,
     EPI_29672e0,
-    EPI_2967378,
     EPI_29674c8,
     EPI_2967678,
     EPI_29676a8,
@@ -412,27 +422,28 @@ enum {
 };
 static const uint32_t ep147_addr_v130[EPI_N] = {
     0x0424d40,
-    0x05acb58,
     0x06742d8,
-    0x06ac3c0,
-    0x06b7958,
-    0x0708a10,
     0x07a01e0,
     0x09d1ae8,
     0x09d4ac0,
+    0x0a28550,
     0x0a77770,
     0x0a77a20,
     0x0aa9a48,
     0x0aabb78,
     0x0c85838,
     0x0d34790,
-    0x0d85a08,
-    0x0e33830,
+    0x10b29f8,
     0x11755a0,
-    0x1176c88,
     0x11881d8,
+    0x11fc670,
     0x1224270,
-    0x12246a0,
+    0x123d560,
+    0x123d6c8,
+    0x123dc78,
+    0x123e7e0,
+    0x123f738,
+    0x1243350,
     0x12439e8,
     0x1243a58,
     0x1243b38,
@@ -448,9 +459,22 @@ static const uint32_t ep147_addr_v130[EPI_N] = {
     0x1243f98,
     0x1244008,
     0x12441d8,
+    0x1244850,
+    0x1246c50,
+    0x1246e08,
+    0x1248420,
+    0x1248530,
+    0x124a558,
+    0x124a7a8,
+    0x1254b88,
+    0x12571c8,
     0x12671d0,
     0x126eab0,
     0x1272830,
+    0x12c0760,
+    0x12c0b20,
+    0x12c0f18,
+    0x12c1fa8,
     0x1348c48,
     0x1349130,
     0x1453e80,
@@ -465,7 +489,6 @@ static const uint32_t ep147_addr_v130[EPI_N] = {
     0x1960f70,
     0x1987038,
     0x19ab418,
-    0x19ab6d8,
     0x19ac3c8,
     0x19ac568,
     0x19bcf68,
@@ -504,7 +527,6 @@ static const uint32_t ep147_addr_v130[EPI_N] = {
     0x1bad940,
     0x1bb99f0,
     0x1bc41b0,
-    0x1bc5668,
     0x1bcfb78,
     0x1bcff88,
     0x1bd03f0,
@@ -524,7 +546,6 @@ static const uint32_t ep147_addr_v130[EPI_N] = {
     0x1c71728,
     0x1ca31a8,
     0x1ca4650,
-    0x1d5ef18,
     0x1d6bc60,
     0x1d6bff0,
     0x1d6f280,
@@ -573,13 +594,17 @@ static const uint32_t ep147_addr_v130[EPI_N] = {
     0x1f25838,
     0x1f3fb18,
     0x1f40998,
-    0x1f44418,
     0x1f45660,
     0x1f4a3f0,
     0x1f4a590,
     0x1f4ac90,
     0x1f5da20,
     0x1fa7a28,
+    0x1fb72e0,
+    0x1fb9488,
+    0x1fc9bf8,
+    0x1fcbe30,
+    0x1fce368,
     0x1fefa78,
     0x1ff1250,
     0x1ffbc60,
@@ -593,7 +618,6 @@ static const uint32_t ep147_addr_v130[EPI_N] = {
     0x212fb94,
     0x218a6d8,
     0x218a890,
-    0x21b6560,
     0x21c81c0,
     0x21e1090,
     0x21e3440,
@@ -665,13 +689,11 @@ static const uint32_t ep147_addr_v130[EPI_N] = {
     0x24fac4c,
     0x24fb350,
     0x25c0aa0,
-    0x25e0550,
     0x25e9ba0,
     0x26a3f60,
     0x26a4838,
     0x26cf590,
     0x26e1b68,
-    0x27d18b8,
     0x2847138,
     0x284ab30,
     0x284b090,
@@ -683,7 +705,6 @@ static const uint32_t ep147_addr_v130[EPI_N] = {
     0x2874158,
     0x2896b90,
     0x29672e0,
-    0x2967378,
     0x29674c8,
     0x2967678,
     0x29676a8,
@@ -812,27 +833,28 @@ static const uint32_t ep147_addr_v130[EPI_N] = {
 };
 static const uint32_t ep147_addr_v200[EPI_N] = {
     0x0426570,   /* hand: operator new: the new(0x230) for the sub column button in the TrackListHeader ctor */
-    0x05d8a70,   /* code w=12 */
     0x06b5d88,   /* code w=12 | xref 6/6 agree */
-    0x06ede50,   /* code w=12 | xref 1/1 agree */
-    0x06f93e8,   /* code w=12 | xref 6/6 agree */
-    0x074a460,   /* code w=12 | ptr 1 agree */
     0x07e27c8,   /* hand: the only regObject instance whose adrp+add+add chain materialises the __PRETTY_FUNCT */
     0x0a17120,   /* ptr 1 agree */
     0x0a1a0f8,   /* xref 1/1 agree */
+    0x0a6d960,   /* reviewed cache: Reception callback entered under native slot13 strong promotion; no source/load inference; exact function bytes */
     0x0abda68,   /* code w=12 | ptr 1 agree */
     0x0abdd18,   /* code w=12 | xref 1/1 agree */
     0x0aefcd0,   /* code w=12 | xref 1/1 agree | ptr 1 agree */
     0x0af1ec0,   /* code w=12 | xref 1/1 agree | ptr 1 agree */
     0x0d00f08,   /* code w=12 | ptr 1 agree */
     0x0dbe648,   /* code w=12 | xref 4/6 agree */
-    0x0e10800,   /* code w=12 | xref 2/2 agree */
-    0x0ebd910,   /* code w=12 | xref 1/1 agree */
+    0x1142bc8,   /* reviewed cache: selected LoadInfoRequestTicket reply processing; receiver remains a genuine weak owner; exact function bytes */
     0x122f860,   /* hand: FolderEntryDigger: re-read one analysed folder from disk (digger, folderID) (masked- */
-    0x1230f48,   /* code w=12 | xref 1/1 agree */
     0x12424a8,   /* code w=96 | ptr 1 agree */
+    0x12b7b88,   /* reviewed cache: LoadTrackInfo cache destructor; exact function bytes */
     0x12df7e8,   /* code w=12 | xref 3/3 agree */
-    0x12dfc18,   /* code w=12 | ptr 1 agree */
+    0x12f8c58,   /* reviewed cache: TrackInfo cache destructor; exact function bytes */
+    0x12f8dc0,   /* reviewed cache: TrackInfo setter; exact function bytes */
+    0x12f9370,   /* reviewed cache: TrackInfo setup; exact function bytes */
+    0x12f9ed8,   /* reviewed cache: Fallback supported standard factory; exact function bytes */
+    0x12fae60,   /* reviewed cache: TrackInfo fallback adapter; exact function bytes */
+    0x12feae0,   /* reviewed cache: Collector clear; exact function bytes */
     0x12ff178,   /* code w=96 | xref 3/3 agree */
     0x12ff1e8,   /* code w=96 | xref 4/4 agree */
     0x12ff2c8,   /* hand: RTTI: the function whose lambda manager returns the type_info of ListCacheCollector: */
@@ -848,9 +870,22 @@ static const uint32_t ep147_addr_v200[EPI_N] = {
     0x12ff728,   /* code w=96 | xref 1/1 agree */
     0x12ff798,   /* hand: ListCacheCollector::removeFolderListCache(u32) (masked-signature match, unique) */
     0x12ff968,   /* code w=12 | xref 6/6 agree */
+    0x12fffe0,   /* reviewed cache: Collector create; exact function bytes */
+    0x13023e0,   /* reviewed cache: ListServer selected clear; exact function bytes */
+    0x1302598,   /* reviewed cache: ListServer reset; exact function bytes */
+    0x1303bb0,   /* reviewed cache: ListServer query; exact function bytes */
+    0x1303cc0,   /* reviewed cache: ListServer destructor; exact function bytes */
+    0x1305ce0,   /* reviewed cache: ListServer selected store; exact function bytes */
+    0x1305f30,   /* reviewed cache: ListServer selection; exact function bytes */
+    0x1310310,   /* reviewed cache: Primary Creator; exact function bytes */
+    0x1312958,   /* reviewed cache: Generic primary adapter; exact function bytes */
     0x1322908,   /* code w=12 | xref 1/1 agree */
     0x132a1f0,   /* code w=12 | xref 1/1 agree */
     0x132df70,   /* code w=12 | xref 1/1 agree */
+    0x137c368,   /* reviewed cache: Collector deleting destructor; exact function bytes */
+    0x137c728,   /* reviewed cache: Collector complete destructor; exact function bytes */
+    0x137d890,   /* reviewed cache: Collector control dispose; exact function bytes */
+    0x137dd40,   /* reviewed cache: Pool record grow; exact function bytes */
     0x1403f98,   /* hand: NetworkManager::onLinkMemberRemoved (masked-signature match, unique) */
     0x1404480,   /* hand: NetworkManager::onLinkMemberAdded (masked-signature match, unique) */
     0x150f568,   /* code w=12 | xref 2/3 agree */
@@ -865,7 +900,6 @@ static const uint32_t ep147_addr_v200[EPI_N] = {
     0x1ac4f40,   /* code w=12 | xref 6/6 agree */
     0x1aeb1a0,   /* code w=12 | ptr 1 agree */
     0x1b0f618,   /* code w=12 | xref 1/1 agree | ptr 4 agree */
-    0x1b0f8d8,   /* code w=12 back=32 | xref 1/1 agree | ptr 4 agree */
     0x1b106c0,   /* code w=12 | xref 1/1 agree */
     0x1b10860,   /* code w=12 | xref 2/2 agree | ptr 3 agree */
     0x1b21130,   /* code w=12 | ptr 1 agree */
@@ -904,7 +938,6 @@ static const uint32_t ep147_addr_v200[EPI_N] = {
     0x1d16f40,   /* code w=12 | ptr 1 agree */
     0x1d22f70,   /* hand: the sub column button's image (juce::Image sret) from the resources: the TrackListHe */
     0x1d2d598,   /* hand: the image resources getter the TrackListHeader ctor calls before the button's image */
-    0x1d2ea98,   /* code w=12 */
     0x1d38fa8,   /* code w=12 | xref 2/2 agree */
     0x1d393b8,   /* hand: gui::browse::TrackListHeader ctor(this, mode): stores BC_HDR_VT and the mode at +0x1 */
     0x1d39858,   /* hand: TrackListHeader: add a listener to [this+0x138] (only in mode 0: ldr w2,[x0,#0x134]; */
@@ -924,7 +957,6 @@ static const uint32_t ep147_addr_v200[EPI_N] = {
     0x1ddb278,   /* code w=12 | xref 3/5 agree */
     0x1e0cfe0,   /* code w=12 | xref 1/1 agree */
     0x1e0e488,   /* code w=12 */
-    0x1ec91d8,   /* code w=12 | xref 6/6 agree */
     0x1ed5f28,   /* hand: instruction fingerprint mov x0,#0x1dc; movk x0,#0x207,lsl#32 unique in both builds ( */
     0x1ed6308,   /* hand: SimpleWaveform2DeckWidget Label setText(this+Label, text, 0): 1.30 slot 13 = ldr x0, */
     0x1ed9d50,   /* hand: SimpleWaveform4DeckWidget: same as HT_SW_ORIG2 (2.00 slot 14; slot 13 0x1ed9d10 is t */
@@ -970,16 +1002,20 @@ static const uint32_t ep147_addr_v200[EPI_N] = {
     0x20173f0,   /* code w=12 back=8 | xref 4/6 agree */
     0x2030354,   /* hand: return address of the indirect call `ldr x1,[x0]; ldr x1,[x1,#0x70]; blr x1` inside  */
     0x2071608,   /* code w=24 back=8 | ptr 1 agree */
-    0x2091660,   /* hand: gui::browser_logic::TrackListDisplayFormatEventFacade ctor: stores BC_FC_VT (1.30 0x */
+    0x2091660,   /* hand: gui::browser_logic::TrackListDisplayFormatEventFacade ctor: stores BR_FC_VT (1.30 0x */
     0x20ac490,   /* hand: gui::disp_data::BrowseDispData ctor: stores B2_BDD_VT and builds its sub objects, th */
     0x20ad318,   /* code w=12 | xref 1/1 agree */
-    0x20b0ca8,   /* hand: the only BrowseLineData-vtable referrer between its independently relocated neighbou */
     0x20b1d78,   /* xref 2/2 agree */
     0x20b6768,   /* code w=12 | xref 1/1 agree */
     0x20b6908,   /* code w=12 | xref 6/6 agree */
     0x20b7008,   /* code w=12 | xref 5/6 agree */
     0x20c9d90,   /* hand: callers 1/1 agree; normalized disassembly 0.96 identical over 400 instructions */
     0x2115140,   /* code w=12 | xref 6/6 agree */
+    0x21249f8,   /* reviewed Slip source-constructor; function signature */
+    0x2126ba8,   /* reviewed Slip weak-listener-append; function signature */
+    0x2137298,   /* reviewed Slip parent-publication; function signature */
+    0x2139500,   /* reviewed Slip source-disposal; function signature */
+    0x213ba38,   /* reviewed Slip parent-disposal; entry-prefix signature */
     0x215d140,   /* hand: masked code signature (12 words, unique); the only caller on both builds is PlayerIn */
     0x215e9e0,   /* hand: masked code signature (12 words, unique) and its only caller (1.30 0x1ff34e0 -> 2.00 */
     0x2169498,   /* hand: masked code signature (12 words, unique) and its only caller, TrackInfoUpdater::upda */
@@ -993,7 +1029,6 @@ static const uint32_t ep147_addr_v200[EPI_N] = {
     0x229d034,   /* code w=12 */
     0x22f7b78,   /* hand: TrackInfoQueue vtable slot +0x20 on both builds (1.30 vt 0x2e509c8, 2.00 vt 0x3203ee */
     0x22f7d30,   /* hand: TrackInfoQueue vtable slot +0x58 on both builds (1.30 0x2e50a20, 2.00 0x3203f40); bo */
-    0x2323a00,   /* code w=12 | xref 1/1 agree */
     0x2335660,   /* code w=12 | ptr 4 agree */
     0x234e530,   /* code w=12 | ptr 4 agree */
     0x23508e0,   /* code w=12 | xref 6/6 agree */
@@ -1012,7 +1047,7 @@ static const uint32_t ep147_addr_v200[EPI_N] = {
     0x247b880,   /* code w=48 | xref 5/6 agree */
     0x247c9d0,   /* code w=24 | xref 6/6 agree */
     0x24a1180,   /* code w=96 | xref 6/6 agree */
-    0x24a97e0,   /* hand: juce::String(CharPointer_UTF8) (this, &utf8): the call the sub item formatter makes  */
+    0x24a97e0,   /* hand: juce::String(CharPointer_UTF8) (this, &utf8): the call the sub item formatter makes */
     0x2505da0,   /* code w=12 | xref 6/6 agree */
     0x250a240,   /* code w=12 | xref 6/6 agree */
     0x2510300,   /* code w=48 | xref 6/6 agree */
@@ -1042,7 +1077,7 @@ static const uint32_t ep147_addr_v200[EPI_N] = {
     0x25aa6a0,   /* code w=12 | xref 4/4 agree */
     0x25c69e0,   /* hand: juce::TableHeaderComponent::getIndexOfColumnId(id, onlyVisible): called by the heade */
     0x25c6ae0,   /* hand: juce::TableHeaderComponent::getColumnPosition(index) (Rectangle<int> sret): the head */
-    0x25c6c80,   /* hand: juce::TableHeaderComponent::isColumnVisible(id): the call BC_LAYOUT makes for each c */
+    0x25c6c80,   /* hand: juce::TableHeaderComponent::isColumnVisible(id): the call BR_LAYOUT makes for each c */
     0x25d3110,   /* code w=12 | xref 6/6 agree */
     0x25f03d0,   /* hand: juce::Component::getComponentAt(const Point<int> &): the only self-recursive functio */
     0x25f31e0,   /* code w=12 | xref 6/6 agree */
@@ -1050,13 +1085,13 @@ static const uint32_t ep147_addr_v200[EPI_N] = {
     0x25f76f0,   /* code w=12 | xref 3/3 agree */
     0x25f7d90,   /* hand: juce::TableHeaderComponent::setColumnVisible(id, bool): identical bodies (search [th */
     0x25f7fa0,   /* code w=12 | xref 6/6 agree */
-    0x25f9460,   /* hand: juce::TableHeaderComponent::columnClicked(this, columnId, mods): a sortable column,  */
+    0x25f9460,   /* hand: juce::TableHeaderComponent::columnClicked(this, columnId, mods): a sortable column, */
     0x25ff370,   /* hand: RTTI: slot 0 (complete-object destructor) of the primary vtable whose type_info name */
     0x25ff990,   /* code w=12 | xref 1/6 agree */
     0x260ab50,   /* code w=12 | xref 6/6 agree */
     0x260af90,   /* code w=12 | xref 6/6 agree | ptr 4 agree */
     0x260c480,   /* code w=12 | xref 6/6 agree */
-    0x260c6a0,   /* hand: juce::Component::setSize(w, h): setSize(0x50, 0x3c) on the new sub column button in  */
+    0x260c6a0,   /* hand: juce::Component::setSize(w, h): setSize(0x50, 0x3c) on the new sub column button in */
     0x260dd30,   /* hand: juce::Component::setBounds(const Rectangle<int> &): the header's button placement ca */
     0x2663060,   /* code w=12 | ptr 1 agree */
     0x2663fd4,   /* code w=12 */
@@ -1065,13 +1100,11 @@ static const uint32_t ep147_addr_v200[EPI_N] = {
     0x26680ec,   /* code w=12 */
     0x26687f0,   /* code w=12 | ptr 1 agree */
     0x28fa0c0,   /* hand: section headers: .rodata sh_addr (v1.30 value reproduces azmod's literal) */
-    0x2919bb0,   /* vtable N12midi_adapter14ReceiveManagerE +0x0 | xref 2/2 agree */
     0x2923200,   /* vtable N23connection_with_hostapp15IPcAppliSetMode4ModeE +0x0 | xref 5/6 agree */
     0x29de458,   /* vtable N7usecase12library_edit28PlaylistRenewalNoticeHandlerE +0x0 */
     0x29ded30,   /* vtable N7usecase12library_edit13TaglistEditorE +0x0 | xref 5/6 agree */
     0x2a0a000,   /* vtable N7usecase5mixer7ChannelE +0x0 | xref 6/6 agree */
     0x2a1c5d8,   /* vtable N7usecase11phase_meter11LocalPlayerE +0x0 */
-    0x2b1e4d8,   /* vtable N23connection_with_hostapp14AlphaThetaCertE +0x0 | xref 2/2 agree */
     0x2b991d0,   /* hand: music_library::FolderEntryDigger vtable (vtable relocation, RTTI) */
     0x2b9cbe0,   /* vtable N13music_library21SqlitePlaylistUpdaterE +0x0 | xref 3/3 agree */
     0x2b9d140,   /* hand: RTTI: the vtable address point of N13music_library15SqliteSortEntryE; slot +0x10 rea */
@@ -1082,8 +1115,7 @@ static const uint32_t ep147_addr_v200[EPI_N] = {
     0x2bc4c38,   /* hand: network::NetworkManager vtable (onLinkMemberAdded +0x48, onLinkMemberRemoved +0x50)  */
     0x2bc63a0,   /* vtable N12player_basis10PlayerCoreE +0x0 | xref 2/2 agree */
     0x2be9658,   /* vtable N9dj_player18VinylSpeedAdjustorE +0x0 | xref 1/1 agree */
-    0x2cd9588,   /* hand: RTTI: the vtable address point of N3gui9disp_data19SubCategoryDispListE; slots 2..4  */
-    0x2cd9620,   /* vtable N3gui9disp_data14BrowseLineDataE +0x0 */
+    0x2cd9588,   /* hand: RTTI: the vtable address point of N3gui9disp_data19SubCategoryDispListE; slots 2..4 */
     0x2cd9780,   /* vtable N3gui18ToggleImagesButtonE +0x0 | xref 5/6 agree */
     0x2cd9930,   /* vtable N3gui18ToggleImagesButtonE +0x0 | xref 5/6 agree */
     0x2cd9960,   /* vtable N3gui18ToggleImagesButtonE +0x0 | xref 4/6 agree */
@@ -1135,7 +1167,7 @@ static const uint32_t ep147_addr_v200[EPI_N] = {
     0x2f77aa0,   /* hand: RTTI: the vtable of N3gui6browse28SubCategorySelectPopupWidgetE with offset-to-top - */
     0x2f79150,   /* vtable N3gui11ScrollLabelE +0x0 | xref 6/6 agree */
     0x2fd44b8,   /* vtable N3gui22SoftwareKeyboardWidgetE +0x0 | xref 2/2 agree */
-    0x2ffc2a0,   /* hand: the vtable address point BC_FB_CTOR stores in both builds (typeinfo N3gui11status_ar */
+    0x2ffc2a0,   /* hand: the vtable address point BR_FB_CTOR stores in both builds (typeinfo N3gui11status_ar */
     0x2ffc330,   /* vtable N3gui11status_area6browse20BrowseFunctionWidgetE +0x0 | xref 2/2 agree */
     0x2ffe280,   /* vtable N3gui11status_area6browse26StatusAreaWidgetControllerE +0x0 | xref 2/2 agree */
     0x3006a58,   /* vtable N3gui11status_area8waveform16StatusAreaWidgetE +0x0 | xref 2/2 agree */
@@ -1222,27 +1254,28 @@ static int ep147_addr_init(int build){
 }
 
 #define EP_424d40 ((uintptr_t)ep147_addr[EPI_424d40])
-#define EP_5acb58 ((uintptr_t)ep147_addr[EPI_5acb58])
 #define EP_6742d8 ((uintptr_t)ep147_addr[EPI_6742d8])
-#define EP_6ac3c0 ((uintptr_t)ep147_addr[EPI_6ac3c0])
-#define EP_6b7958 ((uintptr_t)ep147_addr[EPI_6b7958])
-#define EP_708a10 ((uintptr_t)ep147_addr[EPI_708a10])
 #define EP_7a01e0 ((uintptr_t)ep147_addr[EPI_7a01e0])
 #define EP_9d1ae8 ((uintptr_t)ep147_addr[EPI_9d1ae8])
 #define EP_9d4ac0 ((uintptr_t)ep147_addr[EPI_9d4ac0])
+#define EP_a28550 ((uintptr_t)ep147_addr[EPI_a28550])
 #define EP_a77770 ((uintptr_t)ep147_addr[EPI_a77770])
 #define EP_a77a20 ((uintptr_t)ep147_addr[EPI_a77a20])
 #define EP_aa9a48 ((uintptr_t)ep147_addr[EPI_aa9a48])
 #define EP_aabb78 ((uintptr_t)ep147_addr[EPI_aabb78])
 #define EP_c85838 ((uintptr_t)ep147_addr[EPI_c85838])
 #define EP_d34790 ((uintptr_t)ep147_addr[EPI_d34790])
-#define EP_d85a08 ((uintptr_t)ep147_addr[EPI_d85a08])
-#define EP_e33830 ((uintptr_t)ep147_addr[EPI_e33830])
+#define EP_10b29f8 ((uintptr_t)ep147_addr[EPI_10b29f8])
 #define EP_11755a0 ((uintptr_t)ep147_addr[EPI_11755a0])
-#define EP_1176c88 ((uintptr_t)ep147_addr[EPI_1176c88])
 #define EP_11881d8 ((uintptr_t)ep147_addr[EPI_11881d8])
+#define EP_11fc670 ((uintptr_t)ep147_addr[EPI_11fc670])
 #define EP_1224270 ((uintptr_t)ep147_addr[EPI_1224270])
-#define EP_12246a0 ((uintptr_t)ep147_addr[EPI_12246a0])
+#define EP_123d560 ((uintptr_t)ep147_addr[EPI_123d560])
+#define EP_123d6c8 ((uintptr_t)ep147_addr[EPI_123d6c8])
+#define EP_123dc78 ((uintptr_t)ep147_addr[EPI_123dc78])
+#define EP_123e7e0 ((uintptr_t)ep147_addr[EPI_123e7e0])
+#define EP_123f738 ((uintptr_t)ep147_addr[EPI_123f738])
+#define EP_1243350 ((uintptr_t)ep147_addr[EPI_1243350])
 #define EP_12439e8 ((uintptr_t)ep147_addr[EPI_12439e8])
 #define EP_1243a58 ((uintptr_t)ep147_addr[EPI_1243a58])
 #define EP_1243b38 ((uintptr_t)ep147_addr[EPI_1243b38])
@@ -1258,9 +1291,22 @@ static int ep147_addr_init(int build){
 #define EP_1243f98 ((uintptr_t)ep147_addr[EPI_1243f98])
 #define EP_1244008 ((uintptr_t)ep147_addr[EPI_1244008])
 #define EP_12441d8 ((uintptr_t)ep147_addr[EPI_12441d8])
+#define EP_1244850 ((uintptr_t)ep147_addr[EPI_1244850])
+#define EP_1246c50 ((uintptr_t)ep147_addr[EPI_1246c50])
+#define EP_1246e08 ((uintptr_t)ep147_addr[EPI_1246e08])
+#define EP_1248420 ((uintptr_t)ep147_addr[EPI_1248420])
+#define EP_1248530 ((uintptr_t)ep147_addr[EPI_1248530])
+#define EP_124a558 ((uintptr_t)ep147_addr[EPI_124a558])
+#define EP_124a7a8 ((uintptr_t)ep147_addr[EPI_124a7a8])
+#define EP_1254b88 ((uintptr_t)ep147_addr[EPI_1254b88])
+#define EP_12571c8 ((uintptr_t)ep147_addr[EPI_12571c8])
 #define EP_12671d0 ((uintptr_t)ep147_addr[EPI_12671d0])
 #define EP_126eab0 ((uintptr_t)ep147_addr[EPI_126eab0])
 #define EP_1272830 ((uintptr_t)ep147_addr[EPI_1272830])
+#define EP_12c0760 ((uintptr_t)ep147_addr[EPI_12c0760])
+#define EP_12c0b20 ((uintptr_t)ep147_addr[EPI_12c0b20])
+#define EP_12c0f18 ((uintptr_t)ep147_addr[EPI_12c0f18])
+#define EP_12c1fa8 ((uintptr_t)ep147_addr[EPI_12c1fa8])
 #define EP_1348c48 ((uintptr_t)ep147_addr[EPI_1348c48])
 #define EP_1349130 ((uintptr_t)ep147_addr[EPI_1349130])
 #define EP_1453e80 ((uintptr_t)ep147_addr[EPI_1453e80])
@@ -1275,7 +1321,6 @@ static int ep147_addr_init(int build){
 #define EP_1960f70 ((uintptr_t)ep147_addr[EPI_1960f70])
 #define EP_1987038 ((uintptr_t)ep147_addr[EPI_1987038])
 #define EP_19ab418 ((uintptr_t)ep147_addr[EPI_19ab418])
-#define EP_19ab6d8 ((uintptr_t)ep147_addr[EPI_19ab6d8])
 #define EP_19ac3c8 ((uintptr_t)ep147_addr[EPI_19ac3c8])
 #define EP_19ac568 ((uintptr_t)ep147_addr[EPI_19ac568])
 #define EP_19bcf68 ((uintptr_t)ep147_addr[EPI_19bcf68])
@@ -1314,7 +1359,6 @@ static int ep147_addr_init(int build){
 #define EP_1bad940 ((uintptr_t)ep147_addr[EPI_1bad940])
 #define EP_1bb99f0 ((uintptr_t)ep147_addr[EPI_1bb99f0])
 #define EP_1bc41b0 ((uintptr_t)ep147_addr[EPI_1bc41b0])
-#define EP_1bc5668 ((uintptr_t)ep147_addr[EPI_1bc5668])
 #define EP_1bcfb78 ((uintptr_t)ep147_addr[EPI_1bcfb78])
 #define EP_1bcff88 ((uintptr_t)ep147_addr[EPI_1bcff88])
 #define EP_1bd03f0 ((uintptr_t)ep147_addr[EPI_1bd03f0])
@@ -1334,7 +1378,6 @@ static int ep147_addr_init(int build){
 #define EP_1c71728 ((uintptr_t)ep147_addr[EPI_1c71728])
 #define EP_1ca31a8 ((uintptr_t)ep147_addr[EPI_1ca31a8])
 #define EP_1ca4650 ((uintptr_t)ep147_addr[EPI_1ca4650])
-#define EP_1d5ef18 ((uintptr_t)ep147_addr[EPI_1d5ef18])
 #define EP_1d6bc60 ((uintptr_t)ep147_addr[EPI_1d6bc60])
 #define EP_1d6bff0 ((uintptr_t)ep147_addr[EPI_1d6bff0])
 #define EP_1d6f280 ((uintptr_t)ep147_addr[EPI_1d6f280])
@@ -1383,13 +1426,17 @@ static int ep147_addr_init(int build){
 #define EP_1f25838 ((uintptr_t)ep147_addr[EPI_1f25838])
 #define EP_1f3fb18 ((uintptr_t)ep147_addr[EPI_1f3fb18])
 #define EP_1f40998 ((uintptr_t)ep147_addr[EPI_1f40998])
-#define EP_1f44418 ((uintptr_t)ep147_addr[EPI_1f44418])
 #define EP_1f45660 ((uintptr_t)ep147_addr[EPI_1f45660])
 #define EP_1f4a3f0 ((uintptr_t)ep147_addr[EPI_1f4a3f0])
 #define EP_1f4a590 ((uintptr_t)ep147_addr[EPI_1f4a590])
 #define EP_1f4ac90 ((uintptr_t)ep147_addr[EPI_1f4ac90])
 #define EP_1f5da20 ((uintptr_t)ep147_addr[EPI_1f5da20])
 #define EP_1fa7a28 ((uintptr_t)ep147_addr[EPI_1fa7a28])
+#define EP_1fb72e0 ((uintptr_t)ep147_addr[EPI_1fb72e0])
+#define EP_1fb9488 ((uintptr_t)ep147_addr[EPI_1fb9488])
+#define EP_1fc9bf8 ((uintptr_t)ep147_addr[EPI_1fc9bf8])
+#define EP_1fcbe30 ((uintptr_t)ep147_addr[EPI_1fcbe30])
+#define EP_1fce368 ((uintptr_t)ep147_addr[EPI_1fce368])
 #define EP_1fefa78 ((uintptr_t)ep147_addr[EPI_1fefa78])
 #define EP_1ff1250 ((uintptr_t)ep147_addr[EPI_1ff1250])
 #define EP_1ffbc60 ((uintptr_t)ep147_addr[EPI_1ffbc60])
@@ -1403,7 +1450,6 @@ static int ep147_addr_init(int build){
 #define EP_212fb94 ((uintptr_t)ep147_addr[EPI_212fb94])
 #define EP_218a6d8 ((uintptr_t)ep147_addr[EPI_218a6d8])
 #define EP_218a890 ((uintptr_t)ep147_addr[EPI_218a890])
-#define EP_21b6560 ((uintptr_t)ep147_addr[EPI_21b6560])
 #define EP_21c81c0 ((uintptr_t)ep147_addr[EPI_21c81c0])
 #define EP_21e1090 ((uintptr_t)ep147_addr[EPI_21e1090])
 #define EP_21e3440 ((uintptr_t)ep147_addr[EPI_21e3440])
@@ -1475,13 +1521,11 @@ static int ep147_addr_init(int build){
 #define EP_24fac4c ((uintptr_t)ep147_addr[EPI_24fac4c])
 #define EP_24fb350 ((uintptr_t)ep147_addr[EPI_24fb350])
 #define EP_25c0aa0 ((uintptr_t)ep147_addr[EPI_25c0aa0])
-#define EP_25e0550 ((uintptr_t)ep147_addr[EPI_25e0550])
 #define EP_25e9ba0 ((uintptr_t)ep147_addr[EPI_25e9ba0])
 #define EP_26a3f60 ((uintptr_t)ep147_addr[EPI_26a3f60])
 #define EP_26a4838 ((uintptr_t)ep147_addr[EPI_26a4838])
 #define EP_26cf590 ((uintptr_t)ep147_addr[EPI_26cf590])
 #define EP_26e1b68 ((uintptr_t)ep147_addr[EPI_26e1b68])
-#define EP_27d18b8 ((uintptr_t)ep147_addr[EPI_27d18b8])
 #define EP_2847138 ((uintptr_t)ep147_addr[EPI_2847138])
 #define EP_284ab30 ((uintptr_t)ep147_addr[EPI_284ab30])
 #define EP_284b090 ((uintptr_t)ep147_addr[EPI_284b090])
@@ -1493,7 +1537,6 @@ static int ep147_addr_init(int build){
 #define EP_2874158 ((uintptr_t)ep147_addr[EPI_2874158])
 #define EP_2896b90 ((uintptr_t)ep147_addr[EPI_2896b90])
 #define EP_29672e0 ((uintptr_t)ep147_addr[EPI_29672e0])
-#define EP_2967378 ((uintptr_t)ep147_addr[EPI_2967378])
 #define EP_29674c8 ((uintptr_t)ep147_addr[EPI_29674c8])
 #define EP_2967678 ((uintptr_t)ep147_addr[EPI_2967678])
 #define EP_29676a8 ((uintptr_t)ep147_addr[EPI_29676a8])

@@ -8,6 +8,15 @@
  * reads EP147's memory for them. Both are safe on any thread and never block. */
 #ifndef AZDECKINFO_H
 #define AZDECKINFO_H
+#include <stdint.h>
+#include <string.h>
+#include "azliveobserver.h"
+
+static inline uint32_t azdeck_record_size(const void *record) {
+    uint32_t size;
+    memcpy(&size, record, sizeof size);
+    return size;
+}
 
 #define AZSNAP_STR 128
 
@@ -32,4 +41,58 @@ typedef int (*azstem_deck_snapshot_fn)(int deck, struct azstem_deck_snap *out);
  * moment after the first request. */
 typedef int (*azstem_deck_beat_phase_fn)(int deck, double *phase);
 
+/* Separate export: the original snapshot's exact-size ABI remains unchanged. Revision
+ * counts captured LTI writes; it is not a deck-load generation or a source identity. */
+struct azstem_deck_observation_v1 {
+    unsigned size, version;
+    int loaded, reserved;
+    unsigned long long revision, observed_ns;
+};
+typedef int (*azstem_deck_observation_v1_fn)(int, struct azstem_deck_observation_v1 *);
+
+/* Independent native notification stream. A generation identifies a player UNIT, not a
+ * track load. observed_ns is callback receipt time; native capture time is unavailable. */
+struct azstem_loop_observation_v1 {
+    unsigned size, version;
+    unsigned long long unit_generation, revision, observed_ns;
+    int engaged, reserved;
+};
+typedef int (*azstem_loop_observation_v1_fn)(int, struct azstem_loop_observation_v1 *);
+/* v2 certifies the corrected working-property decoder and adds independently valid
+ * current bounds. v1 stays exported for existing clients. Never infer retained points or
+ * a track-load identity from this notification. */
+struct azstem_loop_observation_v2 {
+    unsigned size, version;
+    unsigned long long unit_generation, revision, observed_ns;
+    int engaged, bounds_valid;
+    double in_s, out_s;
+};
+typedef int (*azstem_loop_observation_v2_fn)(int, struct azstem_loop_observation_v2 *);
+typedef unsigned (*azstem_loop_observer_mask_v1_fn)(void);
+
+/* Independent callback receipts. Raw play context is not normalized playback; unit
+ * generation is not committed track-load identity, and each stream has its own clock. */
+struct azstem_live_observation_v1 {
+    uint32_t size, version;
+    struct azsdk_live_sample sample;
+};
+typedef int (*azstem_live_observation_v1_fn)(int, struct azstem_live_observation_v1 *);
+typedef unsigned (*azstem_live_observer_mask_v1_fn)(void);
+/* Separate Sync receipt keeps the fixed live-v1 layout intact. Native modes0
+ * and2 are the verified off/on setting values; an invalid receipt retains raw
+ * mode and clock while valid is0. Unit lifetime is not track-load identity. */
+struct azstem_sync_observation_v1 {
+    uint32_t size, version;
+    uint64_t unit_generation, revision, observed_ns;
+    int32_t raw_mode;
+    uint32_t valid;
+};
+typedef int (*azstem_sync_observation_v1_fn)(int, struct azstem_sync_observation_v1 *);
+struct azstem_tempo_lock_observation_v1 {
+    uint32_t size, version;
+    uint64_t unit_generation, revision, observed_ns;
+    int32_t raw_locked;
+    uint32_t valid;
+};
+typedef int (*azstem_tempo_lock_observation_v1_fn)(int, struct azstem_tempo_lock_observation_v1 *);
 #endif

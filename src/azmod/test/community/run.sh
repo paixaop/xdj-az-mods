@@ -15,7 +15,7 @@ PASS=0; FAIL=0
 cv(){ rm -rf $W/cv; mkdir -p $W/cv; [ -f $W/root/azmod.conf ] || return 0
     CVD=$W/cv perl -ne 'next unless /^([a-z0-9-]+):(cfg|str)\.(\S+) = (.*)$/; my ($i,$n,$k,$v)=($1,$2,$3,$4); $k=~s/:([0-9a-f]{2})/chr hex $1/ge; if ($n eq "str") { $v=~s/^"(.*)"$/$1/; $k.="\$" } open my $f, ">>", "$ENV{CVD}/$i.cfg" or die; print $f "$k=$v\n"' $W/root/azmod.conf; }
 ok(){ cv; if eval "$2"; then PASS=$((PASS+1)); echo "PASS $1"; else FAIL=$((FAIL+1)); echo "FAIL $1"; echo "---- output:"; cat $W/out; fi; }
-$HCC -O1 -g -Wall -I$A -DCM_ROOT="\"$W/root\"" -DCM_LOGDIR="\"$W/log\"" -DCM_USB_ROOT="\"$W/usb\"" -no-pie -o $W/harness $T/harness.c -ldl -rdynamic 2>$W/cc.log || { cat $W/cc.log; exit 1; }
+$HCC -O1 -g -Wall -I$A -DCM_ROOT="\"$W/root\"" -DCM_LOGDIR="\"$W/log\"" -DCM_USB_ROOT="\"$W/usb\"" -no-pie -o $W/harness $T/harness.c -pthread -ldl -rdynamic 2>$W/cc.log || { cat $W/cc.log; exit 1; }
 TAG=$($W/harness tag); read A0 A1 < <($W/harness addrs)
 echo "tag $TAG"
 $W/harness tagmp > $W/out

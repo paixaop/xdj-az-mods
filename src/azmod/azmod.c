@@ -2655,7 +2655,7 @@ static void install_wavestems_hook(void) {
     if (!nowave) {
         azm_install_hook(SW2D_PAINT, (void *) sw2d_paint_hook,
                          (void **) &g_orig_sw2d_paint); /* per-deck paint -> deck ctx */
-        azm_install_hook(WAVE_OVERVIEW, (void *) ov_hook, (void **) &g_orig_ov);
+        azm_install_hook(WAVE_OVERVIEW, (void *) azm_ov_entry, (void **) &g_orig_ov);
         /* preview/overview -> deck: the owner parks the deck, the tile ctor records
          * (tile + 0x280) -> deck. ~4 calls each per process, never a hot path. */
         az_install_segv(); /* backtrace on EP147 SIGSEGV; observes only */
@@ -2875,6 +2875,9 @@ static void ep147_late_init(void) { /* EP147 addresses that cannot be constant i
     g_wp_real[1] = (void *) EP_1b949b8;
     g_wp_real[2] = (void *) EP_1b95e80;
 }
+#include "sdk_connections.c"
+#include "sdk_cache_startup.c"
+#include "sdk_slip_startup.c"
 __attribute__((constructor)) static void azmod_init(void) {
     if (!is_ep147())
         return;
@@ -2895,6 +2898,16 @@ __attribute__((constructor)) static void azmod_init(void) {
         g_ep147_build = b;
         ep147_late_init();
         ep_img_init();     /* img_q: EP147's own image bounds */
+        if (access("/home/root/settings/azmod.track-data.on", F_OK) == 0 &&
+            access("/home/root/settings/azmod.native-sources.on", F_OK) == 0) {
+            unsigned policy = access("/home/root/settings/azmod.native-source-files.on", F_OK) == 0
+                                  ? AZS_CAPTURE_PHYSICAL_ON_LIBRARY_WORKER
+                                  : 0u;
+            g_sdk_sources_on = azsdk_sources_configure(1, b, policy) == AZS_OK;
+        }
+        sdk_connections_at_start();
+        sdk_cache_at_start();
+        sdk_slip_at_start();
         msg_thread_note(); /* this constructor runs on EP147's main thread = JUCE's message thread */
         g_azm_inert = 0;
     }
@@ -2919,6 +2932,10 @@ __attribute__((constructor)) static void azmod_init(void) {
             pthread_detach(ct);
     }
     load_settings_early(); /* the row values, before any hook that reads one installs */
+    if (g_sdk_sources_on && !install_library_hooks()) {
+        g_sdk_sources_on = 0;
+        (void) azsdk_sources_configure(0, g_ep147_build, 0);
+    }
     install_banner();        /* unconditional, inert; must precede EP147Application::initialise */
     install_daymode_early(); /* Themes: record EP147's art as it decodes (off only
                                 with azmod-themes.off) */

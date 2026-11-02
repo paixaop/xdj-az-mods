@@ -29,6 +29,7 @@ static int sdk_handoff(const char *id, const char *path, const char *const argv[
     return -1;
 }
 static void sdk_reload(const char *id) { (void) id; }
+static void sdk_data_retire_owner(int owner) { (void) owner; }
 static int sdk_lib_playlists(const char *id, int stick, int (*fn)(int, int, const char *, int, void *), void *u) {
     (void) id;
     (void) stick;

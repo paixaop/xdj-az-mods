@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+"""Generate EXIT/RELOOP verification profiles from the two identified stock ELFs."""
+import argparse
+import importlib.util
+from pathlib import Path
+import struct
+
+ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location('addrgen', ROOT / 'tools/ep147-addrgen.py')
+addrgen = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(addrgen)
+
+# Explicit nominal classes; abstract/local Command names are not usable tables.
+# Keep this order aligned with the private azexitprofile.h classifier constants.
+COMMAND_TYPES = (
+    'N12player_basis11JumpCommandINS_10PlayerCoreEEE',
+    'N12player_basis11PlayCommandINS_10PlayerCoreEEE',
+    'N12player_basis11StopCommandINS_10PlayerCoreEEE',
+    'N9dj_player11LoopCommandE',
+    'N9dj_player12ScanFunction17ScanJumpedCommandE',
+    'N9dj_player12SlipFunction21StopBackGroundCommandE',
+    'N9dj_player12SlipFunction22SlipStateChangeCommandE',
+    'N9dj_player14BackCueCommandE',
+    'N9dj_player14CueJumpCommandE',
+    'N9dj_player15StretchFunction26ChangePlayDirectionCommandE',
+    'N9dj_player16BeatJumpFunction15BeatJumpCommandE',
+    'N9dj_player16BeatSyncFunction22BeatSync_SlaveFunction16BeatSyncJobByPos29BeatSyncStartup_JumpedCommandE',
+    'N9dj_player17PlayPauseFunction15CDJPauseCommandE',
+    'N9dj_player20IJumpableForQuantize20JumpedWrapperCommandE',
+    'N9dj_player20NeedleSearchFunction19NeedleJumpedCommandE',
+    'N9dj_player22QuantizePendingCommandE',
+    'N9dj_player26RemotePositionSyncFunction25PositionSyncJumpedCommandE',
+)
+assert len(COMMAND_TYPES) == 17
+assert COMMAND_TYPES[15] == 'N9dj_player22QuantizePendingCommandE'
+NATIVE_ENTRIES = {
+    '1.30': (0x1351220, 0x1450fb0, 0x14455c8, 0x1450728),
+    '2.00': (0x140c570, 0x150c620, 0x1500bc0, 0x150bd38),
+}
+
+
+def primary(image, name):
+    def refs(value):
+        needle = struct.pack('<Q', value)
+        for base, offset, size, _, _ in image.loads:
+            pos = offset
+            while True:
+                pos = image.data.find(needle, pos, offset + size)
+                if pos < 0: break
+                address = base + pos - offset
+                if address % 8 == 0: yield address
+                pos += 1
+    needle = name.encode() + b'\0'
+    tables = set()
+    for base, offset, size, _, _ in image.loads:
+        pos = offset
+        while True:
+            pos = image.data.find(needle, pos, offset + size)
+            if pos < 0: break
+            for ref in refs(base + pos - offset):
+                for pointer in refs(ref - 8):
+                    if image.file_bytes(pointer - 8, 8) == b'\0' * 8:
+                        table = pointer + 8
+                        method = struct.unpack('<Q', image.file_bytes(table, 8))[0]
+                        if any(flags & 1 and start <= method < start + length
+                               for start, _, length, _, flags in image.loads): tables.add(table)
+            pos += 1
+    if len(tables) != 1: raise ValueError('missing/ambiguous primary RTTI: ' + name)
+    return tables.pop()
+
+
+def executable(image, address):
+    return address % 4 == 0 and any(flags & 1 and start <= address < start + length
+                                  for start, _, length, _, flags in image.loads)
+
+
+def method(image, table, slot):
+    address = struct.unpack('<Q', image.file_bytes(table + slot * 8, 8))[0]
+    if not executable(image, address):
+        raise ValueError('non-executable native method: ' + hex(address))
+    return address
+
+
+def inline_patch_safe(prologue):
+    """Match azstem's four-instruction relocator (ADRP is supported)."""
+    for index, instruction in enumerate(struct.unpack('<4I', prologue)):
+        if ((instruction & 0x9f000000) == 0x10000000 or  # ADR
+            (instruction & 0xfc000000) in (0x14000000, 0x94000000) or  # B/BL
+            (instruction & 0xff000010) == 0x54000000 or  # B.cond
+            (instruction & 0x7e000000) in (0x34000000, 0x36000000) or  # CBZ/TBZ
+            (instruction & 0x3b000000) == 0x18000000):  # literal load
+            return False
+        if index < 3 and ((instruction & 0xfffff000) in (0xd65f0000, 0xd61f0000) or
+                          (instruction & 0xfffff800) == 0xd71f0800 or
+                          instruction == 0xd69f03e0):
+            return False
+    return True
+
+
+def entry(image, address, require_inline=True):
+    if not executable(image, address):
+        raise ValueError('non-executable native entry: ' + hex(address))
+    prologue = image.file_bytes(address, 16)
+    if require_inline and not inline_patch_safe(prologue):
+        raise ValueError('unsafe native inline prologue: ' + hex(address))
+    return address, prologue
+
+
+def byte_array(value):
+    return '{' + ', '.join(hex(x) for x in value) + '}'
+
+
+def generate(folder):
+    catalog = addrgen.read_catalog(ROOT / 'tools/ep147-addresses.json')
+    images = addrgen.load_images(catalog, folder)
+    lines = ['/* Generated by tools/sdk-exit-profile.py; verification data, not an address lookup API. */',
+             '#include "../common/azexitprofile.h"',
+             'static const struct azexit_profile exit_profiles[2] = {']
+    names = ['N9dj_player12DjPlayerUnitE', 'N12player_basis10PlayerCoreE',
+             'N9dj_player20CueLoopControlFacadeE', 'N9dj_player16BeatSyncFunctionE',
+             'N9dj_player16QuantizeFunctionE', 'N9dj_player12SlipFunctionE', 'N4meow12AsyncTaskBoxE']
+    for version in addrgen.VERSIONS:
+        image = images[version]
+        tables = [primary(image, name) for name in names]
+        process = method(image, tables[1], 3)
+        pc = process + 0x4c
+        instruction = struct.unpack('<I', image.file_bytes(pc, 4))[0]
+        if instruction & 0xfc000000 != 0x94000000: raise ValueError('preProcess call changed')
+        immediate = instruction & 0x3ffffff
+        if immediate & 0x2000000: immediate -= 1 << 26
+        preprocess = pc + immediate * 4
+        _, prologue = entry(image, preprocess)
+        _, process_prologue = entry(image, process)
+        manager, quantize, embedded_jump, quantize_cancel = NATIVE_ENTRIES[version]
+        native_entries = [entry(image, manager), entry(image, quantize),
+                          entry(image, embedded_jump, False), entry(image, quantize_cancel)]
+        # The embedded request's conditional branch cannot use the ordinary
+        # four-instruction installer; retain identity bytes only. The backend
+        # observes its actual native JumpController virtual-slot2 handoff.
+        if struct.unpack('<I', native_entries[2][1][:4])[0] != 0x310004bf:
+            raise ValueError('embedded Quantize request entry changed')
+        chain = primary(image, 'N12player_basis12CommandChainE')
+        jump = primary(image, 'N12player_basis14JumpControllerINS_10PlayerCoreEEE')
+        values = tables + [process, preprocess, method(image, tables[2], 3), method(image, tables[6], 5),
+                           method(image, tables[2], 4), method(image, tables[2], 6)]
+        lines += ['    /* EP147 ' + version + ': ' + catalog['builds'][version]['sha256'] + ' */',
+                  '    {' + ', '.join(hex(x) for x in values) + ',',
+                  '     ' + byte_array(prologue) + ',',
+                  '     ' + byte_array(process_prologue) + ',']
+        lines += ['     {' + hex(address) + ', ' + byte_array(prologue) + '},'
+                  for address, prologue in native_entries]
+        lines += ['     ' + ', '.join(hex(x) for x in
+                  (chain, method(image, chain, 0), method(image, chain, 1))) + ',',
+                  '     ' + hex(jump) + ', ' + hex(method(image, jump, 2)) + ',',
+                  '     {']
+        for index, name in enumerate(COMMAND_TYPES):
+            table = primary(image, name)
+            methods = [method(image, table, slot) for slot in range(3)]
+            lines += ['         /* ' + str(index) + ': ' + name + ' */',
+                      '         {' + ', '.join(hex(x) for x in (table, *methods)) + '},']
+        setter = primary(image, 'N9dj_player16CueLoopSetFacadeE')
+        cue = primary(image, 'N9dj_player25CuePropertyWithBufferLockE')
+        merger = primary(image, 'N12player_basis18CommandChainMergerE')
+        interval = primary(image, 'N12player_basis18ReversiblePositionE')
+        sourced_interval = primary(image, 'N12player_basis32ReversiblePositionWithSourceInfoE')
+        base_cue = primary(image, 'N9dj_player11CuePropertyE')
+        core_jump, core_jump_prologue = entry(image, {'1.30': 0x14ac520, '2.00': 0x1567950}[version])
+        play_pause = primary(image, 'N9dj_player17PlayPauseFunctionE')
+        lines += ['     }, ' + ', '.join(hex(x) for x in
+                  (setter, *(method(image, setter, slot) for slot in (2, 5, 9, 14, 15, 16, 17)), cue,
+                   merger, method(image, merger, 2), method(image, jump, 4), interval, sourced_interval, method(image, jump, 5),
+                   method(image, tables[2], 8), base_cue)) + ',',
+                  '     {' + hex(core_jump) + ', ' + byte_array(core_jump_prologue) + '}, ' + hex(method(image, setter, 4)) + ', ' + hex(play_pause) + '},']
+    return '\n'.join(lines + ['};', ''])
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--firmware', type=Path, required=True)
+    parser.add_argument('--check', action='store_true')
+    args = parser.parse_args()
+    path = ROOT / 'src/azstem/sdk_exit_profiles.h'
+    text = generate(args.firmware)
+    if args.check:
+        if path.read_text() != text: raise SystemExit('EXIT profiles differ; regenerate')
+    else: path.write_text(text)
+    print('EXIT profiles: both stock firmware identities and native tables verified')

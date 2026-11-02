@@ -21,6 +21,7 @@
  *
  * Included by azmod.c after community.c (it uses the community host's mod records).
  */
+#include "../common/aztimestamp.h"
 #ifdef __linux__
 #include <linux/input.h> /* struct input_event and the touch codes */
 #endif
@@ -56,6 +57,22 @@ static int g_sdk_tf_n; /* __atomic */
  * services are refused at any other time. */
 
 /* ---- timing: the generic timer, no system call -------------------------------------- */
+static inline uint64_t sdk_monotonic_ticks(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) || ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000L) return 0;
+    uint64_t seconds = (uint64_t) ts.tv_sec;
+    if (seconds > (UINT64_MAX - (uint64_t) ts.tv_nsec) / UINT64_C(1000000000)) return 0;
+    return seconds * UINT64_C(1000000000) + (uint64_t) ts.tv_nsec;
+}
+static inline uint64_t sdk_budget_for_frequency(uint64_t frequency) {
+    /* Divide after accounting for fractional MHz, without overflowing f * us.
+     * SDK_FILTER_BUDGET_US is200, so both bounded products fit in u64. */
+    return (frequency / UINT64_C(1000000)) * SDK_FILTER_BUDGET_US +
+           (frequency % UINT64_C(1000000)) * SDK_FILTER_BUDGET_US / UINT64_C(1000000);
+}
+static inline uint64_t sdk_elapsed_ticks(uint64_t start, uint64_t end) {
+    return start && compare_timestamps(end, start, 1, 1, 1) >= AZ_TIME_EQUAL ? end - start : 0; /* An unavailable clock is not an overrun. */
+}
 /* The deck's virtual counter on Linux; elsewhere (a macOS host test) the monotonic clock: a
  * user-space read of cntvct_el0 there does not advance reliably. */
 static inline uint64_t sdk_ticks(void) {
@@ -66,9 +83,7 @@ static inline uint64_t sdk_ticks(void) {
     __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(v) : : "memory");
     return v;
 #else
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t) ts.tv_sec * 1000000000ull + (uint64_t) ts.tv_nsec;
+    return sdk_monotonic_ticks();
 #endif
 }
 static uint64_t g_sdk_budget_ticks; /* SDK_FILTER_BUDGET_US in sdk_ticks units, set at init */
@@ -76,7 +91,7 @@ static void sdk_timing_init(void) {
 #if defined(__aarch64__) && defined(__linux__)
     uint64_t f;
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
-    g_sdk_budget_ticks = f / 1000000ull * SDK_FILTER_BUDGET_US;
+    g_sdk_budget_ticks = sdk_budget_for_frequency(f);
 #else
     g_sdk_budget_ticks = SDK_FILTER_BUDGET_US * 1000ull;
 #endif
@@ -153,7 +168,7 @@ static int sdk_filter_run(int bus, unsigned char *f, int len) {
         g_cm_in_frame = 1;
         uint64_t t0 = sdk_ticks();
         int r = ff->fn(bus, f, len, ff->user);
-        if (sdk_ticks() - t0 > g_sdk_budget_ticks)
+        if (compare_timestamps(sdk_elapsed_ticks(t0, sdk_ticks()), g_sdk_budget_ticks, 1, 1, 1) == AZ_TIME_AFTER)
             sdk_strike(ff->c, &ff->strikes, &ff->off, "frame filter");
         g_cm_in_frame = 0;
         ran = 1;
@@ -185,7 +200,7 @@ static void sdk_filter_copy(int bus, const unsigned char *f, int len, int every_
         g_cm_in_frame = 1;
         uint64_t t0 = sdk_ticks();
         ff->fn(bus, copy, m, ff->user);
-        if (sdk_ticks() - t0 > g_sdk_budget_ticks)
+        if (compare_timestamps(sdk_elapsed_ticks(t0, sdk_ticks()), g_sdk_budget_ticks, 1, 1, 1) == AZ_TIME_AFTER)
             sdk_strike(ff->c, &ff->strikes, &ff->off, "frame filter");
         g_cm_in_frame = 0;
         memcpy(copy, f, (size_t) m); /* the next filter sees the frame as it arrived */
@@ -207,7 +222,7 @@ static int sdk_touch_decide(const az_touch *t) {
         g_cm_in_frame = 1;
         uint64_t t0 = sdk_ticks();
         int r = tf->fn(t, tf->user);
-        if (sdk_ticks() - t0 > g_sdk_budget_ticks)
+        if (compare_timestamps(sdk_elapsed_ticks(t0, sdk_ticks()), g_sdk_budget_ticks, 1, 1, 1) == AZ_TIME_AFTER)
             sdk_strike(tf->c, &tf->strikes, &tf->off, "touch filter");
         g_cm_in_frame = 0;
         if (r == AZ_TOUCH_TAKE)
@@ -251,7 +266,7 @@ static void sdk_touch_read(void *buf, ssize_t r) {
                     g_cm_in_frame = 1;
                     uint64_t t0 = sdk_ticks();
                     tf->fn(&t, tf->user);
-                    if (sdk_ticks() - t0 > g_sdk_budget_ticks)
+                    if (compare_timestamps(sdk_elapsed_ticks(t0, sdk_ticks()), g_sdk_budget_ticks, 1, 1, 1) == AZ_TIME_AFTER)
                         sdk_strike(tf->c, &tf->strikes, &tf->off, "touch filter");
                     g_cm_in_frame = 0;
                 }

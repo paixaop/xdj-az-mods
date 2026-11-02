@@ -39,6 +39,33 @@ static const int STEM_SLOT[NDECK] = {0, 1, 2, 3};
 #define IDMAP_SUB_OFF 0x48UL
 static _Atomic(void *) g_deck_self[MAX_DECKS];
 static _Atomic unsigned g_ctor_calls[MAX_DECKS], g_ap_rebind, g_ap_ctor;
+/* Native loop registration is covered by its separate C++ fixture. */
+static _Atomic uintptr_t g_djpu_vt = 0x289f878;
+static int g_sdk_loop_on;
+static int azsdk_loop_register(int deck, void *unit) {
+    (void) deck;
+    (void) unit;
+    return 0;
+}
+static void azsdk_loop_retire(int deck) { (void) deck; }
+static int g_sdk_live_on;
+static int azsdk_live_register(int deck, void *unit) {
+    (void) deck;
+    (void) unit;
+    return 0;
+}
+static void azsdk_live_retire(int deck) { (void) deck; }
+static int azsdk_cue_register(int deck, void *unit) { (void)deck; (void)unit; return 0; }
+static void azsdk_cue_retire(int deck) { (void)deck; }
+static _Atomic int g_sdk_load_on;
+static int azsdk_load_register(int deck, void *unit) {
+    (void) deck;
+    (void) unit;
+    return 0;
+}
+static void azsdk_load_retire(int deck) { (void) deck; }
+static int azsdk_exit_register(int deck, void *unit) { (void) deck; (void) unit; return 0; }
+static void azsdk_exit_retire(int deck) { (void) deck; }
 /* Test hook, harness only: every __atomic_load_n in the extracted code (the snapshot reader
  * copies its fields byte by byte with it, lti_snap_get) first passes its address to ut_before,
  * which can run one injected call just before the load of a chosen address (the torn-read case
@@ -152,10 +179,32 @@ static double now_s(void) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec + ts.tv_nsec / 1e9;
 }
+struct fake_allocation {
+    void *address;
+    struct fake_allocation *next;
+};
+static struct fake_allocation *fake_allocations;
 static void *mk(size_t n) {
     void *p = aligned_alloc(16, n);
+    struct fake_allocation *allocation = malloc(sizeof *allocation);
+    if (!p || !allocation) abort();
+    allocation->address = p;
+    allocation->next = fake_allocations;
+    fake_allocations = allocation;
     memset(p, 0, n);
     return p;
+}
+/* Keep retired native fakes mapped until every late-read check and thread join
+ * has finished, then release them so native LSan verifies the fixture as well. */
+static void release_fake_allocations(void) {
+    struct fake_allocation *allocation = fake_allocations;
+    fake_allocations = NULL;
+    while (allocation) {
+        struct fake_allocation *next = allocation->next;
+        free(allocation->address);
+        free(allocation);
+        allocation = next;
+    }
 }
 static void new_loadstate(void) {
     g_lsobj = mk(0x4b0);
@@ -345,5 +394,6 @@ int main(int argc, char **argv) {
     }
     printf("      phase 3: %ld teardowns, %ld stale reads\n", rounds, late);
     CHECK("stale generation: a torn-down LoadState's track is never served again", late == 0 && rounds > 10);
+    release_fake_allocations();
     return ut_summary();
 }

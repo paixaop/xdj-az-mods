@@ -23,6 +23,8 @@
 #define AZMOD_PAD_DECKS 2
 static int dg_slip_enum = 2;
 static double g_cm_bpm[AZMOD_STEM_DECKS] = {120.0, 124.5, 0.0, 99.0};
+static int bpm_available = 1;
+static double cm_deck_bpm(int deck) { return bpm_available ? g_cm_bpm[deck] : 0.0; }
 static int pad_mode_fresh(int pad_deck, int deck) {
     (void) pad_deck;
     return deck == 1 ? 4 : 0; /* deck 2: BEAT LOOP's first page; the others not known */
@@ -87,6 +89,12 @@ int main(void) {
     CHECK("... the length and key unknown (no per-deck source): -1 and \"\"", d->len_s == -1.0 && !d->key[0]);
     CHECK("... .size left as the caller set it", d->size == (int) sizeof *d);
     CHECK("... nothing written past the struct", untouched_from(sizeof *d));
+    bpm_available = 0;
+    for (int deck = 0; deck < AZMOD_STEM_DECKS; ++deck) {
+        d = prep((int) sizeof *d);
+        CHECK("unavailable BPM receipt is unknown for every deck", sd_deck_info(deck, d) == 0 && d->bpm == 0.0);
+    }
+    bpm_available = 1;
 
     /* every size a caller can have: exactly that many bytes */
     int bad = 0, nsz = 0;
