@@ -12,6 +12,7 @@
 #ifndef AZMOD_SDK_SURFACE_LOGIC_H
 #define AZMOD_SDK_SURFACE_LOGIC_H
 
+#include "../common/aztimestamp.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -182,7 +183,7 @@ static inline int sdk_press_end(struct sdk_press *p) {
 }
 /* Called every tick: SDK_PRESS_LONG exactly once per press held long enough. */
 static inline int sdk_press_tick(struct sdk_press *p, long long now) {
-    if (p->down && !p->long_sent && now - p->t_ms >= SDK_LONG_PRESS_MS) {
+    if (p->down && !p->long_sent && compare_timestamps(now - p->t_ms, SDK_LONG_PRESS_MS, 1000, 1000, 1) >= AZ_TIME_EQUAL) {
         p->long_sent = 1;
         return SDK_PRESS_LONG;
     }

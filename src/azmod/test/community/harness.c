@@ -32,10 +32,11 @@ static long now_ms(void) { return g_fake_now; }
 static int g_four_deck = 0;
 static int g_cr_fd = -1; /* crash reporter not armed: community installs its own blame handler */
 static int (*g_deck_has_track_fn)(int) = NULL;
-static int bpmstate_read(int d, double *live, double *track) {
+static int bpmstate_sample(int d, double *live, double *track, uint64_t *generation) {
     (void) d;
     (void) live;
     (void) track;
+    *generation = 0;
     return 0;
 }
 static int deck_for_ds(long ds) { return ds == 0x1000 ? 2 : -1; }

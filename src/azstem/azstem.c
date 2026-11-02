@@ -50,7 +50,10 @@
 #include "ep147rate.h" /* AZ_EP147_RATE: the deck engine rate, and why it is fixed */
 #include "../common/azlogcap.h" /* every /tmp append is size-capped */
 #include "../common/azprot.h" /* hook writes: unlock, write, restore the original protection */
+#include "../common/azexit.h"
+#include "sdk_vtable_patch.h" /* ordered replacement of verified native virtual entries */
 #include "../common/azaltstack.h" /* every thread we start has an alternate signal stack */
+#include "../common/azoverviewlease.h"
 
 /* ---- Target (EP147 non-PIE, fixed addresses) ------------------------- *
  * 0x14ab0d0 = DjPlayerAudioProcessor::processBlockInternal (a slot of the
@@ -360,36 +363,46 @@ static void emit_abs_jump(uint32_t *dst, uint64_t target) {
  * (4 relocated prologue instructions + a jump back to FUNC+16), callable as the
  * original, is stored in *orig before the jump is written, so a call that reaches
  * hookfn the moment the jump lands already finds its original; the hook calls through
- * *orig without a null check. Returns the trampoline, or NULL (and *orig untouched)
- * if the prologue cannot be relocated safely or a syscall fails. */
+ * *orig without a null check. Returns the trampoline, or NULL with entry bytes,
+ * *orig and page protections unchanged/restored after a recoverable refusal.
+ * An unrecoverable rollback terminates startup before EP147's main. */
 /* Every azstem hook is a 16-byte absolute jump, which another core could see half written, so
  * all of them go in from azstem_init, before EP147's main runs any of its code. Set when
  * azstem_init returns; from then on install_hook_at refuses. */
 static _Atomic int g_hooks_late;
+__attribute__((noreturn)) static void install_hook_fatal(uintptr_t func, const char *reason) {
+    /* logln can be disabled. Always attempt a direct startup diagnostic. */
+    dprintf(STDERR_FILENO, "azstem: fatal hook install @0x%lx: %s; startup exit 126\n",
+            (unsigned long) func, reason);
+    _exit(126);
+}
 static void *install_hook_at(uintptr_t FUNC, void *hookfn, void **orig) {
     if (atomic_load_explicit(&g_hooks_late, memory_order_acquire)) {
         logln("install: @0x%lx after the constructor -- REFUSED (16-byte patch)", (unsigned long) FUNC);
         return NULL;
     }
-    if (FUNC == 0 || (FUNC & 3)) {
-        logln("install: no or misaligned addr (0x%lx) -- declined", (unsigned long) FUNC);
+    if (FUNC == 0 || (FUNC & 3) || !hookfn || !orig) {
+        logln("install: invalid addr/hook/original (0x%lx) -- declined", (unsigned long) FUNC);
         return NULL;
     }
     uint32_t *func = (uint32_t *) FUNC;
+    uint32_t original_entry[4];
+    memcpy(original_entry, func, sizeof original_entry);
+    void *previous_orig = __atomic_load_n(orig, __ATOMIC_RELAXED);
 
     for (int i = 0; i < 4; i++) {
-        if (pcrel_kind(func[i]) == 1) {
+        if (pcrel_kind(original_entry[i]) == 1) {
             logln("install: @0x%lx prologue insn %d (%08x) PC-relative & non-relocatable"
                   " -- DECLINED (fail-safe)",
-                  (unsigned long) FUNC, i, func[i]);
+                  (unsigned long) FUNC, i, original_entry[i]);
             return NULL;
         }
         /* a function that returns (or branches away) inside the 16 bytes the jump
          * covers is shorter than the jump: it would overwrite the next function */
-        if (i < 3 && ends_fn(func[i])) {
+        if (i < 3 && ends_fn(original_entry[i])) {
             logln("install: @0x%lx insn %d (%08x) ends the function inside the 16-byte patch"
                   " -- DECLINED (fail-safe)",
-                  (unsigned long) FUNC, i, func[i]);
+                  (unsigned long) FUNC, i, original_entry[i]);
             return NULL;
         }
     }
@@ -404,7 +417,7 @@ static void *install_hook_at(uintptr_t FUNC, void *hookfn, void **orig) {
     }
     int out = 0;
     for (int i = 0; i < 4; i++) {
-        uint32_t in = func[i];
+        uint32_t in = original_entry[i];
         if (pcrel_kind(in) == 2) {
             uintptr_t old_pc = FUNC + (uintptr_t) i * 4, new_pc = (uintptr_t) &tramp[out];
             if (adrp_reloc_ok(in, old_pc, new_pc)) {
@@ -440,8 +453,26 @@ static void *install_hook_at(uintptr_t FUNC, void *hookfn, void **orig) {
     __atomic_thread_fence(__ATOMIC_RELEASE);
     emit_abs_jump(func, (uint64_t) (uintptr_t) hookfn);
     __builtin___clear_cache((char *) func, (char *) func + 16);
-    if (azprot_relock(&pt) != 0)
-        logln("install: @0x%lx code page left writable (mprotect failed)", (unsigned long) FUNC);
+    if (azprot_relock(&pt) != 0) {
+        /* relock released azprot's mutex even on failure. Reacquire before
+         * restoring bytes; its new snapshot may describe temporary writable
+         * pages, so restore the FIRST unlock's exact protection flags. This is
+         * safe only in the existing constructor-only installation phase. */
+        azprot_t rollback;
+        if (azprot_unlock(FUNC, sizeof original_entry, &rollback) != 0)
+            install_hook_fatal(FUNC, "rollback unlock failed");
+        memcpy(func, original_entry, sizeof original_entry);
+        __builtin___clear_cache((char *) func, (char *) func + sizeof original_entry);
+        __atomic_store_n(orig, previous_orig, __ATOMIC_RELEASE);
+        rollback.prot = pt.prot;
+        if (azprot_relock(&rollback) != 0)
+            install_hook_fatal(FUNC, "rollback protection restore failed");
+        if (munmap(tramp, 4096) != 0)
+            install_hook_fatal(FUNC, "rollback trampoline cleanup failed");
+        logln("install: @0x%lx protection restore failed; original entry restored -- declined",
+              (unsigned long) FUNC);
+        return NULL;
+    }
     logln("install: hooked @ 0x%lx -> %p, tramp @ %p", (unsigned long) FUNC, hookfn, tramp);
     return tramp;
 }
@@ -975,6 +1006,7 @@ static void *flusher(void *arg) {
 }
 
 __attribute__((constructor)) static void azstem_init(void) {
+    int sdk_loop_build = EPB_UNKNOWN;
     char comm[32] = {0};
     FILE *f = fopen("/proc/self/comm", "re");
     if (f) {
@@ -1001,8 +1033,10 @@ __attribute__((constructor)) static void azstem_init(void) {
         }
         if (!ok)
             return;
+        sdk_loop_build = b;
         atomic_store_explicit(&g_djpu_vt, (uintptr_t) DJPU_VTABLE, memory_order_relaxed);
         *(void **) &g_meow_destroy_fn = (void *) MEOW_DESTROY; /* drumroll.c: the grid's release */
+        azov_lease_configure(b, g_meow_destroy_fn);
         const uintptr_t probes[NPROBE] = {EP_7670a8, EP_785228, EP_784e90, EP_782dc0,
                                           EP_77e260, EP_783010, EP_da07d8, EP_d58ee0};
         memcpy(g_probe_addr, probes, sizeof probes);
@@ -1043,6 +1077,35 @@ __attribute__((constructor)) static void azstem_init(void) {
                                        (void **) &g_orig_djpudtor);
             logln("djpudtor: %s @0x%lx", td ? "hooked" : "install FAILED",
                   (unsigned long) DJPUDTOR_DEFAULT);
+            if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT &&
+                access("/home/root/settings/azmod.track-data.on", F_OK) == 0 &&
+                access("/home/root/settings/azmod.native-loop.on", F_OK) == 0) {
+                azsdk_loop_configure(1, sdk_loop_build);
+                g_sdk_loop_on = 1;
+            }
+            if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT &&
+                access("/home/root/settings/azmod.track-data.on", F_OK) == 0 &&
+                access("/home/root/settings/azmod.native-live.on", F_OK) == 0) {
+                azsdk_live_configure(1, sdk_loop_build);
+                azsdk_cue_configure(1, sdk_loop_build);
+                g_sdk_live_on = 1;
+            }
+            if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT &&
+                access("/home/root/settings/azmod.track-data.on", F_OK) == 0 &&
+                access("/home/root/settings/azmod.native-load.on", F_OK) == 0) {
+                azsdk_load_configure(1, sdk_loop_build, sdk_patch_slot);
+                atomic_store_explicit(&g_sdk_load_on, 1, memory_order_release);
+                unsigned sdk_commands = 0;
+                if (access("/home/root/settings/azmod.native-exit.on", F_OK) == 0)
+                    sdk_commands |= AZEXIT_ENABLE_EXIT;
+                if (access("/home/root/settings/azmod.native-reloop.on", F_OK) == 0)
+                    sdk_commands |= AZEXIT_ENABLE_RELOOP;
+                if (access("/home/root/settings/azmod.native-loop-commands.on", F_OK) == 0)
+                    sdk_commands |= AZEXIT_ENABLE_LOOP;
+                if (access("/home/root/settings/azmod.native-cue-commands.on", F_OK) == 0)
+                    sdk_commands |= AZEXIT_ENABLE_CUE;
+                if (sdk_commands) (void) azsdk_exit_configure((int) sdk_commands, sdk_loop_build, install_hook_at);
+            }
         } else
             logln("djpuctor: install FAILED @0x%llx (identity falls back to ap_deck_of)", v);
     }

@@ -36,7 +36,7 @@
 #   colwidths Column Edit's saved column widths (guest/azmod/browse_edit.h)
 #   colfields Column Edit's saved column fields, and a library text as a field shows it
 #             (guest/azmod/browse_fields.h)
-FZ_NAMES="azconf cmjson cmcat png bus drumwav stemname ofscache sdklib pdbsync elfcheck mp4 hcanlz clocktz cmbrowse inputmem fcopy colwidths colfields"
+FZ_NAMES="azconf cmjson cmcat png bus drumwav stemname ofscache sdklib pdbsync elfcheck mp4 hcanlz sdkanalysis clocktz cmbrowse inputmem fcopy colwidths colfields"
 FZ_T=tools/fuzz
 FZ_UT=tools/unit-tests
 
@@ -117,6 +117,8 @@ fz_prepare() {
     sdklib)
         cp guest/azmod/sdk_lib.c guest/azmod/azmod-mod.h $FZ_UT/sdklib_test.c $FZ_UT/check.h "$dir/"
         grep -q '^static void sdk_copy_col' "$dir/sdk_lib.c" ;;
+    sdkanalysis)
+        cp guest/azmod/sdk_analysis.h guest/azmod/hc_anlz.h guest/azmod/azmod-mod.h "$dir/" ;;
     hcanlz)
         cp guest/azmod/hc_anlz.h "$dir/"
         grep -q 'static inline int hc_anlz_hot_cues' "$dir/hc_anlz.h" ;;
@@ -156,6 +158,7 @@ fz_cflags() {   # <name> <dir>: per-harness compile arguments (sources and inclu
                          -Dazmod_ttf_menu2=lanetest_ttf_menu2) ;;
     sdklib) FZ_ARGS=(-I"$dir" -DLIB_INC="\"$dir/sdk_lib.c\"" $FZ_T/sdklib_fuzz.c -lsqlite3 -ldl) ;;
     mp4)    FZ_ARGS=(-I"$dir" -DMP4_INC="\"$dir/mp4.inc\"" $FZ_T/mp4_fuzz.c -ldl) ;;
+    sdkanalysis) FZ_ARGS=(-I"$dir" $FZ_T/sdkanalysis_fuzz.c) ;;
     hcanlz) FZ_ARGS=(-DHCANLZ_HDR="\"$dir/hc_anlz.h\"" $FZ_T/hcanlz_fuzz.c) ;;
     cmjson) FZ_ARGS=(-I"$dir" -DCMJSON_INC="\"$dir/cmjson.inc\"" $FZ_T/cmjson_fuzz.c) ;;
     esac

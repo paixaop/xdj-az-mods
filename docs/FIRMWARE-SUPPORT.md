@@ -131,17 +131,27 @@ none of these anchors are never guessed: such a name is resolved by hand.
 
 ### How the tables are produced
 
-The headers start with "Generated per firmware build. Do not edit by hand." The generator is a
-project tool that is not part of this source. What it guarantees about the committed
-headers:
+The headers start with "Generated per firmware build. Do not edit by hand."
+Run `python3 tools/ep147-addrgen.py` to generate them from the reviewed
+`tools/ep147-addresses.json` catalog and the exact stock ELFs in the sibling
+`anchor/firmware/` directory. Pass `--firmware-dir` to use another directory.
+`python3 tools/ep147-addrgen.py --check` validates without rewriting files.
+The local tool validates explicit mappings; it does not discover new addresses.
+It guarantees:
 
 - One entry per `EP_` name in the library's code (comments and string literals ignored), and
-  no others, so a stale name does not survive.
+  the separately reviewed cache-entry catalog; stale ordinary references are removed.
 - A name without a value for every known build fails generation; the zero check in
   `ep147_addr_init()` is the second line of defense.
 - A check mode fails when a committed header differs from a fresh generation.
 - An `EP147` address composed with `movz`/`movk` in inline assembly is refused: assembly
   receives addresses from C, through `EP_` names, or the table would not see them.
+- Both stock image identities must match. Cache entries additionally require their
+  reviewed executable ranges, prologues and complete function bytes. A matching
+  address does not establish its ABI, ownership or safe installation.
+
+Run `python3 tests/unit/ep147_addrgen_test.py` for the two-firmware generation and
+rejection regressions. These require the stock ELFs and are separate from asset-free tests.
 
 To add or change an address, open an issue or pull request with the value for **every**
 supported build and the evidence for each, in the form of the basis comments

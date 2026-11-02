@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "../common/aztimestamp.h"
 
 /* ---- playing ----------------------------------------------------------------------
  * "Playing" is the playhead advancing: it moved forward within the last SD_PLAY_HOLD_MS.
@@ -45,12 +46,15 @@ static inline int sd_play_step(struct sd_play *p, int loaded, long long pos, lon
         p->last_pos = pos;
         return -1;
     }
-    if (pos > p->last_pos) {
+    /* These coordinates already use whole source samples; the one-sample
+     * window cancels the rate when both sides are in the same sample clock. */
+    if (compare_timestamps(pos, p->last_pos, 1, 1, 1) == AZ_TIME_AFTER) {
         p->moved = 1;
         p->last_move_ms = now_ms;
     }
     p->last_pos = pos;
-    return p->moved && now_ms - p->last_move_ms <= SD_PLAY_HOLD_MS ? 1 : 0;
+    return p->moved && compare_timestamps(now_ms, p->last_move_ms + SD_PLAY_HOLD_MS,
+                                          1000, 1000, 1) <= AZ_TIME_EQUAL ? 1 : 0;
 }
 
 /* ---- deck events ------------------------------------------------------------------

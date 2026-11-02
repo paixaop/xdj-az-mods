@@ -25,6 +25,10 @@
  * azmod_naming_create, azmod_naming_cancel, azmod_naming_dirty, install_reorder,
  * install_selection_hooks, pledit_at_start.
  */
+#include "../common/azsources.h"
+/* Set once before any library hooks are installed. This diagnostic registry never
+ * qualifies a loaded track from a current media number. */
+static int g_sdk_sources_on;
 /* gui::disp_data::BrowseDispData: BrowseDispDataCreator+0x10 (vptr 0x2dcc3a0), also
  * reachable via meow::MappedObjPtr<IBrowseDispDataAccess>. Sub-objects, as stored by its
  * ctor 0x1f3fb20:
@@ -1829,7 +1833,12 @@ static void mlserver_onmsg_hook(void *server, void *msg, unsigned param) {
         ls_service(server); /* library spool, armed by ls_tick */
         t_pst_own--;
     }
-    g_orig_mlserver_onmsg(server, msg, param);
+    /* Original message forwarding boundary. */
+    if (g_sdk_sources_on)
+        azsdk_sources_forward_owned_message(g_ep147_build, server, msg, param, g_orig_mlserver_onmsg);
+    else
+        g_orig_mlserver_onmsg(server, msg, param);
+    if (g_sdk_sources_on) azsdk_sources_observe_owned_message(server, NULL, 0);
     pst_msg_done(server); /* stock wrote playlists in it: schedule the export.pdb sync */
 }
 static _Atomic unsigned long g_tracklist_widget; /* tentative; defined with the widget capture */

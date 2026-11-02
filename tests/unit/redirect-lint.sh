@@ -20,7 +20,7 @@ set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 G=$(cd "${1:-$here/../../guest}" && pwd)
 bad=0
-for f in "$G"/azmod/*.c "$G"/azstem/*.c; do
+for f in "$G"/azmod/*.{c,h,cpp} "$G"/azstem/*.{c,h,cpp}; do
     [ -f "$f" ] || continue
     rel=${f#"$G"/}
     out=$(REL="$rel" awk '
@@ -30,6 +30,9 @@ for f in "$G"/azmod/*.c "$G"/azstem/*.c; do
             allow["azmod/azmod.c:pngpatch_apply"] = 1
             allow["azmod/waveform.c:apply_ui60"] = 1
             allow["azstem/azstem.c:install_hook_at"] = 1
+            # Reviewed expected-entry check and ordered single-slot store; refuses on
+            # protection failure and preserves originals for forward-only rollback.
+            allow["azstem/sdk_vtable_patch.h:sdk_patch_slot"] = 1
         }
         /^[a-zA-Z].*[ *]([a-z_][a-z0-9_]*)\(.*\)[^;]*\{[ \t]*$/ {
             fn = $0; sub(/\(.*/, "", fn); sub(/.*[ *]/, "", fn)

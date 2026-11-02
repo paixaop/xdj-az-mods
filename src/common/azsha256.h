@@ -55,7 +55,7 @@ static void azsha256_init(azsha256_ctx *c) {
     c->n = 0;
 }
 static void azsha256_update(azsha256_ctx *c, const void *data, size_t len) {
-    const unsigned char *p = data;
+    const unsigned char *p = (const unsigned char *) data;
     c->len += len;
     if (c->n) {
         size_t k = 64 - c->n < len ? 64 - c->n : len;

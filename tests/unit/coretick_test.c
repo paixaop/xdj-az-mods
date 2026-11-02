@@ -54,6 +54,12 @@ static int bpmstate_read(int d, double *v, void *x) {
     (void) d, (void) v, (void) x;
     return 0;
 }
+static void cm_tempo_poll(void) {
+    for (int d = 0; d < AZMOD_STEM_DECKS; ++d) {
+        double v = 0.0;
+        g_cm_bpm[d] = bpmstate_read(d, &v, NULL) ? v : 0.0;
+    }
+}
 static int g_deck_ticks, g_rows_ticks, g_drains;
 static void sdk_deck_tick(long now) {
     (void) now;

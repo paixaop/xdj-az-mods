@@ -30,6 +30,7 @@
 #include <ctype.h>
 #include <limits.h>
 #include "azmod-mod.h"
+#include "../common/aztimestamp.h"
 #include "../common/azlogcap.h" /* azlog_rotate: per-mod logs capped per file */
 #include "../common/azdeckinfo.h" /* azstem_deck_snapshot: deck_loaded / deck_title */
 #include "../common/azsha256.h" /* the approved list's fingerprint of each mod's .so */
@@ -1278,7 +1279,85 @@ static int azcm_deck_for_ds(void *ds) { return deck_for_ds((long) ds); }
 static int azcm_deck_for_modeobj(void *o) { return deck_for_modeobj((long) o); }
 
 /* ---- read-only deck state ---------------------------------------------------------- */
-static double g_cm_bpm[AZMOD_STEM_DECKS];
+static _Atomic double g_cm_bpm[AZMOD_STEM_DECKS]; /* legacy value-only readers */
+static pthread_mutex_t g_cm_bpm_mu = PTHREAD_MUTEX_INITIALIZER;
+/* Receipt publication attempts, not native/source/load generations. Reserving
+ * before trylock invalidates an older receipt even when this update is dropped. */
+static _Atomic uint64_t g_cm_tempo_event[AZMOD_STEM_DECKS];
+static struct {
+    double bpm;
+    uint64_t state_generation, revision, observed_ns, last_ns;
+    int valid;
+} g_cm_tempo[AZMOD_STEM_DECKS];
+static uint64_t cm_tempo_event_next(int d) {
+    uint64_t old = atomic_load_explicit(&g_cm_tempo_event[d], memory_order_relaxed);
+    for (unsigned tries = 0; tries < 8 && old != UINT64_MAX; ++tries)
+        if (atomic_compare_exchange_weak_explicit(&g_cm_tempo_event[d], &old, old + 1,
+                                                  memory_order_acq_rel, memory_order_relaxed))
+            return old + 1 == UINT64_MAX ? 0 : old + 1;
+    atomic_store_explicit(&g_cm_tempo_event[d], UINT64_MAX, memory_order_release);
+    return 0;
+}
+/* Copied GUI polling receipts only. Public readers never wait for the GUI or
+ * promote/dereference a native shared_ptr object. Contention means unavailable. */
+static int cm_tempo_read(int d, double *bpm, uint64_t *generation, uint64_t *revision, uint64_t *observed_ns) {
+    *bpm = 0.0;
+    *generation = *revision = *observed_ns = 0;
+    if (d < 0 || d >= AZMOD_STEM_DECKS || pthread_mutex_trylock(&g_cm_bpm_mu) != 0) return 0;
+    uint64_t current = atomic_load_explicit(&g_cm_tempo_event[d], memory_order_acquire);
+    if (!current || current == UINT64_MAX || g_cm_tempo[d].revision != current ||
+        !bpmstate_current(d, g_cm_tempo[d].state_generation)) {
+        pthread_mutex_unlock(&g_cm_bpm_mu);
+        return 0;
+    }
+    *bpm = g_cm_tempo[d].bpm;
+    *generation = g_cm_tempo[d].state_generation;
+    *revision = g_cm_tempo[d].revision;
+    *observed_ns = g_cm_tempo[d].observed_ns;
+    int valid = g_cm_tempo[d].valid;
+    pthread_mutex_unlock(&g_cm_bpm_mu);
+    return valid;
+}
+static void cm_tempo_publish(int d, int sampled, double bpm, uint64_t generation, uint64_t observed_ns) {
+    if (d < 0 || d >= AZMOD_STEM_DECKS) return;
+    uint64_t event = cm_tempo_event_next(d);
+    if (pthread_mutex_trylock(&g_cm_bpm_mu) != 0) return;
+    if (!event || event != atomic_load_explicit(&g_cm_tempo_event[d], memory_order_acquire)) {
+        pthread_mutex_unlock(&g_cm_bpm_mu);
+        return;
+    }
+    g_cm_tempo[d].valid = 0;
+    g_cm_tempo[d].bpm = g_cm_bpm[d] = 0.0;
+    g_cm_tempo[d].state_generation = 0;
+    g_cm_tempo[d].observed_ns = 0;
+    g_cm_tempo[d].revision = event;
+    if (observed_ns && compare_timestamps(observed_ns, g_cm_tempo[d].last_ns,
+                                           1000000000, 1000000000, 1) == AZ_TIME_AFTER) {
+        g_cm_tempo[d].observed_ns = g_cm_tempo[d].last_ns = observed_ns;
+        g_cm_tempo[d].state_generation = generation;
+        /* Preserve the established conservative GUI-feed range. No rate,
+         * direction, playback or current-track identity follows from BPM. */
+        if (sampled && generation && bpm > 20.0 && bpm < 400.0) {
+            g_cm_tempo[d].bpm = g_cm_bpm[d] = bpm;
+            g_cm_tempo[d].valid = 1;
+        }
+    }
+    pthread_mutex_unlock(&g_cm_bpm_mu);
+}
+static void cm_tempo_poll(void) {
+    for (int d = 0; d < AZMOD_STEM_DECKS; ++d) {
+        double bpm = 0.0;
+        uint64_t generation = 0;
+        int sampled = bpmstate_sample(d, &bpm, NULL, &generation);
+        struct timespec ts;
+        uint64_t ns = 0;
+        if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0 && ts.tv_sec >= 0 &&
+            (uint64_t) ts.tv_sec <= (UINT64_MAX - 999999999u) / 1000000000u &&
+            ts.tv_nsec >= 0 && ts.tv_nsec < 1000000000L)
+            ns = (uint64_t) ts.tv_sec * 1000000000u + (uint64_t) ts.tv_nsec;
+        cm_tempo_publish(d, sampled, bpm, generation, ns);
+    }
+}
 static int (*g_cm_track_fn)(int, char *, int);
 static int cm_deck_count(void) { return g_four_deck ? 4 : 2; }
 /* Loaded state and title come from azstem's per-deck snapshot (EP147's LoadedTrackInfo for
@@ -1307,7 +1386,11 @@ int azcm_any_loaded(void) {
         if (g_deck_has_track_fn(d)) return 1;
     return 0;
 }
-static double cm_deck_bpm(int d) { return (d >= 0 && d < AZMOD_STEM_DECKS) ? g_cm_bpm[d] : 0.0; }
+static double cm_deck_bpm(int d) {
+    double bpm;
+    uint64_t generation, revision, observed_ns;
+    return cm_tempo_read(d, &bpm, &generation, &revision, &observed_ns) ? bpm : 0.0;
+}
 static int cm_deck_title(int d, char *buf, int n) {
     if (!buf || n <= 0) return 0;
     buf[0] = 0;
@@ -1395,6 +1478,7 @@ static int sd_confirm(const char *id, const char *title, const char *text, const
 static void sd_post_ui(const char *id, void (*fn)(void *user), void *user);
 static int sd_thread_start(const char *id, const char *name, void *(*fn)(void *), void *arg);
 static void sdk_deck_tick(long now);
+extern void azsdk_slip_collect_v1(void) __attribute__((weak));
 static void sdk_ui_tick(void);
 /* The community host's unit test builds this file without azmod.c and names its stand-ins. */
 #ifdef SDK_DECKUI_IMPL
@@ -1412,8 +1496,39 @@ static void sdk_ui_tick(void);
 #else
 #include "sdk_proc.c"
 #include "sdk_lib.c"
+#include "sdk_track.c"
 #include "sdk_audio.c"
 #include "sdk_vslot.c"
+#endif
+
+#ifndef SDK_PROC_IMPL
+static const az_library_v1 g_sdk_library = {
+    .abi = AZ_LIBRARY_ABI,
+    .size = sizeof(az_library_v1),
+    .lib_playlists = sdk_lib_playlists,
+    .lib_tracks = sdk_lib_tracks,
+    .data_capabilities = sdk_data_capabilities,
+    .track_resolve = sdk_track_resolve,
+    .track_request = sdk_track_request,
+    .track_acquire = sdk_track_acquire,
+    .track_release = sdk_track_release,
+    .track_cancel = sdk_track_cancel,
+    .data_event = sdk_data_event,
+    .deck_snapshot = sd_deck_snapshot_v1,
+    .time_to_beat = st_time_to_beat,
+    .beat_to_time = st_beat_to_time,
+    .time_interval = st_interval,
+    .command_submit = sdk_command_submit,
+    .waveform_request = sdk_waveform_request,
+    .waveform_acquire = sdk_waveform_acquire,
+    .command_poll = sdk_command_poll,
+    .command_cancel = sdk_command_cancel,
+    .command_release = sdk_command_release,
+    .native_cues = sdk_native_cues,
+};
+static const az_library_v1 *sdk_library_service(uint32_t abi) {
+    return abi == AZ_LIBRARY_ABI ? &g_sdk_library : NULL;
+}
 #endif
 
 static const az_core_v1 g_cm_core = {
@@ -1488,6 +1603,23 @@ static const az_core_v1 g_cm_core = {
     .audio_tap = sdk_audio_tap,
     .claim_vslot = sdk_claim_vslot,
     .lib_spool_kick = sdk_lib_spool_kick,
+#ifndef SDK_PROC_IMPL
+    .data_capabilities = sdk_data_capabilities,
+    .deck_snapshot = sd_deck_snapshot_v1,
+    .track_resolve = sdk_track_resolve,
+    .track_request = sdk_track_request,
+    .track_acquire = sdk_track_acquire,
+    .track_release = sdk_track_release,
+    .track_cancel = sdk_track_cancel,
+    .data_event = sdk_data_event,
+    .time_to_beat = st_time_to_beat,
+    .beat_to_time = st_beat_to_time,
+    .time_interval = st_interval,
+    .command_submit = sdk_command_submit,
+    .waveform_request = sdk_waveform_request,
+    .library_service = sdk_library_service,
+    .waveform_acquire = sdk_waveform_acquire,
+#endif
 };
 
 /* ---- loading ------------------------------------------------------------------------ */
@@ -1852,6 +1984,7 @@ static void cm_load_one(cm_mod *c) {
     g_cm_loading = -1;
     unlink(CM_INITING);
     if (rc) {
+        sdk_data_retire_owner((int)(c - g_cm));
         c->m = NULL;
         c->screen = NULL;   /* stays mapped (see above); nothing of it is called again */
         cm_refuse(c, AZCM_FAILED, "Its init() returned %d%s", rc, c->nhooks ? " (after patching code; reload to clear)" : "");
@@ -1876,6 +2009,19 @@ static void cm_write_status(void) {
 
 /* Called once from the overlay thread (EP147 only), after load_config. */
 static void community_init(void) {
+#ifndef SDK_PROC_IMPL
+    /* Resolve the shared SQL table before any community worker can read it. */
+    g_st_enabled = access("/home/root/settings/azmod.track-data.on", F_OK) == 0;
+    if (g_st_enabled) sdk_sq_resolve();
+    if (g_st_enabled) {
+        azexit_service_fn get_exit;
+        *(void **) &get_exit = dlsym(RTLD_DEFAULT, "azstem_exit_service_v1");
+        const struct azexit_service *api = get_exit ? get_exit() : NULL;
+        if (api && api->version == 1 && api->size >= AZEXIT_SERVICE_V1_SIZE && api->mask && api->target &&
+            api->submit && api->cancel && api->poll && api->release)
+            atomic_store_explicit(&g_sdk_exit_service, api, memory_order_release);
+    }
+#endif
     cm_derive_fwtag();
     g_cm_logs_on = access(CM_ROOT "/azmod-logs.on", F_OK) == 0;
     dbg("community: running EP147 tag %s\n", g_cm_fwtag[0] ? g_cm_fwtag : "(not derivable: hooking mods refused)");
@@ -2071,6 +2217,9 @@ static void community_init(void) {
 /* Every overlay tick. Cheap with no live mod. */
 static void sdk_confirm_tick(void);
 static void community_tick(void) {
+    #ifndef SDK_PROC_IMPL
+    sdk_cue_tick();
+    #endif
     sdk_confirm_tick(); /* the dialog: also the core's own questions, with no mod loaded */
     if (!g_cm_n) return;
     sdk_rows_tick();    /* rows of mods that stopped leave the menu, also when none runs */
@@ -2109,10 +2258,7 @@ static void community_tick(void) {
         static long last_bpm = 0;
         if (now - last_bpm >= 250) {
             last_bpm = now;
-            for (int d = 0; d < AZMOD_STEM_DECKS; d++) {
-                double v = 0.0;
-                g_cm_bpm[d] = (bpmstate_read(d, &v, NULL) && v > 20.0 && v < 400.0) ? v : 0.0;
-            }
+            cm_tempo_poll();
         }
     }
     for (int i = 0; i < g_cm_n; i++) {   /* on_frame's queued log lines and refusals, written here */
@@ -2128,6 +2274,7 @@ static void community_tick(void) {
         if (rf) cm_logf(c, 1, "%u calls to settings or file services from on_frame were refused (allowed in tick, the page callbacks and your own threads)", rf);
     }
     sdk_deck_tick(now);                          /* deck events, before the mods' ticks */
+    if(azsdk_slip_collect_v1)azsdk_slip_collect_v1();
     sdk_ui_tick();                               /* the mods' post_ui callbacks */
     for (int i = 0; i < g_cm_n; i++)
         if (g_cm[i].state == AZCM_LOADED && g_cm[i].m && g_cm[i].m->tick) g_cm[i].m->tick();

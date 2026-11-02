@@ -1,0 +1,5 @@
+/* Keep private GNU C++ support definitions from interposing on EP147. Apply at final link,
+ * after COMDAT resolution; localizing the intermediate object can discard needed sections. */
+{
+    local: _Z*;
+};

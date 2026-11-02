@@ -18,6 +18,11 @@
  * re-encoded when its target still reaches from the trampoline, otherwise its absolute
  * result is materialized with movz/movk.
  *
+ * azm_install_island_hook_at is an explicit one-instruction alternative for a
+ * separately reviewed entry. It validates only that displaced instruction,
+ * requires a reachable island, and never uses the four-instruction fallback.
+ * The general installer's stricter four-instruction policy is unchanged.
+ *
  * azm_patch_vtable swaps one vtable slot and returns the
  * original, which avoids prologue relocation entirely but only intercepts virtual calls
  * through that vtable. Callers must check the return value and treat a decline as "hook
@@ -271,13 +276,20 @@ static void azm_hooks_dump(const char *path) {
 #ifndef azm_install_hook
 #define azm_install_hook(f, h, o) azm_install_hook_at((f), (h), (o), #h)
 #endif
-static int azm_install_hook_at(uintptr_t FUNC, void *hook, void **orig, const char *name) {
+static int azm_install_entry_hook_at(uintptr_t FUNC, void *hook, void **orig, const char *name,
+                                     int island_only) {
     if (!FUNC || (FUNC & 3))
         return azm_rec(FUNC, name, AZM_DECLINED); /* an unresolved EP_ entry is 0: never hook it */
+    if (island_only && (!hook || ((uintptr_t) hook & 3) || !orig ||
+                        ((uintptr_t) orig & (sizeof(void *) - 1))))
+        return azm_rec(FUNC, name, AZM_DECLINED);
     uint32_t *func = (uint32_t *) FUNC;
-    if (!azm_patch_ok(func, 1))
+    if (island_only ? azm_pcrel_kind(func[0]) == 1 : !azm_patch_ok(func, 1))
         return azm_rec(FUNC, name, AZM_DECLINED);
     uint32_t *isl = azm_island_slot(FUNC);
+    if (!isl && island_only)
+        return azm_rec(FUNC, name, __atomic_load_n(&g_azm_late, __ATOMIC_ACQUIRE)
+                                       ? AZM_REFUSED_LATE : AZM_DECLINED);
     int ncopy = isl ? 1 : 4, out = 0;
     if (!isl && __atomic_load_n(&g_azm_late, __ATOMIC_ACQUIRE)) {
         dbg("hook %lx: refused, no island in reach and EP147 is running (a 16-byte write is not atomic)\n",
@@ -358,6 +370,16 @@ static int azm_install_hook_at(uintptr_t FUNC, void *hook, void **orig, const ch
     azm_note_hooked(FUNC);
     azm_rec(FUNC, name, AZM_FALLBACK);
     return 1;
+}
+static int azm_install_hook_at(uintptr_t FUNC, void *hook, void **orig, const char *name) {
+    return azm_install_entry_hook_at(FUNC, hook, orig, name, 0);
+}
+/* Deliberately opt-in and initially unused: this installs no native target by
+ * itself. Its caller still supplies a reviewed live entry/output reference. */
+static int azm_install_island_hook_at(uintptr_t FUNC, void *hook, void **orig, const char *name)
+    __attribute__((unused));
+static int azm_install_island_hook_at(uintptr_t FUNC, void *hook, void **orig, const char *name) {
+    return azm_install_entry_hook_at(FUNC, hook, orig, name, 1);
 }
 /* Swap one vtable slot and return the original through *orig. Use it for a function whose
  * prologue azm_install_hook would decline (a PC-relative branch in the first four

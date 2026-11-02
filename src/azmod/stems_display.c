@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
+#include "../common/aztimestamp.h"
 /**
  * @file stems_display.c
  * @brief Native pad-grid, tile-art and source-cell display for the stems feature.
@@ -125,11 +126,10 @@ static int reset_stems_on_track_change(azmod_state *s) {
  * std::_Sp_counted_ptr_inplace<gui::BpmState, ..., _S_atomic> (RTTI) and constructs the object
  * 0x10 bytes in. So the object is owned through shared_ptr, and EP147's own protocol applies:
  *   - The ctor hook (EP147's thread, inside its call) checks that control-block vtable and takes
- *     a weak reference (an atomic increment of the weak count, as weak_ptr's copy does). While
- *     we hold it the block, and the object in it, is never freed, whatever EP147 does.
- *   - A reader trusts the object only while the use count is above zero: shared_ptr disposes
- *     only after the count reaches zero, and nothing raises it again from zero. The count is
- *     read before and after the fields, so a read that overlapped the disposal is dropped.
+ *     a weak reference. This keeps control-block storage alive, not the BpmState object.
+ *   - The GUI polling reader promotes a positive use count with compare/exchange before
+ *     reading object fields. Its matching GNU release calls _M_dispose and drops the implicit
+ *     weak owner if it becomes the last shared owner. Zero and saturated counts are refused.
  *   - Each weak reference is kept for the life of the process (releasing one could free the
  *     block under a reader on another thread). One per BpmState construction, 208 bytes each,
  *     capped at BPMSTATE_PIN_MAX; past the cap a new BpmState is not used (unknown).
@@ -147,51 +147,106 @@ static void (*g_orig_bpmctor)(long self, long deck, long a3, long a4);
 /* plain types, every access through __atomic builtins */
 static unsigned long g_bpmstate[AZMOD_STEM_DECKS];    /* pinned BpmState, 0 = none */
 static unsigned long g_bpmstate_id[AZMOD_STEM_DECKS]; /* its +0x08 word, from the ctor */
+static unsigned long g_bpmstate_generation[AZMOD_STEM_DECKS]; /* bounded successful capture ordinal */
 static int g_bpmstate_n = 0, g_bpmstate_pins = 0, g_bpmstate_refused = 0;
+static pthread_mutex_t g_bpmstate_mu = PTHREAD_MUTEX_INITIALIZER;
 
 /* EP147's thread, inside BpmState's ctor (the object is alive and ours to read here). Returns
  * 1 when the object was pinned and published for deck d. */
 static int bpmstate_capture(unsigned long self, int d, uintptr_t want_vt) {
-    if (d < 0 || d >= AZMOD_STEM_DECKS || !self || (self & 7) || !want_vt)
-        return 0;
-    unsigned long ctrl = self - BPMCTRL_OFF;
-    if (*(volatile uintptr_t *) ctrl != want_vt)
-        return 0; /* not the make_shared block we know: leave it alone */
-    unsigned long id = *(volatile unsigned long *) (self + BPMSTATE_DECK);
-    if ((id & 0xff) != (unsigned long) d)
-        return 0;
-    if (__atomic_add_fetch(&g_bpmstate_pins, 1, __ATOMIC_RELAXED) > BPMSTATE_PIN_MAX) {
-        __atomic_add_fetch(&g_bpmstate_refused, 1, __ATOMIC_RELAXED);
-        return 0;
-    }
-    __atomic_add_fetch((int *) (ctrl + BPMCTRL_WEAK), 1, __ATOMIC_ACQ_REL); /* our weak_ptr */
-    __atomic_store_n(&g_bpmstate_id[d], id, __ATOMIC_RELAXED);
-    __atomic_store_n(&g_bpmstate[d], self, __ATOMIC_RELEASE);
-    return 1;
-}
-/* Any thread. Deck d's live (and analyzed) BPM, 1 on a read made while the object was alive and
- * still deck d's; 0 = unknown. track may be NULL. */
-static int bpmstate_read(int d, double *live, double *track) {
     if (d < 0 || d >= AZMOD_STEM_DECKS)
         return 0;
+    if (pthread_mutex_lock(&g_bpmstate_mu) != 0) return 0;
+    int accepted = 0;
+    if (!self || self < BPMCTRL_OFF || (self & 7) || !want_vt) goto done;
+    unsigned long ctrl = self - BPMCTRL_OFF;
+    if (*(volatile uintptr_t *) ctrl != want_vt) goto done;
+    unsigned long id = *(volatile unsigned long *) (self + BPMSTATE_DECK);
+    if ((id & 0xff) != (unsigned long) d) goto done;
+    int pins = __atomic_load_n(&g_bpmstate_pins, __ATOMIC_RELAXED);
+    if (pins >= BPMSTATE_PIN_MAX) {
+        __atomic_add_fetch(&g_bpmstate_refused, 1, __ATOMIC_RELAXED);
+        goto done;
+    }
+    int *weak = (int *) (ctrl + BPMCTRL_WEAK);
+    int count = __atomic_load_n(weak, __ATOMIC_ACQUIRE);
+    if (count <= 0 || count == INT_MAX) goto done;
+    if (!__atomic_compare_exchange_n(weak, &count, count + 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) goto done;
+    __atomic_store_n(&g_bpmstate_pins, pins + 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_bpmstate_id[d], id, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_bpmstate_generation[d], (unsigned long) pins + 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_bpmstate[d], self, __ATOMIC_RELEASE);
+    accepted = 1;
+done:
+    if (!accepted) {
+        __atomic_store_n(&g_bpmstate[d], 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_bpmstate_generation[d], 0, __ATOMIC_RELAXED);
+    }
+    pthread_mutex_unlock(&g_bpmstate_mu);
+    return accepted;
+}
+static int bpmstate_hold(unsigned long ctrl) {
+    int *use = (int *) (ctrl + BPMCTRL_USE);
+    int count = __atomic_load_n(use, __ATOMIC_ACQUIRE);
+    for (unsigned attempt = 0; attempt < 16 && count > 0 && count < INT_MAX; ++attempt)
+        if (__atomic_compare_exchange_n(use, &count, count + 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return 1;
+    return 0;
+}
+static void bpmstate_release(unsigned long ctrl) {
+    if (__atomic_fetch_sub((int *) (ctrl + BPMCTRL_USE), 1, __ATOMIC_ACQ_REL) != 1) return;
+    void (**vtable)(void *) = *(void (***)(void *)) ctrl;
+    vtable[2]((void *) ctrl); /* GNU _Sp_counted_base::_M_dispose */
+    if (__atomic_fetch_sub((int *) (ctrl + BPMCTRL_WEAK), 1, __ATOMIC_ACQ_REL) == 1)
+        vtable[3]((void *) ctrl); /* _M_destroy; our retained weak normally prevents this */
+}
+/* GUI polling context only: native destruction may run on final shared release.
+ * Public SDK readers consume the separate copied receipt, never this native lease. */
+static int bpmstate_sample(int d, double *live, double *track, uint64_t *generation) {
+    if (live) *live = 0.0;
+    if (track) *track = 0.0;
+    if (generation) *generation = 0;
+    if (d < 0 || d >= AZMOD_STEM_DECKS || !live) return 0;
+    if (pthread_mutex_lock(&g_bpmstate_mu) != 0) return 0;
     unsigned long obj = __atomic_load_n(&g_bpmstate[d], __ATOMIC_ACQUIRE);
-    if (!obj)
-        return 0;
-    const int *use = (const int *) (obj - BPMCTRL_OFF + BPMCTRL_USE);
-    if (__atomic_load_n(use, __ATOMIC_ACQUIRE) <= 0)
-        return 0; /* disposed: EP147 has let go of it */
+    unsigned long expected = __atomic_load_n(&g_bpmstate_id[d], __ATOMIC_RELAXED);
+    unsigned long serial = __atomic_load_n(&g_bpmstate_generation[d], __ATOMIC_RELAXED);
+    pthread_mutex_unlock(&g_bpmstate_mu);
+    if (!obj || !serial || !bpmstate_hold(obj - BPMCTRL_OFF)) return 0;
     unsigned long id = __atomic_load_n((const unsigned long *) (obj + BPMSTATE_DECK), __ATOMIC_RELAXED);
     uint64_t lv = __atomic_load_n((const uint64_t *) (obj + BPMSTATE_LIVE), __ATOMIC_RELAXED);
     uint64_t tv = __atomic_load_n((const uint64_t *) (obj + BPMSTATE_TRACK), __ATOMIC_RELAXED);
-    __atomic_thread_fence(__ATOMIC_ACQUIRE);
-    if (__atomic_load_n(use, __ATOMIC_RELAXED) <= 0)
-        return 0; /* disposed while we read */
-    if (id != __atomic_load_n(&g_bpmstate_id[d], __ATOMIC_RELAXED))
-        return 0;
+    int same = 0;
+    if (pthread_mutex_lock(&g_bpmstate_mu) == 0) {
+        same = id == expected && (id & 0xff) == (unsigned long) d &&
+               obj == __atomic_load_n(&g_bpmstate[d], __ATOMIC_ACQUIRE) &&
+               serial == __atomic_load_n(&g_bpmstate_generation[d], __ATOMIC_RELAXED);
+        pthread_mutex_unlock(&g_bpmstate_mu);
+    }
+    bpmstate_release(obj - BPMCTRL_OFF);
+    if (!same) return 0;
     memcpy(live, &lv, sizeof *live);
-    if (track)
-        memcpy(track, &tv, sizeof *track);
+    if (track) memcpy(track, &tv, sizeof *track);
+    if (generation) *generation = serial;
     return 1;
+}
+static int bpmstate_read(int d, double *live, double *track) {
+    return bpmstate_sample(d, live, track, NULL);
+}
+/* Public-thread admission checks metadata only. Successful capture already
+ * retained this GNU control's weak count for process lifetime, so its atomic
+ * use count remains readable after the native pointee is gone. Never promote,
+ * inspect the pointee, run a native destructor or wait on its publisher here. */
+static int bpmstate_current(int d, uint64_t generation) {
+    if (d < 0 || d >= AZMOD_STEM_DECKS || !generation || pthread_mutex_trylock(&g_bpmstate_mu)) return 0;
+    unsigned long object = __atomic_load_n(&g_bpmstate[d], __ATOMIC_ACQUIRE);
+    unsigned long current = __atomic_load_n(&g_bpmstate_generation[d], __ATOMIC_RELAXED);
+    int ok = 0;
+    if (object && current == generation) {
+        int count = __atomic_load_n((const int *) (object - BPMCTRL_OFF + BPMCTRL_USE), __ATOMIC_ACQUIRE);
+        ok = count > 0 && count < INT_MAX;
+    }
+    pthread_mutex_unlock(&g_bpmstate_mu);
+    return ok;
 }
 
 static void bpmctor_hook(long self, long deck, long a3, long a4) {
@@ -243,25 +298,90 @@ static float drum_feed_bpm(int d, double live, int master, int master_ok, double
  * to the first's island and declines), so nothing else may hook this function. */
 #define MASTER_EXCHANGED EP_aabb78
 static long (*g_orig_master_xm)(void *, void *);
+static _Atomic int g_master_observer_ready;
+static int master_state_supported(void) {
+    return atomic_load_explicit(&g_master_observer_ready, memory_order_acquire);
+}
 static _Atomic int g_master_deck = -1;
+/* Public readers copy only this receipt, never the borrowed SyncMemberID. An
+ * event invalidates the previous receipt before trying to publish; contention
+ * or overlapping callbacks must not leave an older master looking current. */
+static _Atomic uint64_t g_master_event;
+static pthread_mutex_t g_master_state_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct {
+    uint64_t revision, observed_ns, last_ns;
+    int deck;
+} g_master_state = {0, 0, 0, -1};
+static uint64_t master_event_next(void) {
+    uint64_t old = atomic_load_explicit(&g_master_event, memory_order_relaxed);
+    for (unsigned tries = 0; tries < 8 && old != UINT64_MAX; ++tries) {
+        if (atomic_compare_exchange_weak_explicit(&g_master_event, &old, old + 1,
+                                                  memory_order_acq_rel, memory_order_relaxed))
+            return old + 1;
+    }
+    /* Exhaustion or sustained writer contention permanently closes admission;
+     * no unnumbered callback may leave a previous receipt looking current. */
+    atomic_store_explicit(&g_master_event, UINT64_MAX, memory_order_release);
+    return 0;
+}
+static int master_state_read(int *deck, uint64_t *revision, uint64_t *observed_ns) {
+    if (!deck || !revision || !observed_ns || pthread_mutex_trylock(&g_master_state_mu))
+        return 0;
+    uint64_t current = atomic_load_explicit(&g_master_event, memory_order_acquire);
+    int ok = current && current != UINT64_MAX && g_master_state.revision == current &&
+             g_master_state.deck >= 0 && g_master_state.deck < AZMOD_STEM_DECKS &&
+             g_master_state.observed_ns;
+    if (ok) {
+        *deck = g_master_state.deck;
+        *revision = current;
+        *observed_ns = g_master_state.observed_ns;
+    }
+    pthread_mutex_unlock(&g_master_state_mu);
+    return ok;
+}
 static long master_xm_hook(void *self, void *id) {
+    /* Reserve the event at entry: a nested/newer confirmation can complete
+     * before this original returns and must not be replaced by this argument. */
+    uint64_t revision = master_event_next();
     long r = g_orig_master_xm(self, id);
+    int saved_errno = errno;
     uintptr_t w = 0;
     int m = -1;
     /* id: this call's own argument (const SyncMemberID&), live for the call */
     if (id && own_q((uintptr_t) id, &w) && (uint32_t) w == 1 && (w >> 32) < AZMOD_STEM_DECKS)
         m = (int) (w >> 32);
-    if (__atomic_exchange_n(&g_master_deck, m, __ATOMIC_RELAXED) != m) {
+    struct timespec ts;
+    uint64_t now = 0;
+    if (!clock_gettime(CLOCK_MONOTONIC, &ts) && ts.tv_sec >= 0 && ts.tv_nsec >= 0 &&
+        ts.tv_nsec < 1000000000 && (uint64_t) ts.tv_sec <= (UINT64_MAX - (uint64_t) ts.tv_nsec) / 1000000000)
+        now = (uint64_t) ts.tv_sec * 1000000000 + (uint64_t) ts.tv_nsec;
+    if (!pthread_mutex_trylock(&g_master_state_mu)) {
+        if (revision && revision == atomic_load_explicit(&g_master_event, memory_order_acquire)) {
+            g_master_state.revision = revision;
+            int clock_order = compare_timestamps(now, g_master_state.last_ns, 1000000000, 1000000000, 1);
+            g_master_state.deck = m >= 0 && clock_order == AZ_TIME_AFTER ? m : -1;
+            g_master_state.observed_ns = g_master_state.deck >= 0 ? now : 0;
+            if (clock_order == AZ_TIME_AFTER) g_master_state.last_ns = now;
+        }
+        pthread_mutex_unlock(&g_master_state_mu);
+    }
+    if (revision && revision == atomic_load_explicit(&g_master_event, memory_order_acquire) &&
+        atomic_exchange_explicit(&g_master_deck, m, memory_order_relaxed) != m) {
         FILE *f = azlog_open("/tmp/azmod-drumbpm.log", "a");
         if (f) {
             fprintf(f, "master: deck%d (%s)\n", m + 1, m < 0 ? "none" : "set");
             fclose(f);
         }
     }
+    errno = saved_errno;
     return r;
 }
 static void install_master_hook(void) {
     int rc = azm_install_hook(MASTER_EXCHANGED, (void *) master_xm_hook, (void **) &g_orig_master_xm);
+    /* Feature support is installation, independent of whether a current
+     * master has been confirmed. A failed/partial install admits nothing. */
+    if (rc > 0 && g_orig_master_xm)
+        atomic_store_explicit(&g_master_observer_ready, 1, memory_order_release);
     FILE *f = azlog_open("/tmp/azmod-drumbpm.log", "a");
     if (f) {
         fprintf(f, "install master=%d (1=ok, -1=declined)\n", rc);

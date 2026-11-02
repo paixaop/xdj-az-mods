@@ -1,4 +1,12 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
+#include "../common/azloopobserver.h"
+#include "../common/azliveobserver.h"
+#include "../common/azcueobserver.h"
+#include "../common/azloadobserver.h"
+/* Private native observers, configured before EP147 constructs players. */
+static _Atomic int g_sdk_loop_on;
+static _Atomic int g_sdk_live_on;
+static _Atomic int g_sdk_load_on;
 /* ---- DjPlayerUnit ctor hook: seed the slot table from the deck argument ----
  * @0x14a2560: DjPlayerUnit(this=x0, const PlayerId *id=x1, void *ctx=x2, int cap=x3).
  * `id` is {u8 no; u56 tag; u32 no @+8}; the deck number appears twice and is
@@ -55,10 +63,29 @@ static void djpuctor_hook(void *self, const void *id, void *ctx, int cap) {
         int s = STEM_SLOT[n32];
         void *exp = NULL;
         atomic_fetch_add_explicit(&g_ctor_calls[n32], 1, memory_order_relaxed);
-        if (!atomic_compare_exchange_strong_explicit(&g_deck_self[s], &exp, self,
-                                                     memory_order_release, memory_order_relaxed) &&
-            exp != self)
+        int claimed = atomic_compare_exchange_strong_explicit(&g_deck_self[s], &exp, self,
+                                                              memory_order_release, memory_order_relaxed);
+        if (!claimed && exp != self)
             atomic_fetch_or_explicit(&g_ap_rebind, 1u << n32, memory_order_relaxed);
+        /* This call owns the fully constructed unit. The listener retains only a unique
+         * generation, never the unit/server pointers; its callback copies one scalar. */
+        if (g_sdk_loop_on && (claimed || exp == self) &&
+            *(const uintptr_t *) self == atomic_load_explicit(&g_djpu_vt, memory_order_relaxed))
+            (void) azsdk_loop_register((int) n32, self);
+        if (g_sdk_live_on && (claimed || exp == self) &&
+            *(const uintptr_t *) self == atomic_load_explicit(&g_djpu_vt, memory_order_relaxed))
+            (void) azsdk_live_register((int) n32, self);
+        if (g_sdk_live_on && (claimed || exp == self) &&
+            *(const uintptr_t *) self == atomic_load_explicit(&g_djpu_vt, memory_order_relaxed))
+            (void) azsdk_cue_register((int) n32, self);
+        /* The load tap validates the unit-owned facade here; retained pointer values are
+         * opaque callback identities and are retired before native unit teardown. */
+        if (g_sdk_load_on && (claimed || exp == self) &&
+            *(const uintptr_t *) self == atomic_load_explicit(&g_djpu_vt, memory_order_relaxed))
+        {
+            (void) azsdk_load_register((int) n32, self);
+            (void) azsdk_exit_register((int) n32, self);
+        }
         atomic_fetch_or_explicit(&g_ap_ctor, 1u << n32, memory_order_relaxed);
     }
 }
@@ -75,8 +102,14 @@ static djpudtor_fn g_orig_djpudtor = NULL;
 static _Atomic unsigned g_djpu_dtor_calls;
 static void djpudtor_hook(void *self) {
     for (int d = 0; d < NDECK; d++)
-        if (atomic_load_explicit(&g_deck_self[STEM_SLOT[d]], memory_order_acquire) == self)
+        if (atomic_load_explicit(&g_deck_self[STEM_SLOT[d]], memory_order_acquire) == self) {
+            azsdk_exit_retire(d);
+            if (g_sdk_loop_on) azsdk_loop_retire(d);
+            if (g_sdk_live_on) azsdk_cue_retire(d);
+            if (g_sdk_live_on) azsdk_live_retire(d);
+            if (g_sdk_load_on) azsdk_load_retire(d);
             atomic_store_explicit(&g_djpu_fgpr[d], 0, memory_order_release);
+        }
     for (int i = 0; i < MAX_DECKS; i++) {
         void *exp = self;
         atomic_compare_exchange_strong_explicit(&g_deck_self[i], &exp, NULL, memory_order_acq_rel,
@@ -129,6 +162,7 @@ struct lti_snap {
     _Atomic unsigned seq;
     _Atomic int valid;
     _Atomic uintptr_t owner;
+    _Atomic unsigned long long observed_ns;
     uint64_t id[2]; /* the 16-byte TrackID */
     uint64_t title[LTI_STR / 8];
     uint64_t artist[LTI_STR / 8];
@@ -201,6 +235,11 @@ static void lti_capture(int d, uintptr_t lti) {
         lti_copy_str(lti + LTI_TITLE_OFF, sn->title);
         lti_copy_str(lti + LTI_ARTIST_OFF, sn->artist);
     }
+    struct timespec observed;
+    clock_gettime(CLOCK_MONOTONIC, &observed);
+    atomic_store_explicit(&sn->observed_ns,
+                          (unsigned long long) observed.tv_sec * 1000000000ULL + observed.tv_nsec,
+                          memory_order_relaxed);
     atomic_store_explicit(&sn->owner, lti, memory_order_relaxed);
     atomic_store_explicit(&sn->valid, ok, memory_order_relaxed);
     lti_wunlock(sn, s);
