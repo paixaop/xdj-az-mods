@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/az-sdk-load-lifecycle.XXXXXX")
 trap 'rm -rf "$task_tmp"' EXIT
 # Extracted regions intentionally contain helpers unused by individual fixtures.
-flags=(-std=c11 -D_DEFAULT_SOURCE -O1 -g -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable -pthread -Itests/unit)
+flags=(-std=c11 -D_DEFAULT_SOURCE -O1 -g -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable -pthread -Itests/unit -Isrc/common)
 case ${SAN:-plain} in
 plain|'') ;;
 asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer) ;;
@@ -51,7 +51,8 @@ source = Path('src/azstem/azstem.c').read_text()
 a = source.index('        g_djpuctor_addr = (uintptr_t) v;')
 b = source.index('\n    }\n    /* gui::LoadState ctor', a)
 body = source[a:b]
-config = '''#include <stdatomic.h>
+config = '''#include "azexit.h"
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -86,7 +87,7 @@ static void azsdk_load_configure(int on,int build,patch_fn patch) { CHECK(on==1)
 static void azsdk_loop_configure(int on,int build) { (void)on;(void)build; }
 static void azsdk_live_configure(int on,int build) { (void)on;(void)build; }
 static void azsdk_cue_configure(int on,int build) { (void)on;(void)build; }
-static int azsdk_exit_configure(int on,int build,void *(*install)(uintptr_t,void*,void**)) { (void)on;(void)build;(void)install;return 0; }
+int azsdk_exit_configure(int on,int build,void *(*install)(uintptr_t,void*,void**)) { (void)on;(void)build;(void)install;return 0; }
 static void configure(unsigned long long v) {
 ''' + body + '''
 }

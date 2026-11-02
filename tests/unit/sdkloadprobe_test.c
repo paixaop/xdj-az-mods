@@ -2,6 +2,7 @@
 /* The private probe logger is tested from its actual source, without native objects. */
 #define _GNU_SOURCE
 #include "azloadexport.h"
+#include "aztimestamp.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
