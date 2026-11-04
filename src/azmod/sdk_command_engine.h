@@ -80,7 +80,7 @@ struct scmd_adapter {
 struct scmd_record {
     uint64_t token, execution_revision;
     int owner, phase, pinned, awaiting;
-    int asynchronous, acknowledged, terminal_delivered, released_delivered, callback_active;
+    int asynchronous, acknowledged, terminal_delivered, released_delivered, callback_active, control_requested;
     az_command_completion_fn callback;
     void *callback_user;
     enum scmd_detail detail;

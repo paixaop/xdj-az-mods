@@ -205,8 +205,10 @@ static void sdk_command_collect_retired(const struct azexit_service *api) {
                 scmd_finish(&g_sdk_commands, r, AZ_COMMAND_CANCELLED, AZ_CANCELLED, 0,
                             SCMD_DETAIL_NONE, scmd_now(&g_sdk_commands), 0);
             const struct azexit_delivery_v1 *delivery = sdk_exit_delivery(api);
-            if (r->awaiting && delivery && delivery->control)
+            if (r->awaiting && delivery && delivery->control && !r->control_requested) {
+                r->control_requested = 1;
                 (void) delivery->control(r->request.deck, r->token, AZ_CANCELLED);
+            }
             if (r->phase == SCMD_FINAL && !r->pinned && !r->awaiting && !r->callback_active) memset(r, 0, sizeof *r);
             else remaining = 1;
         }
@@ -281,7 +283,11 @@ static void sdk_command_drive(void) {
         if (token) {
             if (!pthread_mutex_trylock(&g_sdk_commands.mu)) {
                 struct scmd_record *record = scmd_find_token(&g_sdk_commands, token);
-                int expired = record && record->phase == SCMD_FINAL && record->awaiting;
+                uint64_t now = scmd_now(&g_sdk_commands);
+                int expired = record && record->phase == SCMD_FINAL && record->awaiting && now &&
+                              compare_timestamps(record->request.deadline_ns, now, 1000000000, 1000000000, 1) <= AZ_TIME_EQUAL &&
+                              !record->control_requested;
+                if (expired) record->control_requested = 1;
                 pthread_mutex_unlock(&g_sdk_commands.mu);
                 const struct azexit_delivery_v1 *delivery = sdk_exit_delivery(api);
                 if (expired && delivery && delivery->control)
@@ -301,7 +307,7 @@ static void sdk_command_arm_deadline(void) {
     if (!pthread_mutex_trylock(&g_sdk_commands.mu)) {
         for (unsigned i = 0; i < SCMD_SLOTS; ++i) {
             struct scmd_record *r = &g_sdk_commands.records[i];
-            if (r->phase == SCMD_FREE || r->phase == SCMD_FINAL || !r->request.deadline_ns) continue;
+            if (r->phase == SCMD_FREE || (r->phase == SCMD_FINAL && !r->awaiting) || !r->request.deadline_ns) continue;
             if (!nearest || r->request.deadline_ns < nearest) nearest = r->request.deadline_ns;
         }
         pthread_mutex_unlock(&g_sdk_commands.mu);
@@ -381,7 +387,17 @@ static void sdk_exit_cancel_request(int owner, uint64_t request_id) {
     unsigned deck = r ? r->request.deck : 0;
     pthread_mutex_unlock(&g_sdk_commands.mu);
     const struct azexit_delivery_v1 *delivery = sdk_exit_delivery(api);
-    if (token && delivery && delivery->control) (void) delivery->control(deck, token, AZ_CANCELLED);
+    if (token && delivery && delivery->control) {
+        int send = 0;
+        pthread_mutex_lock(&g_sdk_commands.mu);
+        struct scmd_record *record = scmd_find_token(&g_sdk_commands, token);
+        if (record && !record->control_requested) {
+            record->control_requested = 1;
+            send = 1;
+        }
+        pthread_mutex_unlock(&g_sdk_commands.mu);
+        if (send) (void) delivery->control(deck, token, AZ_CANCELLED);
+    }
 }
 static int sdk_exit_submit(int owner, const az_command_request *r, az_command_result *out) {
     const struct azexit_service *api = atomic_load_explicit(&g_sdk_exit_service, memory_order_acquire);
