@@ -23,6 +23,7 @@
 #include <cmath>
 #include <dlfcn.h>
 #include <exception>
+#include <initializer_list>
 #include <limits>
 #include <mutex>
 #include <time.h>
@@ -81,7 +82,8 @@ bool delivery_push(const azexit_receipt &value) noexcept {
                 cell.sequence.store(position + 1, std::memory_order_release);
 #if defined(__linux__)
                 uint64_t one = 1;
-                (void) write(d.fd, &one, sizeof one); /* already-readable/full is a valid wake */
+                ssize_t ignored = write(d.fd, &one, sizeof one);
+                (void) ignored; /* already-readable/full is a valid wake */
 #endif
                 return true;
             }

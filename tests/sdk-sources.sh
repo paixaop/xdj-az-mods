@@ -176,7 +176,7 @@ static void hook_tail(void *server, void *msg, unsigned param) {
 '''
 suffix = '''
 int main() {
-    int server, message = 0; expected_server = &server; expected_message = &message;
+    static int server, message; expected_server = &server; expected_message = &message;
     for (int on = 0; on < 2; ++on) {
         g_sdk_sources_on = on; stage = 0; owner = 1; source_calls = 0;
         hook_tail(expected_server, expected_message, 37);

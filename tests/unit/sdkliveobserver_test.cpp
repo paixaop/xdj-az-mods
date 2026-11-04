@@ -53,12 +53,19 @@ void *operator new[](std::size_t bytes, const std::nothrow_t &) noexcept {
         return nullptr;
     }
 }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmismatched-new-delete"
+#endif
 void operator delete(void *p) noexcept { std::free(p); }
 void operator delete[](void *p) noexcept { std::free(p); }
 void operator delete(void *p, std::size_t) noexcept { std::free(p); }
 void operator delete[](void *p, std::size_t) noexcept { std::free(p); }
 void operator delete(void *p, const std::nothrow_t &) noexcept { ::operator delete(p); }
 void operator delete[](void *p, const std::nothrow_t &) noexcept { ::operator delete[](p); }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 static void allocator_contract() {
     for (unsigned array = 0; array < 2; ++array) {
@@ -269,9 +276,9 @@ static void validation() {
     std::memcpy(bad_table, reinterpret_cast<const void *>(original - 16), sizeof bad_table);
     bad_table[2 + 19] = reinterpret_cast<std::uintptr_t>(bad_table);
     std::uintptr_t forged = reinterpret_cast<std::uintptr_t>(bad_table + 2);
-    std::memcpy(&f.server, &forged, sizeof forged);
+    reinterpret_cast<std::uintptr_t *>(&f.server)[0] = forged;
     CHECK(!azsdk_live_register(0, &f.unit));
-    std::memcpy(&f.server, &original, sizeof original);
+    reinterpret_cast<std::uintptr_t *>(&f.server)[0] = original;
     CHECK(azsdk_live_register(0, &f.unit));
     CHECK(azsdk_live_capabilities() == 1 && !azsdk_live_register(0, &f.unit));
     for (unsigned s = 0; s < 4; ++s) CHECK(f.server.listeners[s].size() == 1);

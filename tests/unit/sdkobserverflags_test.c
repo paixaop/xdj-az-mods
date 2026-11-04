@@ -68,9 +68,10 @@ static void *readers(void *live_only) {
 int main(void) {
     assert(!azstem_loop_observer_mask_v1() && !azstem_live_observer_mask_v1());
     pthread_t writer, first, second;
+    static int live_reader;
     assert(!pthread_create(&writer, NULL, configure, NULL));
     assert(!pthread_create(&first, NULL, readers, NULL));
-    assert(!pthread_create(&second, NULL, readers, &second));
+    assert(!pthread_create(&second, NULL, readers, &live_reader));
     atomic_store(&start, 1);
     assert(!pthread_join(writer, NULL) && !pthread_join(first, NULL) && !pthread_join(second, NULL));
     g_sdk_loop_on = g_sdk_live_on = 0;

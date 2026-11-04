@@ -62,7 +62,8 @@ void azsdk_exit_command_wake(void) {
 static void sdk_ui_wake(void) {
     if (g_sdk_ui_fd >= 0) {
         uint64_t one = 1;
-        (void) write(g_sdk_ui_fd, &one, sizeof one);
+        ssize_t ignored = write(g_sdk_ui_fd, &one, sizeof one);
+        (void) ignored;
     }
 }
 static int sdk_exit_has_cues(const struct azexit_service *api) {
@@ -280,7 +281,7 @@ static void sdk_command_drive(void) {
     const struct azexit_service *api = atomic_load_explicit(&g_sdk_exit_service, memory_order_acquire);
     if (!api || atomic_flag_test_and_set_explicit(&g_sdk_exit_driver, memory_order_acquire)) return;
     sdk_command_collect_retired(api);
-    if (azsdk_cue_commands_drive) azsdk_cue_commands_drive();
+    azsdk_cue_commands_drive();
     /* Native execution publishes receipts.  A delayed wake cannot rewrite a
      * committed result; consume is the only bridge between native and core. */
     sdk_exit_consume(api);
