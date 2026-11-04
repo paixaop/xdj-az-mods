@@ -41,7 +41,8 @@ static int sdk_timerfd_create(void) {
 static void sdk_command_wake(void) {
     if (g_sdk_command_fd >= 0) {
         uint64_t one = 1;
-        (void) write(g_sdk_command_fd, &one, sizeof one);
+        ssize_t ignored = write(g_sdk_command_fd, &one, sizeof one);
+        (void) ignored;
     }
 }
 void azsdk_exit_command_wake(void) {
@@ -53,30 +54,6 @@ static void sdk_ui_wake(void) {
         (void) write(g_sdk_ui_fd, &one, sizeof one);
     }
 }
-static int sdk_command_has_pending_notification(void) {
-    int pending = 0;
-    pthread_mutex_lock(&g_sdk_commands.mu);
-    for (unsigned i = 0; i < SCMD_SLOTS; ++i) {
-        struct scmd_record *r = &g_sdk_commands.records[i];
-        if (r->asynchronous && r->phase == SCMD_FINAL && r->callback &&
-            (!r->terminal_delivered || (r->acknowledged && !r->awaiting && !r->released_delivered))) {
-            pending = 1;
-            break;
-        }
-    }
-    if (!pending) {
-        for (unsigned i = 0; i < SCMD_SLOTS; ++i) {
-            struct scmd_pending_delivery *p = &g_sdk_commands.pending[i];
-            if (p->occupied && !p->released_delivered) {
-                pending = 1;
-                break;
-            }
-        }
-    }
-    pthread_mutex_unlock(&g_sdk_commands.mu);
-    return pending;
-}
-
 static int sdk_exit_has_cues(const struct azexit_service *api) {
     return api && api->size >= AZEXIT_SERVICE_CUE_SIZE && api->commands && api->submit_cue && api->target_cue;
 }

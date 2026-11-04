@@ -4,7 +4,32 @@
  * owner-thread adapter; unsupported operations create no retained request. */
 #include "sdk_command_engine.h"
 static struct scmd_engine g_sdk_commands = SCMD_ENGINE_INIT;
+static int sdk_command_has_pending_notification(void);
 #include "sdk_exit_bridge.c"
+
+static int sdk_command_has_pending_notification(void) {
+    int pending = 0;
+    pthread_mutex_lock(&g_sdk_commands.mu);
+    for (unsigned i = 0; i < SCMD_SLOTS; ++i) {
+        struct scmd_record *r = &g_sdk_commands.records[i];
+        if (r->asynchronous && r->phase == SCMD_FINAL && r->callback &&
+            (!r->terminal_delivered || (r->acknowledged && !r->awaiting && !r->released_delivered))) {
+            pending = 1;
+            break;
+        }
+    }
+    if (!pending) {
+        for (unsigned i = 0; i < SCMD_SLOTS; ++i) {
+            struct scmd_pending_delivery *p = &g_sdk_commands.pending[i];
+            if (p->occupied && !p->released_delivered) {
+                pending = 1;
+                break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_sdk_commands.mu);
+    return pending;
+}
 
 static int sdk_command_poll(const char *id, uint64_t request_id, az_command_result *out) {
     int owner = st_mod_owner(id, CM_RA(), "command_poll");
