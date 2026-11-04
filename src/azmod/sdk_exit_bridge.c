@@ -2,6 +2,8 @@
 /* Included by sdk_command.c. Native execution uses a scalar mailbox, so neither
  * the engine mutex nor a mod callback ever runs inside the native owner hook. */
 #include "../common/azexit.h"
+#include "../common/azcuecommands.h"
+__attribute__((weak)) void azsdk_cue_commands_drive(void) {}
 #include <stdatomic.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -41,6 +43,9 @@ static void sdk_command_wake(void) {
         uint64_t one = 1;
         (void) write(g_sdk_command_fd, &one, sizeof one);
     }
+}
+void azsdk_exit_command_wake(void) {
+    sdk_command_wake();
 }
 static void sdk_ui_wake(void) {
     if (g_sdk_ui_fd >= 0) {
@@ -272,6 +277,7 @@ static void sdk_command_drive(void) {
     const struct azexit_service *api = atomic_load_explicit(&g_sdk_exit_service, memory_order_acquire);
     if (!api || atomic_flag_test_and_set_explicit(&g_sdk_exit_driver, memory_order_acquire)) return;
     sdk_command_collect_retired(api);
+    if (azsdk_cue_commands_drive) azsdk_cue_commands_drive();
     /* Native execution publishes receipts.  A delayed wake cannot rewrite a
      * committed result; consume is the only bridge between native and core. */
     sdk_exit_consume(api);

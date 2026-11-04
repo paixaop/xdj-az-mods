@@ -39,6 +39,8 @@
 #endif
 #include "sdk_exit_profiles.h"
 
+extern "C" __attribute__((weak)) void azsdk_cue_commands_notify(unsigned) noexcept {}
+
 namespace {
 constexpr unsigned DELIVERY_CELLS = 256;
 struct DeliveryCell {
@@ -1140,6 +1142,7 @@ bool loop_postcondition(Slot &slot) noexcept {
 }
 
 void emit_receipt(const Slot &slot, unsigned kind, unsigned settled) noexcept {
+    if (slot.internal_recall.load(std::memory_order_acquire)) return;
     azexit_receipt receipt = {};
     receipt.size = sizeof receipt;
     receipt.version = AZEXIT_DELIVERY_VERSION;
@@ -1161,6 +1164,8 @@ void finish(Slot &slot, unsigned outcome, int reason, uint64_t revision = 0) noe
      * native allocation can be released without another owner-thread action.
      * Producers that genuinely retain work publish a later SETTLED receipt. */
     emit_receipt(slot, AZEXIT_RECEIPT_TERMINAL, 1u);
+    if (slot.internal_recall.load(std::memory_order_acquire))
+        azsdk_cue_commands_notify(unsigned(&slot - state().decks));
 }
 void execute_move_tail(unsigned deck, Slot &slot) noexcept {
     uint64_t time = now(), token = slot.request.token;

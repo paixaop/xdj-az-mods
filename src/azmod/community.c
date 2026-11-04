@@ -2224,9 +2224,6 @@ static void community_init(void) {
 /* Every overlay tick. Cheap with no live mod. */
 static void sdk_confirm_tick(void);
 static void community_tick(void) {
-#ifndef SDK_PROC_IMPL
-    sdk_cue_tick();
-#endif
     sdk_confirm_tick(); /* the dialog: also the core's own questions, with no mod loaded */
     if (!g_cm_n) return;
     sdk_rows_tick();    /* rows of mods that stopped leave the menu, also when none runs */

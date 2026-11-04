@@ -17,6 +17,7 @@
 extern "C" __attribute__((weak)) int azsdk_exit_delivery_publish(const azexit_receipt *) noexcept {
     return AZ_UNSUPPORTED;
 }
+extern "C" __attribute__((weak)) void azsdk_cue_commands_notify(unsigned) noexcept {}
 
 namespace {
 constexpr unsigned TAGS = 512;
@@ -110,6 +111,7 @@ void finish(Slot &slot, unsigned outcome, int reason) {
         receipt.reason = slot.result.reason;
         (void) azsdk_exit_delivery_publish(&receipt);
     }
+    azsdk_cue_commands_notify(slot.request.identity.deck);
 }
 bool matches(const Tag &tag, const Slot &slot) {
     return tag.epoch == slot.epoch && tag.manager == slot.manager &&

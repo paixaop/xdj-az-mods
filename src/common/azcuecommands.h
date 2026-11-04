@@ -17,6 +17,8 @@ int azsdk_cue_commands_cancel(unsigned, uint64_t) AZCUECOMMANDS_NOEXCEPT;
 int azsdk_cue_commands_poll(unsigned, struct azexit_result *) AZCUECOMMANDS_NOEXCEPT;
 int azsdk_cue_commands_release(unsigned, uint64_t) AZCUECOMMANDS_NOEXCEPT;
 void azsdk_cue_commands_tick(void) AZCUECOMMANDS_NOEXCEPT;
+void azsdk_cue_commands_drive(void) AZCUECOMMANDS_NOEXCEPT;
+void azsdk_cue_commands_notify(unsigned) AZCUECOMMANDS_NOEXCEPT;
 int azsdk_cue_commands_native_cues(unsigned, struct az_native_cue_snapshot *) AZCUECOMMANDS_NOEXCEPT;
 #ifdef AZSDK_CUE_COMMANDS_TESTING
 void azsdk_cue_commands_test_time(uint64_t) AZCUECOMMANDS_NOEXCEPT;

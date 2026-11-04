@@ -67,11 +67,13 @@ struct State {
     azcuestore::Profile store;
     int build = 0;
     uintptr_t bias = 0;
+    std::atomic<unsigned> notifications {0};
 };
 State &state() {
     static State value;
     return value;
 }
+extern "C" __attribute__((weak)) void azsdk_exit_command_wake(void) noexcept {}
 bool unfinished_public_work() noexcept {
     State &s = state();
     for (unsigned deck = 0; deck < 4; ++deck) {
@@ -132,6 +134,7 @@ void ready(unsigned deck, uint64_t token, void *) {
     // make that reply wait for the frame lock; retain a bounded continuation.
     if (deck < 4 && token && azsdk_cue_actor_resume(deck, token) == AZ_BUSY)
         state().pending[deck].resume.store(token, std::memory_order_release);
+    azsdk_exit_command_wake();
 }
 template <class T>
 T read(const void *p, unsigned offset) {
@@ -872,6 +875,16 @@ extern "C" void azsdk_cue_commands_tick(void) noexcept {
         }
         azsdk_cue_actor_drive(deck);
     }
+}
+
+extern "C" void azsdk_cue_commands_notify(unsigned deck) noexcept {
+    if (deck < 4) state().notifications.fetch_or(1u << deck, std::memory_order_release);
+    azsdk_exit_command_wake();
+}
+
+extern "C" void azsdk_cue_commands_drive(void) noexcept {
+    if (!state().notifications.exchange(0, std::memory_order_acq_rel)) return;
+    azsdk_cue_commands_tick();
 }
 
 #ifdef AZSDK_CUE_COMMANDS_TESTING
