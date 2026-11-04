@@ -2852,19 +2852,20 @@ static useconds_t ov_tick_us(void) {
  * of the tick. A tick is never shorter than OV_MIN_TICK_US, however busy the connection. */
 #define OV_MIN_TICK_US 4000
 static void ov_wait(struct overlay_ctx *c, useconds_t us, long start_ms) {
-    if (us > OV_MIN_TICK_US)
-        usleep(OV_MIN_TICK_US);
-    else {
-        usleep(us);
-        return;
-    }
-    if (XEventsQueued(c->dpy, QueuedAlready) > 0)
-        return;
     long left = (long) (us / 1000) - (now_ms() - start_ms);
-    if (left <= 0)
-        return;
-    struct pollfd p = {.fd = ConnectionNumber(c->dpy), .events = POLLIN};
-    poll(&p, 1, (int) left);
+    if (left < 0) left = 0;
+    struct pollfd p[2] = {
+        {.fd = ConnectionNumber(c->dpy), .events = POLLIN},
+        {.fd = sdk_command_ui_fd(), .events = POLLIN}
+    };
+    nfds_t n = p[1].fd >= 0 ? 2 : 1;
+    if (XEventsQueued(c->dpy, QueuedAlready) > 0) left = 0;
+    (void) poll(p, n, (int) left);
+    if (n == 2 && (p[1].revents & POLLIN)) {
+        /* Completion delivery is a separate overlay phase, outside
+         * community_tick, visibility checks and the ordinary pacing loop. */
+        (void) sdk_command_ui_drain(8);
+    }
 }
 
 /* The Mod Menu's thread: owns g_state and every overlay window. */

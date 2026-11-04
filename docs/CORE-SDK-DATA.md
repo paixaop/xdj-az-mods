@@ -335,7 +335,8 @@ persistence. Native operations can reposition playback.
 
 All operations share per-deck FIFO ordering, load/lifetime checks, deadlines,
 cancellation and correlated Slip/BeatSync/Quantize descendant tracking. Poll
-`command_poll` until terminal, then `command_release`. `ACCEPTED` can span
+Use `command_submit_async`, acknowledge the validated terminal callback, then await
+`RELEASED`; legacy `command_poll`/`command_release` remain compatibility-only. `ACCEPTED` can span
 processing frames. `APPLIED` requires settled descendants and the operation's
 checked postcondition on the same load; clamped/no-op or partial adjustments
 cannot count as successful exact edits. Its revision is the shared transient

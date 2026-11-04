@@ -1502,6 +1502,8 @@ static void sdk_ui_tick(void);
 #endif
 
 #ifndef SDK_PROC_IMPL
+#include "sdk_data_callbacks.c"
+
 static const az_library_v1 g_sdk_library = {
     .abi = AZ_LIBRARY_ABI,
     .size = sizeof(az_library_v1),
@@ -1525,6 +1527,10 @@ static const az_library_v1 g_sdk_library = {
     .command_cancel = sdk_command_cancel,
     .command_release = sdk_command_release,
     .native_cues = sdk_native_cues,
+    .on_data_event = sdk_on_data_event,
+    .on_command_complete = sdk_on_command_complete,
+    .command_submit_async = sdk_command_submit_async,
+    .command_acknowledge = sdk_command_acknowledge,
 };
 static const az_library_v1 *sdk_library_service(uint32_t abi) {
     return abi == AZ_LIBRARY_ABI ? &g_sdk_library : NULL;
@@ -2017,8 +2023,9 @@ static void community_init(void) {
         azexit_service_fn get_exit;
         *(void **) &get_exit = dlsym(RTLD_DEFAULT, "azstem_exit_service_v1");
         const struct azexit_service *api = get_exit ? get_exit() : NULL;
-        if (api && api->version == 1 && api->size >= AZEXIT_SERVICE_V1_SIZE && api->mask && api->target &&
-            api->submit && api->cancel && api->poll && api->release)
+        if (api && api->version == 1 && api->size >= AZEXIT_SERVICE_DELIVERY_SIZE && api->mask && api->target &&
+            api->submit && api->cancel && api->poll && api->release && api->delivery &&
+            api->delivery->version == AZEXIT_DELIVERY_VERSION && sdk_command_start(api) == AZ_OK)
             atomic_store_explicit(&g_sdk_exit_service, api, memory_order_release);
     }
 #endif
@@ -2273,6 +2280,9 @@ static void community_tick(void) {
         unsigned rf = __atomic_exchange_n(&c->fq.refused, 0, __ATOMIC_RELAXED);
         if (rf) cm_logf(c, 1, "%u calls to settings or file services from on_frame were refused (allowed in tick, the page callbacks and your own threads)", rf);
     }
+#ifndef SDK_PROC_IMPL
+    sdk_data_callbacks_tick();                  /* works for mods with no tick callback */
+#endif
     sdk_deck_tick(now);                          /* deck events, before the mods' ticks */
     if(azsdk_slip_collect_v1)azsdk_slip_collect_v1();
     sdk_ui_tick();                               /* the mods' post_ui callbacks */

@@ -80,7 +80,7 @@ address tables and are not newly certified. No mappings were added to generated 
 | RGB / three-band preview | PWV4 raw six-byte / PWV6 raw three-byte columns | Canonical headers 24/20; bounded streaming windows | Development local USB; approximate duration/count axis, usable metadata required |
 | Mono / tiny preview windows | PWAV / PWV2 raw byte columns | Canonical 20-byte count/header-word layout; DAT streaming windows | Development local USB; approximate duration/count axis, usable metadata required |
 | Calibrated waveform rendering | Native gains/gamma/frequency cutoffs | Not verified | Out of scope; not required for SDK completion |
-| Change events | Owner-scoped sequence, ticket, revision, time | 64-entry polling publication journal | Implemented for track data/invalidation; missed flag |
+| Change events | Owner-scoped sequence, ticket, revision, time | 64-entry publication journal; optional UI callback | Implemented for track data/invalidation; missed flag |
 
 Native ownership evidence: `deck_track_map.c` documents LoadState's constructor signature
 (eight arguments; deck in w4, checked against magic and deck field), destructor invalidation,
@@ -138,8 +138,9 @@ this side effect. These are transient native edits, not verified saved-track
 persistence. Native operations can reposition playback.
 
 All operations share per-deck FIFO ordering, load/lifetime checks, deadlines,
-cancellation and correlated Slip/BeatSync/Quantize descendant tracking. Poll
-`command_poll` until terminal, then `command_release`. `ACCEPTED` can span
+cancellation and correlated Slip/BeatSync/Quantize descendant tracking. Submit through
+`command_submit_async`, acknowledge the validated `TERMINAL` callback, then await
+`RELEASED`; legacy `command_poll`/`command_release` remain compatibility-only. `ACCEPTED` can span
 processing frames. `APPLIED` requires settled descendants and the operation's
 checked postcondition on the same load; clamped/no-op or partial adjustments
 cannot count as successful exact edits. Its revision is the shared transient
@@ -150,8 +151,8 @@ Saved cue writes require `AZ_COMMAND_PERSIST`. Revision-selected operations
 also use `AZ_COMMAND_NATIVE_CUE_IDS` and the exact revision/entry ID returned by
 `native_cues`; file-provider IDs are not interchangeable with native IDs. Saved
 and Memory recall use native-load/native-cue-ID flags without the persistence
-flag. Poll to a terminal result, release it, and refresh the cue snapshot to the
-confirmed revision. Memory RGB accepts the native palette; Hot RGB supports the
+flag. Submit asynchronously, acknowledge the validated terminal callback, await
+`RELEASED`, and refresh the cue snapshot to the confirmed revision. Memory RGB accepts the native palette; Hot RGB supports the
 requested 24-bit color. See the public header for exact operation arguments.
 
 | Operation | Native confirmation |

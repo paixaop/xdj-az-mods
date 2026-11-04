@@ -14,7 +14,7 @@ import time
 from sdk_emulator_controls import MissingEvidence
 
 FIELDS = set('v seq event id deck op target_load rc outcome reason revision receipt_ns query_ns load_valid native_load load_unit load_ns loop_unit loop_rev loop_ns engaged_valid engaged bounds_valid in out'.split())
-EVENTS = {'submit', 'poll', 'cancel', 'release', 'snapshot', 'refused'}
+EVENTS = {'submit', 'poll', 'cancel', 'release', 'snapshot', 'refused', 'terminal', 'acknowledge', 'released'}
 UINT = re.compile(r'0|[1-9][0-9]*')
 INT = re.compile(r'0|[1-9][0-9]*|-[1-9][0-9]*')
 DECIMAL = re.compile(r'-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?')
@@ -206,7 +206,7 @@ class LoopClient:
             raise ValueError('probe request ID space exhausted')
         identity = self.next_id
         self.send_request(request(self.pid, 'submit', identity, deck, operation, before['native_load'], before['query_ns'] + 10_000_000_000, **arguments))
-        terminal = self.wait(lambda r: r['id'] == identity and r['event'] in ('submit', 'poll', 'refused') and r['outcome'] != 0)
+        terminal = self.wait(lambda r: r['id'] == identity and r['event'] in ('submit', 'poll', 'terminal', 'refused') and r['outcome'] != 0)
         if terminal['deck'] != deck or terminal['op'] != operation:
             raise ValueError('cross-request command receipt')
         # Validate result identity before permitting any state-observer retry.
@@ -214,7 +214,7 @@ class LoopClient:
             raise ValueError('command did not reach APPLIED')
         if terminal['target_load'] != before['native_load'] or not terminal['load_valid'] or terminal['native_load'] != before['native_load']:
             raise ValueError('command receipt belongs to a different native load')
-        released = self.wait(lambda r: r['id'] == identity and r['event'] == 'release' and r['rc'] == 0)
+        released = self.wait(lambda r: r['id'] == identity and r['event'] in ('release', 'released') and r['rc'] == 0)
         observed = terminal
         if operation not in (1, 6):
             deadline = self.clock() + self.timeout

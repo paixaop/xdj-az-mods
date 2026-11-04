@@ -16,9 +16,9 @@ enum az_timestamp_order {
  * Missing clocks/identities remain the caller's validity checks. Approximate
  * equality is not transitive: this comparator is not a sorting predicate. */
 static inline int az_compare_integer_timestamps(uint64_t first, uint64_t second,
-                                     uint64_t units_per_second,
-                                     uint64_t sample_rate,
-                                     uint64_t window_samples) {
+                                                uint64_t units_per_second,
+                                                uint64_t sample_rate,
+                                                uint64_t window_samples) {
     if (!units_per_second || !sample_rate || !window_samples) return AZ_TIME_INVALID;
     uint64_t difference = first > second ? first - second : second - first;
     if ((__uint128_t) difference * sample_rate < (__uint128_t) window_samples * units_per_second)
@@ -29,9 +29,9 @@ static inline int az_compare_integer_timestamps(uint64_t first, uint64_t second,
 /* Floating timestamps (normally seconds) keep their precision through the
  * difference calculation; integer clocks use the exact wide-integer path. */
 static inline int az_compare_floating_timestamps(long double first, long double second,
-                                                uint64_t units_per_second,
-                                                uint64_t sample_rate,
-                                                uint64_t window_samples) {
+                                                 uint64_t units_per_second,
+                                                 uint64_t sample_rate,
+                                                 uint64_t window_samples) {
     if (!units_per_second || !sample_rate || !window_samples ||
         !__builtin_isfinite(first) || !__builtin_isfinite(second)) return AZ_TIME_INVALID;
     long double difference = __builtin_fabsl(first - second);
@@ -56,26 +56,61 @@ static inline int compare_timestamps(__uint128_t first, __uint128_t second,
 }
 template <class First, class Second>
 static inline int compare_timestamps(First first, Second second,
-                                    uint64_t units_per_second,
-                                    uint64_t sample_rate,
-                                    uint64_t window_samples) {
+                                     uint64_t units_per_second,
+                                     uint64_t sample_rate,
+                                     uint64_t window_samples) {
     static_assert(std::is_arithmetic<First>::value && std::is_arithmetic<Second>::value,
                   "timestamps must be arithmetic values");
     if (std::is_integral<First>::value && std::is_integral<Second>::value) {
-        if (static_cast<__int128>(first) < 0 || static_cast<__int128>(second) < 0) return AZ_TIME_INVALID;
+        if ((std::is_signed<First>::value && first < 0) ||
+            (std::is_signed<Second>::value && second < 0)) return AZ_TIME_INVALID;
         return az_compare_integer_timestamps(static_cast<uint64_t>(first), static_cast<uint64_t>(second),
                                              units_per_second, sample_rate, window_samples);
     }
     return az_compare_floating_timestamps(first, second, units_per_second, sample_rate, window_samples);
 }
 #else
-/* C11 type selection dispatches to functions; no comparison expression is
- * duplicated at call sites, and each timestamp argument is evaluated once. */
-#define compare_timestamps(first, second, units, rate, window) \
-    _Generic(((first) + (second)), \
-        float: az_compare_floating_timestamps, \
-        double: az_compare_floating_timestamps, \
-        long double: az_compare_floating_timestamps, \
-        default: az_compare_integer_timestamps)((first), (second), (units), (rate), (window))
+/* Preserve each operand's signedness before the usual arithmetic conversions.
+ * The selected constructor evaluates its argument once. Floating comparisons
+ * deliberately retain signed coordinates, including mixed integer/float calls. */
+struct az_timestamp_operand {
+    uint64_t integer;
+    long double floating;
+    int is_floating, negative;
+};
+static inline struct az_timestamp_operand az_timestamp_signed(int64_t value) {
+    struct az_timestamp_operand out = {(uint64_t) value, (long double) value, 0, value < 0};
+    return out;
+}
+static inline struct az_timestamp_operand az_timestamp_unsigned(uint64_t value) {
+    struct az_timestamp_operand out = {value, (long double) value, 0, 0};
+    return out;
+}
+static inline struct az_timestamp_operand az_timestamp_floating(long double value) {
+    struct az_timestamp_operand out = {0, value, 1, 0};
+    return out;
+}
+static inline int az_compare_timestamp_operands(struct az_timestamp_operand first,
+                                                struct az_timestamp_operand second,
+                                                uint64_t units, uint64_t rate, uint64_t window) {
+    if (first.is_floating || second.is_floating)
+        return az_compare_floating_timestamps(first.floating, second.floating, units, rate, window);
+    if (first.negative || second.negative) return AZ_TIME_INVALID;
+    return az_compare_integer_timestamps(first.integer, second.integer, units, rate, window);
+}
+#define AZ_TIMESTAMP_OPERAND(value)                \
+    _Generic((value),                              \
+        float: az_timestamp_floating,              \
+        double: az_timestamp_floating,             \
+        long double: az_timestamp_floating,        \
+        unsigned char: az_timestamp_unsigned,      \
+        unsigned short: az_timestamp_unsigned,     \
+        unsigned int: az_timestamp_unsigned,       \
+        unsigned long: az_timestamp_unsigned,      \
+        unsigned long long: az_timestamp_unsigned, \
+        default: az_timestamp_signed)(value)
+#define compare_timestamps(first, second, units, rate, window)                               \
+    az_compare_timestamp_operands(AZ_TIMESTAMP_OPERAND(first), AZ_TIMESTAMP_OPERAND(second), \
+                                  (units), (rate), (window))
 #endif
 #endif

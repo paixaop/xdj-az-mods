@@ -102,13 +102,13 @@ def validate(text, kind, identity, deck, load, *, sample_rate=None):
                 raise MissingEvidence('refusal deadline cannot be distinguished from stale load')
             evidence.append(dict(request_id=request_id, operation=operation, before=before, terminal=submission))
             continue
-        terminal_rows = [r for r in all_rows if r['id'] == request_id and r['event'] in ('submit', 'poll') and r['outcome'] != 0]
+        terminal_rows = [r for r in all_rows if r['id'] == request_id and r['event'] in ('submit', 'poll', 'terminal') and r['outcome'] != 0]
         if not terminal_rows:
             raise MissingEvidence('native command terminal receipt unavailable')
         terminal = terminal_rows[-1]
         if (terminal['deck'], terminal['op'], terminal['target_load']) != (deck, operation, load):
             raise ValueError('cross-request native command terminal receipt')
-        releases = [r for r in all_rows if r['id'] == request_id and r['event'] == 'release' and r['rc'] == 0]
+        releases = [r for r in all_rows if r['id'] == request_id and r['event'] in ('release', 'released') and r['rc'] == 0]
         if len(releases) != 1 or releases[0]['seq'] < terminal['seq']:
             raise MissingEvidence('settled explicit native result release unavailable')
         next_submissions = [r['seq'] for r in all_rows if r['event'] == 'submit' and r['id'] == request_id + 1]

@@ -66,6 +66,28 @@ struct azexit_result {
     uint32_t outcome;
     int32_t reason;
 };
+/* Private producer-to-core delivery.  The payload is a copied receipt: no native
+ * object, function pointer, or mod-owned address crosses this boundary.  The
+ * producer owns the bounded cells until consume() copies one into core storage. */
+enum {
+    AZEXIT_DELIVERY_VERSION = 1u,
+    AZEXIT_RECEIPT_TERMINAL = 1u,
+    AZEXIT_RECEIPT_SETTLED = 2u,
+    AZEXIT_RECEIPT_RESOURCES_RETIRED = 3u
+};
+struct azexit_receipt {
+    uint32_t size, version, kind, settled, deck;
+    uint64_t token, load_generation, lifetime_generation, revision, observed_ns;
+    uint32_t outcome;
+    int32_t reason;
+};
+struct azexit_delivery_v1 {
+    uint32_t size, version;
+    int (*event_fd)(void);
+    int (*consume)(struct azexit_receipt *out);
+    int (*reclaim)(const struct azexit_receipt *receipt);
+    int (*control)(unsigned deck, uint64_t token, uint32_t reason);
+};
 struct az_native_cue_snapshot;
 struct azexit_service {
     uint32_t size, version;
@@ -84,12 +106,15 @@ struct azexit_service {
     /* Optional GUI collection; never invoked from public plugin calls. */
     void (*cue_tick)(void);
     int (*native_cues)(unsigned deck, struct az_native_cue_snapshot *out);
+    /* Versioned autonomous delivery, appended after the legacy polling prefix. */
+    const struct azexit_delivery_v1 *delivery;
 };
 #define AZEXIT_SERVICE_V1_SIZE offsetof(struct azexit_service, commands)
 #define AZEXIT_SERVICE_COMMAND_SIZE offsetof(struct azexit_service, submit_loop)
 #define AZEXIT_SERVICE_LOOP_SIZE offsetof(struct azexit_service, submit_cue)
 #define AZEXIT_SERVICE_CUE_SIZE (offsetof(struct azexit_service, cue_tick) + sizeof(((struct azexit_service *) 0)->cue_tick))
 #define AZEXIT_SERVICE_CUE_SNAPSHOT_SIZE (offsetof(struct azexit_service, native_cues) + sizeof(((struct azexit_service *) 0)->native_cues))
+#define AZEXIT_SERVICE_DELIVERY_SIZE (offsetof(struct azexit_service, delivery) + sizeof(((struct azexit_service *) 0)->delivery))
 #define AZEXIT_ENABLE_EXIT 1u
 #define AZEXIT_ENABLE_RELOOP 2u
 #define AZEXIT_ENABLE_LOOP 4u
@@ -97,6 +122,9 @@ struct azexit_service {
 typedef const struct azexit_service *(*azexit_service_fn)(void);
 /* Obtained once on the management thread. Functions are process-lifetime. */
 __attribute__((visibility("default"))) const struct azexit_service *azstem_exit_service_v1(void) AZEXIT_NOEXCEPT;
+/* Called by native owning-thread producers.  It only copies into preallocated
+ * cells and signals a descriptor; it never calls the core or waits. */
+int azsdk_exit_delivery_publish(const struct azexit_receipt *receipt) AZEXIT_NOEXCEPT;
 typedef void *(*azexit_install_fn)(uintptr_t, void *, void **);
 /* Enable bits above; zero disables dispatch. Configuration is startup-only. */
 __attribute__((visibility("hidden"))) int azsdk_exit_configure(int on, int build, azexit_install_fn install) AZEXIT_NOEXCEPT;

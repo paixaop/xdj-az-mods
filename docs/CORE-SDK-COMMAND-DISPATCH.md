@@ -34,10 +34,12 @@ capability has subsequently changed. Changed arguments with the same owner/ID re
 Comparison covers known argument values rather than C padding, future record tails, signed
 zero distinctions, or bytes after a comment's first NUL.
 
-`scmd_release` explicitly acknowledges a terminal, settled record and frees its slot.
-Released IDs remain below a per-owner high-water mark and can never execute again; a late
-retry returns `AZ_STALE`. Terminal records are not silently evicted to make room. Another
-owner cannot poll, cancel or release a record by guessing its request ID.
+Legacy `scmd_release` explicitly acknowledges a terminal, settled record and frees its
+slot. Async records instead retain their callback binding through terminal delivery,
+acknowledgement and released delivery; a legacy release on one is `AZ_INVALID`. Released
+IDs remain below a per-owner high-water mark and can never execute again; a late retry
+returns `AZ_STALE`. Terminal records are not silently evicted to make room. Another owner
+cannot poll, cancel or release a record by guessing its request ID.
 
 ## Admission and execution
 
@@ -110,8 +112,8 @@ what happened. No rollback or sample-accurate scheduling is promised.
 
 ## Result publication and integration
 
-`scmd_poll` copies either accepted or terminal state. No borrowed mutable result pointer is
-returned. The owner-scoped 64-entry `scmd_event` journal is written under the same mutex
+`scmd_poll` copies either accepted or terminal state for legacy compatibility only. No
+borrowed mutable result pointer is returned. The owner-scoped 64-entry `scmd_event` journal is written under the same mutex
 after its corresponding result becomes pollable. Events carry request ID, dispatch token,
 revision, receipt timestamp and sequence. A missed-event marker requires polling outstanding
 results; it is produced even when no retained event belongs to that owner. The event's
@@ -124,8 +126,8 @@ journal sequences never wrap; admission reserves enough terminal-event sequence 
 all outstanding records. Destroy only after consumers, native callbacks and owner-thread
 work stop and all records have been released.
 
-`sdk_command.c` holds one shared production engine behind authenticated
-`sdk_command_poll`, `sdk_command_cancel` and `sdk_command_release` wrappers. The existing
+`sdk_command.c` holds one shared production engine behind authenticated legacy query,
+cancel and release wrappers plus the appended async submit/acknowledge entries. The existing
 submit wrapper validates the complete request and routes the 26 native-load
 operation IDs through the available loop/cue endpoint capabilities. Transient loop,
 main-cue and hot-trigger actions use their native control paths; saved cue/loop and
@@ -134,19 +136,31 @@ a correlated unsupported result; no synthetic adapter is exposed. Unsupported su
 accepted record or event. Unknown request IDs return `AZ_STALE`. These wrappers retain the
 core's module/caller and playback-callback authentication checks.
 
-The appended public service table and SDK harness now expose authenticated polling,
-cancellation and release with size checks. The harness accepts the current native-load
+The appended public service table and SDK harness expose authenticated async submit,
+acknowledge, cancellation and legacy compatibility queries with size checks. The harness accepts the current native-load
 and native-cue selector envelopes but keeps synthetic command capabilities zero.
 Runtime tests must call the public service and assert the actual native effect,
 correct completion/cancellation and persistence where applicable. Result-event
 projection and unrelated live-state work are separate from proving these polling
 command paths. Do not enable a synthetic adapter as a native implementation.
 
+The append-only async entries deliver immutable `TERMINAL` and `RELEASED` records on the UI
+thread. Native receipts wake the autonomous dispatcher; the overlay wait loop drains at most
+eight callbacks per pass. No command callback or cleanup depends on `community_tick`, paint,
+capability refresh or a status query. The older `on_command_complete` entry remains only for
+ABI compatibility and is not part of the new command path. Immediate refusals without a
+retained request remain synchronous.
+
+The same dispatcher exposes `on_data_event` for the stored track/waveform publication
+journal, with an independent owner-scoped cursor and at most 16 records/mod/UI turn. Journal
+loss is reported through `missed`; snapshot acquire/release ownership is unchanged.
+
 ## Regression tests
 
 Run from the core root:
 
 ```sh
+bash tests/sdk-data-callbacks.sh
 bash tests/sdk-command.sh
 SAN=asan bash tests/sdk-command.sh
 SAN=tsan bash tests/sdk-command.sh

@@ -10,6 +10,12 @@ else
     trap 'rm -rf "$task_tmp"' EXIT
 fi
 flags=(-std=c11 -O2 -g -Wall -Wextra -Werror -pthread -fexceptions -fasynchronous-unwind-tables)
+if [[ $(uname -s) == Darwin ]]; then
+    # Apple Clang rejects the fixture's deliberately placed inline-assembly
+    # labels when it emits asynchronous CFI. The control validates the exact
+    # fault PC itself, so keep the same probe without malformed unwind tables.
+    flags+=(-fno-asynchronous-unwind-tables)
+fi
 case ${SAN:-plain} in
 plain|'') ;;
 asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer) ;;

@@ -27,6 +27,11 @@
 #include <mutex>
 #include <time.h>
 #if defined(__linux__)
+#include <errno.h>
+#include <sys/eventfd.h>
+#include <unistd.h>
+#endif
+#if defined(__linux__)
 #include <link.h>
 #endif
 #if defined(__linux__) && defined(__aarch64__) && !defined(AZSDK_EXIT_TESTING)
@@ -35,6 +40,72 @@
 #include "sdk_exit_profiles.h"
 
 namespace {
+constexpr unsigned DELIVERY_CELLS = 256;
+struct DeliveryCell {
+    std::atomic<uint64_t> sequence {0};
+    azexit_receipt receipt = {};
+};
+struct DeliveryState {
+    std::once_flag once;
+    int fd = -1;
+    std::atomic<uint64_t> head {0};
+    std::atomic<uint64_t> tail {0};
+    DeliveryCell cells[DELIVERY_CELLS];
+};
+DeliveryState &delivery() {
+    static DeliveryState state;
+    return state;
+}
+void delivery_init() {
+    DeliveryState &d = delivery();
+    for (uint64_t i = 0; i < DELIVERY_CELLS; ++i) d.cells[i].sequence.store(i, std::memory_order_relaxed);
+#if defined(__linux__)
+    d.fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+#endif
+}
+bool delivery_push(const azexit_receipt &value) noexcept {
+    DeliveryState &d = delivery();
+    std::call_once(d.once, delivery_init);
+    if (value.size < sizeof value || value.version != AZEXIT_DELIVERY_VERSION) return false;
+    uint64_t position = d.head.load(std::memory_order_relaxed);
+    for (;;) {
+        DeliveryCell &cell = d.cells[position % DELIVERY_CELLS];
+        uint64_t sequence = cell.sequence.load(std::memory_order_acquire);
+        intptr_t difference = static_cast<intptr_t>(sequence - position);
+        if (difference == 0) {
+            if (d.head.compare_exchange_weak(position, position + 1, std::memory_order_relaxed,
+                                             std::memory_order_relaxed)) {
+                cell.receipt = value;
+                cell.sequence.store(position + 1, std::memory_order_release);
+#if defined(__linux__)
+                uint64_t one = 1;
+                (void) write(d.fd, &one, sizeof one); /* already-readable/full is a valid wake */
+#endif
+                return true;
+            }
+        } else if (difference < 0) {
+            return false; /* admission reserves cells; this is a producer fault, not a drop path */
+        } else {
+            position = d.head.load(std::memory_order_relaxed);
+        }
+    }
+}
+bool delivery_pop(azexit_receipt &out) noexcept {
+    DeliveryState &d = delivery();
+    std::call_once(d.once, delivery_init);
+    uint64_t position = d.tail.load(std::memory_order_relaxed);
+    DeliveryCell &cell = d.cells[position % DELIVERY_CELLS];
+    if (cell.sequence.load(std::memory_order_acquire) != position + 1) return false;
+    out = cell.receipt;
+    cell.sequence.store(position + DELIVERY_CELLS, std::memory_order_release);
+    d.tail.store(position + 1, std::memory_order_relaxed);
+    return true;
+}
+int delivery_fd() noexcept {
+    DeliveryState &d = delivery();
+    std::call_once(d.once, delivery_init);
+    return d.fd;
+}
 enum {
     IDLE,
     WRITING,
@@ -1068,9 +1139,28 @@ bool loop_postcondition(Slot &slot) noexcept {
     }
 }
 
+void emit_receipt(const Slot &slot, unsigned kind, unsigned settled) noexcept {
+    azexit_receipt receipt = {};
+    receipt.size = sizeof receipt;
+    receipt.version = AZEXIT_DELIVERY_VERSION;
+    receipt.kind = kind;
+    receipt.settled = settled;
+    receipt.deck = slot.request.deck;
+    receipt.token = slot.request.token;
+    receipt.load_generation = slot.request.load_generation;
+    receipt.revision = slot.result.revision;
+    receipt.observed_ns = now();
+    receipt.outcome = slot.result.outcome;
+    receipt.reason = slot.result.reason;
+    (void) delivery_push(receipt);
+}
 void finish(Slot &slot, unsigned outcome, int reason, uint64_t revision = 0) noexcept {
     slot.result = {slot.request.token, slot.request.load_generation, revision, outcome, reason};
     slot.phase.store(READY, std::memory_order_release);
+    /* READY is the native owner's terminal state: the copied result and the
+     * native allocation can be released without another owner-thread action.
+     * Producers that genuinely retain work publish a later SETTLED receipt. */
+    emit_receipt(slot, AZEXIT_RECEIPT_TERMINAL, 1u);
 }
 void execute_move_tail(unsigned deck, Slot &slot) noexcept {
     uint64_t time = now(), token = slot.request.token;
@@ -1459,6 +1549,31 @@ __attribute__((unused)) bool patch(uintptr_t address, uintptr_t original, void *
 }
 } // namespace
 
+extern "C" int azsdk_exit_delivery_publish(const azexit_receipt *receipt) noexcept {
+    return receipt && delivery_push(*receipt) ? AZ_OK : AZ_BUSY;
+}
+static int delivery_consume(azexit_receipt *out) noexcept {
+    if (!out || out->size < sizeof *out) return AZ_INVALID;
+    azexit_receipt value = {};
+    if (!delivery_pop(value)) return AZ_EMPTY;
+    uint32_t size = out->size;
+    *out = value;
+    out->size = size;
+    return AZ_OK;
+}
+static int delivery_reclaim(const azexit_receipt *receipt) noexcept {
+    return receipt && receipt->size >= sizeof *receipt && receipt->version == AZEXIT_DELIVERY_VERSION ? AZ_OK : AZ_INVALID;
+}
+static int delivery_control(unsigned deck, uint64_t token, uint32_t reason) noexcept {
+    (void) reason;
+    return cancel(deck, token);
+}
+static int delivery_event_fd(void) noexcept { return delivery_fd(); }
+static const azexit_delivery_v1 g_sdk_delivery = {
+    sizeof g_sdk_delivery, AZEXIT_DELIVERY_VERSION, delivery_event_fd, delivery_consume,
+    delivery_reclaim, delivery_control
+};
+
 extern "C" const azexit_service *azstem_exit_service_v1(void) noexcept {
 #ifndef AZSDK_EXIT_TESTING
     /* Hand the mutating private endpoint only to azmod, which authenticates
@@ -1475,6 +1590,7 @@ extern "C" const azexit_service *azstem_exit_service_v1(void) noexcept {
 #else
         nullptr, nullptr
 #endif
+        , &g_sdk_delivery
     };
     return &api;
 }
@@ -1615,8 +1731,10 @@ extern "C" void azsdk_exit_retire(int deck) noexcept {
     unsigned expected = QUEUED;
     if (slot.phase.compare_exchange_strong(expected, WRITING, std::memory_order_acq_rel))
         finish(slot, AZ_COMMAND_REJECTED, AZ_STALE);
-    else if (expected == RUNNING && !slot.untracked)
+    else if (expected == RUNNING && !slot.untracked) {
         finish(slot, AZ_COMMAND_UNCERTAIN, AZ_STALE);
+        emit_receipt(slot, AZEXIT_RECEIPT_SETTLED, 1);
+    }
 }
 #ifdef AZSDK_EXIT_TESTING
 extern "C" void azsdk_exit_test_profile(const azexit_profile *profile) noexcept {

@@ -215,7 +215,9 @@ static int sd_native_cue_event(int deck) {
     /* One shared GUI collector, not one native listener or queue per mod.
      * Retiring a unit invalidates its last receipt exactly once. Native cue
      * indices remain internal; no main/hot/memory classification is inferred. */
-    static struct { uint64_t unit, revision; } seen[AZMOD_STEM_DECKS];
+    static struct {
+        uint64_t unit, revision;
+    } seen[AZMOD_STEM_DECKS];
     azstem_cue_observation_v1_fn take = atomic_load_explicit(&g_sd_cue_take, memory_order_acquire);
     if (!take) return 0;
     struct azstem_cue_observation_v1 sample = {sizeof sample, 1, 0, 0, 0, 0, 0};
@@ -229,7 +231,8 @@ static int sd_native_cue_event(int deck) {
         return invalidate;
     }
     if (seen[deck].unit == sample.unit_generation && seen[deck].revision == sample.revision) return 0;
-    seen[deck].unit = sample.unit_generation; seen[deck].revision = sample.revision;
+    seen[deck].unit = sample.unit_generation;
+    seen[deck].revision = sample.revision;
     return 1;
 }
 static void sdk_deck_tick(long now) {
@@ -264,7 +267,8 @@ static void sdk_deck_tick(long now) {
 static int sd_native_load_read(int deck, struct azstem_load_observation_v1 *out) {
     azstem_load_observation_v1_fn load = atomic_load_explicit(&g_sd_load_observation, memory_order_acquire);
     struct azstem_load_observation_v1 receipt = {sizeof receipt, 1, {0}};
-    if (!g_st_enabled || !load || load(deck, &receipt) || !receipt.sample.unit_generation ||
+    if (!g_st_enabled || !load || load(deck, &receipt) || receipt.size < sizeof receipt || receipt.version != 1 ||
+        !receipt.sample.unit_generation ||
         !receipt.sample.load_generation || !receipt.sample.invalidation_epoch ||
         !receipt.sample.observed_ns || receipt.sample.reserved) return 0;
     *out = receipt;
@@ -346,7 +350,8 @@ static int sd_deck_snapshot_v1(int deck, az_deck_snapshot *out) {
     }
     azstem_deck_observation_v1_fn f = atomic_load_explicit(&g_sd_observation, memory_order_acquire);
     struct azstem_deck_observation_v1 o = {sizeof o, 1, -1, 0, 0, 0};
-    if (g_st_enabled && f && !f(deck, &o)) {
+    if (g_st_enabled && f && !f(deck, &o) && o.size >= sizeof o && o.version == 1 &&
+        !o.reserved && o.revision && o.observed_ns && (o.loaded == 0 || o.loaded == 1)) {
         v.valid |= AZ_LIVE_LOADED;
         v.loaded = o.loaded;
         v.revision = o.revision;
@@ -354,19 +359,22 @@ static int sd_deck_snapshot_v1(int deck, az_deck_snapshot *out) {
     }
     azstem_loop_observation_v2_fn lf = atomic_load_explicit(&g_sd_loop_observation, memory_order_acquire);
     struct azstem_loop_observation_v2 lo = {sizeof lo, 2, 0, 0, 0, -1, 0, 0, 0};
-    if (g_st_enabled && lf && !lf(deck, &lo)) {
-        v.valid |= AZ_LIVE_LOOP_ENGAGED;
-        v.loop.valid = AZ_LOOP_ENGAGED;
-        v.loop.engaged = lo.engaged;
-        if (lo.bounds_valid) {
+    if (g_st_enabled && lf && !lf(deck, &lo) && lo.size >= sizeof lo && lo.version == 2 &&
+        lo.unit_generation && lo.revision && lo.observed_ns) {
+        v.loop_unit_generation = lo.unit_generation;
+        v.loop_revision = lo.revision;
+        v.loop_observed_ns = lo.observed_ns;
+        if (lo.engaged == 0 || lo.engaged == 1) {
+            v.valid |= AZ_LIVE_LOOP_ENGAGED;
+            v.loop.valid |= AZ_LOOP_ENGAGED;
+            v.loop.engaged = lo.engaged;
+        }
+        if (lo.bounds_valid == 1 && __builtin_isfinite(lo.in_s) && __builtin_isfinite(lo.out_s)) {
             v.valid |= AZ_LIVE_LOOP_BOUNDS;
             v.loop.valid |= AZ_LOOP_BOUNDS;
             v.loop.in_s = lo.in_s;
             v.loop.out_s = lo.out_s;
         }
-        v.loop_unit_generation = lo.unit_generation;
-        v.loop_revision = lo.revision;
-        v.loop_observed_ns = lo.observed_ns;
     }
     azstem_live_observation_v1_fn live = atomic_load_explicit(&g_sd_live_observation, memory_order_acquire);
     struct azstem_live_observation_v1 observation = {sizeof observation, 1, {0}};

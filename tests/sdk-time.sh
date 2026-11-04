@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/az-sdk-time.XXXXXX")
 trap 'rm -rf "$task_tmp"' EXIT
 cflags=(-std=c11 -O1 -g -Wall -Wextra -Werror -pthread)
-cppflags=(-std=c++11 -O1 -g -Wall -Wextra -Werror -Isrc/common)
+cppflags=(-std=c++14 -O1 -g -Wall -Wextra -Werror -Isrc/common)
 san=()
 case ${SAN:-plain} in
 plain|'') ;;

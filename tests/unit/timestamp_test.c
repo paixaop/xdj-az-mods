@@ -5,6 +5,12 @@
 #include <math.h>
 #include <stdio.h>
 int main(void) {
+    assert(compare_timestamps(-1, -1, 1, 1, 1) == AZ_TIME_INVALID);
+    assert(compare_timestamps(-1, UINT64_MAX, 1, 1, 1) == AZ_TIME_INVALID);
+    assert(compare_timestamps(UINT64_MAX, -1, 1, 1, 1) == AZ_TIME_INVALID);
+    assert(compare_timestamps(-1, -1., 1, 1, 1) == AZ_TIME_EQUAL);
+    assert(compare_timestamps(-2., -1., 1, 1, 1) == AZ_TIME_BEFORE);
+    assert(compare_timestamps(0, 0, 1, 1, 1) == AZ_TIME_EQUAL);
     const uint64_t rates[] = {44100, 48000, 96000, 192000};
     for (unsigned i = 0; i < sizeof rates / sizeof rates[0]; ++i) {
         uint64_t rate = rates[i];

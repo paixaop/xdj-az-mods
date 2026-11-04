@@ -1162,6 +1162,8 @@ static int install_drag_view(void);
 static int g_cm_live; /* mods with state LOADED: the LED-frame dispatch is skipped at 0 */
 static void community_init(void);
 static void community_tick(void);
+static int sdk_command_ui_fd(void);
+static unsigned sdk_command_ui_drain(unsigned budget);
 static void ssh_approve_tick(void); /* ssh_approve.c */
 static int community_redraw_wanted(void);
 static int community_frame(int bus, unsigned char *f, int len);

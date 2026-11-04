@@ -3382,6 +3382,8 @@ d="$OUT/sdkdata"; mkdir -p "$d"
 cp guest/azmod/sdk_data_engine.h guest/azmod/sdk_analysis.h guest/azmod/hc_anlz.h guest/azmod/azmod-mod.h "$d/"
 $CC "${CFLAGS[@]}" -pthread -I"$d" -o "$d/real" $T/sdkdata_test.c -lm
 suite "sdk track data, parser, timing and concurrent consumers" "$d/real"
+$CC "${CFLAGS[@]}" -Wno-unused-function -pthread -Iguest/azmod -o "$d/callbacks" $T/sdk_data_callbacks_test.c -lm
+suite "sdk data and command callbacks without mod polling" "$d/callbacks"
 python3 "$T/sdk_review_controls.py" guest/azmod "$d/review"
 for v in timing-size timing-version; do
     $CC "${CFLAGS[@]}" -pthread -I"$d/review/$v" -Iguest/azmod -o "$d/$v" $T/sdkdata_test.c -lm

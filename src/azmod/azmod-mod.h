@@ -465,6 +465,16 @@ typedef struct az_command_result {
     int32_t reason; /* AZ_* status */
     uint64_t request_id, revision, observed_ns;
 } az_command_result;
+/* Borrowed for one UI callback. Copy result before acknowledging TERMINAL.
+ * RELEASED follows acknowledgement and proven native cleanup; keep callback
+ * context alive through its return, or for process lifetime if retired. */
+enum { AZ_COMMAND_COMPLETION_TERMINAL = 1, AZ_COMMAND_COMPLETION_RELEASED = 2 };
+typedef struct az_command_completion {
+    uint32_t size, version, kind, settled;
+    az_command_result result;
+} az_command_completion;
+typedef void (*az_command_completion_fn)(const az_command_completion *completion, void *user);
+
 
 /* ---- services the core hands every mod at init() ------------------------------------
  * Append-only: a mod built against a newer core checks AZ_HAS(core, field) before calling
@@ -507,6 +517,36 @@ typedef struct az_library_v1 {
     int (*command_release)(const char *id, uint64_t request_id);
     /* Copied native saved cues; nonblocking. Memory IDs belong only to this revision. */
     int (*native_cues)(int deck, az_native_cue_snapshot *out);
+
+    /* Optional push delivery; append-only ABI extension, check AZ_LIB_HAS.
+     * Register once per kind from init(), before starting workers. AZ_OK on success,
+     * AZ_INVALID for a bad owner/context/function, AZ_LIMIT for a duplicate.
+     * Callbacks run on the UI thread, outside provider locks, even with tick=NULL.
+     * Keep them bounded and nonblocking; records are valid only during the call.
+     * on_data_event starts at the journal's current end and has an independent cursor:
+     * track/waveform completion (including failure/cancel) and invalidation use the
+     * same az_data_change records as data_event. Up to 16 deliveries/mod/UI turn.
+     * missed=1 requires rebuilding state; kind=0 is a gap-only notification.
+     * A delivered ticket may since have been released/cancelled: check acquire's status.
+     * Registration can return AZ_BUSY; no listener is installed on failure.
+     * on_command_complete delivers each retained, settled terminal command once;
+     * it supplies the full result, so command_poll is unnecessary. Release the result
+     * with command_release (AZ_BUSY still requires a later retry under contention).
+     * Rejected submissions with no retained request are returned synchronously only.
+     * Releasing before collection suppresses completion. Failed init/retired owners
+     * receive no callbacks. Registrations last until the core restarts. */
+    int (*on_data_event)(const char *id, void (*fn)(const az_data_change *, void *), void *user);
+    int (*on_command_complete)(const char *id, void (*fn)(const az_command_result *, void *), void *user);
+    /* Optional asynchronous command tail, ABI v1. Both members and the operation
+     * capability are required. Init/UI calls only; callbacks are deferred on UI.
+     * AZ_OK establishes ownership even if the synchronous reply is malformed.
+     * Equal retries preserve the original callback/user and delivery phase.
+     * Acknowledge a validated terminal once; no status polling or release retry.
+     * post_ui is best effort and does not establish command admission. */
+    int (*command_submit_async)(const char *id, const az_command_request *request,
+                                az_command_completion_fn callback, void *user,
+                                az_command_result *out);
+    int (*command_acknowledge)(const char *id, uint64_t request_id);
 } az_library_v1;
 #define AZ_LIB_HAS(service, field) \
     ((service) && (service)->abi == AZ_LIBRARY_ABI && \

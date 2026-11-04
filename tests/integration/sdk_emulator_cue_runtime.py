@@ -36,7 +36,7 @@ def records(text):
   row={}
   for key,value in pairs:
    if key=='event':
-    if value not in ('snapshot','submit','poll','release','cancel','refused'):raise ValueError('unknown cue event')
+    if value not in ('snapshot','submit','poll','release','cancel','refused','terminal','acknowledge','released'):raise ValueError('unknown cue event')
     row[key]=value
    elif key=='comment_hex':
     if value=='-':row['comment']=''
@@ -104,7 +104,7 @@ class CueClient:
    load=before['native_load']
   self.high+=1;identity=self.high
   self.send(request(self.pid,'submit',identity,deck,op,load=load,timeout=10000000000,**arguments))
-  row=self.wait(lambda r:r['id']==identity and r['event'] in ('submit','poll','refused') and r['outcome']!=0)
+  row=self.wait(lambda r:r['id']==identity and r['event'] in ('submit','poll','terminal','refused') and r['outcome']!=0)
   if (row['deck'],row['op'],row['target_load'])!=(deck,op,load):raise ValueError('cue result belongs to different request')
   if any(row[field]!=arguments.get(argument,0) for field,argument in (('target_revision','revision'),('flags','flags'),('classification','classification'),('entry_id','entry_id'),('rgb','rgb'))):raise ValueError('cue result arguments changed')
   if row['event']=='refused':raise MissingEvidence('cue request refused before SDK admission')
@@ -122,11 +122,11 @@ class CueClient:
    if row['rc']==-2:
     if row['event']!='submit':raise ValueError('immediate unsupported must be SDK submit refusal')
     return row
-   if not any(r['id']==identity and r['event']=='release' and r['rc']==0 for r in self.rows):self.wait(lambda r:r['id']==identity and r['event']=='release' and r['rc']==0)
+   if not any(r['id']==identity and r['event'] in ('release','released') and r['rc']==0 for r in self.rows):self.wait(lambda r:r['id']==identity and r['event'] in ('release','released') and r['rc']==0)
    return row
   if row['outcome']==1 and not (compare_timestamps(row['submitted_ns'], row['receipt_ns']) <= 0 and compare_timestamps(row['receipt_ns'], row['deadline_ns']) <= 0):raise ValueError('cue APPLIED receipt outside native request deadline')
   if (row['rc'],row['outcome'],row['reason'])!=(0,1,0) or not row['revision'] or not row['load_valid'] or (row['native_load'],row['load_unit'])!=(load,before['load_unit']):raise ValueError('cue command deck%d op%d did not reach load-qualified APPLIED: rc=%d outcome=%d reason=%d' % (deck+1,op,row['rc'],row['outcome'],row['reason']))
-  if not any(r['id']==identity and r['event']=='release' and r['rc']==0 for r in self.rows):self.wait(lambda r:r['id']==identity and r['event']=='release' and r['rc']==0)
+  if not any(r['id']==identity and r['event'] in ('release','released') and r['rc']==0 for r in self.rows):self.wait(lambda r:r['id']==identity and r['event'] in ('release','released') and r['rc']==0)
   print('SDK cue receipt deck=%d op=%d outcome=APPLIED native_ms=%.3f' % (deck+1,op,(row['receipt_ns']-row['submitted_ns'])/1000000),flush=True)
   self.evidence.append(dict(operation=op,before=before,terminal=row));return row
  def cues(self,deck,predicate=lambda s:True):
@@ -689,7 +689,7 @@ def run_active_loop_switch(read_log,send_request,health,pid,*,setup_deck,read_po
      submitted=[row for row in client.rows if row['event']=='submit' and row['rc']==0 and row['id']]
      if submitted:
       identity=submitted[-1]['id']
-      if not any(row['event']=='release' and row['id']==identity and row['rc']==0 for row in client.rows):client.wait(lambda row:row['event']=='release' and row['id']==identity and row['rc']==0)
+      if not any(row['event'] in ('release','released') and row['id']==identity and row['rc']==0 for row in client.rows):client.wait(lambda row:row['event'] in ('release','released') and row['id']==identity and row['rc']==0)
      state=fresh()
      if created and state['engaged']==1:client.submit(deck,4,load=load,flags=2)
      for target in reversed(created):

@@ -3,16 +3,93 @@
  * the engine mutex nor a mod callback ever runs inside the native owner hook. */
 #include "../common/azexit.h"
 #include <stdatomic.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#if defined(__linux__)
+#include <sys/eventfd.h>
+#include <sys/timerfd.h>
+#endif
+#include <unistd.h>
 static _Atomic(const struct azexit_service *) g_sdk_exit_service;
 static atomic_flag g_sdk_exit_driver = ATOMIC_FLAG_INIT;
 static uint64_t g_sdk_exit_tokens[4]; /* the single admitted driver only */
 static _Atomic uint32_t g_sdk_command_retired;
+static int g_sdk_command_fd = -1;
+static int g_sdk_ui_fd = -1;
+static int g_sdk_timer_fd = -1;
+static pthread_t g_sdk_command_thread;
+static _Atomic int g_sdk_command_running;
+
+static int sdk_eventfd_create(void) {
+#if defined(__linux__)
+    return eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+#else
+    return -1;
+#endif
+}
+static int sdk_timerfd_create(void) {
+#if defined(__linux__)
+    return timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+#else
+    return -1;
+#endif
+}
+
+static void sdk_command_wake(void) {
+    if (g_sdk_command_fd >= 0) {
+        uint64_t one = 1;
+        (void) write(g_sdk_command_fd, &one, sizeof one);
+    }
+}
+static void sdk_ui_wake(void) {
+    if (g_sdk_ui_fd >= 0) {
+        uint64_t one = 1;
+        (void) write(g_sdk_ui_fd, &one, sizeof one);
+    }
+}
+static int sdk_command_has_pending_notification(void) {
+    int pending = 0;
+    pthread_mutex_lock(&g_sdk_commands.mu);
+    for (unsigned i = 0; i < SCMD_SLOTS; ++i) {
+        struct scmd_record *r = &g_sdk_commands.records[i];
+        if (r->asynchronous && r->phase == SCMD_FINAL && r->callback &&
+            (!r->terminal_delivered || (r->acknowledged && !r->awaiting && !r->released_delivered))) {
+            pending = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_sdk_commands.mu);
+    return pending;
+}
 
 static int sdk_exit_has_cues(const struct azexit_service *api) {
     return api && api->size >= AZEXIT_SERVICE_CUE_SIZE && api->commands && api->submit_cue && api->target_cue;
 }
+static const struct azexit_delivery_v1 *sdk_exit_delivery(const struct azexit_service *api) {
+    return api && api->size >= AZEXIT_SERVICE_DELIVERY_SIZE ? api->delivery : NULL;
+}
 static uint64_t sdk_exit_operations(const struct azexit_service *api) {
     if (!api) return 0;
+    const struct azexit_delivery_v1 *delivery = sdk_exit_delivery(api);
+    if (!delivery || delivery->version != AZEXIT_DELIVERY_VERSION ||
+        !delivery->consume || !delivery->event_fd || !delivery->control) {
+#ifdef CM_MAX
+        return 0;
+#else
+        if (api->size >= AZEXIT_SERVICE_COMMAND_SIZE && api->commands && api->submit_command) {
+            uint64_t supported = (UINT64_C(1) << AZ_CMD_LOOP_EXIT) | (UINT64_C(1) << AZ_CMD_RELOOP);
+            if (api->size >= AZEXIT_SERVICE_LOOP_SIZE && api->submit_loop)
+                supported |= (UINT64_C(1) << (AZ_CMD_LOOP_ADJUST_OUT + 1)) - 2;
+            if (sdk_exit_has_cues(api))
+                supported |= SCMD_ALL_COMMANDS & ~((UINT64_C(1) << (AZ_CMD_LOOP_ADJUST_OUT + 1)) - 2);
+            return api->commands() & supported;
+        } else {
+            return api->size >= AZEXIT_SERVICE_V1_SIZE && api->mask && api->mask()
+                ? UINT64_C(1) << AZ_CMD_LOOP_EXIT : 0;
+        }
+#endif
+    }
     if (api->size >= AZEXIT_SERVICE_COMMAND_SIZE && api->commands) {
         uint64_t supported = api->submit_command ? (UINT64_C(1) << AZ_CMD_LOOP_EXIT) | (UINT64_C(1) << AZ_CMD_RELOOP) : 0;
         uint64_t loops = (UINT64_C(1) << (AZ_CMD_LOOP_ADJUST_OUT + 1)) - 2;
@@ -127,8 +204,10 @@ static void sdk_command_collect_retired(const struct azexit_service *api) {
             if (r->phase == SCMD_QUEUED)
                 scmd_finish(&g_sdk_commands, r, AZ_COMMAND_CANCELLED, AZ_CANCELLED, 0,
                             SCMD_DETAIL_NONE, scmd_now(&g_sdk_commands), 0);
-            if (r->awaiting) (void) api->cancel(r->request.deck, r->token);
-            if (r->phase == SCMD_FINAL && !r->pinned && !r->awaiting) memset(r, 0, sizeof *r);
+            const struct azexit_delivery_v1 *delivery = sdk_exit_delivery(api);
+            if (r->awaiting && delivery && delivery->control)
+                (void) delivery->control(r->request.deck, r->token, AZ_CANCELLED);
+            if (r->phase == SCMD_FINAL && !r->pinned && !r->awaiting && !r->callback_active) memset(r, 0, sizeof *r);
             else remaining = 1;
         }
         if (!remaining) {
@@ -140,22 +219,61 @@ static void sdk_command_collect_retired(const struct azexit_service *api) {
     }
     pthread_mutex_unlock(&g_sdk_commands.mu);
 }
-static void sdk_exit_collect(const struct azexit_service *api, unsigned deck) {
-    uint64_t token = g_sdk_exit_tokens[deck];
-    struct azexit_result result;
-    if (token && api->poll(deck, &result) == AZ_OK && result.token == token) {
-        struct scmd_completion completion = {result.outcome, result.reason, result.load_generation, result.revision, 1};
-        int rc = scmd_complete(&g_sdk_commands, token, &completion);
-        if ((rc == AZ_OK || rc == AZ_STALE) && api->release(deck, token) == AZ_OK) g_sdk_exit_tokens[deck] = 0;
+static void sdk_exit_consume(const struct azexit_service *api) {
+    if (!api) return;
+    const struct azexit_delivery_v1 *delivery = sdk_exit_delivery(api);
+    if (!delivery || delivery->version != AZEXIT_DELIVERY_VERSION || !delivery->consume) {
+        /* Compatibility only: a pre-delivery private service has no producer
+         * receipt channel. The autonomous path above never uses this branch. */
+        if (api->size >= AZEXIT_SERVICE_V1_SIZE && api->poll) {
+            for (unsigned deck = 0; deck < 4; ++deck) {
+                uint64_t token = g_sdk_exit_tokens[deck];
+                if (!token) continue;
+                struct azexit_result result = {};
+                if (api->poll(deck, &result) != AZ_OK || result.token != token) continue;
+                struct scmd_completion completion = {
+            result.outcome, result.reason, result.load_generation, result.revision, 1
+                };
+                int complete = scmd_complete(&g_sdk_commands, token, &completion);
+                if (complete == AZ_OK || complete == AZ_STALE) {
+                    if (api->release && api->release(deck, token) == AZ_OK) g_sdk_exit_tokens[deck] = 0;
+                }
+            }
+        }
+        return;
+    }
+    struct azexit_receipt receipt = {.size = sizeof receipt};
+    for (;;) {
+        int rc = delivery->consume(&receipt);
+        if (rc != AZ_OK) break;
+        if (receipt.deck >= 4 || !receipt.token || (receipt.token & (UINT64_C(1) << 63)) ||
+            receipt.version != AZEXIT_DELIVERY_VERSION || receipt.size < sizeof receipt ||
+            (receipt.kind != AZEXIT_RECEIPT_TERMINAL && receipt.kind != AZEXIT_RECEIPT_SETTLED &&
+             receipt.kind != AZEXIT_RECEIPT_RESOURCES_RETIRED)) continue;
+        struct scmd_completion completion = {
+            receipt.outcome, receipt.reason, receipt.load_generation, receipt.revision, receipt.settled
+        };
+        int accepted = receipt.kind == AZEXIT_RECEIPT_TERMINAL || receipt.kind == AZEXIT_RECEIPT_SETTLED;
+        if (accepted) {
+            int complete = scmd_complete(&g_sdk_commands, receipt.token, &completion);
+            if (complete == AZ_OK || complete == AZ_STALE) {
+                if (complete == AZ_OK) scmd_set_observed(&g_sdk_commands, receipt.token, receipt.observed_ns);
+                if (receipt.settled && api->release && api->release(receipt.deck, receipt.token) == AZ_OK)
+                    g_sdk_exit_tokens[receipt.deck] = 0;
+                if (receipt.settled) sdk_ui_wake();
+            }
+        }
+        if (delivery->reclaim) (void) delivery->reclaim(&receipt);
+        receipt.size = sizeof receipt;
     }
 }
 static void sdk_command_drive(void) {
     const struct azexit_service *api = atomic_load_explicit(&g_sdk_exit_service, memory_order_acquire);
     if (!api || atomic_flag_test_and_set_explicit(&g_sdk_exit_driver, memory_order_acquire)) return;
     sdk_command_collect_retired(api);
-    /* Native execution enforces the actual action deadline. Collect its
-     * completed receipts first: a late UI poll is not an execution timeout. */
-    for (unsigned d = 0; d < 4; ++d) sdk_exit_collect(api, d);
+    /* Native execution publishes receipts.  A delayed wake cannot rewrite a
+     * committed result; consume is the only bridge between native and core. */
+    sdk_exit_consume(api);
     (void) scmd_expire(&g_sdk_commands);
     struct scmd_adapter adapter = sdk_exit_adapter(api);
     for (unsigned d = 0; d < 4; ++d) {
@@ -165,18 +283,94 @@ static void sdk_command_drive(void) {
                 struct scmd_record *record = scmd_find_token(&g_sdk_commands, token);
                 int expired = record && record->phase == SCMD_FINAL && record->awaiting;
                 pthread_mutex_unlock(&g_sdk_commands.mu);
-                if (expired) (void) api->cancel(d, token);
+                const struct azexit_delivery_v1 *delivery = sdk_exit_delivery(api);
+                if (expired && delivery && delivery->control)
+                    (void) delivery->control(d, token, AZ_STALE);
             }
-            sdk_exit_collect(api, d);
         }
         sdk_command_collect_retired(api);
         if (!g_sdk_exit_tokens[d]) (void) scmd_step(&g_sdk_commands, d, &adapter);
     }
+    if (sdk_command_has_pending_notification()) sdk_ui_wake();
     atomic_flag_clear_explicit(&g_sdk_exit_driver, memory_order_release);
+}
+static void sdk_command_arm_deadline(void) {
+#if defined(__linux__)
+    if (g_sdk_timer_fd < 0) return;
+    uint64_t nearest = 0;
+    if (!pthread_mutex_trylock(&g_sdk_commands.mu)) {
+        for (unsigned i = 0; i < SCMD_SLOTS; ++i) {
+            struct scmd_record *r = &g_sdk_commands.records[i];
+            if (r->phase == SCMD_FREE || r->phase == SCMD_FINAL || !r->request.deadline_ns) continue;
+            if (!nearest || r->request.deadline_ns < nearest) nearest = r->request.deadline_ns;
+        }
+        pthread_mutex_unlock(&g_sdk_commands.mu);
+    }
+    struct itimerspec timer = {};
+    if (nearest) {
+        timer.it_value.tv_sec = (time_t) (nearest / UINT64_C(1000000000));
+        timer.it_value.tv_nsec = (long) (nearest % UINT64_C(1000000000));
+    }
+    (void) timerfd_settime(g_sdk_timer_fd, TFD_TIMER_ABSTIME, &timer, NULL);
+#endif
+}
+static void *sdk_command_worker(void *unused) {
+    (void) unused;
+    while (atomic_load_explicit(&g_sdk_command_running, memory_order_acquire)) {
+        const struct azexit_service *api = atomic_load_explicit(&g_sdk_exit_service, memory_order_acquire);
+        const struct azexit_delivery_v1 *delivery = sdk_exit_delivery(api);
+        int native_fd = delivery && delivery->event_fd ? delivery->event_fd() : -1;
+        struct pollfd fds[3];
+        nfds_t n = 0;
+        fds[n++] = (struct pollfd) {g_sdk_command_fd, POLLIN, 0};
+        if (native_fd >= 0) fds[n++] = (struct pollfd) {native_fd, POLLIN, 0};
+        if (g_sdk_timer_fd >= 0) fds[n++] = (struct pollfd) {g_sdk_timer_fd, POLLIN, 0};
+        (void) poll(fds, n, -1);
+        uint64_t value;
+        while (g_sdk_command_fd >= 0 && read(g_sdk_command_fd, &value, sizeof value) > 0) {}
+        while (native_fd >= 0 && read(native_fd, &value, sizeof value) > 0) {}
+        while (g_sdk_timer_fd >= 0 && read(g_sdk_timer_fd, &value, sizeof value) > 0) {}
+        sdk_command_drive();
+        sdk_command_arm_deadline();
+    }
+    return NULL;
+}
+static __attribute__((unused)) int sdk_command_start(const struct azexit_service *api) {
+    const struct azexit_delivery_v1 *delivery = sdk_exit_delivery(api);
+    if (!delivery || !delivery->consume || !delivery->event_fd || delivery->version != AZEXIT_DELIVERY_VERSION)
+        return AZ_UNSUPPORTED;
+    if (atomic_load_explicit(&g_sdk_command_running, memory_order_acquire)) return AZ_OK;
+    g_sdk_command_fd = sdk_eventfd_create();
+    g_sdk_ui_fd = sdk_eventfd_create();
+    g_sdk_timer_fd = sdk_timerfd_create();
+    if (g_sdk_command_fd < 0 || g_sdk_ui_fd < 0 || g_sdk_timer_fd < 0) {
+        if (g_sdk_command_fd >= 0) close(g_sdk_command_fd);
+        if (g_sdk_ui_fd >= 0) close(g_sdk_ui_fd);
+        if (g_sdk_timer_fd >= 0) close(g_sdk_timer_fd);
+        g_sdk_command_fd = g_sdk_ui_fd = g_sdk_timer_fd = -1;
+        return AZ_FAILED;
+    }
+    atomic_store_explicit(&g_sdk_command_running, 1, memory_order_release);
+    if (pthread_create(&g_sdk_command_thread, NULL, sdk_command_worker, NULL)) {
+        atomic_store_explicit(&g_sdk_command_running, 0, memory_order_release);
+        close(g_sdk_command_fd);
+        close(g_sdk_ui_fd);
+        close(g_sdk_timer_fd);
+        g_sdk_command_fd = g_sdk_ui_fd = g_sdk_timer_fd = -1;
+        return AZ_FAILED;
+    }
+    sdk_command_wake();
+    return AZ_OK;
+}
+static __attribute__((unused)) int sdk_command_ui_fd(void) { return g_sdk_ui_fd; }
+static __attribute__((unused)) void sdk_command_ui_clear(void) {
+    uint64_t value;
+    while (g_sdk_ui_fd >= 0 && read(g_sdk_ui_fd, &value, sizeof value) > 0) {}
 }
 static void sdk_command_retire_owner(int owner) {
     if (!scmd_owner_ok(owner)) return;
     atomic_fetch_or_explicit(&g_sdk_command_retired, UINT32_C(1) << (unsigned) owner, memory_order_release);
+    sdk_command_wake();
     sdk_command_drive();
 }
 static void sdk_exit_cancel_request(int owner, uint64_t request_id) {
@@ -186,7 +380,8 @@ static void sdk_exit_cancel_request(int owner, uint64_t request_id) {
     uint64_t token = r && r->awaiting ? r->token : 0;
     unsigned deck = r ? r->request.deck : 0;
     pthread_mutex_unlock(&g_sdk_commands.mu);
-    if (token) (void) api->cancel(deck, token);
+    const struct azexit_delivery_v1 *delivery = sdk_exit_delivery(api);
+    if (token && delivery && delivery->control) (void) delivery->control(deck, token, AZ_CANCELLED);
 }
 static int sdk_exit_submit(int owner, const az_command_request *r, az_command_result *out) {
     const struct azexit_service *api = atomic_load_explicit(&g_sdk_exit_service, memory_order_acquire);
@@ -202,7 +397,33 @@ static int sdk_exit_submit(int owner, const az_command_request *r, az_command_re
     int target_pending = rc == AZ_BUSY || rc == AZ_PENDING;
     if (rc != AZ_OK) target.commands = rc == AZ_STALE || target_pending ? sdk_exit_operations(api) : 0;
     rc = scmd_submit_target(&g_sdk_commands, owner, r, &target, &adapter, out, NULL, target_pending);
-    if (rc == AZ_OK) sdk_command_drive();
+    if (rc == AZ_OK) {
+        sdk_command_wake();
+#ifndef CM_MAX
+        sdk_command_drive();
+#endif
+    }
+    return rc;
+}
+static __attribute__((unused)) int sdk_exit_submit_async(int owner, const az_command_request *r,
+                                                         az_command_completion_fn callback, void *user,
+                                                         az_command_result *out) {
+    const struct azexit_service *api = atomic_load_explicit(&g_sdk_exit_service, memory_order_acquire);
+    const struct azexit_delivery_v1 *delivery = sdk_exit_delivery(api);
+    if (!delivery || delivery->version != AZEXIT_DELIVERY_VERSION)
+        return scmd_refuse(out, r, AZ_UNSUPPORTED, scmd_now(&g_sdk_commands));
+    struct scmd_adapter adapter = sdk_exit_adapter(api);
+    struct scmd_target target = {0};
+    int initial = sdk_exit_begin((void *) api, r, &target);
+    int target_pending = initial == AZ_BUSY || initial == AZ_PENDING;
+    if (initial != AZ_OK) target.commands = initial == AZ_STALE || target_pending ? sdk_exit_operations(api) : 0;
+    int rc = scmd_submit_async(&g_sdk_commands, owner, r, callback, user, &target, &adapter, out, NULL, target_pending);
+    if (rc == AZ_OK) {
+        sdk_command_wake();
+#ifndef CM_MAX
+        sdk_command_drive();
+#endif
+    }
     return rc;
 }
 

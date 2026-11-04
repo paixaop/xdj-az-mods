@@ -311,7 +311,7 @@ static void deduplication(void) {
     submit(&f, 0, r);
     az_command_result out = result();
     enum scmd_detail detail;
-    for (unsigned changed = 0; changed < 14; changed++) {
+    for (unsigned changed = 0; changed < 16; changed++) {
         az_command_request conflict = r;
         switch (changed) {
         case 0: conflict.operation = AZ_CMD_LOOP_ENTER; break;
@@ -328,6 +328,8 @@ static void deduplication(void) {
         case 11: conflict.beats = 1; break;
         case 12: conflict.rgb = 0x123456; break;
         case 13: strcpy(conflict.comment, "changed"); break;
+        case 14: conflict.position_s = 1e-12; break;
+        case 15: conflict.end_s = 1e-12; break;
         }
         assert(scmd_submit(&f.engine, 0, &conflict, &f.target[0], &f.adapter, &out, &detail) == AZ_INVALID && detail == SCMD_DETAIL_ID_CONFLICT);
     }

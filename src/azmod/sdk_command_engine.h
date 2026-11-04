@@ -80,6 +80,9 @@ struct scmd_adapter {
 struct scmd_record {
     uint64_t token, execution_revision;
     int owner, phase, pinned, awaiting;
+    int asynchronous, acknowledged, terminal_delivered, released_delivered, callback_active;
+    az_command_completion_fn callback;
+    void *callback_user;
     enum scmd_detail detail;
     az_command_request request;
     az_command_result result;
@@ -101,6 +104,13 @@ struct scmd_engine {
     void *clock_context;
     struct scmd_record records[SCMD_SLOTS];
     struct scmd_journal_entry events[SCMD_EVENTS];
+};
+struct scmd_notification {
+    az_command_completion_fn callback;
+    void *user;
+    uint64_t token;
+    uint32_t kind;
+    az_command_completion completion;
 };
 static inline uint64_t scmd_monotonic(void *unused) {
     (void) unused;
@@ -149,9 +159,9 @@ static inline void scmd_canonical_request(az_command_request *out, const az_comm
 static inline int scmd_request_equal(const az_command_request *a, const az_command_request *b) {
     return a->operation == b->operation && a->deck == b->deck && a->request_id == b->request_id &&
            a->expected_load_generation == b->expected_load_generation && a->expected_revision == b->expected_revision &&
-           compare_timestamps(a->deadline_ns, b->deadline_ns, 1000000000, 1000000000, 1) == AZ_TIME_EQUAL && a->quantization == b->quantization && a->flags == b->flags &&
-           a->classification == b->classification && a->entry_id == b->entry_id && compare_timestamps(a->position_s, b->position_s, 1, 1000000000, 1) == AZ_TIME_EQUAL &&
-           compare_timestamps(a->end_s, b->end_s, 1, 1000000000, 1) == AZ_TIME_EQUAL && a->beats == b->beats && a->rgb == b->rgb && !strcmp(a->comment, b->comment);
+           a->deadline_ns == b->deadline_ns && a->quantization == b->quantization && a->flags == b->flags &&
+           a->classification == b->classification && a->entry_id == b->entry_id && a->position_s == b->position_s &&
+           a->end_s == b->end_s && a->beats == b->beats && a->rgb == b->rgb && !strcmp(a->comment, b->comment);
 }
 static inline struct scmd_record *scmd_find_id(struct scmd_engine *e, int owner, uint64_t id) {
     for (unsigned i = 0; i < SCMD_SLOTS; i++)
@@ -228,8 +238,8 @@ static inline int scmd_refuse(az_command_result *out, const az_command_request *
     return reason;
 }
 static inline int scmd_submit_target(struct scmd_engine *e, int owner, const az_command_request *request,
-                              const struct scmd_target *target, const struct scmd_adapter *adapter,
-                              az_command_result *out, enum scmd_detail *detail_out, int target_pending) {
+                                     const struct scmd_target *target, const struct scmd_adapter *adapter,
+                                     az_command_result *out, enum scmd_detail *detail_out, int target_pending) {
     if (detail_out) *detail_out = SCMD_DETAIL_ARGUMENTS;
     if (!e || !scmd_owner_ok(owner) || !scmd_output_ok(out) || !scmd_request_valid(request)) return AZ_INVALID;
     az_command_request r;
@@ -312,6 +322,110 @@ static inline int scmd_submit(struct scmd_engine *e, int owner, const az_command
                               az_command_result *out, enum scmd_detail *detail_out) {
     return scmd_submit_target(e, owner, request, target, adapter, out, detail_out, 0);
 }
+static inline int scmd_submit_async(struct scmd_engine *e, int owner, const az_command_request *request,
+                                    az_command_completion_fn callback, void *user,
+                                    const struct scmd_target *target, const struct scmd_adapter *adapter,
+                                    az_command_result *out, enum scmd_detail *detail_out, int target_pending) {
+    if (!callback || !e || !scmd_owner_ok(owner) || !scmd_output_ok(out) || !scmd_request_valid(request)) return AZ_INVALID;
+    az_command_request canonical;
+    scmd_canonical_request(&canonical, request);
+    if (!pthread_mutex_trylock(&e->mu)) {
+        struct scmd_record *existing = scmd_find_id(e, owner, canonical.request_id);
+        if (existing) {
+            int same = scmd_request_equal(&existing->request, &canonical) && existing->asynchronous &&
+                       existing->callback == callback && existing->callback_user == user;
+            if (!same) {
+                if (detail_out) *detail_out = SCMD_DETAIL_ID_CONFLICT;
+                pthread_mutex_unlock(&e->mu);
+                return AZ_INVALID;
+            }
+            scmd_copy_result(out, &existing->result);
+            if (detail_out) *detail_out = existing->detail;
+            pthread_mutex_unlock(&e->mu);
+            return AZ_OK;
+        }
+        pthread_mutex_unlock(&e->mu);
+    } else return AZ_BUSY;
+    int rc = scmd_submit_target(e, owner, &canonical, target, adapter, out, detail_out, target_pending);
+    if (rc != AZ_OK) return rc;
+    /* Admission already returned AZ_OK. Installing the callback is part of
+     * that admission and must not turn an accepted request into a refusal just
+     * because the worker owns the mutex for a moment. */
+    pthread_mutex_lock(&e->mu);
+    struct scmd_record *record = scmd_find_id(e, owner, canonical.request_id);
+    if (!record || record->phase == SCMD_FREE) {
+        pthread_mutex_unlock(&e->mu);
+        return AZ_FAILED;
+    }
+    record->asynchronous = 1;
+    record->callback = callback;
+    record->callback_user = user;
+    pthread_mutex_unlock(&e->mu);
+    return AZ_OK;
+}
+static inline int scmd_acknowledge(struct scmd_engine *e, int owner, uint64_t id) {
+    if (!e || !scmd_owner_ok(owner) || !id) return AZ_INVALID;
+    /* A valid terminal acknowledgement is a lifecycle transition, not a
+     * best-effort query.  Serialize briefly so it cannot report AZ_BUSY and
+     * strand the RELEASED obligation. */
+    pthread_mutex_lock(&e->mu);
+    struct scmd_record *r = scmd_find_id(e, owner, id);
+    int rc = AZ_STALE;
+    if (r) {
+        if (!r->asynchronous || r->phase != SCMD_FINAL || !r->terminal_delivered) rc = AZ_INVALID;
+        else {
+            r->acknowledged = 1;
+            rc = AZ_OK;
+        }
+    }
+    pthread_mutex_unlock(&e->mu);
+    return rc;
+}
+/* Reserve the next callback identity while holding the store lock, then invoke it
+ * after the lock is released.  This is the only path that turns native evidence
+ * into a public callback. */
+static inline int scmd_next_notification(struct scmd_engine *e, struct scmd_notification *out) {
+    if (!e || !out) return AZ_INVALID;
+    pthread_mutex_lock(&e->mu);
+    for (unsigned i = 0; i < SCMD_SLOTS; ++i) {
+        struct scmd_record *r = &e->records[i];
+        if (r->phase != SCMD_FINAL || !r->asynchronous || !r->callback || r->callback_active) continue;
+        uint32_t kind = 0;
+        if (!r->terminal_delivered) {
+            r->terminal_delivered = 1;
+            kind = AZ_COMMAND_COMPLETION_TERMINAL;
+        } else if (r->acknowledged && !r->awaiting && !r->released_delivered) {
+            r->released_delivered = 1;
+            kind = AZ_COMMAND_COMPLETION_RELEASED;
+        }
+        if (!kind) continue;
+        memset(out, 0, sizeof *out);
+        out->callback = r->callback;
+        out->user = r->callback_user;
+        out->token = r->token;
+        out->kind = kind;
+        out->completion.size = sizeof out->completion;
+        out->completion.version = AZ_DATA_VERSION;
+        out->completion.kind = kind;
+        out->completion.settled = r->awaiting ? 0u : 1u;
+        out->completion.result = r->result;
+        r->callback_active = 1;
+        pthread_mutex_unlock(&e->mu);
+        return AZ_OK;
+    }
+    pthread_mutex_unlock(&e->mu);
+    return AZ_EMPTY;
+}
+static inline void scmd_notification_done(struct scmd_engine *e, const struct scmd_notification *notification) {
+    if (!e || !notification) return;
+    pthread_mutex_lock(&e->mu);
+    struct scmd_record *r = scmd_find_token(e, notification->token);
+    if (r) {
+        r->callback_active = 0;
+        if (notification->kind == AZ_COMMAND_COMPLETION_RELEASED && r->released_delivered) memset(r, 0, sizeof *r);
+    }
+    pthread_mutex_unlock(&e->mu);
+}
 static inline int scmd_poll(struct scmd_engine *e, int owner, uint64_t id, az_command_result *out) {
     if (!e || !scmd_owner_ok(owner) || !id || !scmd_output_ok(out)) return AZ_INVALID;
     if (pthread_mutex_trylock(&e->mu)) return AZ_BUSY;
@@ -347,7 +461,7 @@ static inline int scmd_release(struct scmd_engine *e, int owner, uint64_t id) {
     if (!e || !scmd_owner_ok(owner) || !id) return AZ_INVALID;
     if (pthread_mutex_trylock(&e->mu)) return AZ_BUSY;
     struct scmd_record *r = scmd_find_id(e, owner, id);
-    int rc = !r ? AZ_STALE : r->phase != SCMD_FINAL || r->pinned || r->awaiting ? AZ_BUSY
+    int rc = !r ? AZ_STALE : r->asynchronous ? AZ_INVALID : r->phase != SCMD_FINAL || r->pinned || r->awaiting ? AZ_BUSY
                                                                                 : AZ_OK;
     if (rc == AZ_OK) memset(r, 0, sizeof *r);
     pthread_mutex_unlock(&e->mu);
@@ -383,7 +497,9 @@ static inline int scmd_complete_locked(struct scmd_engine *e, struct scmd_record
         scmd_finish(e, r, AZ_COMMAND_UNCERTAIN, AZ_STALE, 0, SCMD_DETAIL_REVISION, now, 0);
         return AZ_STALE;
     }
-    scmd_finish(e, r, c->outcome, c->reason, c->revision, c->outcome == AZ_COMMAND_UNCERTAIN ? SCMD_DETAIL_BACKEND : SCMD_DETAIL_NONE, now, !c->settled);
+    scmd_finish(e, r, c->outcome, c->reason, c->revision,
+                c->outcome == AZ_COMMAND_UNCERTAIN ? SCMD_DETAIL_BACKEND : SCMD_DETAIL_NONE,
+                now, !c->settled);
     return AZ_OK;
 }
 /* Trusted adapter completion only. A module consumer must never receive this entry. */
@@ -394,6 +510,13 @@ static inline int scmd_complete(struct scmd_engine *e, uint64_t token, const str
     int rc = r ? scmd_complete_locked(e, r, completion, scmd_now(e)) : AZ_STALE;
     pthread_mutex_unlock(&e->mu);
     return rc;
+}
+static inline void scmd_set_observed(struct scmd_engine *e, uint64_t token, uint64_t observed_ns) {
+    if (!e || !token || !observed_ns) return;
+    pthread_mutex_lock(&e->mu);
+    struct scmd_record *r = scmd_find_token(e, token);
+    if (r && r->phase == SCMD_FINAL) r->result.observed_ns = observed_ns;
+    pthread_mutex_unlock(&e->mu);
 }
 /* One request for one deck. begin/end and dispatch are outside the lock; pinned
  * prevents release, and active prevents both native overlap and FIFO overtaking. */

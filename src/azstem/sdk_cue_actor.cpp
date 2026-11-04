@@ -14,6 +14,10 @@
 #include "sdk_vtable_patch.h"
 #endif
 
+extern "C" __attribute__((weak)) int azsdk_exit_delivery_publish(const azexit_receipt *) noexcept {
+    return AZ_UNSUPPORTED;
+}
+
 namespace {
 constexpr unsigned TAGS = 512;
 enum Phase {
@@ -333,6 +337,21 @@ extern "C" int azsdk_cue_actor_complete(unsigned deck, uint64_t token, const aze
         result->token != token || result->load_generation != slot.request.identity.load_generation) return AZ_STALE;
     slot.result = *result;
     slot.phase = Ready;
+    if (!(token & (UINT64_C(1) << 63))) {
+        azexit_receipt receipt = {};
+        receipt.size = sizeof receipt;
+        receipt.version = AZEXIT_DELIVERY_VERSION;
+        receipt.kind = AZEXIT_RECEIPT_TERMINAL;
+        receipt.settled = 1;
+        receipt.deck = deck;
+        receipt.token = result->token;
+        receipt.load_generation = result->load_generation;
+        receipt.revision = result->revision;
+        receipt.observed_ns = now();
+        receipt.outcome = result->outcome;
+        receipt.reason = result->reason;
+        (void) azsdk_exit_delivery_publish(&receipt);
+    }
     return AZ_OK;
 }
 
