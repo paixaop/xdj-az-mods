@@ -118,7 +118,9 @@ fz_prepare() {
         cp guest/azmod/sdk_lib.c guest/azmod/azmod-mod.h $FZ_UT/sdklib_test.c $FZ_UT/check.h "$dir/"
         grep -q '^static void sdk_copy_col' "$dir/sdk_lib.c" ;;
     sdkanalysis)
-        cp guest/azmod/sdk_analysis.h guest/azmod/hc_anlz.h guest/azmod/azmod-mod.h "$dir/" ;;
+        mkdir -p "$dir/../common"
+        cp guest/azmod/sdk_analysis.h guest/azmod/hc_anlz.h guest/azmod/azmod-mod.h "$dir/"
+        cp guest/common/aztimestamp.h "$dir/../common/" ;;
     hcanlz)
         cp guest/azmod/hc_anlz.h "$dir/"
         grep -q 'static inline int hc_anlz_hot_cues' "$dir/hc_anlz.h" ;;

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* Synthetic ANLZ containers only. No firmware, audio or exported track bytes. */
-#include "../../src/azmod/sdk_waveform.h"
+#include "sdk_waveform.h"
 #include <stdio.h>
 #include <stdlib.h>
 

@@ -3,6 +3,12 @@
  * the engine mutex nor a mod callback ever runs inside the native owner hook. */
 #include "../common/azexit.h"
 #include "../common/azcuecommands.h"
+#if defined(__APPLE__)
+#ifndef MAP_ANONYMOUS
+#define MAP_ANONYMOUS 0x1000
+#endif
+#endif
+#include "../common/azaltstack.h"
 __attribute__((weak)) void azsdk_cue_commands_drive(void) {}
 #include <stdatomic.h>
 #include <errno.h>
@@ -354,7 +360,7 @@ static __attribute__((unused)) int sdk_command_start(const struct azexit_service
         return AZ_FAILED;
     }
     atomic_store_explicit(&g_sdk_command_running, 1, memory_order_release);
-    if (pthread_create(&g_sdk_command_thread, NULL, sdk_command_worker, NULL)) {
+    if (az_thread_create(&g_sdk_command_thread, NULL, sdk_command_worker, NULL)) {
         atomic_store_explicit(&g_sdk_command_running, 0, memory_order_release);
         close(g_sdk_command_fd);
         close(g_sdk_ui_fd);
