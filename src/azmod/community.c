@@ -1332,7 +1332,7 @@ static void cm_tempo_publish(int d, int sampled, double bpm, uint64_t generation
     g_cm_tempo[d].observed_ns = 0;
     g_cm_tempo[d].revision = event;
     if (observed_ns && compare_timestamps(observed_ns, g_cm_tempo[d].last_ns,
-                                           1000000000, 1000000000, 1) == AZ_TIME_AFTER) {
+                                          1000000000, 1000000000, 1) == AZ_TIME_AFTER) {
         g_cm_tempo[d].observed_ns = g_cm_tempo[d].last_ns = observed_ns;
         g_cm_tempo[d].state_generation = generation;
         /* Preserve the established conservative GUI-feed range. No rate,
@@ -1990,7 +1990,7 @@ static void cm_load_one(cm_mod *c) {
     g_cm_loading = -1;
     unlink(CM_INITING);
     if (rc) {
-        sdk_data_retire_owner((int)(c - g_cm));
+        sdk_data_retire_owner((int) (c - g_cm));
         c->m = NULL;
         c->screen = NULL;   /* stays mapped (see above); nothing of it is called again */
         cm_refuse(c, AZCM_FAILED, "Its init() returned %d%s", rc, c->nhooks ? " (after patching code; reload to clear)" : "");
@@ -2224,9 +2224,9 @@ static void community_init(void) {
 /* Every overlay tick. Cheap with no live mod. */
 static void sdk_confirm_tick(void);
 static void community_tick(void) {
-    #ifndef SDK_PROC_IMPL
+#ifndef SDK_PROC_IMPL
     sdk_cue_tick();
-    #endif
+#endif
     sdk_confirm_tick(); /* the dialog: also the core's own questions, with no mod loaded */
     if (!g_cm_n) return;
     sdk_rows_tick();    /* rows of mods that stopped leave the menu, also when none runs */
@@ -2284,7 +2284,7 @@ static void community_tick(void) {
     sdk_data_callbacks_tick();                  /* works for mods with no tick callback */
 #endif
     sdk_deck_tick(now);                          /* deck events, before the mods' ticks */
-    if(azsdk_slip_collect_v1)azsdk_slip_collect_v1();
+    if (azsdk_slip_collect_v1) azsdk_slip_collect_v1();
     sdk_ui_tick();                               /* the mods' post_ui callbacks */
     for (int i = 0; i < g_cm_n; i++)
         if (g_cm[i].state == AZCM_LOADED && g_cm[i].m && g_cm[i].m->tick) g_cm[i].m->tick();

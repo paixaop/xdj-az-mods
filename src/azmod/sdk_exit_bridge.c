@@ -86,7 +86,8 @@ static uint64_t sdk_exit_operations(const struct azexit_service *api) {
             return api->commands() & supported;
         } else {
             return api->size >= AZEXIT_SERVICE_V1_SIZE && api->mask && api->mask()
-                ? UINT64_C(1) << AZ_CMD_LOOP_EXIT : 0;
+                       ? UINT64_C(1) << AZ_CMD_LOOP_EXIT
+                       : 0;
         }
 #endif
     }
@@ -234,8 +235,7 @@ static void sdk_exit_consume(const struct azexit_service *api) {
                 struct azexit_result result = {};
                 if (api->poll(deck, &result) != AZ_OK || result.token != token) continue;
                 struct scmd_completion completion = {
-            result.outcome, result.reason, result.load_generation, result.revision, 1
-                };
+                    result.outcome, result.reason, result.load_generation, result.revision, 1};
                 int complete = scmd_complete(&g_sdk_commands, token, &completion);
                 if (complete == AZ_OK || complete == AZ_STALE) {
                     if (api->release && api->release(deck, token) == AZ_OK) g_sdk_exit_tokens[deck] = 0;
@@ -253,8 +253,7 @@ static void sdk_exit_consume(const struct azexit_service *api) {
             (receipt.kind != AZEXIT_RECEIPT_TERMINAL && receipt.kind != AZEXIT_RECEIPT_SETTLED &&
              receipt.kind != AZEXIT_RECEIPT_RESOURCES_RETIRED)) continue;
         struct scmd_completion completion = {
-            receipt.outcome, receipt.reason, receipt.load_generation, receipt.revision, receipt.settled
-        };
+            receipt.outcome, receipt.reason, receipt.load_generation, receipt.revision, receipt.settled};
         int accepted = receipt.kind == AZEXIT_RECEIPT_TERMINAL || receipt.kind == AZEXIT_RECEIPT_SETTLED;
         if (accepted) {
             int complete = scmd_complete(&g_sdk_commands, receipt.token, &completion);
@@ -451,5 +450,6 @@ static __attribute__((unused)) int sdk_native_cues(int deck, az_native_cue_snaps
     if (deck < 0 || deck >= 4 || !out || out->size < sizeof *out) return AZ_INVALID;
     const struct azexit_service *api = atomic_load_explicit(&g_sdk_exit_service, memory_order_acquire);
     return api && api->size >= AZEXIT_SERVICE_CUE_SNAPSHOT_SIZE && api->native_cues
-        ? api->native_cues((unsigned) deck, out) : AZ_UNSUPPORTED;
+               ? api->native_cues((unsigned) deck, out)
+               : AZ_UNSUPPORTED;
 }

@@ -280,10 +280,10 @@ bool bindings(Slot &slot) noexcept {
     if (!pointer(basis)) return false;
     uintptr_t jump = word(basis + 0x38);
     bool valid = table(jump, p.jump_table) && word(basis + 0x30) == core && word(jump + 0x10) == core &&
-           word(quantize + 0x20) == jump && word(beat + 0x38) == basis && word(beat + 0x48) == core &&
-           word(beat + 0x70) == word(f + 0x68) && word(beat + 0x80) == quantize &&
-           pointer(functions) && word(functions + 0x20) == quantize &&
-           word(functions + 0x30) == slip && word(slip + 0x78) == quantize;
+                 word(quantize + 0x20) == jump && word(beat + 0x38) == basis && word(beat + 0x48) == core &&
+                 word(beat + 0x70) == word(f + 0x68) && word(beat + 0x80) == quantize &&
+                 pointer(functions) && word(functions + 0x20) == quantize &&
+                 word(functions + 0x30) == slip && word(slip + 0x78) == quantize;
     return valid;
 }
 bool quantize_idle(Slot &slot) noexcept {
@@ -366,7 +366,9 @@ Node *capture(uintptr_t address, bool borrowed = false) noexcept {
         node.deck.store(causal.deck, std::memory_order_relaxed);
         node.executed.store(0, std::memory_order_relaxed);
         node.borrowed.store(borrowed, std::memory_order_relaxed);
-        node.required.store(borrowed ? 0 : causal.setup ? 2 : 1, std::memory_order_relaxed);
+        node.required.store(borrowed ? 0 : causal.setup ? 2
+                                                        : 1,
+                            std::memory_order_relaxed);
         node.type.store(unsigned(type), std::memory_order_relaxed);
         node.maintenance.store(causal.maintenance, std::memory_order_relaxed);
         node.incarnation.store(incarnation, std::memory_order_relaxed);
@@ -479,8 +481,7 @@ void manager_hook(void *self, const void *reference) {
             capture_list(word(chain + 0x18));
             trampoline<void (*)(void *, const void *)> (&state().manager_original)(self, reference);
             return;
-        }
-        else causal.slot->untracked = true;
+        } else causal.slot->untracked = true;
     }
     trampoline<void (*)(void *, const void *)> (&state().manager_original)(self, reference);
 }
@@ -503,7 +504,7 @@ int quantize_hook(void *self, int selector, const void *reference, const void *o
 void jump_hook(void *self, const void *property, int mode, const void *reference, bool option, double timing) {
     Scope next = causal;
     next.setup = causal.slot && word(word(causal.slot->unit + 0x180) + 0x38) == reinterpret_cast<uintptr_t>(self) &&
-        initial_request(*causal.slot, reference);
+                 initial_request(*causal.slot, reference);
     CausalScope scope(next);
     if (next.slot && word(word(next.slot->unit + 0x180) + 0x38) == reinterpret_cast<uintptr_t>(self))
         capture_list(word(reinterpret_cast<uintptr_t>(reference)));
@@ -515,8 +516,8 @@ void loop_schedule_hook(void *self, const void *forward, const void *reverse, in
     Scope next = causal;
     next.setup = false;
     next.maintenance = causal.slot &&
-        word(word(causal.slot->unit + 0x180) + 0x38) == reinterpret_cast<uintptr_t>(self) &&
-        loop_schedule_matches(*causal.slot, forward, reverse, mode, reference, timing);
+                       word(word(causal.slot->unit + 0x180) + 0x38) == reinterpret_cast<uintptr_t>(self) &&
+                       loop_schedule_matches(*causal.slot, forward, reverse, mode, reference, timing);
     CausalScope scope(next);
     if (next.maintenance) capture_list(future_hidden(*next.slot, word(reinterpret_cast<uintptr_t>(reference))));
     reinterpret_cast<Schedule>(state().profile.jump_schedule)(self, forward, reverse, mode, reference, option, timing);
@@ -546,9 +547,9 @@ bool cue_seek_operation(uint32_t operation) noexcept {
 bool cue_position_matches(const Slot &slot) noexcept {
     uintptr_t core = slot.core.load(std::memory_order_relaxed);
     return slot.retained_before.in_valid &&
-        !std::memcmp(reinterpret_cast<const void *>(core + 0x18), slot.retained_before.identity, 12) &&
-        compare_timestamps(word(core + 0x28), slot.retained_before.in,
-                           slot.retained_before.rate, slot.retained_before.rate, 1) == AZ_TIME_EQUAL;
+           !std::memcmp(reinterpret_cast<const void *>(core + 0x18), slot.retained_before.identity, 12) &&
+           compare_timestamps(word(core + 0x28), slot.retained_before.in,
+                              slot.retained_before.rate, slot.retained_before.rate, 1) == AZ_TIME_EQUAL;
 }
 void core_jump_hook(void *self, const void *position) {
     Slot *slot = causal.slot;
@@ -562,9 +563,9 @@ void core_jump_hook(void *self, const void *position) {
     if (slot && slot->operation == AZ_CMD_HOT_TRIGGER && causal.command) {
         uintptr_t command = causal.command;
         planned = table(command, state().profile.commands[0].table) &&
-            word(command + 0x20) == reinterpret_cast<uintptr_t>(self) &&
-            table(command + 0x28, state().profile.interval_source_table) &&
-            !std::memcmp(reinterpret_cast<const void *>(command + 0x30), slot->retained_before.identity, 12);
+                  word(command + 0x20) == reinterpret_cast<uintptr_t>(self) &&
+                  table(command + 0x28, state().profile.interval_source_table) &&
+                  !std::memcmp(reinterpret_cast<const void *>(command + 0x30), slot->retained_before.identity, 12);
         if (planned) {
             uint64_t forward = word(command + 0x40), reverse = word(command + 0x48);
             const uint64_t rate = slot->retained_before.rate;
@@ -573,20 +574,19 @@ void core_jump_hook(void *self, const void *position) {
             if (planned) {
                 window = (order == AZ_TIME_BEFORE ? reverse - forward : forward - reverse) + 1;
                 planned = compare_timestamps(slot->retained_before.in, forward, rate, rate, window) == AZ_TIME_EQUAL &&
-                    compare_timestamps(slot->retained_before.in, reverse, rate, rate, window) == AZ_TIME_EQUAL &&
-                    compare_timestamps(target, forward, rate, rate, window) == AZ_TIME_EQUAL &&
-                    compare_timestamps(target, reverse, rate, rate, window) == AZ_TIME_EQUAL;
+                          compare_timestamps(slot->retained_before.in, reverse, rate, rate, window) == AZ_TIME_EQUAL &&
+                          compare_timestamps(target, forward, rate, rate, window) == AZ_TIME_EQUAL &&
+                          compare_timestamps(target, reverse, rate, rate, window) == AZ_TIME_EQUAL;
             }
         }
     }
     bool owned = slot && cue_seek_operation(slot->operation) &&
-        slot->core.load(std::memory_order_relaxed) == reinterpret_cast<uintptr_t>(self) &&
-        slot->token.load(std::memory_order_acquire) == causal.token &&
-        slot->phase.load(std::memory_order_acquire) == RUNNING &&
-        !std::memcmp(reinterpret_cast<const unsigned char *>(position) + 8, slot->retained_before.identity, 12) &&
-        planned && compare_timestamps(target, slot->retained_before.in,
-                                      slot->retained_before.rate, slot->retained_before.rate, window) == AZ_TIME_EQUAL;
-    trampoline<void (*)(void *, const void *)>(&state().core_jump_original)(self, position);
+                 slot->core.load(std::memory_order_relaxed) == reinterpret_cast<uintptr_t>(self) &&
+                 slot->token.load(std::memory_order_acquire) == causal.token &&
+                 slot->phase.load(std::memory_order_acquire) == RUNNING &&
+                 !std::memcmp(reinterpret_cast<const unsigned char *>(position) + 8, slot->retained_before.identity, 12) &&
+                 planned && compare_timestamps(target, slot->retained_before.in, slot->retained_before.rate, slot->retained_before.rate, window) == AZ_TIME_EQUAL;
+    trampoline<void (*)(void *, const void *)> (&state().core_jump_original)(self, position);
     if (owned && same_load(causal.deck, *slot) &&
         !std::memcmp(reinterpret_cast<const void *>(slot->core.load(std::memory_order_relaxed) + 0x18), slot->retained_before.identity, 12) &&
         compare_timestamps(word(slot->core.load(std::memory_order_relaxed) + 0x28), target,
@@ -643,8 +643,7 @@ void destroy_command(void *self, bool deleting) {
             uint64_t token = node->token.load(std::memory_order_acquire);
             Slot &slot = state().decks[node->deck.load(std::memory_order_acquire)];
             if (!node->executed.load(std::memory_order_acquire) && node->required.load(std::memory_order_acquire) &&
-                !node->maintenance.load(std::memory_order_acquire))
-            {
+                !node->maintenance.load(std::memory_order_acquire)) {
                 mark_lost(slot, token);
             }
             node->address.store(0, std::memory_order_release); /* before pool reuse */
@@ -691,9 +690,9 @@ bool empty_position(uintptr_t source) noexcept {
     /* Native empty constructor values are absence markers, not timestamps.
      * A malformed or foreign populated source must still refuse HOT_CLEAR. */
     return !word(source) && !integer(source + 8) &&
-        word(source + 16) == UINT64_C(0x7fffffffffffffff) &&
-        !word(source + 0x20) && integer(source + 0x30) == 0x7fffffff &&
-        word(source + 0x38) == UINT64_C(0x7fffffffffffffff);
+           word(source + 16) == UINT64_C(0x7fffffffffffffff) &&
+           !word(source + 0x20) && integer(source + 0x30) == 0x7fffffff &&
+           word(source + 0x38) == UINT64_C(0x7fffffffffffffff);
 }
 LoopPoints points(uintptr_t property) noexcept {
     LoopPoints result;
@@ -745,7 +744,7 @@ bool loop_callback(Slot &slot, uintptr_t loop, const LoopView &view, uintptr_t &
         !interval_matches(loop + 0x68, view, true, false)) return false;
     play = word(loop + 0x18);
     return !play || (table(play, p.commands[1].table) &&
-                    word(play + 0x20) == slot.core.load(std::memory_order_relaxed) && !word(play + 0x18));
+                     word(play + 0x20) == slot.core.load(std::memory_order_relaxed) && !word(play + 0x18));
 }
 /* Quantize's interval request wraps an owner-held Loop callback. The visible
  * wrapper and its hidden callback are both stock future playback work; the
@@ -804,7 +803,7 @@ bool initial_request(Slot &slot, const void *reference) noexcept {
     LoopView view = {};
     uintptr_t play = 0;
     return pointer(reinterpret_cast<uintptr_t>(reference)) && loop_view(slot, view) &&
-        loop_callback(slot, word(reinterpret_cast<uintptr_t>(reference)), view, play);
+           loop_callback(slot, word(reinterpret_cast<uintptr_t>(reference)), view, play);
 }
 bool initial_chain(Slot &slot, uintptr_t chain) noexcept {
     const auto &p = state().profile;
@@ -879,7 +878,7 @@ bool settled_work(Slot &slot, uint64_t token) noexcept {
         // empty-manager/node proof; cue_postcondition still requires this
         // request's seek, source-bound point, disengagement and transport pause.
         bool point_recall = slot.operation == AZ_CMD_MEMORY_RECALL &&
-            slot.retained_before.in_valid && !slot.retained_before.out_valid;
+                            slot.retained_before.in_valid && !slot.retained_before.out_valid;
         return (!slot.maintenance_seen || point_recall) && !pending_nodes(token) && idle(slot);
     }
     uint64_t generation = slot.gate.generation();
@@ -991,15 +990,15 @@ bool prepare_cue(Slot &slot) noexcept {
     if (slot.operation == AZ_CMD_HOT_TRIGGER && integer(word(slot.facade + 0x70) + 0x104)) return false;
     if (slot.operation == AZ_CMD_HOT_SET && slot.initially_engaged && !complete_points(slot.before)) return false;
     return slot.operation == AZ_CMD_MAIN_SET || slot.operation == AZ_CMD_HOT_SET ||
-        (slot.operation == AZ_CMD_HOT_CLEAR && empty_position(slot.retained + 0x30) && empty_position(slot.retained + 0x88)) ||
-        (slot.retained_before.in_valid && !std::memcmp(slot.retained_before.identity, slot.cue_source_before, 12));
+           (slot.operation == AZ_CMD_HOT_CLEAR && empty_position(slot.retained + 0x30) && empty_position(slot.retained + 0x88)) ||
+           (slot.retained_before.in_valid && !std::memcmp(slot.retained_before.identity, slot.cue_source_before, 12));
 }
 void dispatch_cue(Slot &slot) {
     const auto &p = state().profile;
 #if !defined(AZSDK_EXIT_TESTING) || defined(AZSDK_CUE_STAGE_TESTING)
     if (recall_operation(slot.operation)) {
         if (azsdk_cue_recall_dispatch(unsigned(&slot - state().decks), slot.request.token,
-                reinterpret_cast<void *>(slot.core.load(std::memory_order_relaxed)), reinterpret_cast<void *>(slot.facade)) != AZ_OK) throw std::exception();
+                                      reinterpret_cast<void *>(slot.core.load(std::memory_order_relaxed)), reinterpret_cast<void *>(slot.facade)) != AZ_OK) throw std::exception();
         return;
     }
 #endif
@@ -1024,16 +1023,16 @@ bool cue_postcondition(Slot &slot) noexcept {
         LoopPoints current = points(word(word(slot.facade + 0x68) + 0x18));
         bool engaged_now = false;
         bool loop_ok = slot.operation != AZ_CMD_MEMORY_RECALL ||
-            (engaged(slot, engaged_now) && !engaged_now);
+                       (engaged(slot, engaged_now) && !engaged_now);
         if (complete_points(slot.retained_before)) {
             LoopPoints active = points(working(slot));
             loop_ok = engaged(slot, engaged_now) && engaged_now && complete_points(active) &&
-                same_source(active, slot.retained_before) && compare_timestamps(active.in, slot.retained_before.in, active.rate, active.rate, 1) == AZ_TIME_EQUAL && compare_timestamps(active.out, slot.retained_before.out, active.rate, active.rate, 1) == AZ_TIME_EQUAL;
+                      same_source(active, slot.retained_before) && compare_timestamps(active.in, slot.retained_before.in, active.rate, active.rate, 1) == AZ_TIME_EQUAL && compare_timestamps(active.out, slot.retained_before.out, active.rate, active.rate, 1) == AZ_TIME_EQUAL;
         }
         return slot.cue_seek_seen && current.in_valid && compare_timestamps(current.in, slot.retained_before.in, current.rate, current.rate, 1) == AZ_TIME_EQUAL &&
-            same_source(current, slot.retained_before) && !playing && !auxiliary && loop_ok &&
-            current.out_valid == slot.retained_before.out_valid &&
-            (!current.out_valid || compare_timestamps(current.out, slot.retained_before.out, current.rate, current.rate, 1) == AZ_TIME_EQUAL);
+               same_source(current, slot.retained_before) && !playing && !auxiliary && loop_ok &&
+               current.out_valid == slot.retained_before.out_valid &&
+               (!current.out_valid || compare_timestamps(current.out, slot.retained_before.out, current.rate, current.rate, 1) == AZ_TIME_EQUAL);
     }
     unsigned kind = slot.operation == AZ_CMD_HOT_TRIGGER || hot_edit(slot.operation) ? slot.cue_arguments.entry_id : 0;
     if (word(word(slot.facade + 0x68) + 0x18 + kind * 8) != slot.retained) return false;
@@ -1044,11 +1043,12 @@ bool cue_postcondition(Slot &slot) noexcept {
     if (slot.operation == AZ_CMD_HOT_SET) {
         unsigned rgb = (byte(slot.retained + 0x10) << 16) | (byte(slot.retained + 0x11) << 8) | byte(slot.retained + 0x12);
         bool loop_matches = slot.initially_engaged ? complete_points(retained) && same_source(retained, slot.before) &&
-            compare_timestamps(retained.in, slot.before.in, retained.rate, retained.rate, 1) == AZ_TIME_EQUAL && compare_timestamps(retained.out, slot.before.out, retained.rate, retained.rate, 1) == AZ_TIME_EQUAL : !retained.out_valid;
+                                                         compare_timestamps(retained.in, slot.before.in, retained.rate, retained.rate, 1) == AZ_TIME_EQUAL && compare_timestamps(retained.out, slot.before.out, retained.rate, retained.rate, 1) == AZ_TIME_EQUAL
+                                                   : !retained.out_valid;
         bool matches = loop_matches && retained.in_valid && !std::memcmp(retained.identity, slot.cue_source_before, 12) && rgb == slot.cue_arguments.rgb &&
-            (!slot.retained_before.in_valid || compare_timestamps(retained.in, slot.retained_before.in, retained.rate, retained.rate, 1) != AZ_TIME_EQUAL ||
-             retained.out_valid != slot.retained_before.out_valid || (retained.out_valid && compare_timestamps(retained.out, slot.retained_before.out, retained.rate, retained.rate, 1) != AZ_TIME_EQUAL) ||
-             rgb != slot.cue_rgb_before || !same_source(retained, slot.retained_before));
+                       (!slot.retained_before.in_valid || compare_timestamps(retained.in, slot.retained_before.in, retained.rate, retained.rate, 1) != AZ_TIME_EQUAL ||
+                        retained.out_valid != slot.retained_before.out_valid || (retained.out_valid && compare_timestamps(retained.out, slot.retained_before.out, retained.rate, retained.rate, 1) != AZ_TIME_EQUAL) ||
+                        rgb != slot.cue_rgb_before || !same_source(retained, slot.retained_before));
         if (matches) {
             slot.staged_cue.in_sample = retained.in;
             slot.staged_cue.out_sample = retained.out;
@@ -1060,7 +1060,7 @@ bool cue_postcondition(Slot &slot) noexcept {
     }
     if (slot.operation == AZ_CMD_MAIN_SET)
         return retained.in_valid && !std::memcmp(retained.identity, slot.cue_source_before, 12) &&
-            (!slot.retained_before.in_valid || compare_timestamps(retained.in, slot.retained_before.in, retained.rate, retained.rate, 1) != AZ_TIME_EQUAL);
+               (!slot.retained_before.in_valid || compare_timestamps(retained.in, slot.retained_before.in, retained.rate, retained.rate, 1) != AZ_TIME_EQUAL);
     if (!retained.in_valid || compare_timestamps(retained.in, slot.retained_before.in, retained.rate, retained.rate, 1) != AZ_TIME_EQUAL || !same_source(retained, slot.retained_before)) return false;
     if (slot.operation == AZ_CMD_MAIN_RECALL)
         return slot.cue_seek_seen && cue_position_matches(slot) && !playing && !auxiliary;
@@ -1258,7 +1258,7 @@ void execute(unsigned deck, Slot &slot) noexcept {
         bool after = true;
         if (!engaged(slot, after)) slot.failed.store(slot.request.token, std::memory_order_release);
         slot.caused = (extended(slot.operation) || cue_operation(slot.operation)) ? true : slot.operation == AZ_CMD_RELOOP ? (!before && after) || slot.captured != 0
-                                                                                        : slot.caused || !before || !after || slot.captured != 0;
+                                                                                                                           : slot.caused || !before || !after || slot.captured != 0;
         /* Do not complete here. The native operation may have retained commands
          * in Quantize/Slip, including descendants produced in a later block. */
     } catch (...) {
@@ -1313,10 +1313,8 @@ void settle(unsigned deck, Slot &slot) noexcept {
     }
     if (slot.operation == AZ_CMD_LOOP_MOVE && slot.move_stage == 2) return;
     bool loop = true;
-    bool verified = cue_operation(slot.operation) ? cue_postcondition(slot) : extended(slot.operation) && !entering(slot.operation)
-                        ? set_bindings(slot) && loop_postcondition(slot)
-                        : engaged(slot, loop) && loop == entering(slot.operation) &&
-                              !(entering(slot.operation) && slot.initially_engaged);
+    bool verified = cue_operation(slot.operation) ? cue_postcondition(slot) : extended(slot.operation) && !entering(slot.operation) ? set_bindings(slot) && loop_postcondition(slot)
+                                                                                                                                    : engaged(slot, loop) && loop == entering(slot.operation) && !(entering(slot.operation) && slot.initially_engaged);
     /* Engagement alone cannot confirm a seek when RELOOP started engaged.
      * There is no request-correlated native position receipt for that case. */
     if (!verified || slot.untracked || !slot.caused ||
@@ -1375,12 +1373,13 @@ uint64_t commands() {
                                             ~((UINT64_C(1) << AZ_CMD_LOOP_EXIT) | (UINT64_C(1) << AZ_CMD_RELOOP)))
                                          : 0) |
            (enabled & AZEXIT_ENABLE_CUE ? (UINT64_C(1) << AZ_CMD_MAIN_SET) |
-                                         (UINT64_C(1) << AZ_CMD_MAIN_RECALL) |
-                                         (UINT64_C(1) << AZ_CMD_HOT_TRIGGER) : 0)
+                                              (UINT64_C(1) << AZ_CMD_MAIN_RECALL) |
+                                              (UINT64_C(1) << AZ_CMD_HOT_TRIGGER)
+                                        : 0)
 #ifndef AZSDK_EXIT_TESTING
            | azsdk_cue_commands_commands()
 #endif
-           ;
+        ;
 }
 int target(unsigned deck, uint64_t *out) {
     if (!out || deck >= 4) return AZ_INVALID;
@@ -1458,8 +1457,7 @@ int submit_cue(const azexit_cue_request *r) {
     if (identity.deck >= 4 || !identity.token || !identity.load_generation || !identity.deadline_ns || identity.reserved ||
         r->expected_revision || r->flags != AZ_COMMAND_NATIVE_LOAD || r->rgb || r->comment[0] ||
         !std::memchr(r->comment, 0, sizeof r->comment) || r->position_s != 0 || r->end_s != 0 || r->beats != 0) return AZ_INVALID;
-    if (r->operation == AZ_CMD_HOT_TRIGGER ? (r->classification != AZ_CUE_HOT || r->entry_id < 1 || r->entry_id > 8) :
-        (r->classification != AZ_CUE_MAIN || r->entry_id)) return AZ_INVALID;
+    if (r->operation == AZ_CMD_HOT_TRIGGER ? (r->classification != AZ_CUE_HOT || r->entry_id < 1 || r->entry_id > 8) : (r->classification != AZ_CUE_MAIN || r->entry_id)) return AZ_INVALID;
     if (!(commands() & (UINT64_C(1) << r->operation)) || !(deck_mask() & (1u << identity.deck))) return AZ_UNSUPPORTED;
     Slot &slot = state().decks[identity.deck];
     unsigned expected = IDLE;
@@ -1571,8 +1569,7 @@ static int delivery_control(unsigned deck, uint64_t token, uint32_t reason) noex
 static int delivery_event_fd(void) noexcept { return delivery_fd(); }
 static const azexit_delivery_v1 g_sdk_delivery = {
     sizeof g_sdk_delivery, AZEXIT_DELIVERY_VERSION, delivery_event_fd, delivery_consume,
-    delivery_reclaim, delivery_control
-};
+    delivery_reclaim, delivery_control};
 
 extern "C" const azexit_service *azstem_exit_service_v1(void) noexcept {
 #ifndef AZSDK_EXIT_TESTING
@@ -1586,12 +1583,12 @@ extern "C" const azexit_service *azstem_exit_service_v1(void) noexcept {
 #endif
     static const azexit_service api = {sizeof api, 1, mask, target, submit, cancel, poll, release, commands, submit_command, submit_loop, submit_cue, target_cue,
 #ifndef AZSDK_EXIT_TESTING
-        azsdk_cue_commands_tick, azsdk_cue_commands_native_cues
+                                       azsdk_cue_commands_tick, azsdk_cue_commands_native_cues
 #else
-        nullptr, nullptr
+                                       nullptr, nullptr
 #endif
-        , &g_sdk_delivery
-    };
+                                       ,
+                                       &g_sdk_delivery};
     return &api;
 }
 extern "C" int azsdk_exit_configure(int on, int build, azexit_install_fn install) noexcept {
@@ -1791,7 +1788,7 @@ extern "C" int azsdk_exit_recall_quiescent(unsigned deck, uint64_t token) noexce
     Slot &slot = state().decks[deck];
     unsigned phase = slot.phase.load(std::memory_order_acquire);
     return phase == IDLE || !slot.internal_recall.load(std::memory_order_acquire) ||
-        slot.token.load(std::memory_order_acquire) != token || phase == READY || phase == READING;
+           slot.token.load(std::memory_order_acquire) != token || phase == READY || phase == READING;
 }
 extern "C" int azsdk_exit_recall_poll(unsigned deck, azexit_result *out) noexcept {
     if (deck >= 4 || !out) return AZ_INVALID;
@@ -1809,7 +1806,10 @@ extern "C" int azsdk_exit_recall_release(unsigned deck, uint64_t token) noexcept
     unsigned expected = READY;
     if (!slot.internal_recall.load(std::memory_order_acquire) ||
         !slot.phase.compare_exchange_strong(expected, READING, std::memory_order_acq_rel)) return AZ_BUSY;
-    if (slot.result.token != token) { slot.phase.store(READY, std::memory_order_release); return AZ_STALE; }
+    if (slot.result.token != token) {
+        slot.phase.store(READY, std::memory_order_release);
+        return AZ_STALE;
+    }
     slot.internal_recall.store(false, std::memory_order_release);
     slot.phase.store(IDLE, std::memory_order_release);
     return AZ_OK;

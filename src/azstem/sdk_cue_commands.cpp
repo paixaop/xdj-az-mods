@@ -257,12 +257,12 @@ bool same_point(const az_cue_entry &a, const az_cue_entry &b, uint32_t rate) {
 bool staged_point(const azcuestore::NativeProperty &property, const az_cue_entry &entry, const azexit_cue_stage_sample &captured) {
     const unsigned char *p = property.bytes;
     return captured.sample_rate && read<uint32_t>(p, 0x60) == captured.sample_rate &&
-        !std::memcmp(p + 0x30, captured.source_id, 12) &&
-        bool(entry.valid & AZ_CUE_END) == bool(captured.out_valid) &&
-        compare_timestamps(read<uint64_t>(p, 0x40), captured.in_sample, captured.sample_rate, captured.sample_rate, 1) == AZ_TIME_EQUAL &&
-        (!captured.out_valid || (read<uint32_t>(p, 0xb8) == captured.sample_rate &&
-            !std::memcmp(p + 0x88, captured.source_id, 12) &&
-            compare_timestamps(read<uint64_t>(p, 0x98), captured.out_sample, captured.sample_rate, captured.sample_rate, 1) == AZ_TIME_EQUAL));
+           !std::memcmp(p + 0x30, captured.source_id, 12) &&
+           bool(entry.valid & AZ_CUE_END) == bool(captured.out_valid) &&
+           compare_timestamps(read<uint64_t>(p, 0x40), captured.in_sample, captured.sample_rate, captured.sample_rate, 1) == AZ_TIME_EQUAL &&
+           (!captured.out_valid || (read<uint32_t>(p, 0xb8) == captured.sample_rate &&
+                                    !std::memcmp(p + 0x88, captured.source_id, 12) &&
+                                    compare_timestamps(read<uint64_t>(p, 0x98), captured.out_sample, captured.sample_rate, captured.sample_rate, 1) == AZ_TIME_EQUAL));
 }
 int confirm_persist(const azexit_cue_request *request, void *manager, uint64_t cookie, uint64_t *revision, void *) {
     if (!validate_persist(request, manager, cookie, nullptr)) return 0;
@@ -279,7 +279,7 @@ int confirm_persist(const azexit_cue_request *request, void *manager, uint64_t c
         if (!snapshot.content_witness(snapshot.revision(), &fresh) ||
             !azsdk_cue_persist_confirm_publication(request, &fresh) ||
             !snapshot.metadata_only_changed(pending.before_witness, kind, request->entry_id,
-                request->operation == AZ_CMD_CUE_COMMENT ? request->comment : nullptr, request->rgb, pending.expected_rate) ||
+                                            request->operation == AZ_CMD_CUE_COMMENT ? request->comment : nullptr, request->rgb, pending.expected_rate) ||
             !validate_persist(request, manager, cookie, nullptr)) return 0;
         // The exact receipt and full typed native collection prove the edit.
         // Public position conversion is an independent cache refresh, outside
@@ -379,7 +379,7 @@ int execute(const azexit_cue_request *request, void *manager, azexit_result *res
         return fail(AZ_STALE);
     }
     bool awaiting_hot_view = request->operation == AZ_CMD_HOT_SET &&
-        pending.stage_token.load(std::memory_order_acquire) == request->identity.token && pending.stage.load(std::memory_order_acquire) == 2;
+                             pending.stage_token.load(std::memory_order_acquire) == request->identity.token && pending.stage.load(std::memory_order_acquire) == 2;
     auto resume_hot_completion = [&]() -> int {
         // The native PlayerState copy and the setter's automatic store work
         // can lag DSP completion. Keep the original deadline and capture.
@@ -706,7 +706,9 @@ extern "C" int azsdk_cue_commands_submit(const azexit_cue_request *request) noex
     retire_internal_reads();
     rc = azsdk_cue_actor_enqueue(&cache.waiting_request);
     COMMAND_DIAG(*request, rc == AZ_BUSY ? 8 : 9, rc == AZ_BUSY ? "public-queued" : "actor-enqueued");
-    cache.waiting.store(rc == AZ_PENDING ? 5 : rc == AZ_BUSY ? 2 : 0, std::memory_order_release);
+    cache.waiting.store(rc == AZ_PENDING ? 5 : rc == AZ_BUSY ? 2
+                                                             : 0,
+                        std::memory_order_release);
 #ifndef AZSDK_CUE_COMMANDS_TESTING
     if (rc == AZ_PENDING) azsdk_cue_actor_drive(request->identity.deck);
 #endif
