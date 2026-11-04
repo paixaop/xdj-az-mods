@@ -84,6 +84,7 @@ static unsigned sdk_command_ui_drain(unsigned budget) {
         if (rc != AZ_OK) break;
         if (notification.callback) notification.callback(&notification.completion, notification.user);
         scmd_notification_done(&g_sdk_commands, &notification);
+        sdk_command_wake();
         delivered++;
     }
     if (sdk_command_has_pending_notification()) sdk_ui_wake();
