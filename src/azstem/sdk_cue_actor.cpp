@@ -95,6 +95,21 @@ void finish(Slot &slot, unsigned outcome, int reason) {
     slot.result.outcome = outcome == AZ_COMMAND_REJECTED && slot.work_started ? unsigned(AZ_COMMAND_UNCERTAIN) : outcome;
     slot.result.reason = reason;
     slot.phase = Ready;
+    if (!(slot.request.identity.token & (UINT64_C(1) << 63))) {
+        azexit_receipt receipt = {};
+        receipt.size = sizeof receipt;
+        receipt.version = AZEXIT_DELIVERY_VERSION;
+        receipt.kind = AZEXIT_RECEIPT_TERMINAL;
+        receipt.settled = 1;
+        receipt.deck = slot.request.identity.deck;
+        receipt.token = slot.result.token;
+        receipt.load_generation = slot.result.load_generation;
+        receipt.revision = slot.result.revision;
+        receipt.observed_ns = now();
+        receipt.outcome = slot.result.outcome;
+        receipt.reason = slot.result.reason;
+        (void) azsdk_exit_delivery_publish(&receipt);
+    }
 }
 bool matches(const Tag &tag, const Slot &slot) {
     return tag.epoch == slot.epoch && tag.manager == slot.manager &&
@@ -158,6 +173,21 @@ void execute_hook(void *task) {
                result.load_generation == tag->request.identity.load_generation) {
         slot.result = result;
         slot.phase = Ready;
+        if (!(slot.request.identity.token & (UINT64_C(1) << 63))) {
+            azexit_receipt receipt = {};
+            receipt.size = sizeof receipt;
+            receipt.version = AZEXIT_DELIVERY_VERSION;
+            receipt.kind = AZEXIT_RECEIPT_TERMINAL;
+            receipt.settled = 1;
+            receipt.deck = slot.request.identity.deck;
+            receipt.token = result.token;
+            receipt.load_generation = result.load_generation;
+            receipt.revision = result.revision;
+            receipt.observed_ns = now();
+            receipt.outcome = result.outcome;
+            receipt.reason = result.reason;
+            (void) azsdk_exit_delivery_publish(&receipt);
+        }
     } else finish(slot, AZ_COMMAND_REJECTED, rc == AZ_OK ? AZ_INVALID : rc);
 }
 void dtor_hook(void *task) {

@@ -707,6 +707,9 @@ extern "C" int azsdk_cue_commands_submit(const azexit_cue_request *request) noex
     rc = azsdk_cue_actor_enqueue(&cache.waiting_request);
     COMMAND_DIAG(*request, rc == AZ_BUSY ? 8 : 9, rc == AZ_BUSY ? "public-queued" : "actor-enqueued");
     cache.waiting.store(rc == AZ_PENDING ? 5 : rc == AZ_BUSY ? 2 : 0, std::memory_order_release);
+#ifndef AZSDK_CUE_COMMANDS_TESTING
+    if (rc == AZ_PENDING) azsdk_cue_actor_drive(request->identity.deck);
+#endif
     return rc == AZ_BUSY ? AZ_PENDING : rc;
 }
 extern "C" int azsdk_cue_commands_cancel(unsigned deck, uint64_t token) noexcept {
