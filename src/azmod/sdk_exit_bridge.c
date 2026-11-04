@@ -64,6 +64,15 @@ static int sdk_command_has_pending_notification(void) {
             break;
         }
     }
+    if (!pending) {
+        for (unsigned i = 0; i < SCMD_SLOTS; ++i) {
+            struct scmd_pending_delivery *p = &g_sdk_commands.pending[i];
+            if (p->occupied && !p->released_delivered) {
+                pending = 1;
+                break;
+            }
+        }
+    }
     pthread_mutex_unlock(&g_sdk_commands.mu);
     return pending;
 }
@@ -216,6 +225,12 @@ static void sdk_command_collect_retired(const struct azexit_service *api) {
                 (void) delivery->control(r->request.deck, r->token, AZ_CANCELLED);
             }
             if (r->phase == SCMD_FINAL && !r->pinned && !r->awaiting && !r->callback_active) memset(r, 0, sizeof *r);
+            else remaining = 1;
+        }
+        for (unsigned i = 0; i < SCMD_SLOTS; ++i) {
+            struct scmd_pending_delivery *p = &g_sdk_commands.pending[i];
+            if (!p->occupied || p->owner != (int) owner) continue;
+            if (!p->callback_active) memset(p, 0, sizeof *p);
             else remaining = 1;
         }
         if (!remaining) {

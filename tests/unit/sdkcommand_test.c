@@ -715,6 +715,43 @@ static void concurrent_callers(void) {
     assert(f.dispatched == 400 && f.applied == 400 && f.begins == f.ends);
     drain(&f);
 }
+static void async_callback(const az_command_completion *completion, void *user) {
+    unsigned *calls = user;
+    assert(completion->size >= sizeof *completion);
+    assert(completion->version == AZ_DATA_VERSION);
+    assert(completion->result.request_id == 1);
+    (*calls)++;
+}
+static void pending_delivery_identity(void) {
+    struct fixture f = FIXTURE_INIT;
+    initialize(&f);
+    az_command_request r = request(1, 0);
+    az_command_result out = result();
+    unsigned calls = 0;
+    enum scmd_detail detail;
+    assert(scmd_submit_async(&f.engine, 0, &r, async_callback, &calls, &f.target[0], &f.adapter, &out, &detail, 0) == AZ_OK);
+    assert(scmd_step(&f.engine, 0, &f.adapter) == AZ_OK);
+    struct scmd_notification notification;
+    assert(scmd_next_notification(&f.engine, &notification) == AZ_OK);
+    assert(notification.kind == AZ_COMMAND_COMPLETION_TERMINAL);
+    assert(scmd_acknowledge(&f.engine, 0, 1) == AZ_OK);
+    /* Acknowledgement from the terminal callback's interval is accepted, but
+     * the primary record cannot move until that callback returns. */
+    assert(scmd_find_token(&f.engine, notification.token) != NULL);
+    scmd_notification_done(&f.engine, &notification);
+    assert(scmd_find_token(&f.engine, notification.token) == NULL);
+    assert(scmd_find_pending_token(&f.engine, notification.token) != NULL);
+    out = result();
+    assert(scmd_submit_async(&f.engine, 0, &r, async_callback, &calls, &f.target[0], &f.adapter, &out, &detail, 0) == AZ_OK);
+    assert(out.outcome == AZ_COMMAND_APPLIED && out.request_id == 1);
+    assert(scmd_acknowledge(&f.engine, 0, 1) == AZ_OK);
+    assert(scmd_next_notification(&f.engine, &notification) == AZ_OK);
+    assert(notification.kind == AZ_COMMAND_COMPLETION_RELEASED && notification.completion.settled == 1);
+    scmd_notification_done(&f.engine, &notification);
+    assert(calls == 0);
+    assert(scmd_acknowledge(&f.engine, 0, 1) == AZ_STALE);
+    assert(scmd_destroy(&f.engine) == AZ_OK);
+}
 int main(void) {
     assert(setvbuf(stdout, NULL, _IOLBF, 0) == 0);
     operation_deck_matrix();
@@ -738,6 +775,7 @@ int main(void) {
     RUN(quotas_and_exhaustion);
     RUN(events);
     RUN(concurrent_callers);
+    RUN(pending_delivery_identity);
 #undef RUN
     alarm(0);
     puts("sdk command engine: 14 suites passed; no native firmware was called");

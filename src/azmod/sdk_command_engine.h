@@ -87,6 +87,18 @@ struct scmd_record {
     az_command_request request;
     az_command_result result;
 };
+/* A released notification can outlive the primary command record. This is a
+ * reservation identity, not a second command slot: it keeps the callback,
+ * user pointer, immutable result and owner/ID retry identity until RELEASED
+ * returns. The bounded array is part of the admission quota. */
+struct scmd_pending_delivery {
+    int occupied, owner, acknowledged, callback_active, released_delivered;
+    uint64_t token;
+    az_command_request request;
+    az_command_result result;
+    az_command_completion_fn callback;
+    void *callback_user;
+};
 struct scmd_change {
     uint32_t size, version;
     uint64_t sequence, token;
@@ -103,6 +115,7 @@ struct scmd_engine {
     uint64_t (*clock)(void *); /* Process lifetime; bounded, no waiting or engine reentry. */
     void *clock_context;
     struct scmd_record records[SCMD_SLOTS];
+    struct scmd_pending_delivery pending[SCMD_SLOTS];
     struct scmd_journal_entry events[SCMD_EVENTS];
 };
 struct scmd_notification {
@@ -166,6 +179,37 @@ static inline int scmd_request_equal(const az_command_request *a, const az_comma
 static inline struct scmd_record *scmd_find_id(struct scmd_engine *e, int owner, uint64_t id) {
     for (unsigned i = 0; i < SCMD_SLOTS; i++)
         if (e->records[i].phase != SCMD_FREE && e->records[i].owner == owner && e->records[i].request.request_id == id) return &e->records[i];
+    return NULL;
+}
+static inline struct scmd_pending_delivery *scmd_find_pending_id(struct scmd_engine *e, int owner, uint64_t id) {
+    for (unsigned i = 0; i < SCMD_SLOTS; i++)
+        if (e->pending[i].occupied && e->pending[i].owner == owner && e->pending[i].request.request_id == id) return &e->pending[i];
+    return NULL;
+}
+static inline struct scmd_pending_delivery *scmd_find_pending_token(struct scmd_engine *e, uint64_t token) {
+    for (unsigned i = 0; i < SCMD_SLOTS; i++)
+        if (e->pending[i].occupied && e->pending[i].token == token) return &e->pending[i];
+    return NULL;
+}
+static inline unsigned scmd_owner_reservations(struct scmd_engine *e, int owner) {
+    unsigned count = 0;
+    for (unsigned i = 0; i < SCMD_SLOTS; i++) {
+        if (e->records[i].phase != SCMD_FREE && e->records[i].owner == owner) count++;
+        if (e->pending[i].occupied && e->pending[i].owner == owner) count++;
+    }
+    return count;
+}
+static inline unsigned scmd_total_reservations(struct scmd_engine *e) {
+    unsigned count = 0;
+    for (unsigned i = 0; i < SCMD_SLOTS; i++) {
+        if (e->records[i].phase != SCMD_FREE) count++;
+        if (e->pending[i].occupied) count++;
+    }
+    return count;
+}
+static inline struct scmd_pending_delivery *scmd_pending_free(struct scmd_engine *e) {
+    for (unsigned i = 0; i < SCMD_SLOTS; i++)
+        if (!e->pending[i].occupied) return &e->pending[i];
     return NULL;
 }
 static inline struct scmd_record *scmd_find_token(struct scmd_engine *e, uint64_t token) {
@@ -290,10 +334,10 @@ static inline int scmd_submit_target(struct scmd_engine *e, int owner, const az_
         unsigned count = 0;
         for (unsigned i = 0; i < SCMD_SLOTS; i++) {
             if (e->records[i].phase == SCMD_FREE) slot = &e->records[i];
-            else if (e->records[i].owner == owner) count++;
         }
+        count = scmd_owner_reservations(e, owner);
         /* Leave enough journal sequence values for every outstanding terminal event. */
-        if (!slot || count >= SCMD_PER_OWNER || e->next_token == UINT64_MAX || e->sequence >= UINT64_MAX - SCMD_SLOTS) {
+        if (!slot || count >= SCMD_PER_OWNER || scmd_total_reservations(e) >= SCMD_SLOTS || e->next_token == UINT64_MAX || e->sequence >= UINT64_MAX - SCMD_SLOTS) {
             rc = AZ_LIMIT;
             detail = SCMD_DETAIL_QUOTA;
         }
@@ -316,6 +360,23 @@ static inline int scmd_submit_target(struct scmd_engine *e, int owner, const az_
     if (detail_out) *detail_out = SCMD_DETAIL_NONE;
     pthread_mutex_unlock(&e->mu);
     return AZ_OK;
+}
+static inline int scmd_move_to_pending_locked(struct scmd_engine *e, struct scmd_record *r) {
+    if (!e || !r || r->phase != SCMD_FINAL || !r->asynchronous || !r->terminal_delivered ||
+        !r->acknowledged || r->awaiting || r->callback_active || r->released_delivered) return 0;
+    struct scmd_pending_delivery *p = scmd_pending_free(e);
+    if (!p) return 0;
+    memset(p, 0, sizeof *p);
+    p->occupied = 1;
+    p->owner = r->owner;
+    p->acknowledged = 1;
+    p->token = r->token;
+    p->request = r->request;
+    p->result = r->result;
+    p->callback = r->callback;
+    p->callback_user = r->callback_user;
+    memset(r, 0, sizeof *r);
+    return 1;
 }
 static inline int scmd_submit(struct scmd_engine *e, int owner, const az_command_request *request,
                               const struct scmd_target *target, const struct scmd_adapter *adapter,
@@ -341,6 +402,20 @@ static inline int scmd_submit_async(struct scmd_engine *e, int owner, const az_c
             }
             scmd_copy_result(out, &existing->result);
             if (detail_out) *detail_out = existing->detail;
+            pthread_mutex_unlock(&e->mu);
+            return AZ_OK;
+        }
+        struct scmd_pending_delivery *pending = scmd_find_pending_id(e, owner, canonical.request_id);
+        if (pending) {
+            int same = scmd_request_equal(&pending->request, &canonical) && pending->callback == callback &&
+                       pending->callback_user == user;
+            if (!same) {
+                if (detail_out) *detail_out = SCMD_DETAIL_ID_CONFLICT;
+                pthread_mutex_unlock(&e->mu);
+                return AZ_INVALID;
+            }
+            scmd_copy_result(out, &pending->result);
+            if (detail_out) *detail_out = SCMD_DETAIL_NONE;
             pthread_mutex_unlock(&e->mu);
             return AZ_OK;
         }
@@ -375,9 +450,10 @@ static inline int scmd_acknowledge(struct scmd_engine *e, int owner, uint64_t id
         if (!r->asynchronous || r->phase != SCMD_FINAL || !r->terminal_delivered) rc = AZ_INVALID;
         else {
             r->acknowledged = 1;
+            (void) scmd_move_to_pending_locked(e, r);
             rc = AZ_OK;
         }
-    }
+    } else if (scmd_find_pending_id(e, owner, id)) rc = AZ_OK;
     pthread_mutex_unlock(&e->mu);
     return rc;
 }
@@ -413,6 +489,24 @@ static inline int scmd_next_notification(struct scmd_engine *e, struct scmd_noti
         pthread_mutex_unlock(&e->mu);
         return AZ_OK;
     }
+    for (unsigned i = 0; i < SCMD_SLOTS; ++i) {
+        struct scmd_pending_delivery *p = &e->pending[i];
+        if (!p->occupied || p->callback_active || p->released_delivered) continue;
+        p->released_delivered = 1;
+        p->callback_active = 1;
+        memset(out, 0, sizeof *out);
+        out->callback = p->callback;
+        out->user = p->callback_user;
+        out->token = p->token;
+        out->kind = AZ_COMMAND_COMPLETION_RELEASED;
+        out->completion.size = sizeof out->completion;
+        out->completion.version = AZ_DATA_VERSION;
+        out->completion.kind = AZ_COMMAND_COMPLETION_RELEASED;
+        out->completion.settled = 1;
+        out->completion.result = p->result;
+        pthread_mutex_unlock(&e->mu);
+        return AZ_OK;
+    }
     pthread_mutex_unlock(&e->mu);
     return AZ_EMPTY;
 }
@@ -423,6 +517,13 @@ static inline void scmd_notification_done(struct scmd_engine *e, const struct sc
     if (r) {
         r->callback_active = 0;
         if (notification->kind == AZ_COMMAND_COMPLETION_RELEASED && r->released_delivered) memset(r, 0, sizeof *r);
+        else if (notification->kind == AZ_COMMAND_COMPLETION_TERMINAL) (void) scmd_move_to_pending_locked(e, r);
+    } else {
+        struct scmd_pending_delivery *p = scmd_find_pending_token(e, notification->token);
+        if (p && notification->kind == AZ_COMMAND_COMPLETION_RELEASED) {
+            p->callback_active = 0;
+            if (p->released_delivered) memset(p, 0, sizeof *p);
+        }
     }
     pthread_mutex_unlock(&e->mu);
 }
@@ -430,9 +531,17 @@ static inline int scmd_poll(struct scmd_engine *e, int owner, uint64_t id, az_co
     if (!e || !scmd_owner_ok(owner) || !id || !scmd_output_ok(out)) return AZ_INVALID;
     if (pthread_mutex_trylock(&e->mu)) return AZ_BUSY;
     struct scmd_record *r = scmd_find_id(e, owner, id);
+    int found = r != NULL;
     if (r) scmd_copy_result(out, &r->result);
+    else {
+        struct scmd_pending_delivery *p = scmd_find_pending_id(e, owner, id);
+        if (p) {
+            scmd_copy_result(out, &p->result);
+            found = 1;
+        }
+    }
     pthread_mutex_unlock(&e->mu);
-    return r ? AZ_OK : AZ_STALE;
+    return found ? AZ_OK : AZ_STALE;
 }
 static inline int scmd_cancel(struct scmd_engine *e, int owner, uint64_t id, az_command_result *out) {
     if (!e || !scmd_owner_ok(owner) || !id || !scmd_output_ok(out)) return AZ_INVALID;
@@ -451,6 +560,12 @@ static inline int scmd_cancel(struct scmd_engine *e, int owner, uint64_t id, az_
         } else if (r->phase == SCMD_DISPATCHED || r->awaiting) rc = AZ_PENDING;
         else if (r->result.outcome == AZ_COMMAND_CANCELLED) rc = AZ_OK;
         scmd_copy_result(out, &r->result);
+    } else {
+        struct scmd_pending_delivery *p = scmd_find_pending_id(e, owner, id);
+        if (p) {
+            scmd_copy_result(out, &p->result);
+            rc = AZ_STALE;
+        }
     }
     pthread_mutex_unlock(&e->mu);
     return rc;
@@ -483,6 +598,7 @@ static inline int scmd_complete_locked(struct scmd_engine *e, struct scmd_record
         if (!c->settled) return AZ_PENDING;
         r->awaiting = 0;
         scmd_clear_barrier(e, r);
+        (void) scmd_move_to_pending_locked(e, r);
         return AZ_OK; /* The published terminal uncertainty remains immutable. */
     }
     if (r->phase != SCMD_DISPATCHED) return AZ_STALE;
@@ -517,6 +633,10 @@ static inline void scmd_set_observed(struct scmd_engine *e, uint64_t token, uint
     pthread_mutex_lock(&e->mu);
     struct scmd_record *r = scmd_find_token(e, token);
     if (r && r->phase == SCMD_FINAL) r->result.observed_ns = observed_ns;
+    else {
+        struct scmd_pending_delivery *p = scmd_find_pending_token(e, token);
+        if (p) p->result.observed_ns = observed_ns;
+    }
     pthread_mutex_unlock(&e->mu);
 }
 /* One request for one deck. begin/end and dispatch are outside the lock; pinned
@@ -657,6 +777,11 @@ static inline int scmd_destroy(struct scmd_engine *e) {
     if (pthread_mutex_trylock(&e->mu)) return AZ_BUSY;
     for (unsigned i = 0; i < SCMD_SLOTS; i++)
         if (e->records[i].phase != SCMD_FREE) {
+            pthread_mutex_unlock(&e->mu);
+            return AZ_BUSY;
+        }
+    for (unsigned i = 0; i < SCMD_SLOTS; i++)
+        if (e->pending[i].occupied) {
             pthread_mutex_unlock(&e->mu);
             return AZ_BUSY;
         }
