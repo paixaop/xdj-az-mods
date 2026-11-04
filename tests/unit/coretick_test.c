@@ -66,6 +66,11 @@ static void sdk_deck_tick(long now) {
     g_deck_ticks++;
 }
 static void sdk_rows_tick(void) { g_rows_ticks++; }
+/* community.c normally gets these from the provider translation units.  The
+ * extracted coretick fixture deliberately includes only community_tick, so
+ * keep its optional per-frame services self-contained here. */
+static void sdk_data_callbacks_tick(void) {}
+static void azsdk_slip_collect_v1(void) {}
 /* the quarantine's heartbeat (cm_orderly.h has its own suite) */
 static long g_rtick_n;
 static void cmo_note(long count, long now) { (void) count, (void) now; }
