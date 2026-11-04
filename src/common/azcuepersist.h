@@ -69,6 +69,8 @@ __attribute__((visibility("hidden"))) int azsdk_cue_persist_confirm_publication(
     const struct azexit_cue_request *, const struct azcuepersist_witness *) AZCUEPERSIST_NOEXCEPT;
 __attribute__((visibility("hidden"))) int azsdk_cue_persist_poll(
     const struct azexit_cue_request *, void *live_manager, struct azexit_result *) AZCUEPERSIST_NOEXCEPT;
+__attribute__((visibility("hidden"))) int azsdk_cue_persist_take(
+    const struct azexit_cue_request *, void *live_manager, struct azexit_result *) AZCUEPERSIST_NOEXCEPT;
 /* Retire only after the actor has closed admission. Held native refs are
  * released after the correlated receipt and any in-flight helper have quiesced. */
 __attribute__((visibility("hidden"))) void azsdk_cue_persist_retire(void *manager) AZCUEPERSIST_NOEXCEPT;
@@ -105,10 +107,10 @@ static inline bool azcue_timestamps_equal(const azcue_native_timestamps &a, cons
         if (!a.sample_rate || !b.sample_rate || a.sample_rate >= 0x7fffffffu || b.sample_rate >= 0x7fffffffu) return false;
         // Exact common ticks explicitly convert the two encoded sample rates.
         return compare_timestamps(__uint128_t(first) * b.sample_rate, __uint128_t(second) * a.sample_rate,
-            uint64_t(a.sample_rate) * b.sample_rate, source_rate, 1) == AZ_TIME_EQUAL;
+                                  uint64_t(a.sample_rate) * b.sample_rate, source_rate, 1) == AZ_TIME_EQUAL;
     };
     return microseconds(a.in_us, b.in_us) && microseconds(a.out_us, b.out_us) &&
-        samples(a.in_sample, b.in_sample) && samples(a.out_sample, b.out_sample);
+           samples(a.in_sample, b.in_sample) && samples(a.out_sample, b.out_sample);
 }
 #endif
 #undef AZCUEPERSIST_NOEXCEPT

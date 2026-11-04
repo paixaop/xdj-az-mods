@@ -31,6 +31,8 @@ void azsdk_cue_actor_retire(unsigned, void *manager) AZCUE_NOEXCEPT;
 int azsdk_cue_actor_enqueue(const struct azexit_cue_request *) AZCUE_NOEXCEPT;
 void azsdk_cue_actor_drive(unsigned) AZCUE_NOEXCEPT;
 int azsdk_cue_actor_cancel(unsigned, uint64_t) AZCUE_NOEXCEPT;
+int azsdk_cue_actor_peek(unsigned, struct azexit_result *) AZCUE_NOEXCEPT;
+int azsdk_cue_actor_take(unsigned, struct azexit_result *) AZCUE_NOEXCEPT;
 int azsdk_cue_actor_poll(unsigned, struct azexit_result *) AZCUE_NOEXCEPT;
 int azsdk_cue_actor_release(unsigned, uint64_t) AZCUE_NOEXCEPT;
 /* Queue another owned native envelope for the same pending request. A cleanup

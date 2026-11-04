@@ -1795,7 +1795,7 @@ extern "C" int azsdk_exit_recall_quiescent(unsigned deck, uint64_t token) noexce
     return phase == IDLE || !slot.internal_recall.load(std::memory_order_acquire) ||
            slot.token.load(std::memory_order_acquire) != token || phase == READY || phase == READING;
 }
-extern "C" int azsdk_exit_recall_poll(unsigned deck, azexit_result *out) noexcept {
+extern "C" int azsdk_exit_recall_take(unsigned deck, azexit_result *out) noexcept {
     if (deck >= 4 || !out) return AZ_INVALID;
     Slot &slot = state().decks[deck];
     unsigned expected = READY;
@@ -1804,6 +1804,9 @@ extern "C" int azsdk_exit_recall_poll(unsigned deck, azexit_result *out) noexcep
     *out = slot.result;
     slot.phase.store(READY, std::memory_order_release);
     return AZ_OK;
+}
+extern "C" int azsdk_exit_recall_poll(unsigned deck, azexit_result *out) noexcept {
+    return azsdk_exit_recall_take(deck, out);
 }
 extern "C" int azsdk_exit_recall_release(unsigned deck, uint64_t token) noexcept {
     if (deck >= 4 || !token) return AZ_INVALID;

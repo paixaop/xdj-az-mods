@@ -340,7 +340,7 @@ extern "C" int azsdk_cue_actor_cancel(unsigned deck, uint64_t token) noexcept {
     finish(slot, AZ_COMMAND_CANCELLED, AZ_CANCELLED);
     return AZ_OK;
 }
-extern "C" int azsdk_cue_actor_poll(unsigned deck, azexit_result *result) noexcept {
+extern "C" int azsdk_cue_actor_peek(unsigned deck, azexit_result *result) noexcept {
     State &s = state();
     std::unique_lock<std::recursive_mutex> lock(s.mutex, std::try_to_lock);
     if (!lock.owns_lock()) return AZ_PENDING;
@@ -348,6 +348,12 @@ extern "C" int azsdk_cue_actor_poll(unsigned deck, azexit_result *result) noexce
     if (s.slots[deck].phase != Ready) return AZ_PENDING;
     *result = s.slots[deck].result;
     return AZ_OK;
+}
+extern "C" int azsdk_cue_actor_take(unsigned deck, azexit_result *result) noexcept {
+    return azsdk_cue_actor_peek(deck, result);
+}
+extern "C" int azsdk_cue_actor_poll(unsigned deck, azexit_result *result) noexcept {
+    return azsdk_cue_actor_peek(deck, result);
 }
 extern "C" int azsdk_cue_actor_release(unsigned deck, uint64_t token) noexcept {
     State &s = state();

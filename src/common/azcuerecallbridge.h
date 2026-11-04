@@ -16,6 +16,7 @@ int azsdk_exit_cue_stage_submit(const azexit_cue_request *) noexcept;
 int azsdk_exit_cue_stage_capture(unsigned, uint64_t, azexit_cue_stage_sample *) noexcept;
 int azsdk_exit_recall_cancel(unsigned, uint64_t) noexcept;
 int azsdk_exit_recall_quiescent(unsigned, uint64_t) noexcept;
+int azsdk_exit_recall_take(unsigned, azexit_result *) noexcept;
 int azsdk_exit_recall_poll(unsigned, azexit_result *) noexcept;
 int azsdk_exit_recall_release(unsigned, uint64_t) noexcept;
 }

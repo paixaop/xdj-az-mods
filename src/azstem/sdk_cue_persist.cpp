@@ -406,12 +406,12 @@ void request_hook(void *maintainer, const void *record) {
             slot->request_source = word(input + 8 + 0x50);
             slot->request_rate = u32(input + 8 + 0x60);
         }
-        unsigned reason = !pointer(input) ? 11 : static_cast<const unsigned char *>(record)[0] != unsigned(!deleting(slot->request.operation)) ? 12
-                                             : u32(input + 4) != slot->kind                                                                    ? 13
-                                             : std::memcmp(reinterpret_cast<const void *>(input + 8 + 0x30), slot->property_identity, 12)      ? 14
+        unsigned reason = !pointer(input) ? 11 : static_cast<const unsigned char *>(record)[0] != unsigned(!deleting(slot->request.operation))                             ? 12
+                                             : u32(input + 4) != slot->kind                                                                                                ? 13
+                                             : std::memcmp(reinterpret_cast<const void *>(input + 8 + 0x30), slot->property_identity, 12)                                  ? 14
                                              : compare_timestamps(word(input + 8 + 0x40), slot->property_in, slot->property_rate, slot->property_rate, 1) != AZ_TIME_EQUAL ? 15
-                                             : !valid(*slot)                                                                                   ? 16
-                                                                                                                                               : 0;
+                                             : !valid(*slot)                                                                                                               ? 16
+                                                                                                                                                                           : 0;
         if (reason) {
             slot->diagnostic.store(reason, std::memory_order_release);
             slot->invalid.store(1, std::memory_order_release);
@@ -762,7 +762,7 @@ extern "C" int azsdk_cue_persist_confirm_publication(const azexit_cue_request *r
         word(fresh->memory_set + 0x28) != fresh->memory_content || word(fresh->hot_set + 0x28) != fresh->hot_content || !valid(slot)) return 0;
     return fresh->memory_content == slot.reply_memory_content && fresh->hot_content == slot.reply_hot_content ? 1 : 2;
 }
-extern "C" int azsdk_cue_persist_poll(const azexit_cue_request *request, void *manager, azexit_result *out) noexcept {
+extern "C" int azsdk_cue_persist_take(const azexit_cue_request *request, void *manager, azexit_result *out) noexcept {
     if (!request || !out || request->identity.deck >= 4 || !manager) return AZ_INVALID;
     Slot &slot = state().slots[request->identity.deck];
     unsigned phase = RECEIPT;
@@ -798,6 +798,9 @@ extern "C" int azsdk_cue_persist_poll(const azexit_cue_request *request, void *m
     release_witness(slot);
     slot.phase.store(FREE, std::memory_order_release);
     return AZ_OK;
+}
+extern "C" int azsdk_cue_persist_poll(const azexit_cue_request *request, void *manager, azexit_result *out) noexcept {
+    return azsdk_cue_persist_take(request, manager, out);
 }
 extern "C" void azsdk_cue_persist_retire(void *manager) noexcept {
     for (auto &slot : state().slots) {
