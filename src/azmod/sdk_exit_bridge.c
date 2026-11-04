@@ -3,12 +3,17 @@
  * the engine mutex nor a mod callback ever runs inside the native owner hook. */
 #include "../common/azexit.h"
 #include "../common/azcuecommands.h"
-#if defined(__APPLE__)
-#ifndef MAP_ANONYMOUS
-#define MAP_ANONYMOUS 0x1000
+#if !defined(AZALTSTACK_H) && !defined(az_thread_create)
+/* sdk_command.c is also extracted into host fixtures without azmod.c's
+ * unity-build prologue. Production includes azaltstack.h before this file. */
+#define AZSDK_THREAD_START_(base, name) base##name
+#define AZSDK_THREAD_START(base, name) AZSDK_THREAD_START_(base, name)
+static int az_thread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*fn)(void *), void *arg) {
+    return AZSDK_THREAD_START(pthread_, create)(thread, attr, fn, arg);
+}
+#undef AZSDK_THREAD_START
+#undef AZSDK_THREAD_START_
 #endif
-#endif
-#include "../common/azaltstack.h"
 __attribute__((weak)) void azsdk_cue_commands_drive(void) {}
 #include <stdatomic.h>
 #include <errno.h>
