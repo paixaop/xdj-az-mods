@@ -5,7 +5,8 @@
 #include "../common/azloadobserver.h"
 /* Private native observers, configured before EP147 constructs players. */
 static _Atomic int g_sdk_loop_on;
-static _Atomic int g_sdk_live_on, g_sdk_cue_on;
+static _Atomic int g_sdk_live_on;
+static _Atomic int g_sdk_cue_on;
 static _Atomic int g_sdk_load_on;
 /* ---- DjPlayerUnit ctor hook: seed the slot table from the deck argument ----
  * @0x14a2560: DjPlayerUnit(this=x0, const PlayerId *id=x1, void *ctx=x2, int cap=x3).

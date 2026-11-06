@@ -40,6 +40,8 @@ static int fail_init, borrow_data, wave_data, request_status;
 static uint64_t owned[CM_MAX][ST_PER_OWNER];
 static const az_track_snapshot *held;
 static const az_wave_snapshot *held_wave;
+static void sdk_command_owner_init(int owner) { (void) owner; }
+static void sdk_command_owner_ready(int owner) { (void) owner; }
 static void sdk_command_retire_owner(int owner) { (void)owner; }
 static az_track_ref lifecycle_ref = {sizeof(az_track_ref), AZ_DATA_VERSION, 1, 1, 9, 42, 0};
 static void cm_refuse(cm_mod *c, int state, const char *format, ...) {

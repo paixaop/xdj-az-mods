@@ -23,6 +23,7 @@ unsigned azsdk_live_capabilities(void) { return native_mask; }
 #define DJPUCTOR_DEFAULT ((uintptr_t) 0x10000)
 #define F_OK 0
 static uintptr_t g_djpuctor_addr;
+static int g_sdk_cue_on;
 static int sdk_loop_build = 2, track_flag, live_flag, configure_calls, cue_configure_calls;
 void azsdk_live_configure(int on, int build) {
     assert(on == 1 && build == 2);
@@ -46,10 +47,11 @@ static void configuration(void) {
                     g_djpuctor_addr = original ? DJPUCTOR_DEFAULT : 0;
                     track_flag = track;
                     live_flag = native;
-                    g_sdk_live_on = configure_calls = cue_configure_calls = 0;
+                    g_sdk_live_on = g_sdk_cue_on = configure_calls = cue_configure_calls = 0;
                     live_configuration(td);
                     int expected = td && native && track && original;
                     assert(configure_calls == expected && cue_configure_calls == expected && g_sdk_live_on == expected);
+                    assert(g_sdk_cue_on == expected);
                 }
     g_sdk_live_on = 1;
 }
