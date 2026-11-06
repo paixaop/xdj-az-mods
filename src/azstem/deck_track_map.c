@@ -5,7 +5,7 @@
 #include "../common/azloadobserver.h"
 /* Private native observers, configured before EP147 constructs players. */
 static _Atomic int g_sdk_loop_on;
-static _Atomic int g_sdk_live_on;
+static _Atomic int g_sdk_live_on, g_sdk_cue_on;
 static _Atomic int g_sdk_load_on;
 /* ---- DjPlayerUnit ctor hook: seed the slot table from the deck argument ----
  * @0x14a2560: DjPlayerUnit(this=x0, const PlayerId *id=x1, void *ctx=x2, int cap=x3).
@@ -75,7 +75,7 @@ static void djpuctor_hook(void *self, const void *id, void *ctx, int cap) {
         if (g_sdk_live_on && (claimed || exp == self) &&
             *(const uintptr_t *) self == atomic_load_explicit(&g_djpu_vt, memory_order_relaxed))
             (void) azsdk_live_register((int) n32, self);
-        if (g_sdk_live_on && (claimed || exp == self) &&
+        if (g_sdk_cue_on && (claimed || exp == self) &&
             *(const uintptr_t *) self == atomic_load_explicit(&g_djpu_vt, memory_order_relaxed))
             (void) azsdk_cue_register((int) n32, self);
         /* The load tap validates the unit-owned facade here; retained pointer values are
@@ -101,11 +101,14 @@ typedef void (*djpudtor_fn)(void *self);
 static djpudtor_fn g_orig_djpudtor = NULL;
 static _Atomic unsigned g_djpu_dtor_calls;
 static void djpudtor_hook(void *self) {
+    uintptr_t unit = (uintptr_t) self;
+    unsigned retiring = 0;
     for (int d = 0; d < NDECK; d++)
         if (atomic_load_explicit(&g_deck_self[STEM_SLOT[d]], memory_order_acquire) == self) {
+            retiring |= 1u << d;
             azsdk_exit_retire(d);
             if (g_sdk_loop_on) azsdk_loop_retire(d);
-            if (g_sdk_live_on) azsdk_cue_retire(d);
+            if (g_sdk_cue_on) azsdk_cue_retire(d);
             if (g_sdk_live_on) azsdk_live_retire(d);
             if (g_sdk_load_on) azsdk_load_retire(d);
             atomic_store_explicit(&g_djpu_fgpr[d], 0, memory_order_release);
@@ -118,6 +121,8 @@ static void djpudtor_hook(void *self) {
     atomic_fetch_add_explicit(&g_djpu_dtor_calls, 1, memory_order_relaxed);
     atomic_thread_fence(memory_order_seq_cst);
     g_orig_djpudtor(self);
+    for (unsigned deck = 0; retiring && deck < NDECK; ++deck)
+        if (retiring & (1u << deck)) azsdk_exit_retire_complete(deck, unit);
 }
 
 /* ---- gui::LoadState -> LoadedTrackInfo: track identity by construction ----

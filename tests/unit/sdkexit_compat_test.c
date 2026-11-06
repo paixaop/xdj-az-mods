@@ -15,6 +15,9 @@ extern int sdk_exit_public_release(const char *, uint64_t);
 extern int sdk_exit_public_cancel(const char *, uint64_t, az_command_result *);
 extern void sdk_exit_public_clock(uint64_t);
 static struct azexit_result receipt;
+static struct azexit_request reservation;
+static unsigned receipt_phase;
+static int local_result;
 static unsigned dispatched;
 static uint64_t cue_receipt_revision;
 static uint64_t target_generation = 1;
@@ -70,16 +73,63 @@ static int cancel(unsigned deck, uint64_t token) {
 }
 static int poll(unsigned deck, struct azexit_result *out) {
     (void) deck;
-    if (!receipt.token) return AZ_PENDING;
-    *out = receipt;
-    return AZ_OK;
+    (void) out;
+    assert(!"the bound core must never query native command status");
+    return AZ_FAILED;
 }
 static int release(unsigned deck, uint64_t token) {
     (void) deck;
-    assert(receipt.token == token);
-    memset(&receipt, 0, sizeof receipt);
+    (void) token;
+    assert(!"the bound core must use the receipt reclamation handshake");
+    return AZ_FAILED;
+}
+static int bind(const struct azexit_binding *binding) {
+    return binding->version == AZEXIT_DELIVERY_VERSION && binding->capacity == 32 ? AZ_OK : AZ_UNSUPPORTED;
+}
+static int fd(void) { return -1; } /* deterministic fixture dispatcher */
+static void drive(void) {}
+static uint64_t delivery_ready(unsigned deck) { return deck < 4 ? commands() : 0; }
+static int reserve(const struct azexit_request *request) {
+    assert(!reservation.token);
+    reservation = *request;
+    receipt_phase = 0;
+    local_result = 0;
     return AZ_OK;
 }
+static int consume(struct azexit_receipt *out) {
+    if (!receipt.token || receipt_phase == 3) return AZ_EMPTY;
+    unsigned kind = ++receipt_phase;
+    *out = (struct azexit_receipt) {
+        sizeof *out, AZEXIT_DELIVERY_VERSION, kind, 1, reservation.deck,
+        receipt.token, receipt.load_generation, local_result ? 0 : 9,
+        receipt.revision, 1, receipt.outcome, receipt.reason};
+    return AZ_OK;
+}
+static int reclaim(const struct azexit_receipt *value) {
+    assert(receipt_phase == 3 && value->token == reservation.token);
+    reservation.token = receipt.token = 0;
+    return AZ_OK;
+}
+static int control(unsigned deck, uint64_t token, uint32_t reasons, uint64_t time,
+                   struct azexit_receipt *winner) {
+    assert(token == reservation.token && deck == reservation.deck && !receipt.token);
+    *winner = (struct azexit_receipt) {
+        sizeof *winner, AZEXIT_DELIVERY_VERSION, AZEXIT_RECEIPT_TERMINAL, 1, deck,
+        token, reservation.load_generation, 0, 0, time,
+        AZ_COMMAND_CANCELLED, reasons & AZEXIT_STOP_DEADLINE ? AZ_STALE : AZ_CANCELLED};
+    receipt = (struct azexit_result) {token, reservation.load_generation, 0, winner->outcome, winner->reason};
+    local_result = 1;
+    return AZ_OK;
+}
+static int close_local(const struct azexit_receipt *value) {
+    if (!receipt.token)
+        receipt = (struct azexit_result) {value->token, value->load_generation, value->revision,
+                                          value->outcome, value->reason};
+    local_result = 1;
+    return AZ_OK;
+}
+static const struct azexit_delivery_v2 delivery = {
+    sizeof delivery, AZEXIT_DELIVERY_VERSION, fd, consume, reclaim, control, bind, reserve, close_local, drive, delivery_ready};
 static az_command_request request(uint64_t id, unsigned operation) {
     az_command_request r = {0};
     r.size = sizeof r;
@@ -116,16 +166,18 @@ int main(void) {
     } old = {sizeof old, 1, mask, target, submit, cancel, poll, release, commands, submit_command};
     _Static_assert(sizeof old == AZEXIT_SERVICE_COMMAND_SIZE, "old private prefix changed");
     sdk_exit_public_bind((const struct azexit_service *) &old);
-    assert(sdk_exit_public_capabilities() == old_commands);
+    assert(!sdk_exit_public_capabilities());
     az_command_request r = request(1, AZ_CMD_LOOP_DOUBLE);
     az_command_result out = {.size = sizeof out};
     unsigned before;
     assert(sdk_exit_public_submit("one", &r, &out) == AZ_UNSUPPORTED && !dispatched);
-    run(1, AZ_CMD_RELOOP);
-    run(2, AZ_CMD_LOOP_EXIT);
-    struct azexit_service current = {.size = sizeof current, .version = 1, .mask = mask, .target = target, .submit = submit, .cancel = cancel, .poll = poll, .release = release, .commands = commands, .submit_command = submit_command};
+    r.operation = AZ_CMD_LOOP_EXIT;
+    assert(sdk_exit_public_submit("one", &r, &out) == AZ_UNSUPPORTED && !dispatched);
+    struct azexit_service current = {.size = sizeof current, .version = 1, .mask = mask, .target = target, .submit = submit, .cancel = cancel, .poll = poll, .release = release, .commands = commands, .submit_command = submit_command, .delivery = &delivery};
     sdk_exit_public_bind(&current);
     assert(sdk_exit_public_capabilities() == old_commands);
+    run(1, AZ_CMD_RELOOP);
+    run(2, AZ_CMD_LOOP_EXIT);
     current.submit_loop = submit_loop;
     assert(sdk_exit_public_capabilities() == commands());
     run(3, AZ_CMD_LOOP_MOVE);
@@ -149,19 +201,19 @@ int main(void) {
     _Static_assert(sizeof(struct azexit_cue_target) == 32, "cue target layout changed");
     advertised = (UINT64_C(1) << (AZ_CMD_CUE_COLOR + 1)) - 2;
     sdk_exit_public_bind((const struct azexit_service *) &old_loop);
-    assert(sdk_exit_public_capabilities() == ((UINT64_C(1) << 13) - 2));
+    assert(!sdk_exit_public_capabilities());
     r = request(4, AZ_CMD_CUE_COMMENT);
     before = dispatched;
     assert(sdk_exit_public_submit("one", &r, &out) == AZ_UNSUPPORTED && dispatched == before);
-    run(4, AZ_CMD_LOOP_DOUBLE);
     sdk_exit_public_bind(&current);
+    run(4, AZ_CMD_LOOP_DOUBLE);
     assert(sdk_exit_public_capabilities() == ((UINT64_C(1) << 13) - 2));
     current.submit_cue = submit_cue;
     assert(sdk_exit_public_capabilities() == ((UINT64_C(1) << 13) - 2));
     current.target_cue = target_cue;
-    current.size = AZEXIT_SERVICE_CUE_SIZE - sizeof current.cue_tick;
-    assert(sdk_exit_public_capabilities() == ((UINT64_C(1) << 13) - 2));
     current.size = AZEXIT_SERVICE_CUE_SIZE;
+    assert(!sdk_exit_public_capabilities());
+    current.size = sizeof current;
     assert(sdk_exit_public_capabilities() == advertised); /* cue_tick is optional */
     current.cue_tick = cue_tick;
     current.submit_cue = NULL;
@@ -295,7 +347,6 @@ int main(void) {
     assert(sdk_exit_public_submit("one", &r, &out) == AZ_OK && out.outcome == AZ_COMMAND_ACCEPTED &&
            compare_timestamps(out.observed_ns, first_observed, 1000000000, 1000000000, 1) == AZ_TIME_EQUAL && dispatched == before);
     cue_target_rc = AZ_OK;
-    assert(sdk_exit_public_poll("one", r.request_id, &out) == AZ_OK && out.outcome == AZ_COMMAND_ACCEPTED && dispatched == before + 1);
     assert(sdk_exit_public_poll("one", r.request_id, &out) == AZ_OK && out.outcome == AZ_COMMAND_APPLIED && dispatched == before + 1);
     assert(copied_cue.expected_revision == r.expected_revision &&
            compare_timestamps(copied_cue.identity.deadline_ns, r.deadline_ns, 1000000000, 1000000000, 1) == AZ_TIME_EQUAL &&

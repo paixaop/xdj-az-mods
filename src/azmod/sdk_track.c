@@ -483,8 +483,7 @@ static int sdk_data_event(const char *id, uint64_t after, az_data_change *out) {
 /* Only the opt-in native transient commands are admitted. Refusal performs no action. */
 #include "sdk_command.c"
 static int sdk_command_submit(const char *id, const az_command_request *r, az_command_result *out) {
-    if (st_mod_owner(id, CM_RA(), "command_submit") < 0 || !scmd_output_ok(out) || !scmd_request_valid(r)) return AZ_INVALID;
-    if (r->operation >= AZ_CMD_LOOP_IN && r->operation <= AZ_CMD_CUE_COLOR && (r->flags & AZ_COMMAND_NATIVE_LOAD))
-        return sdk_exit_submit(st_mod_owner(id, CM_RA(), "command_submit"), r, out);
-    return scmd_refuse(out, r, AZ_UNSUPPORTED, scmd_now(&g_sdk_commands));
+    int owner = st_mod_owner(id, CM_RA(), "command_submit");
+    if (owner < 0 || !scmd_output_ok(out) || !scmd_request_valid(r)) return AZ_INVALID;
+    return sdk_exit_submit(owner, r, out);
 }

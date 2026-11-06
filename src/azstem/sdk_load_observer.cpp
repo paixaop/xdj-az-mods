@@ -3,6 +3,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include "../common/azcuecommands.h"
 #include "../common/azloadobserver.h"
 #include <atomic>
 #include <cstddef>
@@ -13,6 +14,11 @@
 #include <time.h>
 #if defined(__linux__)
 #include <link.h>
+#endif
+
+#ifdef AZSDK_LOAD_TESTING
+extern "C" __attribute__((weak)) void azsdk_cue_commands_notify(unsigned) noexcept {}
+extern "C" __attribute__((weak)) void azsdk_exit_load_changed(unsigned) noexcept {}
 #endif
 
 namespace {
@@ -129,6 +135,7 @@ std::uint64_t now() noexcept {
 }
 std::uint64_t invalidate(Deck &d) noexcept {
     d.valid.store(0, std::memory_order_release);
+    azsdk_exit_load_changed(unsigned(&d - decks));
     std::uint64_t e = d.epoch.load(std::memory_order_acquire);
     for (unsigned n = 0; n < 8; ++n) {
         if (e == UINT64_MAX) break;
@@ -317,6 +324,7 @@ void complete(std::uintptr_t listener, const void *request, std::uint32_t result
             }
         }
         unlock(d);
+        azsdk_cue_commands_notify(deck);
         return;
     }
 }

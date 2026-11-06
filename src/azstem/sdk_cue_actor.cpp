@@ -1,23 +1,26 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #include "../common/aztimestamp.h"
 #include "../common/azcueactor.h"
+#include "../common/azcuecommands.h"
 #include "../azmod/azmod-mod.h"
+#include <atomic>
 #include <cstring>
 #include <mutex>
 #include <exception>
 #include <time.h>
 #if defined(AZSDK_CUE_DIAGNOSTIC)
 #include <cstdio>
-#include <atomic>
 #endif
 #if defined(__linux__) && defined(__aarch64__) && !defined(AZSDK_CUE_ACTOR_TESTING)
 #include "sdk_vtable_patch.h"
 #endif
 
-extern "C" __attribute__((weak)) int azsdk_exit_delivery_publish(const azexit_receipt *) noexcept {
-    return AZ_UNSUPPORTED;
-}
-extern "C" __attribute__((weak)) void azsdk_cue_commands_notify(unsigned) noexcept {}
+#ifdef AZSDK_CUE_ACTOR_TESTING
+extern "C" int azsdk_exit_delivery_publish(const azexit_receipt *) noexcept { return AZ_UNSUPPORTED; }
+extern "C" int azsdk_exit_delivery_claim(const azexit_request *, uint64_t) noexcept { return AZ_OK; }
+extern "C" void azsdk_cue_commands_notify(unsigned) noexcept {}
+extern "C" void azsdk_cue_commands_actor_finished(unsigned, uint64_t) noexcept {}
+#endif
 
 namespace {
 constexpr unsigned TAGS = 512;
@@ -46,6 +49,7 @@ struct Tag {
 };
 struct State {
     std::recursive_mutex mutex;
+    std::atomic<unsigned> waiters {0}, registered {0};
     Slot slots[4];
     Tag tags[TAGS];
     azcue_actor_profile profile = {};
@@ -57,6 +61,35 @@ State &state() {
     static State s;
     return s;
 }
+/* Dispatch never waits for another deck's actor frame. Release signals the
+ * affected decks after the outermost owner unlocks; retrying once after
+ * registering interest closes the unlock-before-registration race. */
+class ActorLock {
+    State &state_;
+    std::unique_lock<std::recursive_mutex> lock_;
+    static thread_local unsigned depth_;
+public:
+    explicit ActorLock(State &state, unsigned deck = 4)
+        : state_(state), lock_(state.mutex, std::defer_lock) {
+        if (deck >= 4) lock_.lock();
+        else if (!lock_.try_lock()) {
+            state_.waiters.fetch_or(1u << deck, std::memory_order_release);
+            if (!lock_.try_lock()) return;
+        }
+        ++depth_;
+    }
+    ~ActorLock() { if (owns_lock()) unlock(); }
+    bool owns_lock() const { return lock_.owns_lock(); }
+    void unlock() {
+        bool outermost = --depth_ == 0;
+        lock_.unlock();
+        if (!outermost) return;
+        unsigned waiters = state_.waiters.exchange(0, std::memory_order_acq_rel);
+        for (unsigned deck = 0; waiters && deck < 4; ++deck)
+            if (waiters & (1u << deck)) azsdk_cue_commands_notify(deck);
+    }
+};
+thread_local unsigned ActorLock::depth_;
 thread_local Tag *capture = nullptr;
 uintptr_t word(const void *object, unsigned offset = 0) {
     uintptr_t value;
@@ -89,29 +122,24 @@ Tag *find(void *task) {
         if (tag.reserved && tag.task == task) return &tag;
     return nullptr;
 }
-void finish(Slot &slot, unsigned outcome, int reason) {
-    slot.result = {};
-    slot.result.token = slot.request.identity.token;
-    slot.result.load_generation = slot.request.identity.load_generation;
-    slot.result.outcome = outcome == AZ_COMMAND_REJECTED && slot.work_started ? unsigned(AZ_COMMAND_UNCERTAIN) : outcome;
-    slot.result.reason = reason;
+void finish(Slot &slot, azexit_result result, unsigned settled = 1) {
+    const auto &request = slot.request.identity;
+    if (result.outcome == AZ_COMMAND_REJECTED && result.reason == AZ_CANCELLED)
+        result.outcome = AZ_COMMAND_CANCELLED;
+    if (slot.work_started && (result.outcome == AZ_COMMAND_REJECTED || result.outcome == AZ_COMMAND_CANCELLED))
+        result.outcome = AZ_COMMAND_UNCERTAIN;
+    slot.result = result;
     slot.phase = Ready;
-    if (!(slot.request.identity.token & (UINT64_C(1) << 63))) {
-        azexit_receipt receipt = {};
-        receipt.size = sizeof receipt;
-        receipt.version = AZEXIT_DELIVERY_VERSION;
-        receipt.kind = AZEXIT_RECEIPT_TERMINAL;
-        receipt.settled = 1;
-        receipt.deck = slot.request.identity.deck;
-        receipt.token = slot.result.token;
-        receipt.load_generation = slot.result.load_generation;
-        receipt.revision = slot.result.revision;
-        receipt.observed_ns = now();
-        receipt.outcome = slot.result.outcome;
-        receipt.reason = slot.result.reason;
+    if (!(request.token & (UINT64_C(1) << 63))) {
+        azexit_receipt receipt = {
+            sizeof receipt, AZEXIT_DELIVERY_VERSION, AZEXIT_RECEIPT_TERMINAL, settled, request.deck,
+            request.token, request.load_generation, 0, result.revision, now(), result.outcome, result.reason};
         (void) azsdk_exit_delivery_publish(&receipt);
     }
-    azsdk_cue_commands_notify(slot.request.identity.deck);
+    azsdk_cue_commands_actor_finished(request.deck, request.token);
+}
+void finish(Slot &slot, unsigned outcome, int reason) {
+    finish(slot, {slot.request.identity.token, slot.request.identity.load_generation, 0, outcome, reason});
 }
 bool matches(const Tag &tag, const Slot &slot) {
     return tag.epoch == slot.epoch && tag.manager == slot.manager &&
@@ -121,7 +149,7 @@ uint64_t post_hook(void *box, void *task) {
     State &s = state();
     /* Shared stock notification posts never enter the SDK management lock. */
     if (!capture) return reinterpret_cast<uint64_t (*)(void *, void *)>(__atomic_load_n(&s.post, __ATOMIC_ACQUIRE))(box, task);
-    std::lock_guard<std::recursive_mutex> lock(s.mutex);
+    ActorLock lock(s);
     if (capture) {
         Tag &tag = *capture;
         /* Only the original guarded producer is called while capture is set.
@@ -137,7 +165,7 @@ uint64_t post_hook(void *box, void *task) {
 }
 void execute_hook(void *task) {
     State &s = state();
-    std::unique_lock<std::recursive_mutex> lock(s.mutex);
+    ActorLock lock(s);
     Tag *tag = find(task);
     if (!tag) {
         void *original = s.execute;
@@ -162,6 +190,11 @@ void execute_hook(void *task) {
         finish(slot, AZ_COMMAND_REJECTED, AZ_STALE);
         return;
     }
+    if (!slot.work_started && tag->request.operation &&
+        azsdk_exit_delivery_claim(&tag->request.identity, clock) != AZ_OK) {
+        finish(slot, AZ_COMMAND_CANCELLED, AZ_CANCELLED);
+        return;
+    }
     ACTOR_DIAG(tag->deck, 1, 0, "execute-admitted", tag->request, slot.work_started);
     slot.phase = Executing;
     azexit_result result = {};
@@ -171,38 +204,26 @@ void execute_hook(void *task) {
         slot.work_started = true;
         slot.phase = slot.continuation ? Queued : Waiting;
         slot.continuation = false;
+        if (slot.phase == Queued) azsdk_cue_commands_notify(tag->deck);
     } else if (rc == AZ_OK && result.token == tag->request.identity.token &&
                result.load_generation == tag->request.identity.load_generation) {
-        slot.result = result;
-        slot.phase = Ready;
-        if (!(slot.request.identity.token & (UINT64_C(1) << 63))) {
-            azexit_receipt receipt = {};
-            receipt.size = sizeof receipt;
-            receipt.version = AZEXIT_DELIVERY_VERSION;
-            receipt.kind = AZEXIT_RECEIPT_TERMINAL;
-            receipt.settled = 1;
-            receipt.deck = slot.request.identity.deck;
-            receipt.token = result.token;
-            receipt.load_generation = result.load_generation;
-            receipt.revision = result.revision;
-            receipt.observed_ns = now();
-            receipt.outcome = result.outcome;
-            receipt.reason = result.reason;
-            (void) azsdk_exit_delivery_publish(&receipt);
-        }
+        finish(slot, result);
     } else finish(slot, AZ_COMMAND_REJECTED, rc == AZ_OK ? AZ_INVALID : rc);
 }
 void dtor_hook(void *task) {
     State &s = state();
-    std::unique_lock<std::recursive_mutex> lock(s.mutex);
+    ActorLock lock(s);
     Tag *tag = find(task);
     if (tag) {
         Slot &slot = s.slots[tag->deck];
         if (matches(*tag, slot) && !tag->executed && slot.phase == Posted)
             finish(slot, AZ_COMMAND_REJECTED, AZ_CANCELLED);
         /* Native dtor owns token/watchdog accounting; allocator runs after it. */
+        unsigned deck = tag->deck;
         reinterpret_cast<void (*)(void *)>(s.dtor)(task);
         *tag = {};
+        lock.unlock();
+        azsdk_cue_commands_notify(deck);
         return;
     }
     void *original = s.dtor;
@@ -213,7 +234,7 @@ void dtor_hook(void *task) {
 extern "C" int azsdk_cue_actor_configure(const azcue_actor_profile *p, azexit_install_fn install,
                                          const azcue_actor_callbacks *callbacks) noexcept {
     State &s = state();
-    std::lock_guard<std::recursive_mutex> lock(s.mutex);
+    ActorLock lock(s);
     if (!p || !install || !callbacks || !callbacks->execute || !callbacks->current) return AZ_INVALID;
     if (s.configured || s.installation_attempted) return AZ_BUSY;
     if (!p->manager_vptr || !p->box_vptr || !p->owner_vptr || !p->task_vptr ||
@@ -235,7 +256,7 @@ extern "C" int azsdk_cue_actor_configure(const azcue_actor_profile *p, azexit_in
 }
 extern "C" int azsdk_cue_actor_register(unsigned deck, void *manager, uint64_t generation) noexcept {
     State &s = state();
-    std::lock_guard<std::recursive_mutex> lock(s.mutex);
+    ActorLock lock(s);
     if (deck >= 4 || !manager || !generation) return AZ_INVALID;
     if (!s.configured || word(manager) != s.profile.manager_vptr ||
         word(manager, 8) != s.profile.box_vptr) return AZ_UNSUPPORTED;
@@ -244,17 +265,32 @@ extern "C" int azsdk_cue_actor_register(unsigned deck, void *manager, uint64_t g
     if (++slot.epoch == 0) std::terminate();
     slot.manager = manager;
     slot.generation = generation;
+    s.registered.fetch_or(1u << deck, std::memory_order_release);
+    azsdk_cue_commands_notify(deck);
     return AZ_OK;
+}
+extern "C" unsigned azsdk_cue_actor_mask(void) noexcept {
+    return state().registered.load(std::memory_order_acquire);
 }
 extern "C" void azsdk_cue_actor_retire(unsigned deck, void *manager) noexcept {
     State &s = state();
-    std::lock_guard<std::recursive_mutex> lock(s.mutex);
+    ActorLock lock(s);
     if (deck >= 4) return;
     Slot &slot = s.slots[deck];
     if (slot.manager != manager) return;
+    s.registered.fetch_and(~(1u << deck), std::memory_order_release);
     for (auto &tag : s.tags)
         if (tag.reserved && tag.deck == deck && tag.epoch == slot.epoch) tag.cancelled = true;
-    if (slot.phase != Idle && slot.phase != Ready) finish(slot, AZ_COMMAND_REJECTED, AZ_STALE);
+    if (slot.phase != Idle && slot.phase != Ready) {
+#ifndef AZSDK_CUE_ACTOR_TESTING
+        const auto &request = slot.request.identity;
+        if (slot.work_started && slot.request.operation) {
+            finish(slot, {request.token, request.load_generation, 0, AZ_COMMAND_UNCERTAIN, AZ_STALE}, 0);
+            azsdk_cue_commands_actor_retired(deck, request.token, request.load_generation);
+        } else
+#endif
+            finish(slot, AZ_COMMAND_REJECTED, AZ_STALE);
+    }
     slot.manager = nullptr;
     slot.generation = 0;
 }
@@ -263,7 +299,7 @@ extern "C" int azsdk_cue_actor_enqueue(const azexit_cue_request *request) noexce
         !request->identity.token || !request->identity.load_generation || !request->identity.deadline_ns ||
         request->identity.reserved || !std::memchr(request->comment, 0, sizeof request->comment)) return AZ_INVALID;
     State &s = state();
-    std::unique_lock<std::recursive_mutex> lock(s.mutex, std::try_to_lock);
+    ActorLock lock(s, request->identity.deck);
     if (!lock.owns_lock()) return AZ_BUSY;
     Slot &slot = s.slots[request->identity.deck];
     if (!s.configured || !slot.manager) return AZ_UNSUPPORTED;
@@ -279,8 +315,9 @@ extern "C" int azsdk_cue_actor_enqueue(const azexit_cue_request *request) noexce
 }
 extern "C" void azsdk_cue_actor_drive(unsigned deck) noexcept {
     State &s = state();
-    std::lock_guard<std::recursive_mutex> lock(s.mutex);
     if (deck >= 4) return;
+    ActorLock lock(s, deck);
+    if (!lock.owns_lock()) return;
     Slot &slot = s.slots[deck];
     if (slot.phase != Queued) return;
     if (!slot.manager || (!slot.work_started && !s.callbacks.current(deck, slot.request.identity.load_generation, s.callbacks.context))) {
@@ -329,9 +366,9 @@ extern "C" void azsdk_cue_actor_drive(unsigned deck) noexcept {
 }
 extern "C" int azsdk_cue_actor_cancel(unsigned deck, uint64_t token) noexcept {
     State &s = state();
-    std::unique_lock<std::recursive_mutex> lock(s.mutex, std::try_to_lock);
-    if (!lock.owns_lock()) return AZ_PENDING;
     if (deck >= 4 || !token) return AZ_INVALID;
+    ActorLock lock(s, deck);
+    if (!lock.owns_lock()) return AZ_PENDING;
     Slot &slot = s.slots[deck];
     if (slot.phase == Idle || slot.request.identity.token != token) return AZ_STALE;
     if (slot.phase == Ready) return AZ_OK;
@@ -342,9 +379,9 @@ extern "C" int azsdk_cue_actor_cancel(unsigned deck, uint64_t token) noexcept {
 }
 extern "C" int azsdk_cue_actor_peek(unsigned deck, azexit_result *result) noexcept {
     State &s = state();
-    std::unique_lock<std::recursive_mutex> lock(s.mutex, std::try_to_lock);
-    if (!lock.owns_lock()) return AZ_PENDING;
     if (deck >= 4 || !result) return AZ_INVALID;
+    ActorLock lock(s, deck);
+    if (!lock.owns_lock()) return AZ_PENDING;
     if (s.slots[deck].phase != Ready) return AZ_PENDING;
     *result = s.slots[deck].result;
     return AZ_OK;
@@ -357,47 +394,38 @@ extern "C" int azsdk_cue_actor_poll(unsigned deck, azexit_result *result) noexce
 }
 extern "C" int azsdk_cue_actor_release(unsigned deck, uint64_t token) noexcept {
     State &s = state();
-    std::unique_lock<std::recursive_mutex> lock(s.mutex, std::try_to_lock);
-    if (!lock.owns_lock()) return AZ_BUSY;
     if (deck >= 4 || !token) return AZ_INVALID;
+    ActorLock lock(s, deck);
+    if (!lock.owns_lock()) return AZ_BUSY;
     Slot &slot = s.slots[deck];
     if (slot.phase != Ready) return AZ_BUSY;
     if (slot.result.token != token) return AZ_STALE;
+#ifndef AZSDK_CUE_ACTOR_TESTING
+    if (!(token & (UINT64_C(1) << 63))) {
+        for (const auto &tag : s.tags)
+            if (tag.reserved && tag.deck == deck && tag.request.identity.token == token) return AZ_BUSY;
+    }
+#endif
     slot.phase = Idle;
     return AZ_OK;
 }
 extern "C" int azsdk_cue_actor_complete(unsigned deck, uint64_t token, const azexit_result *result) noexcept {
     State &s = state();
-    std::lock_guard<std::recursive_mutex> lock(s.mutex);
     if (deck >= 4 || !token || !result) return AZ_INVALID;
+    ActorLock lock(s, deck);
+    if (!lock.owns_lock()) return AZ_BUSY;
     Slot &slot = s.slots[deck];
     if ((slot.phase != Waiting && slot.phase != Executing) || slot.request.identity.token != token ||
         result->token != token || result->load_generation != slot.request.identity.load_generation) return AZ_STALE;
-    slot.result = *result;
-    slot.phase = Ready;
-    if (!(token & (UINT64_C(1) << 63))) {
-        azexit_receipt receipt = {};
-        receipt.size = sizeof receipt;
-        receipt.version = AZEXIT_DELIVERY_VERSION;
-        receipt.kind = AZEXIT_RECEIPT_TERMINAL;
-        receipt.settled = 1;
-        receipt.deck = deck;
-        receipt.token = result->token;
-        receipt.load_generation = result->load_generation;
-        receipt.revision = result->revision;
-        receipt.observed_ns = now();
-        receipt.outcome = result->outcome;
-        receipt.reason = result->reason;
-        (void) azsdk_exit_delivery_publish(&receipt);
-    }
+    finish(slot, *result);
     return AZ_OK;
 }
 
 extern "C" int azsdk_cue_actor_resume(unsigned deck, uint64_t token) noexcept {
     State &s = state();
-    std::unique_lock<std::recursive_mutex> lock(s.mutex, std::try_to_lock);
-    if (!lock.owns_lock()) return AZ_BUSY;
     if (deck >= 4 || !token) return AZ_INVALID;
+    ActorLock lock(s, deck);
+    if (!lock.owns_lock()) return AZ_BUSY;
     Slot &slot = s.slots[deck];
     if (slot.request.identity.token != token) return AZ_STALE;
     if (slot.phase == Executing) {

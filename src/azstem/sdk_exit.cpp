@@ -8,9 +8,7 @@
 #include "../common/azexit.h"
 #include "../common/azcuerecallbridge.h"
 #include "../common/azexitprofile.h"
-#ifndef AZSDK_EXIT_TESTING
 #include "../common/azcuecommands.h"
-#endif
 #if !defined(AZSDK_EXIT_TESTING) || defined(AZSDK_CUE_STAGE_TESTING)
 #include "../common/azcuerecall.h"
 #endif
@@ -21,6 +19,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cmath>
+#include <cstdio>
 #include <dlfcn.h>
 #include <exception>
 #include <initializer_list>
@@ -40,81 +39,19 @@
 #endif
 #include "sdk_exit_profiles.h"
 
-extern "C" __attribute__((weak)) void azsdk_cue_commands_notify(unsigned) noexcept {}
+#ifdef AZSDK_EXIT_TESTING
+extern "C" __attribute__((weak)) void azsdk_cue_commands_recall_finished(unsigned, uint64_t) noexcept {}
+#endif
+
+#include "sdk_exit_delivery.h"
 
 namespace {
-constexpr unsigned DELIVERY_CELLS = 256;
-struct DeliveryCell {
-    std::atomic<uint64_t> sequence {0};
-    azexit_receipt receipt = {};
-};
-struct DeliveryState {
-    std::once_flag once;
-    int fd = -1;
-    std::atomic<uint64_t> head {0};
-    std::atomic<uint64_t> tail {0};
-    DeliveryCell cells[DELIVERY_CELLS];
-};
-DeliveryState &delivery() {
-    static DeliveryState state;
-    return state;
-}
-void delivery_init() {
-    DeliveryState &d = delivery();
-    for (uint64_t i = 0; i < DELIVERY_CELLS; ++i) d.cells[i].sequence.store(i, std::memory_order_relaxed);
-#if defined(__linux__)
-    d.fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-#endif
-}
-bool delivery_push(const azexit_receipt &value) noexcept {
-    DeliveryState &d = delivery();
-    std::call_once(d.once, delivery_init);
-    if (value.size < sizeof value || value.version != AZEXIT_DELIVERY_VERSION) return false;
-    uint64_t position = d.head.load(std::memory_order_relaxed);
-    for (;;) {
-        DeliveryCell &cell = d.cells[position % DELIVERY_CELLS];
-        uint64_t sequence = cell.sequence.load(std::memory_order_acquire);
-        intptr_t difference = static_cast<intptr_t>(sequence - position);
-        if (difference == 0) {
-            if (d.head.compare_exchange_weak(position, position + 1, std::memory_order_relaxed,
-                                             std::memory_order_relaxed)) {
-                cell.receipt = value;
-                cell.sequence.store(position + 1, std::memory_order_release);
-#if defined(__linux__)
-                uint64_t one = 1;
-                ssize_t ignored = write(d.fd, &one, sizeof one);
-                (void) ignored; /* already-readable/full is a valid wake */
-#endif
-                return true;
-            }
-        } else if (difference < 0) {
-            return false; /* admission reserves cells; this is a producer fault, not a drop path */
-        } else {
-            position = d.head.load(std::memory_order_relaxed);
-        }
-    }
-}
-bool delivery_pop(azexit_receipt &out) noexcept {
-    DeliveryState &d = delivery();
-    std::call_once(d.once, delivery_init);
-    uint64_t position = d.tail.load(std::memory_order_relaxed);
-    DeliveryCell &cell = d.cells[position % DELIVERY_CELLS];
-    if (cell.sequence.load(std::memory_order_acquire) != position + 1) return false;
-    out = cell.receipt;
-    cell.sequence.store(position + DELIVERY_CELLS, std::memory_order_release);
-    d.tail.store(position + 1, std::memory_order_relaxed);
-    return true;
-}
-int delivery_fd() noexcept {
-    DeliveryState &d = delivery();
-    std::call_once(d.once, delivery_init);
-    return d.fd;
-}
 enum {
     IDLE,
     WRITING,
     QUEUED,
     RUNNING,
+    DRAINING,
     READY,
     READING
 };
@@ -128,7 +65,7 @@ struct LoopPoints {
 };
 struct Slot {
     azsdk_native::OwnerGate gate;
-    std::atomic<uintptr_t> core {0}; /* comparison only before gate admission */
+    std::atomic<uintptr_t> core {0}, draining_unit {0}; /* opaque identities before gate admission */
     uintptr_t unit = 0, facade = 0;
     std::atomic<unsigned> phase {IDLE};
     azexit_request request = {};
@@ -148,7 +85,7 @@ struct Slot {
     unsigned move_stage = 0;
     azexit_result result = {};
     uint64_t revision = 0; /* owner frame only; never reset on replacement */
-    std::atomic<uint64_t> token {0}, lost {0}, failed {0};
+    std::atomic<uint64_t> token {0}, lost {0}, failed {0}, review {0}, frame_token {0};
     std::atomic<unsigned> loss_overflow {0};
     azsdk_load_sample load = {};
     bool untracked = false;
@@ -180,6 +117,8 @@ struct State {
     void *original = nullptr, *pre_original = nullptr;
     void *manager_original = nullptr, *quantize_original = nullptr;
     void *cancel_original = nullptr, *core_jump_original = nullptr;
+    void *hot_countdown_original[2] = {};
+    bool hot_countdown_ready = false;
     bool configured = false;
 };
 struct Scope {
@@ -200,6 +139,7 @@ struct CausalScope {
 bool future_chain(Slot &, uintptr_t, uintptr_t *, unsigned &) noexcept;
 bool loop_schedule_matches(Slot &, const void *, const void *, int, const void *, double) noexcept;
 bool settled_work(Slot &, uint64_t) noexcept;
+void settle_retired(Slot &, uint64_t) noexcept;
 void supersede_setup(Slot &) noexcept;
 bool initial_request(Slot &, const void *) noexcept;
 bool initial_chain(Slot &, uintptr_t) noexcept;
@@ -308,7 +248,13 @@ bool same_load(unsigned deck, Slot &slot) noexcept {
            current.unit_generation == slot.load.unit_generation &&
            current.invalidation_epoch == slot.load.invalidation_epoch;
 }
+void request_review(Slot &slot, uint64_t token) noexcept {
+    if (token && slot.token.load(std::memory_order_acquire) == token &&
+        slot.phase.load(std::memory_order_acquire) == RUNNING)
+        slot.review.store(token, std::memory_order_release);
+}
 void mark_lost(Slot &slot, uint64_t token) noexcept {
+    request_review(slot, token);
     /* Dispatch tokens increase process-wide. An old tombstone must not erase
      * a newer request's failure when it is finally executed or destroyed. */
     uint64_t observed = slot.lost.load(std::memory_order_relaxed);
@@ -394,7 +340,7 @@ void capture_list(uintptr_t address, bool borrowed = false) noexcept {
 }
 bool pending_nodes(uint64_t token) noexcept {
     for (auto &node : state().nodes)
-        if (node.address.load(std::memory_order_acquire) > 1 && node.token.load(std::memory_order_acquire) == token) return true;
+        if (node.address.load(std::memory_order_acquire) && node.token.load(std::memory_order_acquire) == token) return true;
     return false;
 }
 unsigned free_nodes() noexcept {
@@ -607,7 +553,12 @@ bool command_hook(void *self) {
     if (type < 0) std::terminate(); /* only verified nominal slots are patched */
     Node *node = find_node(address);
     if (!node && causal.slot) node = capture(address);
-    if (!node) return reinterpret_cast<bool (*)(void *)>(state().profile.commands[type].execute)(self);
+    if (!node) {
+        bool result = reinterpret_cast<bool (*)(void *)>(state().profile.commands[type].execute)(self);
+        if (processing && type == AZEXIT_QUANTIZE_PENDING)
+            request_review(*processing, processing->token.load(std::memory_order_acquire));
+        return result;
+    }
     uint64_t incarnation = node->incarnation.load(std::memory_order_acquire);
     unsigned deck = node->deck.load(std::memory_order_acquire);
     uint64_t token = node->token.load(std::memory_order_acquire), generation = node->generation.load(std::memory_order_acquire);
@@ -623,11 +574,12 @@ bool command_hook(void *self) {
         return false; /* a retired incarnation never follows raw native owners */
     }
     uint64_t time = now();
-    if (!time || compare_timestamps(time, slot.request.deadline_ns, 1000000000, 1000000000, 1) >= AZ_TIME_EQUAL ||
+    if (azsdk_exit_delivery_continue(&slot.request, time) != AZ_OK ||
         reinterpret_cast<bool (*)(void *)>(state().profile.affinity)(reinterpret_cast<void *>(slot.core.load(std::memory_order_relaxed) + 0x110))) {
         mark_lost(slot, token);
         return false;
     }
+    request_review(slot, token);
     node->executed.store(1, std::memory_order_release);
     CausalScope scope({&slot, deck, token, generation, false, false, address});
     try {
@@ -641,20 +593,27 @@ void destroy_command(void *self, bool deleting) {
     uintptr_t address = reinterpret_cast<uintptr_t>(self);
     int type = command_type(address);
     if (type < 0) std::terminate();
+    Node *disposed = nullptr;
+    uint64_t token = 0;
+    unsigned deck = 0;
     if (Node *node = find_node(address)) {
         uintptr_t expected = address;
         if (node->address.compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) {
-            uint64_t token = node->token.load(std::memory_order_acquire);
-            Slot &slot = state().decks[node->deck.load(std::memory_order_acquire)];
+            disposed = node;
+            token = node->token.load(std::memory_order_acquire);
+            deck = node->deck.load(std::memory_order_acquire);
             if (!node->executed.load(std::memory_order_acquire) && node->required.load(std::memory_order_acquire) &&
-                !node->maintenance.load(std::memory_order_acquire)) {
-                mark_lost(slot, token);
-            }
-            node->address.store(0, std::memory_order_release); /* before pool reuse */
+                !node->maintenance.load(std::memory_order_acquire))
+                mark_lost(state().decks[deck], token);
         }
     }
     const auto &p = state().profile.commands[type];
     reinterpret_cast<void (*)(void *)>(deleting ? p.deleting : p.destroy)(self);
+    if (disposed) {
+        disposed->address.store(0, std::memory_order_release);
+        request_review(state().decks[deck], token);
+        settle_retired(state().decks[deck], token);
+    }
 }
 void destroy_hook(void *self) { destroy_command(self, false); }
 void deleting_hook(void *self) { destroy_command(self, true); }
@@ -1143,31 +1102,22 @@ bool loop_postcondition(Slot &slot) noexcept {
     }
 }
 
-void emit_receipt(const Slot &slot, unsigned kind, unsigned settled) noexcept {
-    if (slot.internal_recall.load(std::memory_order_acquire)) return;
-    azexit_receipt receipt = {};
-    receipt.size = sizeof receipt;
-    receipt.version = AZEXIT_DELIVERY_VERSION;
-    receipt.kind = kind;
-    receipt.settled = settled;
-    receipt.deck = slot.request.deck;
-    receipt.token = slot.request.token;
-    receipt.load_generation = slot.request.load_generation;
-    receipt.revision = slot.result.revision;
-    receipt.observed_ns = now();
-    receipt.outcome = slot.result.outcome;
-    receipt.reason = slot.result.reason;
-    (void) delivery_push(receipt);
-}
 void finish(Slot &slot, unsigned outcome, int reason, uint64_t revision = 0) noexcept {
-    slot.result = {slot.request.token, slot.request.load_generation, revision, outcome, reason};
+    const auto request = slot.request;
+    bool internal = slot.internal_recall.load(std::memory_order_acquire);
+    auto value = azsdk_delivery::receipt(request, AZEXIT_RECEIPT_TERMINAL, 1, 0, now(), outcome, reason, revision);
+    slot.result = {request.token, request.load_generation, revision, outcome, reason};
     slot.phase.store(READY, std::memory_order_release);
-    /* READY is the native owner's terminal state: the copied result and the
-     * native allocation can be released without another owner-thread action.
-     * Producers that genuinely retain work publish a later SETTLED receipt. */
-    emit_receipt(slot, AZEXIT_RECEIPT_TERMINAL, 1u);
-    if (slot.internal_recall.load(std::memory_order_acquire))
-        azsdk_cue_commands_notify(unsigned(&slot - state().decks));
+    if (internal) azsdk_cue_commands_recall_finished(request.deck, request.token);
+    else (void) azsdk_delivery::publish(&value);
+}
+void settle_retired(Slot &slot, uint64_t token) noexcept {
+    if (slot.phase.load(std::memory_order_acquire) != DRAINING ||
+        slot.token.load(std::memory_order_acquire) != token ||
+        slot.draining_unit.load(std::memory_order_acquire) || pending_nodes(token)) return;
+    unsigned draining = DRAINING;
+    if (slot.phase.compare_exchange_strong(draining, WRITING, std::memory_order_acq_rel))
+        finish(slot, AZ_COMMAND_UNCERTAIN, AZ_STALE);
 }
 void execute_move_tail(unsigned deck, Slot &slot) noexcept {
     uint64_t time = now(), token = slot.request.token;
@@ -1177,8 +1127,9 @@ void execute_move_tail(unsigned deck, Slot &slot) noexcept {
         finish(slot, AZ_COMMAND_UNCERTAIN, AZ_FAILED);
         return;
     }
-    if (!time || compare_timestamps(time, slot.request.deadline_ns, 1000000000, 1000000000, 1) >= AZ_TIME_EQUAL || !same_load(deck, slot)) {
-        finish(slot, AZ_COMMAND_UNCERTAIN, time ? AZ_STALE : AZ_FAILED);
+    if (azsdk_exit_delivery_continue(&slot.request, time) != AZ_OK || !same_load(deck, slot)) {
+        if (!pending_nodes(token) && coherent(slot) && bindings(slot) && settled_work(slot, token))
+            finish(slot, AZ_COMMAND_UNCERTAIN, time ? AZ_STALE : AZ_FAILED);
         return;
     }
     try {
@@ -1198,6 +1149,7 @@ void execute_move_tail(unsigned deck, Slot &slot) noexcept {
         }
         CausalScope scope({&slot, deck, token, slot.gate.generation(), false, false, 0});
         slot.move_stage = 3;
+        request_review(slot, token);
         adjust(slot, positive, slot.arguments.position_s);
     } catch (...) {
         slot.failed.store(token, std::memory_order_release);
@@ -1212,6 +1164,7 @@ void execute(unsigned deck, Slot &slot) noexcept {
     }
     unsigned expected = QUEUED;
     if (!slot.phase.compare_exchange_strong(expected, RUNNING, std::memory_order_acq_rel)) return;
+    slot.frame_token.store(slot.request.token, std::memory_order_release);
     if (!(state().mask.load(std::memory_order_acquire) & (1u << deck))) {
         finish(slot, AZ_COMMAND_REJECTED, AZ_STALE);
         return;
@@ -1256,6 +1209,15 @@ void execute(unsigned deck, Slot &slot) noexcept {
             finish(slot, AZ_COMMAND_REJECTED, AZ_UNSUPPORTED);
             return;
         }
+        time = now();
+        int claim = slot.internal_recall.load(std::memory_order_acquire)
+                        ? azsdk_exit_delivery_continue(&slot.request, time)
+                        : azsdk_exit_delivery_claim(&slot.request, time);
+        if (claim != AZ_OK) {
+            finish(slot, AZ_COMMAND_CANCELLED, claim == AZ_CANCELLED ? AZ_CANCELLED : AZ_STALE);
+            return;
+        }
+        request_review(slot, slot.request.token);
         CausalScope scope({&slot, deck, slot.request.token, slot.gate.generation(), false, false, 0});
         if (cue_operation(slot.operation)) dispatch_cue(slot);
         else if (extended(slot.operation)) dispatch_loop(slot);
@@ -1278,15 +1240,24 @@ void settle(unsigned deck, Slot &slot) noexcept {
     /* An unknown handoff cannot acknowledge settlement. Even retirement cannot
      * prove an unobserved callback dead; retain the SDK fence for this process. */
     if (slot.untracked) return;
-    if (!same_load(deck, slot)) {
-        /* Live native references remain tagged with this old token. Their
-         * execute wrappers now suppress them, even after result release. */
-        finish(slot, AZ_COMMAND_UNCERTAIN, AZ_STALE);
-        return;
-    }
     uint64_t time = now();
-    if (!time || compare_timestamps(time, slot.request.deadline_ns, 1000000000, 1000000000, 1) >= AZ_TIME_EQUAL) {
-        finish(slot, AZ_COMMAND_UNCERTAIN, time ? AZ_STALE : AZ_FAILED);
+    bool current = same_load(deck, slot);
+    bool allowed = azsdk_exit_delivery_continue(&slot.request, time) == AZ_OK;
+    if (!current || !allowed) {
+        /* The stop/lifetime guard has closed further effects. Keep the native
+         * fence until actual disposal of the correlated work. */
+        const auto *cell = azsdk_delivery::find(token);
+        unsigned stops = cell ? cell->stops.load(std::memory_order_acquire) : 0;
+        int reason = !time ? AZ_FAILED : !current || !(stops & AZEXIT_STOP_CANCEL) ||
+                     (stops & AZEXIT_STOP_DEADLINE) ? AZ_STALE : AZ_CANCELLED;
+        bool hot_pending = slot.operation == AZ_CMD_HOT_TRIGGER &&
+                           (!coherent(slot) || integer(word(slot.facade + 0x70) + 0x104) != 0);
+        if (!pending_nodes(token) && !hot_pending) finish(slot, AZ_COMMAND_UNCERTAIN, reason);
+        else if (!slot.internal_recall.load(std::memory_order_acquire)) {
+            auto value = azsdk_delivery::receipt(slot.request, AZEXIT_RECEIPT_TERMINAL, 0, 0, time,
+                                                AZ_COMMAND_UNCERTAIN, reason);
+            (void) azsdk_delivery::publish(&value);
+        }
         return;
     }
     if (!coherent(slot) || !bindings(slot)) {
@@ -1355,11 +1326,27 @@ __attribute__((unused)) void process_hook(void *self, const void *frames) {
             explicit OwnerFrame(Slot *current) : previous(processing) { processing = current; }
             ~OwnerFrame() { processing = previous; }
         } owner(&slot);
+        struct FrameToken {
+            Slot &slot;
+            unsigned deck;
+            ~FrameToken() {
+                uint64_t token = slot.frame_token.exchange(0, std::memory_order_acq_rel);
+                if (!token || slot.phase.load(std::memory_order_acquire) != READY) return;
+                if (slot.internal_recall.load(std::memory_order_acquire))
+                    azsdk_cue_commands_recall_finished(deck, token);
+                else azsdk_delivery::notify(deck);
+            }
+        } frame_token {slot, d};
+        if (slot.phase.load(std::memory_order_acquire) == RUNNING)
+            slot.frame_token.store(slot.token.load(std::memory_order_acquire), std::memory_order_release);
         try {
             /* Original includes preProcess, rendering, all manager executions
              * and postprocessing. Teardown waits until the entire frame ends. */
             original(self, frames);
-            if (s.enabled.load(std::memory_order_acquire)) settle(d, slot);
+            /* Check the postcondition on the owner after an action, descendant
+             * execution/disposal, load change, or a durable stop request. */
+            uint64_t review = slot.review.exchange(0, std::memory_order_acq_rel);
+            if (review && review == slot.token.load(std::memory_order_acquire)) settle(d, slot);
         } catch (...) {
             slot.failed.store(slot.token.load(std::memory_order_acquire), std::memory_order_release);
             throw;
@@ -1368,11 +1355,54 @@ __attribute__((unused)) void process_hook(void *self, const void *frames) {
     }
     original(self, frames);
 }
+/* The nominal BeatSync callback and its owning task both contain a copy
+ * of the same countdown. Observe its final edge inside the verified frame. */
+template <unsigned I>
+void hot_countdown_hook(void *self) {
+    Slot *slot = processing;
+    uintptr_t object = reinterpret_cast<uintptr_t>(self);
+    uintptr_t beat = I == 0 ? object : word(object + 0x10);
+    bool track = slot && slot->phase.load(std::memory_order_acquire) == RUNNING &&
+                 slot->operation == AZ_CMD_HOT_TRIGGER && word(slot->facade + 0x70) == beat &&
+                 table(beat, state().profile.beat);
+    int before = track ? integer(beat + 0x104) : 0;
+    trampoline<void (*)(void *)>(&state().hot_countdown_original[I])(self);
+    if (before > 0 && integer(beat + 0x104) == 0)
+        request_review(*slot, slot->request.token);
+}
+static bool install_hot_countdown(State &s, azexit_install_fn install) {
+    void *hooks[] = {reinterpret_cast<void *>(hot_countdown_hook<0>),
+                     reinterpret_cast<void *>(hot_countdown_hook<1>)};
+    for (unsigned i = 0; i < 2; ++i) {
+        const auto &entry = s.profile.hot_countdown[i];
+        if (!entry.address || std::memcmp(reinterpret_cast<void *>(entry.address), entry.prologue, 16))
+            return false;
+    }
+    for (unsigned i = 0; i < 2; ++i) {
+        if (!install(s.profile.hot_countdown[i].address, hooks[i], &s.hot_countdown_original[i]) ||
+            !s.hot_countdown_original[i]) return false;
+    }
+    return true;
+}
 unsigned deck_mask() { return state().enabled.load(std::memory_order_acquire) ? state().mask.load(std::memory_order_acquire) : 0; }
+bool delivery_bound() noexcept {
+    return azsdk_delivery::transport.bound.load(std::memory_order_acquire);
+}
+int attach_delivery(const azexit_request &r) noexcept {
+#ifdef AZSDK_EXIT_TESTING
+    if (!azsdk_delivery::find(r.token)) return AZ_OK;
+#endif
+    azsdk_load_sample load = {};
+    if (!azsdk_load_read(int(r.deck), &load) || r.load_generation != load.load_generation)
+        return AZ_STALE;
+    return azsdk_delivery::attach(r, load.unit_generation) ? AZ_OK : AZ_UNSUPPORTED;
+}
 /* Preserve the original endpoint's EXIT-only capability meaning for old peers. */
-unsigned mask() { return state().enabled.load(std::memory_order_acquire) & AZEXIT_ENABLE_EXIT ? deck_mask() : 0; }
+unsigned mask() {
+    return delivery_bound() && (state().enabled.load(std::memory_order_acquire) & AZEXIT_ENABLE_EXIT) ? deck_mask() : 0;
+}
 uint64_t commands() {
-    if (!deck_mask()) return 0;
+    if (!delivery_bound() || !deck_mask()) return 0;
     unsigned enabled = state().enabled.load(std::memory_order_acquire);
     return (enabled & AZEXIT_ENABLE_EXIT ? UINT64_C(1) << AZ_CMD_LOOP_EXIT : 0) |
            (enabled & AZEXIT_ENABLE_RELOOP ? UINT64_C(1) << AZ_CMD_RELOOP : 0) |
@@ -1381,12 +1411,20 @@ uint64_t commands() {
                                          : 0) |
            (enabled & AZEXIT_ENABLE_CUE ? (UINT64_C(1) << AZ_CMD_MAIN_SET) |
                                               (UINT64_C(1) << AZ_CMD_MAIN_RECALL) |
-                                              (UINT64_C(1) << AZ_CMD_HOT_TRIGGER)
+                                              (state().hot_countdown_ready ? UINT64_C(1) << AZ_CMD_HOT_TRIGGER : 0)
                                         : 0)
 #ifndef AZSDK_EXIT_TESTING
            | azsdk_cue_commands_commands()
 #endif
         ;
+}
+uint64_t delivery_ready(unsigned deck) noexcept {
+    if (deck >= 4 || !(deck_mask() & (1u << deck))) return 0;
+    uint64_t available = commands();
+#ifndef AZSDK_EXIT_TESTING
+    available &= ~(azsdk_cue_commands_commands() & ~azsdk_cue_commands_ready(deck));
+#endif
+    return available;
 }
 int target(unsigned deck, uint64_t *out) {
     if (!out || deck >= 4) return AZ_INVALID;
@@ -1403,6 +1441,11 @@ int submit_command(const azexit_request *r, uint32_t operation) {
     Slot &slot = state().decks[r->deck];
     unsigned expected = IDLE;
     if (!slot.phase.compare_exchange_strong(expected, WRITING, std::memory_order_acq_rel)) return AZ_BUSY;
+    int rc = attach_delivery(*r);
+    if (rc != AZ_OK) {
+        slot.phase.store(IDLE, std::memory_order_release);
+        return rc;
+    }
     slot.request = *r;
     slot.operation = operation;
     slot.token.store(r->token, std::memory_order_release);
@@ -1432,6 +1475,11 @@ int submit_loop(const azexit_loop_request *r) {
     Slot &slot = state().decks[identity.deck];
     unsigned expected = IDLE;
     if (!slot.phase.compare_exchange_strong(expected, WRITING, std::memory_order_acq_rel)) return AZ_BUSY;
+    int rc = attach_delivery(identity);
+    if (rc != AZ_OK) {
+        slot.phase.store(IDLE, std::memory_order_release);
+        return rc;
+    }
     slot.request = identity;
     slot.arguments = *r;
     slot.operation = r->operation;
@@ -1456,7 +1504,13 @@ int target_cue(unsigned deck, azexit_cue_target *out) {
 int submit_cue(const azexit_cue_request *r) {
     if (!r || r->size < sizeof *r) return AZ_INVALID;
 #ifndef AZSDK_EXIT_TESTING
-    if (hot_edit(r->operation) || recall_operation(r->operation) || !cue_operation(r->operation)) return azsdk_cue_commands_submit(r);
+    if (hot_edit(r->operation) || recall_operation(r->operation) || !cue_operation(r->operation)) {
+        if (r->identity.deck >= 4) return AZ_INVALID;
+        if (!delivery_bound() || r->operation >= 64 || !(commands() & (UINT64_C(1) << r->operation)))
+            return AZ_UNSUPPORTED;
+        int rc = attach_delivery(r->identity);
+        return rc == AZ_OK ? azsdk_cue_commands_submit(r) : rc;
+    }
 #else
     if (!cue_operation(r->operation)) return AZ_INVALID;
 #endif
@@ -1469,6 +1523,11 @@ int submit_cue(const azexit_cue_request *r) {
     Slot &slot = state().decks[identity.deck];
     unsigned expected = IDLE;
     if (!slot.phase.compare_exchange_strong(expected, WRITING, std::memory_order_acq_rel)) return AZ_BUSY;
+    int rc = attach_delivery(identity);
+    if (rc != AZ_OK) {
+        slot.phase.store(IDLE, std::memory_order_release);
+        return rc;
+    }
     slot.request = identity;
     slot.cue_arguments = *r;
     slot.operation = r->operation;
@@ -1512,6 +1571,7 @@ int poll(unsigned deck, azexit_result *out) {
 }
 int release(unsigned deck, uint64_t token) {
     if (deck >= 4 || !token) return AZ_INVALID;
+    if (state().decks[deck].frame_token.load(std::memory_order_acquire) == token) return AZ_BUSY;
 #ifndef AZSDK_EXIT_TESTING
     if (state().decks[deck].internal_recall.load(std::memory_order_acquire)) return azsdk_cue_commands_release(deck, token);
 #endif
@@ -1555,28 +1615,61 @@ __attribute__((unused)) bool patch(uintptr_t address, uintptr_t original, void *
 } // namespace
 
 extern "C" int azsdk_exit_delivery_publish(const azexit_receipt *receipt) noexcept {
-    return receipt && delivery_push(*receipt) ? AZ_OK : AZ_BUSY;
+    return azsdk_delivery::publish(receipt);
 }
-static int delivery_consume(azexit_receipt *out) noexcept {
-    if (!out || out->size < sizeof *out) return AZ_INVALID;
-    azexit_receipt value = {};
-    if (!delivery_pop(value)) return AZ_EMPTY;
-    uint32_t size = out->size;
-    *out = value;
-    out->size = size;
-    return AZ_OK;
+extern "C" int azsdk_exit_delivery_claim(const azexit_request *request, uint64_t time) noexcept {
+    if (!request) return AZ_INVALID;
+#ifdef AZSDK_EXIT_TESTING
+    if (!azsdk_delivery::find(request->token))
+        return azsdk_delivery::before(time, request->deadline_ns) ? AZ_OK : AZ_STALE;
+#endif
+    return azsdk_delivery::claim(*request, time);
 }
-static int delivery_reclaim(const azexit_receipt *receipt) noexcept {
-    return receipt && receipt->size >= sizeof *receipt && receipt->version == AZEXIT_DELIVERY_VERSION ? AZ_OK : AZ_INVALID;
+extern "C" int azsdk_exit_delivery_continue(const azexit_request *request, uint64_t time) noexcept {
+    if (!request) return AZ_INVALID;
+#ifdef AZSDK_EXIT_TESTING
+    if (!azsdk_delivery::find(request->token))
+        return azsdk_delivery::before(time, request->deadline_ns) ? AZ_OK : AZ_STALE;
+#endif
+    return azsdk_delivery::continuation(*request, time);
 }
-static int delivery_control(unsigned deck, uint64_t token, uint32_t reason) noexcept {
-    (void) reason;
-    return cancel(deck, token);
+extern "C" void azsdk_exit_delivery_wake(void) noexcept { azsdk_delivery::wake(); }
+extern "C" void azsdk_exit_delivery_notify(unsigned deck) noexcept { azsdk_delivery::notify(deck); }
+extern "C" void azsdk_exit_load_changed(unsigned deck) noexcept {
+    if (deck >= 4) return;
+    Slot &slot = state().decks[deck];
+    request_review(slot, slot.token.load(std::memory_order_acquire));
 }
-static int delivery_event_fd(void) noexcept { return delivery_fd(); }
-static const azexit_delivery_v1 g_sdk_delivery = {
-    sizeof g_sdk_delivery, AZEXIT_DELIVERY_VERSION, delivery_event_fd, delivery_consume,
-    delivery_reclaim, delivery_control};
+
+static void delivery_drive() noexcept {
+#ifndef AZSDK_EXIT_TESTING
+    azsdk_cue_commands_drive();
+#endif
+    unsigned decks = azsdk_delivery::transport.decks.exchange(0, std::memory_order_acq_rel);
+    for (auto &cell : azsdk_delivery::transport.tokens) {
+        if (!cell.decision.load(std::memory_order_acquire) || !cell.lifetime.load(std::memory_order_acquire))
+            continue;
+        unsigned deck = cell.request.deck;
+        if (!(decks & (1u << deck))) continue;
+        unsigned facts = cell.evidence.load(std::memory_order_acquire);
+        if (facts & azsdk_delivery::Retired) continue;
+        uint64_t token = cell.request.token;
+        if (!(facts & azsdk_delivery::Settled) && cell.stops.load(std::memory_order_acquire)) {
+            Slot &slot = state().decks[deck];
+            request_review(slot, token);
+            (void) cancel(deck, token);
+        }
+        if (cell.native_work.exchange(0, std::memory_order_acq_rel)) {
+            int rc = release(deck, token);
+            if (rc == AZ_OK) azsdk_delivery::evidence(cell, azsdk_delivery::Retired);
+            else cell.native_work.store(1, std::memory_order_release);
+        }
+    }
+}
+static const azexit_delivery_v2 g_sdk_delivery = {
+    sizeof g_sdk_delivery, AZEXIT_DELIVERY_VERSION, azsdk_delivery::event_fd, azsdk_delivery::consume,
+    azsdk_delivery::reclaim, azsdk_delivery::control, azsdk_delivery::bind, azsdk_delivery::reserve,
+    azsdk_delivery::close_local, delivery_drive, delivery_ready};
 
 extern "C" const azexit_service *azstem_exit_service_v1(void) noexcept {
 #ifndef AZSDK_EXIT_TESTING
@@ -1632,7 +1725,8 @@ extern "C" int azsdk_exit_configure(int on, int build, azexit_install_fn install
                                &s.profile.adjust_in, &s.profile.adjust_out, &s.profile.length_beat, &s.profile.length_square, &s.profile.cue_table,
                                &s.profile.merger_table, &s.profile.merger_request,
                                &s.profile.jump_schedule, &s.profile.interval_table, &s.profile.interval_source_table, &s.profile.jump_cancel, &s.profile.control_backcue,
-                               &s.profile.cue_base_table, &s.profile.core_jump.address, &s.profile.set_hot, &s.profile.play_pause_table};
+                               &s.profile.cue_base_table, &s.profile.core_jump.address, &s.profile.set_hot, &s.profile.play_pause_table,
+                               &s.profile.hot_countdown[0].address, &s.profile.hot_countdown[1].address};
         for (auto field : fields) {
             if (*field > UINTPTR_MAX - s.bias) return 0;
             *field += s.bias;
@@ -1683,7 +1777,13 @@ extern "C" int azsdk_exit_configure(int on, int build, azexit_install_fn install
         if (!patch(s.profile.jump_table + 32, s.profile.jump_schedule, reinterpret_cast<void *>(loop_schedule_hook))) return 0;
         if (!patch(s.profile.jump_table + 40, s.profile.jump_cancel, reinterpret_cast<void *>(jump_cancel_hook))) return 0;
         if ((unsigned(on) & AZEXIT_ENABLE_CUE) &&
-            (!install(s.profile.core_jump.address, reinterpret_cast<void *>(core_jump_hook), &s.core_jump_original) || !s.core_jump_original)) return 0;
+            (!install(s.profile.core_jump.address, reinterpret_cast<void *>(core_jump_hook), &s.core_jump_original) || !s.core_jump_original))
+            return 0;
+        if (on & AZEXIT_ENABLE_CUE) {
+            s.hot_countdown_ready = install_hot_countdown(s, install);
+            if (!s.hot_countdown_ready)
+                std::fprintf(stderr, "azstem: Hot Cue Trigger disabled; countdown delivery hook unavailable\n");
+        }
 #ifndef AZSDK_EXIT_TESTING
         if (on & AZEXIT_ENABLE_CUE) azsdk_cue_commands_configure(1, build, install);
 #endif
@@ -1717,6 +1817,7 @@ extern "C" int azsdk_exit_register(int deck, void *unit) noexcept {
             return 0;
         }
         s.mask.fetch_or(1u << unsigned(deck), std::memory_order_release);
+        azsdk_delivery::notify(unsigned(deck));
         return 1;
     } catch (...) { return 0; }
 }
@@ -1735,10 +1836,29 @@ extern "C" void azsdk_exit_retire(int deck) noexcept {
     unsigned expected = QUEUED;
     if (slot.phase.compare_exchange_strong(expected, WRITING, std::memory_order_acq_rel))
         finish(slot, AZ_COMMAND_REJECTED, AZ_STALE);
-    else if (expected == RUNNING && !slot.untracked) {
-        finish(slot, AZ_COMMAND_UNCERTAIN, AZ_STALE);
-        emit_receipt(slot, AZEXIT_RECEIPT_SETTLED, 1);
+    else if (expected == RUNNING) {
+        if (!slot.internal_recall.load(std::memory_order_acquire)) {
+            auto value = azsdk_delivery::receipt(slot.request, AZEXIT_RECEIPT_TERMINAL, 0, 0, now(),
+                                                AZ_COMMAND_UNCERTAIN, AZ_STALE);
+            (void) azsdk_delivery::publish(&value);
+        }
+        if (!slot.untracked) {
+            if (slot.operation == AZ_CMD_HOT_TRIGGER) {
+                uintptr_t beat = word(slot.facade + 0x70);
+                if (!table(beat, s.profile.beat) || integer(beat + 0x104))
+                    slot.draining_unit.store(slot.unit, std::memory_order_release);
+            }
+            slot.phase.store(DRAINING, std::memory_order_release);
+            settle_retired(slot, slot.token.load(std::memory_order_acquire));
+        }
     }
+    azsdk_delivery::notify(unsigned(deck));
+}
+extern "C" void azsdk_exit_retire_complete(unsigned deck, uintptr_t unit) noexcept {
+    if (deck >= 4 || !unit) return;
+    Slot &slot = state().decks[deck];
+    if (slot.draining_unit.compare_exchange_strong(unit, 0, std::memory_order_acq_rel))
+        settle_retired(slot, slot.token.load(std::memory_order_acquire));
 }
 #ifdef AZSDK_EXIT_TESTING
 extern "C" void azsdk_exit_test_profile(const azexit_profile *profile) noexcept {
@@ -1801,7 +1921,8 @@ extern "C" int azsdk_exit_recall_take(unsigned deck, azexit_result *out) noexcep
     if (deck >= 4 || !out) return AZ_INVALID;
     Slot &slot = state().decks[deck];
     unsigned expected = READY;
-    if (!slot.internal_recall.load(std::memory_order_acquire) ||
+    if (slot.frame_token.load(std::memory_order_acquire) ||
+        !slot.internal_recall.load(std::memory_order_acquire) ||
         !slot.phase.compare_exchange_strong(expected, READING, std::memory_order_acq_rel)) return AZ_PENDING;
     *out = slot.result;
     slot.phase.store(READY, std::memory_order_release);
@@ -1812,6 +1933,7 @@ extern "C" int azsdk_exit_recall_poll(unsigned deck, azexit_result *out) noexcep
 }
 extern "C" int azsdk_exit_recall_release(unsigned deck, uint64_t token) noexcept {
     if (deck >= 4 || !token) return AZ_INVALID;
+    if (state().decks[deck].frame_token.load(std::memory_order_acquire) == token) return AZ_BUSY;
     Slot &slot = state().decks[deck];
     unsigned expected = READY;
     if (!slot.internal_recall.load(std::memory_order_acquire) ||

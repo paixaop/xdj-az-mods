@@ -27,6 +27,7 @@ int azsdk_cue_actor_configure(const struct azcue_actor_profile *, azexit_install
 /* Lifecycle caller pins manager through register and routes teardown through
  * retire BEFORE native destruction. Registration and drive are management work. */
 int azsdk_cue_actor_register(unsigned, void *, uint64_t) AZCUE_NOEXCEPT;
+unsigned azsdk_cue_actor_mask(void) AZCUE_NOEXCEPT;
 void azsdk_cue_actor_retire(unsigned, void *manager) AZCUE_NOEXCEPT;
 int azsdk_cue_actor_enqueue(const struct azexit_cue_request *) AZCUE_NOEXCEPT;
 void azsdk_cue_actor_drive(unsigned) AZCUE_NOEXCEPT;

@@ -23,9 +23,19 @@ static cm_mod *cm_self(const char *id, uintptr_t caller, const char *service) {
 #include "sdk_command.c"
 #include SDK_EXIT_SUBMIT_INC
 void sdk_exit_public_bind(const struct azexit_service *api) {
+    const struct azexit_delivery_v2 *delivery = sdk_exit_delivery(api);
+    struct azexit_binding binding = {sizeof binding, AZEXIT_DELIVERY_VERSION, SCMD_SLOTS, SCMD_PER_OWNER};
+    if (delivery && delivery->bind(&binding) != AZ_OK) delivery = NULL;
+    g_sdk_commands.delivery = delivery;
     atomic_store_explicit(&g_sdk_exit_service, api, memory_order_release);
+    atomic_store_explicit(&g_sdk_exit_bound, delivery, memory_order_release);
 }
-void sdk_exit_public_retire(int owner) { sdk_command_retire_owner(owner); }
+void sdk_exit_public_retire(int owner) {
+    sdk_command_retire_owner(owner);
+    sdk_command_drive();
+    sdk_command_owner_init(owner);
+    sdk_command_owner_ready(owner);
+}
 static uint64_t test_clock_value;
 static uint64_t test_clock(void *unused) {
     (void) unused;
@@ -37,11 +47,23 @@ void sdk_exit_public_clock(uint64_t time) {
 }
 uint64_t sdk_exit_public_capabilities(void) { return sdk_command_capabilities(); }
 int sdk_exit_public_submit(const char *owner, const az_command_request *r, az_command_result *out) {
-    return sdk_command_submit(owner, r, out);
+    int rc = sdk_command_submit(owner, r, out);
+    sdk_command_drive(); /* deterministic fixture dispatcher; production uses descriptors */
+    return rc;
 }
-int sdk_exit_public_poll(const char *owner, uint64_t id, az_command_result *out) { return sdk_command_poll(owner, id, out); }
-int sdk_exit_public_cancel(const char *owner, uint64_t id, az_command_result *out) { return sdk_command_cancel(owner, id, out); }
-int sdk_exit_public_release(const char *owner, uint64_t id) { return sdk_command_release(owner, id); }
+int sdk_exit_public_poll(const char *owner, uint64_t id, az_command_result *out) {
+    sdk_command_drive();
+    return sdk_command_poll(owner, id, out);
+}
+int sdk_exit_public_cancel(const char *owner, uint64_t id, az_command_result *out) {
+    int rc = sdk_command_cancel(owner, id, out);
+    sdk_command_drive();
+    return rc;
+}
+int sdk_exit_public_release(const char *owner, uint64_t id) {
+    sdk_command_drive();
+    return sdk_command_release(owner, id);
+}
 void sdk_exit_public_auth(void) {
     az_command_request r = {.size = sizeof r, .version = 1, .operation = AZ_CMD_LOOP_EXIT, .request_id = 1, .flags = AZ_COMMAND_NATIVE_LOAD, .expected_load_generation = 1, .deadline_ns = UINT64_MAX};
     for (unsigned operation = AZ_CMD_LOOP_IN; operation <= AZ_CMD_CUE_COLOR; ++operation) {

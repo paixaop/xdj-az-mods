@@ -81,19 +81,19 @@ submit = function('sdk_command_submit')
 (output / 'submit.inc').write_text(submit)
 module = (source.parent / 'sdk_command.c').read_text()
 wrapper_controls = {
-    'wrapper-submit-owner': ('submit', 'st_mod_owner(id, CM_RA(), "command_submit") < 0', '((void) id, 0)'),
+    'wrapper-submit-owner': ('submit', 'st_mod_owner(id, CM_RA(), "command_submit")', '((void) id, 0)'),
     'wrapper-poll-owner': ('module', 'st_mod_owner(id, CM_RA(), "command_poll")', '((void) id, 0)'),
     'wrapper-cancel-owner': ('module', 'st_mod_owner(id, CM_RA(), "command_cancel")', '((void) id, 0)'),
     'wrapper-release-owner': ('module', 'st_mod_owner(id, CM_RA(), "command_release")', '((void) id, 0)'),
     'wrapper-arguments': ('submit', '!scmd_request_valid(r)',
         '(!r || scmd_size(r) < sizeof *r || r->version != AZ_DATA_VERSION || r->deck > 3 || r->operation < AZ_CMD_LOOP_IN || r->operation > AZ_CMD_CUE_COLOR || !r->request_id || !r->expected_load_generation || !r->deadline_ns || r->quantization > AZ_QUANTIZE_ON)'),
     'wrapper-poll-state': ('module', 'scmd_poll(&g_sdk_commands, owner, request_id, out)', '((void) request_id, (void) out, AZ_STALE)'),
-    'wrapper-cancel-state': ('module', 'scmd_cancel(&g_sdk_commands, owner, request_id, out)', '((void) request_id, (void) out, AZ_STALE)'),
+    'wrapper-cancel-state': ('module', 'sdk_exit_cancel_request(owner, request_id, out)', '((void) sdk_exit_cancel_request, (void) request_id, (void) out, AZ_STALE)'),
     'wrapper-release-state': ('module', 'scmd_release(&g_sdk_commands, owner, request_id)', '((void) request_id, AZ_STALE)'),
 }
 for name, (which, old, new) in wrapper_controls.items():
     original = submit if which == 'submit' else module
-    assert original.count(old) == (2 if name == 'wrapper-poll-state' else 1), name
+    assert original.count(old) == 1, name
     directory = output / name
     directory.mkdir()
     (directory / 'submit.inc').write_text(submit.replace(old, new) if which == 'submit' else submit)

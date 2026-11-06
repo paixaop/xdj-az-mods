@@ -8,7 +8,9 @@
 #define AZEXIT_COMMAND_TYPES 17u
 #define AZEXIT_QUANTIZE_PENDING 15u
 
-struct azexit_native_color { unsigned char r, g, b; };
+struct azexit_native_color {
+    unsigned char r, g, b;
+};
 struct azexit_native_entry {
     uintptr_t address;
     unsigned char prologue[16];
@@ -32,5 +34,6 @@ struct azexit_profile {
     struct azexit_native_entry core_jump;
     uintptr_t set_hot;
     uintptr_t play_pause_table;
+    struct azexit_native_entry hot_countdown[2];
 };
 #endif

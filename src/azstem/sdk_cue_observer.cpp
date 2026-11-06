@@ -8,6 +8,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include "../common/azcuecommands.h"
 #include "../common/azcueobserver.h"
 #include <atomic>
 #include <cstddef>
@@ -22,6 +23,10 @@
 #error "Native cue weak listeners require GNU libstdc++"
 #endif
 #include <link.h>
+#endif
+
+#ifdef AZSDK_CUE_TESTING
+extern "C" __attribute__((weak)) void azsdk_cue_commands_collection_changed(unsigned) noexcept {}
 #endif
 
 namespace {
@@ -166,6 +171,7 @@ public:
         // One nonblocking RMW, no finite retry/lost wakeup. The immutable slot
         // belongs to this registration even if retirement races this store.
         s.pending[slot_ - 1].word.fetch_or(std::uint64_t(1u << index), std::memory_order_release);
+        azsdk_cue_commands_collection_changed(deck_);
     }
 };
 std::uint64_t collection_now(unsigned deck) noexcept {

@@ -29,7 +29,7 @@ lifetime += source[a:b]
 (out / 'real.inc').write_text(lifetime)
 variants = [
     ('cue-register', '(void) azsdk_cue_register((int) n32, self);', '(void) 0;'),
-    ('cue-retire', 'if (g_sdk_live_on) azsdk_cue_retire(d);', '(void) 0;'),
+    ('cue-retire', 'if (g_sdk_cue_on) azsdk_cue_retire(d);', '(void) 0;'),
     ('register', '(void) azsdk_load_register((int) n32, self);', '(void) 0;'),
     ('retire', 'if (g_sdk_load_on) azsdk_load_retire(d);', '(void) 0;'),
     ('owner', 'if (g_sdk_load_on && (claimed || exp == self) &&', 'if (g_sdk_load_on &&'),
@@ -64,7 +64,7 @@ config = '''#include "azexit.h"
 #define logln(...) ((void)0)
 typedef int (*patch_fn)(uintptr_t,void*,void**);
 static int track_on, load_on, ctor_ok, dtor_ok, configured, configured_build, bad_patch, ctor_calls, dtor_calls;
-static int sdk_loop_build, g_sdk_loop_on, g_sdk_live_on;
+static int sdk_loop_build, g_sdk_loop_on, g_sdk_live_on, g_sdk_cue_on;
 static _Atomic int g_sdk_load_on;
 static uintptr_t g_djpuctor_addr;
 static void *g_orig_djpuctor,*g_orig_djpudtor;

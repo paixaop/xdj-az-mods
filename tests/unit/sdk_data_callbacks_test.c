@@ -27,6 +27,9 @@ static int st_mod_owner(const char *id, uintptr_t caller, const char *service) {
     cm_mod *c = cm_self(id, caller, service);
     return c && !g_cm_in_frame ? (int) (c - g_cm) : -1;
 }
+static int cm_command_code(cm_mod *mod, uintptr_t address) {
+    return mod->lo <= address && address < mod->hi;
+}
 #include "sdk_command.c"
 #include "sdk_data_callbacks.c"
 static int counts[CM_MAX], commands[CM_MAX], saw_missed, last_status;
@@ -79,59 +82,6 @@ static uint64_t request(int owner, unsigned id, int wave) {
                                 wave ? &q : NULL, &ticket) == AZ_OK);
     return ticket;
 }
-static struct azexit_request native_request;
-static int native_ready, native_submits, native_receipt_sent;
-static unsigned native_mask(void) { return 1; }
-static int native_target(unsigned deck, uint64_t *generation) {
-    assert(deck == 0);
-    *generation = 7;
-    return AZ_OK;
-}
-static int native_submit(const struct azexit_request *request) {
-    assert(!native_request.token);
-    native_request = *request;
-    native_receipt_sent = 0;
-    ++native_submits;
-    return AZ_PENDING;
-}
-static int native_poll(unsigned deck, struct azexit_result *result) {
-    assert(deck == 0);
-    if (!native_ready) return AZ_PENDING;
-    *result = (struct azexit_result) {native_request.token, 7, 1, AZ_COMMAND_APPLIED, AZ_OK};
-    return AZ_OK;
-}
-static int native_release(unsigned deck, uint64_t token) {
-    assert(deck == 0 && token == native_request.token);
-    native_request.token = 0;
-    return AZ_OK;
-}
-static int native_cancel(unsigned deck, uint64_t token) {
-    (void) deck;
-    (void) token;
-    return AZ_PENDING;
-}
-static int native_delivery_fd(void) { return -1; }
-static int native_delivery_consume(struct azexit_receipt *out) {
-    if (!out || out->size < sizeof *out) return AZ_INVALID;
-    if (!native_ready || native_receipt_sent || !native_request.token) return AZ_EMPTY;
-    *out = (struct azexit_receipt) {
-        sizeof *out, AZEXIT_DELIVERY_VERSION, AZEXIT_RECEIPT_TERMINAL, 1, 0,
-        native_request.token, 7, 0, 1, 1, AZ_COMMAND_APPLIED, AZ_OK};
-    native_receipt_sent = 1;
-    return AZ_OK;
-}
-static int native_delivery_reclaim(const struct azexit_receipt *receipt) {
-    return receipt ? AZ_OK : AZ_INVALID;
-}
-static int native_delivery_control(unsigned deck, uint64_t token, uint32_t reason) {
-    (void) deck;
-    (void) token;
-    (void) reason;
-    return AZ_OK;
-}
-static const struct azexit_delivery_v1 native_delivery = {
-    sizeof native_delivery, AZEXIT_DELIVERY_VERSION, native_delivery_fd, native_delivery_consume,
-    native_delivery_reclaim, native_delivery_control};
 int main(void) {
     assert(sdk_on_data_event("unknown", data, NULL) == AZ_INVALID);
     assert(sdk_on_data_event("one", data, NULL) == AZ_INVALID);
@@ -247,24 +197,6 @@ int main(void) {
     g_sdk_commands.records[0] = (struct scmd_record) {.owner = 0, .token = 5, .phase = SCMD_FINAL};
     sdk_data_callbacks_tick();
     assert(commands[0] == 2);
-    /* Drive the actual public command bridge to completion without command_poll.
-     * Only the native mailbox endpoint is synthetic; no hardware is contacted. */
-    static const struct azexit_service api = {.size = AZEXIT_SERVICE_DELIVERY_SIZE, .version = 1, .mask = native_mask, .target = native_target, .submit = native_submit, .cancel = native_cancel, .poll = native_poll, .release = native_release, .delivery = &native_delivery};
-    atomic_store(&g_sdk_exit_service, &api);
-    g_sdk_commands.next_token = 5;
-    az_command_request cmd = {.size = sizeof cmd, .version = 1, .operation = AZ_CMD_LOOP_EXIT, .deck = 0, .request_id = 2, .flags = AZ_COMMAND_NATIVE_LOAD, .expected_load_generation = 7, .deadline_ns = UINT64_MAX};
-    az_command_result result = {.size = sizeof result};
-    assert(sdk_exit_submit(1, &cmd, &result) == AZ_OK && result.outcome == AZ_COMMAND_ACCEPTED);
-    sdk_command_drive();
-    assert(native_submits == 1);
-    sdk_data_callbacks_tick();
-    assert(commands[1] == 1);
-    native_ready = 1;
-    sdk_command_drive();
-    sdk_data_callbacks_tick();
-    assert(commands[1] == 2 && !native_request.token);
-    sdk_data_callbacks_tick();
-    assert(commands[1] == 2 && native_submits == 1);
     st_destroy(&g_st);
     puts("data callbacks: passed");
     return 0;

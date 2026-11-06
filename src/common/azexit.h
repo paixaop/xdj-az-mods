@@ -70,10 +70,17 @@ struct azexit_result {
  * object, function pointer, or mod-owned address crosses this boundary.  The
  * producer owns the bounded cells until consume() copies one into core storage. */
 enum {
-    AZEXIT_DELIVERY_VERSION = 1u,
+    AZEXIT_DELIVERY_VERSION = 2u,
+    AZEXIT_DELIVERY_CAPACITY = 32u,
+    AZEXIT_DELIVERY_PER_OWNER = 4u,
     AZEXIT_RECEIPT_TERMINAL = 1u,
     AZEXIT_RECEIPT_SETTLED = 2u,
     AZEXIT_RECEIPT_RESOURCES_RETIRED = 3u
+};
+enum {
+    AZEXIT_STOP_DEADLINE = 1u,
+    AZEXIT_STOP_CANCEL = 2u,
+    AZEXIT_STOP_RETIRE = 4u
 };
 struct azexit_receipt {
     uint32_t size, version, kind, settled, deck;
@@ -81,12 +88,24 @@ struct azexit_receipt {
     uint32_t outcome;
     int32_t reason;
 };
-struct azexit_delivery_v1 {
+struct azexit_binding {
+    uint32_t size, version, capacity, per_owner;
+};
+struct azexit_delivery_v2 {
     uint32_t size, version;
     int (*event_fd)(void);
     int (*consume)(struct azexit_receipt *out);
     int (*reclaim)(const struct azexit_receipt *receipt);
-    int (*control)(unsigned deck, uint64_t token, uint32_t reason);
+    /* Decide under the same arbitration used by the native execution claim.
+     * AZ_OK copies the winner, AZ_PENDING retains the stop without a winner. */
+    int (*control)(unsigned deck, uint64_t token, uint32_t reasons, uint64_t now_ns,
+                   struct azexit_receipt *winner);
+    int (*bind)(const struct azexit_binding *core);
+    int (*reserve)(const struct azexit_request *request);
+    /* Close a token whose dispatch did not acquire any native references. */
+    int (*close_local)(const struct azexit_receipt *receipt);
+    void (*drive)(void);
+    uint64_t (*ready)(unsigned deck);
 };
 struct az_native_cue_snapshot;
 struct azexit_service {
@@ -107,7 +126,7 @@ struct azexit_service {
     void (*cue_tick)(void);
     int (*native_cues)(unsigned deck, struct az_native_cue_snapshot *out);
     /* Versioned autonomous delivery, appended after the legacy polling prefix. */
-    const struct azexit_delivery_v1 *delivery;
+    const struct azexit_delivery_v2 *delivery;
 };
 #define AZEXIT_SERVICE_V1_SIZE offsetof(struct azexit_service, commands)
 #define AZEXIT_SERVICE_COMMAND_SIZE offsetof(struct azexit_service, submit_loop)
@@ -125,12 +144,20 @@ __attribute__((visibility("default"))) const struct azexit_service *azstem_exit_
 /* Called by native owning-thread producers.  It only copies into preallocated
  * cells and signals a descriptor; it never calls the core or waits. */
 int azsdk_exit_delivery_publish(const struct azexit_receipt *receipt) AZEXIT_NOEXCEPT;
+/* These are companion-internal. Public native work requires a reservation
+ * before any owning-thread executor can claim it. */
+int azsdk_exit_delivery_claim(const struct azexit_request *request, uint64_t now_ns) AZEXIT_NOEXCEPT;
+int azsdk_exit_delivery_continue(const struct azexit_request *request, uint64_t now_ns) AZEXIT_NOEXCEPT;
+void azsdk_exit_delivery_wake(void) AZEXIT_NOEXCEPT;
+void azsdk_exit_delivery_notify(unsigned deck) AZEXIT_NOEXCEPT;
+void azsdk_exit_load_changed(unsigned deck) AZEXIT_NOEXCEPT;
 typedef void *(*azexit_install_fn)(uintptr_t, void *, void **);
 /* Enable bits above; zero disables dispatch. Configuration is startup-only. */
 __attribute__((visibility("hidden"))) int azsdk_exit_configure(int on, int build, azexit_install_fn install) AZEXIT_NOEXCEPT;
 /* Called from the existing constructed-unit / pre-destruction native hooks. */
 __attribute__((visibility("hidden"))) int azsdk_exit_register(int deck, void *owned_unit) AZEXIT_NOEXCEPT;
 __attribute__((visibility("hidden"))) void azsdk_exit_retire(int deck) AZEXIT_NOEXCEPT;
+__attribute__((visibility("hidden"))) void azsdk_exit_retire_complete(unsigned deck, uintptr_t unit) AZEXIT_NOEXCEPT;
 #ifdef AZSDK_EXIT_TESTING
 /* Inject exact nominal tables and a native-entry installer, never bypass guards. */
 void azsdk_exit_test_profile(const struct azexit_profile *profile) AZEXIT_NOEXCEPT;

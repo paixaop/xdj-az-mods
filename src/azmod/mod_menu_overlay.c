@@ -29,6 +29,8 @@
  * Entry points: overlay_thread(), handle_action(), read_sysinfo(), srcrow_activate_item(),
  * apply_menu_shape().
  */
+#include "../common/aztimestamp.h"
+
 /* SoC temperature in tenths of a degree C, or -1. The soc-thermal zone is located once (retried
  * every 30 s until found); the emulator has none, so /tmp/azmod-fake-temp stands in. */
 static int cpu_temp_read(void) {
@@ -2847,23 +2849,29 @@ static useconds_t ov_tick_us(void) {
                : 30000;
 }
 
-/* Waits for the next tick: the tick's time, or less when an X event (a touch) arrives on our
- * connection, so a finger's step is drawn as soon as it is reported instead of after the rest
- * of the tick. A tick is never shorter than OV_MIN_TICK_US, however busy the connection. */
-#define OV_MIN_TICK_US 4000
-static void ov_wait(struct overlay_ctx *c, useconds_t us, long start_ms) {
-    long left = (long) (us / 1000) - (now_ms() - start_ms);
-    if (left < 0) left = 0;
+/* X input can start an early frame. SDK callbacks run on this thread between
+ * frames without advancing menu timers or rendering once per audio receipt. */
+enum { OV_WAKE_FRAME = 1, OV_WAKE_COMMAND = 2 };
+static unsigned ov_wait(struct overlay_ctx *c, useconds_t us, long start_ms) {
+    const long deadline = start_ms + (long) (us / 1000);
     struct pollfd p[2] = {
         {.fd = ConnectionNumber(c->dpy), .events = POLLIN},
         {.fd = sdk_command_ui_fd(), .events = POLLIN}};
-    nfds_t n = p[1].fd >= 0 ? 2 : 1;
-    if (XEventsQueued(c->dpy, QueuedAlready) > 0) left = 0;
-    (void) poll(p, n, (int) left);
-    if (n == 2 && (p[1].revents & POLLIN)) {
-        /* Completion delivery is a separate overlay phase, outside
-         * community_tick, visibility checks and the ordinary pacing loop. */
-        (void) sdk_command_ui_drain(8);
+    for (;;) {
+        long now = now_ms();
+        int deadline_order = compare_timestamps(now, deadline, 1000, 1000, 1);
+        if (deadline_order == AZ_TIME_INVALID) return OV_WAKE_FRAME;
+        int before_deadline = deadline_order == AZ_TIME_BEFORE;
+        long left = before_deadline ? deadline - now : 0;
+        int pending_x = XEventsQueued(c->dpy, QueuedAlready) > 0;
+        int ready = poll(p, 2, before_deadline && !pending_x ? (int) left : 0);
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready <= 0) return OV_WAKE_FRAME;
+        unsigned wake = p[1].revents & POLLIN ? OV_WAKE_COMMAND : 0;
+        int order = compare_timestamps(now_ms(), deadline, 1000, 1000, 1);
+        if (pending_x || p[0].revents || order == AZ_TIME_EQUAL || order == AZ_TIME_AFTER || order == AZ_TIME_INVALID ||
+            (p[1].revents & (POLLERR | POLLHUP | POLLNVAL))) wake |= OV_WAKE_FRAME;
+        if (wake) return wake;
     }
 }
 
@@ -2879,24 +2887,26 @@ static void *overlay_thread(void *arg) {
     sdk_overlay_attach(c); /* before the mods' init(), which may create surfaces */
     ov_create_windows(c);
     ov_load_state();
+    long tick_start = now_ms();
+    unsigned wake = OV_WAKE_FRAME;
     for (;;) {
-        long tick_start = now_ms();
-        bus_cfg_publish(); /* this tick's Mod Menu settings -> the bus threads */
-        vs_save_flush(); /* before any continue: a Vinyl Speed Adjust value posted by
-                          * the touch handler on EP147's message thread */
-        if (ov_reload_banner(c))
-            continue;
-        ov_poll_inputs(c);
-        ov_update_state(c);
-        ov_place_windows(c);
-        if (c->dirty)
-            ov_present(c);
-        if (c->dirty || sdk_any_redraw())
-            sdk_overlay_present(c, c->dirty);
-        c->need_raise = 0;
-        XFlush(c->dpy);
-        c->dirty = 0;
-        ov_wait(c, ov_tick_us(), tick_start);
+        if (wake & OV_WAKE_COMMAND) (void) sdk_command_ui_drain(8);
+        if (wake & OV_WAKE_FRAME) {
+            tick_start = now_ms();
+            bus_cfg_publish(); /* this tick's Mod Menu settings -> the bus threads */
+            vs_save_flush(); /* a Vinyl Speed Adjust value posted by EP147's message thread */
+            if (!ov_reload_banner(c)) {
+                ov_poll_inputs(c);
+                ov_update_state(c);
+                ov_place_windows(c);
+                if (c->dirty) ov_present(c);
+                if (c->dirty || sdk_any_redraw()) sdk_overlay_present(c, c->dirty);
+                c->need_raise = 0;
+                XFlush(c->dpy);
+                c->dirty = 0;
+            }
+        }
+        wake = ov_wait(c, ov_tick_us(), tick_start);
     }
     return NULL;
 }

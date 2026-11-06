@@ -1089,6 +1089,7 @@ __attribute__((constructor)) static void azstem_init(void) {
                 azsdk_live_configure(1, sdk_loop_build);
                 azsdk_cue_configure(1, sdk_loop_build);
                 g_sdk_live_on = 1;
+                g_sdk_cue_on = 1;
             }
             if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT &&
                 access("/home/root/settings/azmod.track-data.on", F_OK) == 0 &&
@@ -1102,8 +1103,13 @@ __attribute__((constructor)) static void azstem_init(void) {
                     sdk_commands |= AZEXIT_ENABLE_RELOOP;
                 if (access("/home/root/settings/azmod.native-loop-commands.on", F_OK) == 0)
                     sdk_commands |= AZEXIT_ENABLE_LOOP;
-                if (access("/home/root/settings/azmod.native-cue-commands.on", F_OK) == 0)
+                if (access("/home/root/settings/azmod.native-cue-commands.on", F_OK) == 0) {
                     sdk_commands |= AZEXIT_ENABLE_CUE;
+                    if (!g_sdk_cue_on) {
+                        azsdk_cue_configure(1, sdk_loop_build);
+                        g_sdk_cue_on = 1;
+                    }
+                }
                 if (sdk_commands) (void) azsdk_exit_configure((int) sdk_commands, sdk_loop_build, install_hook_at);
             }
         } else

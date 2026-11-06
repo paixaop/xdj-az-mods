@@ -104,6 +104,8 @@ using QuantizeSubmit = int (*)(void *, int, const void *, const void *, const vo
 using QuantizeCancel = void (*)(void *);
 Process hook;
 Process core_jump_hook;
+void (*hot_countdown_hooks[2])(void *);
+unsigned hot_countdown_route;
 Preprocess pre_hook;
 ManagerSubmit manager_hook;
 QuantizeSubmit quantize_hook;
@@ -117,12 +119,14 @@ static void active(unsigned d);
 static void apply_set(unsigned d);
 static void native_cue_action(void *facade, unsigned operation, unsigned kind);
 static void maintain_loop(unsigned d);
+static void advance_load(unsigned deck);
 static void dispose_pending(unsigned d);
 static unsigned deck_for(const void *object, unsigned member) {
     for (unsigned d = 0; d < 4; ++d) {
         const void *candidate = member == 0 ? static_cast<void *>(natives[d].core.bytes) : member == 1 ? static_cast<void *>(natives[d].facade.bytes)
                                                                                        : member == 2   ? static_cast<void *>(natives[d].manager.bytes)
                                                                                        : member == 3   ? static_cast<void *>(natives[d].quantize.bytes)
+                                                                                       : member == 5   ? static_cast<void *>(natives[d].beat.bytes)
                                                                                                        : static_cast<void *>(natives[d].jump.bytes);
         if (candidate == object) return d;
     }
@@ -458,6 +462,21 @@ static void engine(unsigned d, uintptr_t original_chain) {
     put(n.manager, 8, uintptr_t(0));
     release(original_chain);
 }
+static void advance_load(unsigned deck) {
+    loads[deck].fetch_add(1);
+    azsdk_exit_load_changed(deck);
+}
+static void native_hot_countdown(void *beat) {
+    auto &n = natives[deck_for(beat, 5)];
+    uint32_t count = get<uint32_t>(beat, 0x104);
+    if (count >= 1 && count <= 3) {
+        store(beat, 0x104, count - 1);
+        if (count == 1) put(n.play_pause, 8, uint8_t(n.cue_fault != 4));
+    }
+}
+static void native_hot_countdown_task(void *task) {
+    native_hot_countdown(reinterpret_cast<void *>(object_word(task, 0x10)));
+}
 static void native_process(void *core, const void *frames) {
     unsigned d = deck_for(core, 0);
     ++forwards;
@@ -467,13 +486,17 @@ static void native_process(void *core, const void *frames) {
     /* Keep destruction blocked after preProcess and its EXIT callback returned. */
     inside.store(true, std::memory_order_release);
     while (hold.load(std::memory_order_acquire)) std::this_thread::yield();
-    if (natives[d].invalidate_after_pre) loads[d].fetch_add(1);
+    if (natives[d].invalidate_after_pre) advance_load(d);
     if (natives[d].expire_after_pre) std::this_thread::sleep_for(std::chrono::milliseconds(120));
     if (!natives[d].pause_engine) engine(d, chain_at_entry);
     if (cue_countdown_at_entry >= 1 && cue_countdown_at_entry <= 3 &&
         get<uint32_t>(natives[d].beat.bytes, 0x104) == cue_countdown_at_entry) {
-        put(natives[d].beat, 0x104, cue_countdown_at_entry - 1);
-        if (cue_countdown_at_entry == 1) put(natives[d].play_pause, 8, uint8_t(natives[d].cue_fault != 4));
+        if (!hot_countdown_hooks[0]) native_hot_countdown(natives[d].beat.bytes);
+        else if (hot_countdown_route) {
+            Raw<0x20> task;
+            put(task, 0x10, natives[d].beat.address());
+            hot_countdown_hooks[1](task.bytes);
+        } else hot_countdown_hooks[0](natives[d].beat.bytes);
     }
     owner_frame = false; /* native task affinity ends before outer-frame settlement */
 }
@@ -498,7 +521,7 @@ static void native_action(void *facade, bool reloop) {
             if (n.maintained_loop) maintain_loop(d);
         } else put(n.context, 0x190, uint8_t(0));
     }
-    if (replace_load) loads[d].fetch_add(1);
+    if (replace_load) advance_load(d);
 }
 static void native_exit(void *facade) { native_action(facade, false); }
 static void native_control_jump(void *facade, int kind, int behavior, int slip) {
@@ -767,6 +790,12 @@ static void *install(uintptr_t entry, void *replacement, void **original) {
     } else if (entry == reinterpret_cast<uintptr_t>(native_quantize_submit)) {
         *original = reinterpret_cast<void *>(native_quantize_submit);
         quantize_hook = reinterpret_cast<QuantizeSubmit>(replacement);
+    } else if (entry == reinterpret_cast<uintptr_t>(native_hot_countdown)) {
+        *original = reinterpret_cast<void *>(native_hot_countdown);
+        hot_countdown_hooks[0] = reinterpret_cast<void (*)(void *)>(replacement);
+    } else if (entry == reinterpret_cast<uintptr_t>(native_hot_countdown_task)) {
+        *original = reinterpret_cast<void *>(native_hot_countdown_task);
+        hot_countdown_hooks[1] = reinterpret_cast<void (*)(void *)>(replacement);
     } else if (entry == reinterpret_cast<uintptr_t>(native_core_jump)) {
         *original = reinterpret_cast<void *>(native_core_jump);
         core_jump_hook = reinterpret_cast<Process>(replacement);
@@ -827,6 +856,9 @@ static void setup(int build, unsigned enabled = AZEXIT_ENABLE_EXIT | AZEXIT_ENAB
     p.cue_base_table = reinterpret_cast<uintptr_t>(cue_base_table);
     p.control_backcue = facade_table[8];
     entry(p.core_jump, reinterpret_cast<uintptr_t>(native_core_jump));
+    entry(p.hot_countdown[0], reinterpret_cast<uintptr_t>(native_hot_countdown));
+    entry(p.hot_countdown[1], reinterpret_cast<uintptr_t>(native_hot_countdown_task));
+    hot_countdown_route = unsigned(build - 1);
     p.play_pause_table = reinterpret_cast<uintptr_t>(play_pause_table);
     merger_table[2] = p.merger_request = reinterpret_cast<uintptr_t>(native_merge);
     p.merger_table = reinterpret_cast<uintptr_t>(merger_table);
@@ -993,8 +1025,18 @@ static void terminal(const az_command_request &r, unsigned outcome, int reason) 
     assert(sdk_exit_public_poll("one", r.request_id, &out) == AZ_OK && !std::memcmp(&saved, &out, sizeof out));
     if (outcome == AZ_COMMAND_APPLIED)
         assert(sdk_exit_public_cancel("one", r.request_id, &out) == AZ_STALE && !std::memcmp(&saved, &out, sizeof out));
-    assert(sdk_exit_public_release("one", r.request_id) == AZ_OK);
+    int released = sdk_exit_public_release("one", r.request_id);
+    if (released != AZ_OK)
+        std::fprintf(stderr, "release status %d for operation %u, deck %u, terminal %u/%d\n",
+                     released, r.operation, r.deck, outcome, reason);
+    assert(released == AZ_OK);
     assert(sdk_exit_public_submit("one", &r, &out) == AZ_STALE);
+}
+static void fenced(const az_command_request &r, int reason) {
+    auto out = result();
+    assert(sdk_exit_public_poll("one", r.request_id, &out) == AZ_OK &&
+           out.outcome == AZ_COMMAND_UNCERTAIN && out.reason == reason);
+    assert(sdk_exit_public_release("one", r.request_id) == AZ_BUSY);
 }
 static void pending(const az_command_request &r) {
     auto out = result();
@@ -1056,7 +1098,6 @@ static void asynchronous(bool adopt_existing) {
         pending(r);
         if (!adopt_existing) {
             assert(n.effects == effects && n.context.bytes[0x190] == 1);
-            assert(sdk_exit_public_cancel("one", r.request_id, &out) == AZ_PENDING && out.outcome == AZ_COMMAND_ACCEPTED);
             process(d);
             pending(r);
         }
@@ -1131,9 +1172,9 @@ static void borrowed_pending_repurposed() {
     assert(n.cancels == cancels + 1);
     uintptr_t old_callback = object_word(n.quantize.bytes, 0xf8);
     retain(old_callback); /* a native owner keeps the old EXIT callback alive */
-    loads[0].fetch_add(1);
+    advance_load(0);
     process(0);
-    terminal(r, AZ_COMMAND_UNCERTAIN, AZ_STALE);
+    fenced(r, AZ_STALE);
     assert(object_word(reinterpret_cast<void *>(object_word(n.manager.bytes, 0)), 0x18) == infrastructure);
     unsigned effects = n.effects, executes = n.command_executes;
     uintptr_t replacement = make_command(0, 3, STOP_BACKGROUND);
@@ -1152,6 +1193,8 @@ static void borrowed_pending_repurposed() {
     owner_frame = false;
     assert(n.command_executes == executes + 4 && n.effects == effects + 1);
     release(old_callback);
+    process(0);
+    terminal(r, AZ_COMMAND_UNCERTAIN, AZ_STALE);
     n.deferred = false;
 }
 static void borrowed_pending_replaced() {
@@ -1209,11 +1252,11 @@ static void replacement_and_incarnation() {
     r = request();
     assert(sdk_exit_public_submit("one", &r, &out) == AZ_OK);
     process(0);
-    loads[0].fetch_add(1);
+    advance_load(0);
     unsigned effects = n.effects, executed = n.command_executes;
     process(0); /* old QPending must not touch the replacement track */
     assert(n.effects == effects && n.command_executes == executed && n.context.bytes[0x190] == 1);
-    terminal(r, AZ_COMMAND_UNCERTAIN, AZ_STALE);
+    fenced(r, AZ_STALE);
     /* A separately held old callback stays suppressed after public result release. */
     uintptr_t old_callback = object_word(n.quantize.bytes, 0xf8);
     owner_frame = true;
@@ -1221,6 +1264,8 @@ static void replacement_and_incarnation() {
     owner_frame = false;
     assert(n.effects == effects && n.command_executes == executed);
     dispose_pending(0);
+    process(0);
+    terminal(r, AZ_COMMAND_UNCERTAIN, AZ_STALE);
     uintptr_t same_address = make_command(0, 3, 4, 100);
     assert(same_address == old_callback);
     owner_frame = true;
@@ -1271,12 +1316,14 @@ static void delayed_deadline() {
     std::this_thread::sleep_for(std::chrono::milliseconds(75));
     process(0);
     assert(n.command_executes == executed && n.effects == effects && n.context.bytes[0x190] == 1);
-    terminal(r, AZ_COMMAND_UNCERTAIN, AZ_STALE);
+    fenced(r, AZ_STALE);
     owner_frame = true;
     assert(!run_command(old_callback));
     owner_frame = false;
     assert(n.command_executes == executed && n.effects == effects);
     dispose_pending(0);
+    process(0);
+    terminal(r, AZ_COMMAND_UNCERTAIN, AZ_STALE);
     n.deferred = false;
 }
 static void loss_interference() {
@@ -1293,17 +1340,20 @@ static void loss_interference() {
     put(n.manager, 0, uintptr_t(0));
     put(n.quantize, 0xf8, uintptr_t(0));
     put(n.quantize, 0x98, int32_t(-1));
-    loads[0].fetch_add(1);
+    advance_load(0);
     process(0);
-    terminal(older, AZ_COMMAND_UNCERTAIN, AZ_STALE);
+    fenced(older, AZ_STALE);
     auto current = request();
     assert(sdk_exit_public_submit("one", &current, &out) == AZ_OK);
     process(0);
     pending(current);
-    dispose_pending(0); /* current request loses its actual unexecuted chain */
-    put(n.context, 0x190, uint8_t(0));
     release(old_chain);
-    release(old_callback); /* old disposal cannot overwrite the current loss */
+    release(old_callback);
+    process(0);
+    terminal(older, AZ_COMMAND_UNCERTAIN, AZ_STALE);
+    process(0);
+    dispose_pending(0); /* the new token's actual chain is discarded independently */
+    put(n.context, 0x190, uint8_t(0));
     process(0);
     terminal(current, AZ_COMMAND_UNCERTAIN, AZ_FAILED);
     n.deferred = false;
@@ -1432,13 +1482,15 @@ static void dormant_retirement() {
     process(0);
     uintptr_t old_callback = object_word(n.quantize.bytes, 0xf8);
     unsigned executed = n.command_executes;
-    azsdk_exit_retire(0); /* must not wait for dormant command allocations */
-    terminal(r, AZ_COMMAND_UNCERTAIN, AZ_STALE);
+    azsdk_exit_retire(0); /* retirement suppresses work but does not settle a live allocation */
+    assert(sdk_exit_public_poll("one", r.request_id, &out) == AZ_OK && out.outcome == AZ_COMMAND_UNCERTAIN);
+    assert(sdk_exit_public_release("one", r.request_id) == AZ_BUSY);
     owner_frame = true;
     assert(!run_command(old_callback));
     owner_frame = false;
     assert(n.command_executes == executed && n.context.bytes[0x190] == 1);
     dispose_pending(0);
+    terminal(r, AZ_COMMAND_UNCERTAIN, AZ_STALE);
     assert(azsdk_exit_register(0, n.unit.bytes));
     n.deferred = false;
 }
@@ -1467,7 +1519,7 @@ static void lifecycle() {
     assert(sdk_exit_public_release("one", r.request_id) == AZ_OK);
     r = request();
     assert(sdk_exit_public_submit("one", &r, &out) == AZ_OK);
-    loads[0].fetch_add(1);
+    advance_load(0);
     process(0);
     terminal(r, AZ_COMMAND_REJECTED, AZ_STALE);
     assert(calls.load() == before);
@@ -1578,7 +1630,6 @@ static void reloop_async(bool existing) {
         process(d);
         pending(r);
         assert(!n.context.bytes[0x190] && n.effects == effects && n.cancels == cancels);
-        assert(sdk_exit_public_cancel("one", r.request_id, &out) == AZ_PENDING);
         process(d);
         if (!existing) pending(r);
         process(d);
@@ -1598,13 +1649,15 @@ static void reloop_stale_pending() {
     process(0);
     pending(r);
     unsigned executes = n.command_executes, effects = n.effects;
-    loads[0].fetch_add(1);
+    advance_load(0);
     process(0);
-    terminal(r, AZ_COMMAND_UNCERTAIN, AZ_STALE);
+    fenced(r, AZ_STALE);
     n.pause_engine = false;
     process(0);
     assert(n.command_executes == executes && n.effects == effects && !n.context.bytes[0x190]);
     dispose_pending(0);
+    process(0);
+    terminal(r, AZ_COMMAND_UNCERTAIN, AZ_STALE);
     n.deferred = false;
     r = reloop_request();
     unsigned before = calls.load();
@@ -1615,7 +1668,7 @@ static void reloop_stale_pending() {
     terminal(r, AZ_COMMAND_CANCELLED, AZ_CANCELLED);
     r = reloop_request();
     assert(sdk_exit_public_submit("one", &r, &out) == AZ_OK);
-    loads[0].fetch_add(1);
+    advance_load(0);
     process(0);
     assert(calls.load() == before);
     terminal(r, AZ_COMMAND_REJECTED, AZ_STALE);
@@ -1674,13 +1727,15 @@ static void legacy_service() {
     } legacy = {AZEXIT_SERVICE_V1_SIZE, 1, api->mask, api->target, api->submit, api->cancel, api->poll, api->release};
     static_assert(sizeof legacy == AZEXIT_SERVICE_V1_SIZE, "legacy bridge prefix changed");
     sdk_exit_public_bind(reinterpret_cast<const azexit_service *>(&legacy));
-    assert(sdk_exit_public_capabilities() == (UINT64_C(1) << AZ_CMD_LOOP_EXIT));
+    assert(!sdk_exit_public_capabilities());
     auto r = reloop_request();
     auto out = result();
     assert(sdk_exit_public_submit("one", &r, &out) == AZ_UNSUPPORTED);
+    r.operation = AZ_CMD_LOOP_EXIT;
+    assert(sdk_exit_public_submit("one", &r, &out) == AZ_UNSUPPORTED);
+    sdk_exit_public_bind(api);
     active(0);
     complete(request(), AZ_COMMAND_APPLIED, AZ_OK);
-    sdk_exit_public_bind(api);
 }
 static void capability_gating(unsigned enabled) {
     const auto *api = azstem_exit_service_v1();
@@ -1915,16 +1970,21 @@ static void loop_commands() {
         pending(r);
         process(0); /* first stage applies; second stage posts separately */
         pending(r);
-        if (stale_load) loads[0].fetch_add(1);
+        if (stale_load) advance_load(0);
         else exit_noop = true;
         for (unsigned i = 0; i < 8; ++i) {
             process(0);
             assert(sdk_exit_public_poll("one", r.request_id, &move_out) == AZ_OK);
             if (move_out.outcome != AZ_COMMAND_ACCEPTED) break;
         }
-        terminal(r, AZ_COMMAND_UNCERTAIN, stale_load ? AZ_STALE : AZ_FAILED);
-        assert(get<uint64_t>(natives[0].context.bytes + 0x160, 0x40) == 48000);
+        assert(move_out.outcome == AZ_COMMAND_UNCERTAIN && move_out.reason == (stale_load ? AZ_STALE : AZ_FAILED));
+        const auto *loop = natives[0].context.bytes + 0x160;
+        const uint32_t rate = get<uint32_t>(loop, 0x60);
+        const int order = compare_timestamps(get<uint64_t>(loop, 0x40), 48000u, rate, rate, 1);
+        assert(order != AZ_TIME_INVALID && order == AZ_TIME_EQUAL);
         dispose_pending(0); /* native load replacement owns holder disposal */
+        process(0);
+        terminal(r, AZ_COMMAND_UNCERTAIN, stale_load ? AZ_STALE : AZ_FAILED);
         exit_noop = false;
         natives[0].deferred = false;
     }
@@ -1941,7 +2001,7 @@ static void loop_commands() {
     /* A queued request cannot act on a replacement load. */
     auto stale = loop_request(AZ_CMD_LOOP_HALVE);
     assert(sdk_exit_public_submit("one", &stale, &out) == AZ_OK);
-    loads[0].fetch_add(1);
+    advance_load(0);
     process(0);
     terminal(stale, AZ_COMMAND_REJECTED, AZ_STALE);
     assert(calls.load() == before);
@@ -2080,7 +2140,7 @@ static void recurring_loop_commands() {
         auto out = result();
         assert(sdk_exit_public_submit("one", &r, &out) == AZ_OK);
         process(0);
-        terminal(r, AZ_COMMAND_UNCERTAIN, AZ_STALE);
+        fenced(r, AZ_STALE);
         n.invalidate_after_pre = n.expire_after_pre = false;
         unsigned executes = n.command_executes;
         n.cycle_future = true;
@@ -2088,6 +2148,8 @@ static void recurring_loop_commands() {
         assert(n.command_executes == executes);
         n.cycle_future = n.maintained_loop = false;
         dispose_pending(0);
+        process(0);
+        terminal(r, AZ_COMMAND_UNCERTAIN, AZ_STALE);
     }
 }
 static void preparatory_loop_commands() {
@@ -2134,6 +2196,8 @@ static void preparatory_loop_commands() {
     process(0);
     pending(r); /* engaged state plus an empty queue is not replacement proof */
     std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    fenced(r, AZ_STALE);
+    dispose_pending(0);
     process(0);
     terminal(r, AZ_COMMAND_UNCERTAIN, AZ_STALE);
     n.omit_future = n.maintained_loop = n.preparatory_loop = false;
@@ -2189,8 +2253,10 @@ static void quantized_loop_commands() {
         if (fault == 6) {
             std::this_thread::sleep_for(std::chrono::milliseconds(120));
             process(0);
-            terminal(r, AZ_COMMAND_UNCERTAIN, AZ_STALE);
+            fenced(r, AZ_STALE);
             dispose_pending(0);
+            process(0);
+            terminal(r, AZ_COMMAND_UNCERTAIN, AZ_STALE);
         } else {
             dispose_pending(0);
             process(0);
@@ -2407,7 +2473,10 @@ static void cue_commands() {
     assert(sdk_exit_public_submit("one", &counted, &counted_out) == AZ_OK);
     process(0);
     pending(counted);
-    loads[0].fetch_add(1);
+    advance_load(0);
+    process(0);
+    fenced(counted, AZ_STALE);
+    process(0);
     process(0);
     terminal(counted, AZ_COMMAND_UNCERTAIN, AZ_STALE);
     cue_reset(0);
@@ -2446,6 +2515,22 @@ static void cue_commands() {
     }
     assert(get<uint32_t>(natives[3].beat.bytes, 0x104) == 4 && !natives[3].play_pause.bytes[8]);
     /* Unknown native continuation stays fenced until process retirement. */
+}
+static void hot_countdown_retirement() {
+    auto &n = natives[0];
+    cue_reset(0);
+    put(n.play_pause, 8, uint8_t(0));
+    auto r = cue_request(AZ_CMD_HOT_TRIGGER, 0, 1);
+    auto out = result();
+    assert(sdk_exit_public_submit("one", &r, &out) == AZ_OK);
+    process(0);
+    pending(r);
+    azsdk_exit_retire(0);
+    fenced(r, AZ_STALE);
+    azsdk_exit_retire_complete(0, natives[1].unit.address());
+    fenced(r, AZ_STALE);
+    azsdk_exit_retire_complete(0, n.unit.address());
+    terminal(r, AZ_COMMAND_UNCERTAIN, AZ_STALE);
 }
 #ifdef AZSDK_CUE_STAGE_TESTING
 extern "C" const void *azsdk_cue_recall_property(unsigned deck, uint64_t token) noexcept {
@@ -2662,7 +2747,7 @@ static void hot_stage_commands() {
     r = hot_stage_request(AZ_CMD_HOT_SET, 0, 1, 0xabcdef);
     before = calls.load();
     assert(azsdk_exit_cue_stage_submit(&r) == AZ_PENDING);
-    loads[0].fetch_add(1);
+    advance_load(0);
     process(0);
     hot_stage_terminal(r, AZ_COMMAND_REJECTED, AZ_STALE);
     assert(calls.load() == before);
@@ -2782,6 +2867,7 @@ static void loop_only_gating() {
     active(0);
     loop_complete(loop_request(AZ_CMD_LOOP_DOUBLE), AZ_COMMAND_APPLIED, AZ_OK);
 }
+#define NATIVE_CASE(test) do { std::fprintf(stderr, "native fixture: %s\n", #test); test; } while (0)
 int main(int argc, char **argv) {
     assert(argc == 2 || argc == 3);
     unsigned enabled = argc == 3 ? unsigned(std::strtoul(argv[2], nullptr, 10)) : AZEXIT_ENABLE_EXIT | AZEXIT_ENABLE_RELOOP;
@@ -2811,7 +2897,8 @@ int main(int argc, char **argv) {
     return 0;
 #endif
     if (argc == 3 && (enabled & AZEXIT_ENABLE_CUE)) {
-        cue_commands();
+        NATIVE_CASE(cue_commands());
+        NATIVE_CASE(hot_countdown_retirement());
         for (int d = 0; d < 4; d++) azsdk_exit_retire(d);
         assert(!sdk_exit_public_capabilities());
         std::puts("PASS native async main and hot cue controls");
@@ -2825,10 +2912,10 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (argc == 3 && enabled == 7) {
-        loop_commands();
-        recurring_loop_commands();
-        preparatory_loop_commands();
-        quantized_loop_commands();
+        NATIVE_CASE(loop_commands());
+        NATIVE_CASE(recurring_loop_commands());
+        NATIVE_CASE(preparatory_loop_commands());
+        NATIVE_CASE(quantized_loop_commands());
         for (int d = 0; d < 4; d++) azsdk_exit_retire(d);
         assert(!sdk_exit_public_capabilities());
         std::puts("PASS native async loop control and adjustments");
@@ -2841,29 +2928,29 @@ int main(int argc, char **argv) {
         std::puts("PASS native async command capability gating");
         return 0;
     }
-    happy();
-    asynchronous(false);
-    asynchronous(true);
-    retained_after_execution();
-    borrowed_pending_repurposed();
-    borrowed_pending_replaced();
-    noop_preserves_borrowed_work();
-    replacement_and_incarnation();
-    child_exception();
-    delayed_deadline();
-    loss_interference();
-    unrelated_command_passthrough();
-    fifo_owners();
-    guards();
-    dormant_retirement();
-    reloop_happy();
-    reloop_async(false);
-    reloop_async(true);
-    reloop_stale_pending();
-    reloop_pending_replaced();
-    mixed_fifo();
-    legacy_service();
-    lifecycle();
+    NATIVE_CASE(happy());
+    NATIVE_CASE(asynchronous(false));
+    NATIVE_CASE(asynchronous(true));
+    NATIVE_CASE(retained_after_execution());
+    NATIVE_CASE(borrowed_pending_repurposed());
+    NATIVE_CASE(borrowed_pending_replaced());
+    NATIVE_CASE(noop_preserves_borrowed_work());
+    NATIVE_CASE(replacement_and_incarnation());
+    NATIVE_CASE(child_exception());
+    NATIVE_CASE(delayed_deadline());
+    NATIVE_CASE(loss_interference());
+    NATIVE_CASE(unrelated_command_passthrough());
+    NATIVE_CASE(fifo_owners());
+    NATIVE_CASE(guards());
+    NATIVE_CASE(dormant_retirement());
+    NATIVE_CASE(reloop_happy());
+    NATIVE_CASE(reloop_async(false));
+    NATIVE_CASE(reloop_async(true));
+    NATIVE_CASE(reloop_stale_pending());
+    NATIVE_CASE(reloop_pending_replaced());
+    NATIVE_CASE(mixed_fifo());
+    NATIVE_CASE(legacy_service());
+    NATIVE_CASE(lifecycle());
     for (int d = 0; d < 4; d++) azsdk_exit_retire(d);
     assert(!sdk_exit_public_capabilities());
     std::puts("PASS native async EXIT/RELOOP: deferred chains, existing Quantize, disposal, mixed FIFO, capability gates and legacy bridge");

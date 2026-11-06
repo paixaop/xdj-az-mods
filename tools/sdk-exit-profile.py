@@ -111,6 +111,25 @@ def byte_array(value):
     return '{' + ', '.join(hex(x) for x in value) + '}'
 
 
+# BeatSyncFunction and its +0x10 owner callback have separate copies of
+# the same decrement/zero branch. Confirm both sites for each stock build.
+HOT_COUNTDOWN = {
+    '1.30': ((0x13e1138, 0x13e1164), (0x13e1938, 0x13e1990)),
+    '2.00': ((0x149b7b8, 0x149b7e4), (0x149cc30, 0x149cc88)),
+}
+
+
+def countdown_entries(image, version):
+    entries = []
+    for address, store in HOT_COUNTDOWN[version]:
+        load, empty, decrement, save, done = struct.unpack('<5I', image.file_bytes(store - 12, 20))
+        if (load, decrement, save) != (0xb9410660, 0x51000400, 0xb9010660) or (
+                empty & 0xff00001f != 0x34000000 or done & 0xff00001f != 0x34000000):
+            raise ValueError('Hot Cue countdown changed: ' + hex(address))
+        entries.append(entry(image, address))
+    return entries
+
+
 def generate(folder):
     catalog = addrgen.read_catalog(ROOT / 'tools/ep147-addresses.json')
     images = addrgen.load_images(catalog, folder)
@@ -171,7 +190,9 @@ def generate(folder):
                   (setter, *(method(image, setter, slot) for slot in (2, 5, 9, 14, 15, 16, 17)), cue,
                    merger, method(image, merger, 2), method(image, jump, 4), interval, sourced_interval, method(image, jump, 5),
                    method(image, tables[2], 8), base_cue)) + ',',
-                  '     {' + hex(core_jump) + ', ' + byte_array(core_jump_prologue) + '}, ' + hex(method(image, setter, 4)) + ', ' + hex(play_pause) + '},']
+                  '     {' + hex(core_jump) + ', ' + byte_array(core_jump_prologue) + '}, ' + hex(method(image, setter, 4)) + ', ' + hex(play_pause) + ',',
+                  '     {' + ', '.join('{' + hex(address) + ', ' + byte_array(prologue) + '}'
+                                     for address, prologue in countdown_entries(image, version)) + '}},']
     return '\n'.join(lines + ['};', ''])
 
 if __name__ == '__main__':

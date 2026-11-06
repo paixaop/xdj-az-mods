@@ -56,12 +56,12 @@ static int azsdk_live_register(int deck, void *unit) {
     return 1;
 }
 static void azsdk_live_retire(int deck) { live_retired_mask |= 1 << deck; }
-static int cue_registrations, cue_retired_mask, cue_bad_owner, cue_dtor_late;
+static int g_sdk_cue_on, cue_registrations, cue_retired_mask, cue_bad_owner, cue_dtor_late;
 static void *cue_completed_ctor;
 static int azsdk_cue_register(int deck, void *unit) {
     ++cue_registrations;
     cue_bad_owner |= atomic_load(&g_deck_self[STEM_SLOT[deck]]) != unit;
-    cue_bad_owner |= *(uintptr_t *)unit != atomic_load(&g_djpu_vt) || cue_completed_ctor != unit;
+    cue_bad_owner |= *(uintptr_t *) unit != atomic_load(&g_djpu_vt) || cue_completed_ctor != unit;
     return 1;
 }
 static void azsdk_cue_retire(int deck) { cue_retired_mask |= 1 << deck; }
@@ -70,7 +70,10 @@ static int load_registrations, load_retired_mask, load_bad_owner, load_before_ct
 static void *load_completed_ctor;
 static int azsdk_load_register(int deck, void *unit) {
     load_registrations++;
-    if (deck < 0 || deck >= NDECK) { load_bad_owner = 1; return 0; }
+    if (deck < 0 || deck >= NDECK) {
+        load_bad_owner = 1;
+        return 0;
+    }
     load_bad_owner |= atomic_load(&g_deck_self[STEM_SLOT[deck]]) != unit;
     load_bad_owner |= *(uintptr_t *) unit != atomic_load(&g_djpu_vt);
     load_before_ctor |= load_completed_ctor != unit;
@@ -81,6 +84,10 @@ static int azsdk_exit_register(int deck, void *unit) {
     (void) deck; (void) unit; return 0;
 }
 static void azsdk_exit_retire(int deck) { (void) deck; }
+static void azsdk_exit_retire_complete(unsigned deck, uintptr_t unit) {
+    (void) deck;
+    (void) unit;
+}
 #include LIFE_INC
 #include "check.h"
 
@@ -178,7 +185,7 @@ static void fake_djdtor(void *s) {
         djdtor_saw_slot = 1;
     if (g_sdk_live_on && s == watch_self && !(live_retired_mask & (1 << watch_slot)))
         live_dtor_late = 1;
-    if (g_sdk_live_on && s == watch_self && !(cue_retired_mask & (1 << watch_slot)))
+    if (g_sdk_cue_on && s == watch_self && !(cue_retired_mask & (1 << watch_slot)))
         cue_dtor_late = 1;
     if (g_sdk_load_on && s == watch_self && !(load_retired_mask & (1 << watch_slot)))
         load_dtor_late = 1;
@@ -338,6 +345,7 @@ int main(void) {
     djctor_saw_slot = 0;
     g_sdk_loop_on = 1;
     g_sdk_live_on = 1;
+    g_sdk_cue_on = 1;
     g_sdk_load_on = 1;
     djpuctor_hook((void *) unit, &idu, 0, 0);
     CHECK("DjPlayerUnit ctor: published only after the ctor returned",

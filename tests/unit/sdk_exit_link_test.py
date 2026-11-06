@@ -24,7 +24,7 @@ class ExitPrivateLinkTests(unittest.TestCase):
                        "-I" + str(root / "src/common"), "-I" + str(root / "src/azmod"),
                        str(root / "src/azstem/sdk_exit.cpp"), str(root / "src/azstem/sdk_native_commands.cpp"),
                        *[str(root / ("src/azstem/sdk_cue_" + name + ".cpp")) for name in
-                         ("actor", "store", "lifecycle", "persist", "recall", "commands")],
+                         ("actor", "store", "lifecycle", "persist", "recall", "commands", "observer")],
                        str(stub), "-o", str(library)]
             if sys.platform.startswith("linux"):
                 command.append("-ldl")

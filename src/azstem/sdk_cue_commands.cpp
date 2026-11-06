@@ -2,6 +2,7 @@
 #include "../common/aztimestamp.h"
 #include "../common/azcuecommands.h"
 #include "../common/azcueactor.h"
+#include "../common/azcueobserver.h"
 #include "../common/azcuestore.h"
 #include "../common/azloadobserver.h"
 #include "../common/azcueprofile.h"
@@ -22,9 +23,10 @@ constexpr uint64_t INTERNAL = UINT64_C(1) << 63;
 constexpr uint64_t bit(unsigned operation) { return UINT64_C(1) << operation; }
 struct Cache {
     std::mutex mutex;
+    std::atomic<bool> waiter {false};
     az_native_cue_snapshot value = {};
     uint64_t observed = 0;
-    std::atomic<uint64_t> refresh {0};
+    std::atomic<uint64_t> refresh {0}, actor_finished {0};
     azcuestore::RevisionState revision;
     /* One copied public command owns admission through release, including
      * contention with another deck's owner frame or an internal snapshot query.
@@ -43,7 +45,9 @@ struct AutoPlan {
 };
 struct Pending {
     std::atomic<uint64_t> cookie {0}, token {0};
-    std::atomic<uint64_t> resume {0};
+    std::atomic<uint64_t> resume {0}, persist_ready {0}, bridge_ready {0};
+    std::atomic<uint64_t> actor_retired {0}, retired_load {0}, persist_retired {0}, stop_resumed {0};
+    azexit_result actor_completion = {}; // management dispatcher only
     std::atomic<uintptr_t> manager {0};
     az_cue_entry expected = {};
     uint32_t expected_rate = 0;
@@ -67,35 +71,42 @@ struct State {
     azcuestore::Profile store;
     int build = 0;
     uintptr_t bias = 0;
-    std::atomic<unsigned> notifications {0};
+    std::atomic<unsigned> notifications {0}, collections {0};
 };
-State &state() {
-    static State value;
-    return value;
-}
-extern "C" __attribute__((weak)) void azsdk_exit_command_wake(void) noexcept {}
-extern "C" __attribute__((weak)) int azsdk_cue_actor_peek(unsigned deck, azexit_result *result) noexcept {
+static State command_state;
+State &state() { return command_state; }
+#ifdef AZSDK_CUE_COMMANDS_TESTING
+extern "C" void azsdk_exit_delivery_notify(unsigned) noexcept {}
+extern "C" int azsdk_exit_delivery_continue(const azexit_request *, uint64_t) noexcept { return AZ_OK; }
+extern "C" int azsdk_exit_delivery_publish(const azexit_receipt *) noexcept { return AZ_UNSUPPORTED; }
+extern "C" int azsdk_cue_actor_peek(unsigned deck, azexit_result *result) noexcept {
     return azsdk_cue_actor_poll(deck, result);
 }
-extern "C" __attribute__((weak)) int azsdk_cue_actor_take(unsigned deck, azexit_result *result) noexcept {
+extern "C" int azsdk_cue_actor_take(unsigned deck, azexit_result *result) noexcept {
     return azsdk_cue_actor_peek(deck, result);
 }
-extern "C" __attribute__((weak)) int azsdk_cue_persist_take(const azexit_cue_request *request, void *manager,
-                                                            azexit_result *result) noexcept {
+extern "C" int azsdk_cue_persist_take(const azexit_cue_request *request, void *manager,
+                                     azexit_result *result) noexcept {
     return azsdk_cue_persist_poll(request, manager, result);
 }
-extern "C" __attribute__((weak)) int azsdk_exit_recall_take(unsigned deck, azexit_result *result) noexcept {
+extern "C" int azsdk_exit_recall_take(unsigned deck, azexit_result *result) noexcept {
     return azsdk_exit_recall_poll(deck, result);
 }
+#endif
 bool unfinished_public_work() noexcept {
     State &s = state();
     for (unsigned deck = 0; deck < 4; ++deck) {
         unsigned waiting = s.decks[deck].waiting.load(std::memory_order_acquire);
         if (!waiting || waiting == 3) continue;
         if (waiting != 5) return true;
+#ifdef AZSDK_CUE_COMMANDS_TESTING
         azexit_result result = {};
         if (azsdk_cue_actor_peek(deck, &result) != AZ_OK || !result.token ||
             (result.token & INTERNAL) || result.outcome == AZ_COMMAND_ACCEPTED) return true;
+#else
+        if (s.decks[deck].actor_finished.load(std::memory_order_acquire) !=
+            s.decks[deck].waiting_request.identity.token) return true;
+#endif
     }
     return false;
 }
@@ -143,11 +154,17 @@ int current(unsigned deck, uint64_t generation, void *) {
            sample.load_generation == generation;
 }
 void ready(unsigned deck, uint64_t token, void *) {
-    // A native reply may run before the producer's owned frame returns. Never
-    // make that reply wait for the frame lock; retain a bounded continuation.
-    if (deck < 4 && token && azsdk_cue_actor_resume(deck, token) == AZ_BUSY)
-        state().pending[deck].resume.store(token, std::memory_order_release);
-    azsdk_exit_command_wake();
+    if (deck >= 4 || !token) return;
+    Pending &pending = state().pending[deck];
+    pending.persist_ready.store(token, std::memory_order_release);
+    pending.resume.store(token, std::memory_order_release);
+    azsdk_cue_commands_notify(deck);
+}
+void publish_waiting_result(unsigned deck, const azexit_result &result) noexcept {
+    azexit_receipt value = {
+        sizeof value, AZEXIT_DELIVERY_VERSION, AZEXIT_RECEIPT_TERMINAL, 1, deck,
+        result.token, result.load_generation, 0, result.revision, now(), result.outcome, result.reason};
+    (void) azsdk_exit_delivery_publish(&value);
 }
 template <class T>
 T read(const void *p, unsigned offset) {
@@ -365,6 +382,7 @@ int execute(const azexit_cue_request *request, void *manager, azexit_result *res
     if (pending.token.load(std::memory_order_acquire) == request->identity.token && pending.cookie.load(std::memory_order_acquire)) {
         int rc = azsdk_cue_persist_take(&pending.active_request, manager, result);
         if (rc == AZ_PENDING) return rc;
+        pending.persist_ready.store(0, std::memory_order_release);
         pending.cookie.store(0, std::memory_order_release);
         pending.stage.store(0, std::memory_order_release);
         pending.retained.reset();
@@ -394,12 +412,18 @@ int execute(const azexit_cue_request *request, void *manager, azexit_result *res
         COMMAND_DIAG(*request, 2, "execute-current");
         return fail(AZ_STALE);
     }
+    if (request->operation) {
+        int allowed = azsdk_exit_delivery_continue(&request->identity, clock);
+        if (allowed != AZ_OK) return fail(allowed);
+    }
     bool awaiting_hot_view = request->operation == AZ_CMD_HOT_SET &&
                              pending.stage_token.load(std::memory_order_acquire) == request->identity.token && pending.stage.load(std::memory_order_acquire) == 2;
     auto resume_hot_completion = [&]() -> int {
         // The native PlayerState copy and the setter's automatic store work
         // can lag DSP completion. Keep the original deadline and capture.
+#ifdef AZSDK_CUE_COMMANDS_TESTING
         ready(deck, request->identity.token, nullptr);
+#endif
         return AZ_PENDING;
     };
     azcuestore::Snapshot snapshot;
@@ -544,6 +568,8 @@ int execute(const azexit_cue_request *request, void *manager, azexit_result *res
             pending.stage_token.store(request->identity.token, std::memory_order_release);
             pending.stage.store(1, std::memory_order_release);
             pending.bridge.store(request->identity.token, std::memory_order_release);
+            if (pending.bridge_ready.load(std::memory_order_acquire) == request->identity.token)
+                azsdk_cue_commands_notify(deck);
         }
         return rc;
     }
@@ -556,6 +582,8 @@ int execute(const azexit_cue_request *request, void *manager, azexit_result *res
             pending.bridge_generation.store(request->identity.load_generation, std::memory_order_relaxed);
             pending.bridge_revision.store(snapshot.revision(), std::memory_order_relaxed);
             pending.bridge.store(request->identity.token, std::memory_order_release);
+            if (pending.bridge_ready.load(std::memory_order_acquire) == request->identity.token)
+                azsdk_cue_commands_notify(deck);
         }
         return rc;
     }
@@ -616,7 +644,7 @@ int valid(const azexit_cue_request *r) {
     if (!r || r->size < sizeof *r || r->identity.deck >= 4 || !r->identity.token ||
         (r->identity.token & INTERNAL) || !r->identity.load_generation || !r->identity.deadline_ns || r->identity.reserved || r->operation >= 64 ||
         !std::memchr(r->comment, 0, sizeof r->comment) || !std::isfinite(r->position_s) || r->end_s != 0 || r->beats != 0) return AZ_INVALID;
-    if (!(state().capabilities.load(std::memory_order_acquire) & bit(r->operation))) return AZ_UNSUPPORTED;
+    if (!(azsdk_cue_commands_ready(r->identity.deck) & bit(r->operation))) return AZ_UNSUPPORTED;
     const bool selected = selector(r->operation);
     uint32_t flags = AZ_COMMAND_NATIVE_LOAD | (recall(r->operation) ? 0 : AZ_COMMAND_PERSIST) |
                      (selected ? AZ_COMMAND_NATIVE_CUE_IDS : 0);
@@ -674,19 +702,40 @@ extern "C" int azsdk_cue_commands_configure(int on, int build, azexit_install_fn
     s.enabled.store(true, std::memory_order_release);
     return AZ_OK;
 }
+extern "C" uint64_t azsdk_cue_commands_ready(unsigned deck) noexcept {
+    if (deck >= 4 || !state().enabled.load(std::memory_order_acquire)) return 0;
+    uint64_t mask = state().capabilities.load(std::memory_order_acquire);
+#ifndef AZSDK_CUE_COMMANDS_TESTING
+    unsigned bit_deck = 1u << deck;
+    if (!(azsdk_cue_actor_mask() & bit_deck)) return 0;
+    if (!(azsdk_cue_capabilities() & bit_deck))
+        mask &= bit(AZ_CMD_SAVED_RECALL) | bit(AZ_CMD_MEMORY_RECALL);
+#endif
+    return mask;
+}
 extern "C" uint64_t azsdk_cue_commands_commands(void) noexcept {
-    return state().enabled.load(std::memory_order_acquire) ? state().capabilities.load(std::memory_order_acquire) : 0;
+    uint64_t mask = 0;
+    for (unsigned deck = 0; deck < 4; ++deck) mask |= azsdk_cue_commands_ready(deck);
+    return mask;
 }
 extern "C" int azsdk_cue_commands_native_cues(unsigned deck, az_native_cue_snapshot *out) noexcept {
     if (deck >= 4 || !out || out->size < sizeof *out) return AZ_INVALID;
     Cache &cache = state().decks[deck];
     std::unique_lock<std::mutex> lock(cache.mutex, std::try_to_lock);
-    if (!lock.owns_lock()) return AZ_BUSY;
-    if (!cache.value.revision || !current(deck, cache.value.native_load_generation, nullptr)) return AZ_STALE;
-    uint32_t size = out->size;
-    *out = cache.value;
-    out->size = size;
-    return AZ_OK;
+    if (!lock.owns_lock()) {
+        cache.waiter.store(true, std::memory_order_release);
+        if (!lock.try_lock()) return AZ_BUSY;
+    }
+    int rc = AZ_STALE;
+    if (cache.value.revision && current(deck, cache.value.native_load_generation, nullptr)) {
+        uint32_t size = out->size;
+        *out = cache.value;
+        out->size = size;
+        rc = AZ_OK;
+    }
+    lock.unlock();
+    if (cache.waiter.exchange(false, std::memory_order_acq_rel)) azsdk_exit_delivery_notify(deck);
+    return rc;
 }
 extern "C" int azsdk_cue_commands_target_cue(unsigned deck, azexit_cue_target *out) noexcept {
     if (deck >= 4 || !out) return AZ_INVALID;
@@ -725,9 +774,7 @@ extern "C" int azsdk_cue_commands_submit(const azexit_cue_request *request) noex
     cache.waiting.store(rc == AZ_PENDING ? 5 : rc == AZ_BUSY ? 2
                                                              : 0,
                         std::memory_order_release);
-#ifndef AZSDK_CUE_COMMANDS_TESTING
-    if (rc == AZ_PENDING) azsdk_cue_actor_drive(request->identity.deck);
-#endif
+    if (rc == AZ_PENDING || rc == AZ_BUSY) azsdk_cue_commands_notify(request->identity.deck);
     return rc == AZ_BUSY ? AZ_PENDING : rc;
 }
 extern "C" int azsdk_cue_commands_cancel(unsigned deck, uint64_t token) noexcept {
@@ -741,6 +788,7 @@ extern "C" int azsdk_cue_commands_cancel(unsigned deck, uint64_t token) noexcept
         }
         cache.waiting_result = {token, cache.waiting_request.identity.load_generation, 0, AZ_COMMAND_CANCELLED, AZ_CANCELLED};
         cache.waiting.store(3, std::memory_order_release);
+        publish_waiting_result(deck, cache.waiting_result);
         return AZ_OK;
     }
     if (queued && queued != 5) return AZ_PENDING;
@@ -749,8 +797,16 @@ extern "C" int azsdk_cue_commands_cancel(unsigned deck, uint64_t token) noexcept
         int rc = azsdk_exit_recall_cancel(deck, token);
         if (rc != AZ_OK) return rc;
     }
-    if (pending.stage_token.load(std::memory_order_acquire) == token && pending.stage.load(std::memory_order_acquire) == 2) return AZ_PENDING;
-    if (pending.cookie.load(std::memory_order_acquire) && pending.token.load(std::memory_order_acquire) == token) return AZ_PENDING;
+    if ((pending.cookie.load(std::memory_order_acquire) && pending.token.load(std::memory_order_acquire) == token) ||
+        (pending.stage_token.load(std::memory_order_acquire) == token && pending.stage.load(std::memory_order_acquire) == 2)) {
+        if ((pending.persist_ready.load(std::memory_order_acquire) == token ||
+             !pending.cookie.load(std::memory_order_acquire)) &&
+            pending.stop_resumed.exchange(token, std::memory_order_acq_rel) != token) {
+            pending.resume.store(token, std::memory_order_release);
+            azsdk_cue_commands_notify(deck);
+        }
+        return AZ_PENDING;
+    }
     int rc = azsdk_cue_actor_cancel(deck, token);
     if (rc == AZ_OK && pending.stage_token.load(std::memory_order_acquire) == token) pending.stage.store(0, std::memory_order_release);
     return rc;
@@ -792,15 +848,15 @@ extern "C" void azsdk_cue_commands_tick(void) noexcept {
     uint64_t clock = now();
     if (!clock) return;
     if (unfinished_public_work()) retire_internal_reads();
+    unsigned collections = s.collections.exchange(0, std::memory_order_acq_rel);
     for (unsigned deck = 0; deck < 4; ++deck) {
         Pending &pending = s.pending[deck];
-        uint64_t notice = pending.resume.exchange(0, std::memory_order_acq_rel);
-        if (notice && azsdk_cue_actor_resume(deck, notice) == AZ_BUSY) {
-            uint64_t empty = 0;
-            pending.resume.compare_exchange_strong(empty, notice, std::memory_order_acq_rel);
-        }
         uint64_t bridge = pending.bridge.load(std::memory_order_acquire);
-        if (bridge) {
+        if (bridge
+#ifndef AZSDK_CUE_COMMANDS_TESTING
+            && pending.bridge_ready.load(std::memory_order_acquire) == bridge
+#endif
+        ) {
             azexit_result result = {};
             if (azsdk_exit_recall_take(deck, &result) == AZ_OK && result.token == bridge) {
                 uint64_t generation = pending.bridge_generation.load(std::memory_order_acquire);
@@ -819,21 +875,57 @@ extern "C" void azsdk_cue_commands_tick(void) noexcept {
                         result.reason = AZ_FAILED;
                     }
                 }
-                (void) azsdk_exit_recall_release(deck, bridge);
+                if (azsdk_exit_recall_release(deck, bridge) != AZ_OK) continue;
                 azsdk_cue_recall_release(deck, bridge);
+                pending.bridge_ready.store(0, std::memory_order_release);
                 pending.bridge.store(0, std::memory_order_release);
                 if (pending.stage.load(std::memory_order_acquire) == 1 && result.outcome == AZ_COMMAND_APPLIED) {
                     pending.stage.store(2, std::memory_order_release);
-                    ready(deck, bridge, nullptr);
+                    pending.resume.store(bridge, std::memory_order_release);
+                    azsdk_cue_commands_notify(deck);
                 } else {
                     pending.stage.store(0, std::memory_order_release);
-                    (void) azsdk_cue_actor_complete(deck, bridge, &result);
+                    pending.actor_completion = result;
                 }
             }
         }
+        if (pending.actor_completion.token &&
+            azsdk_cue_actor_complete(deck, pending.actor_completion.token, &pending.actor_completion) != AZ_BUSY)
+            pending.actor_completion = {};
+        uint64_t retired = pending.actor_retired.load(std::memory_order_acquire);
+        if (retired) {
+            if (pending.persist_retired.load(std::memory_order_acquire) == retired) {
+                pending.persist_ready.store(0, std::memory_order_release);
+                pending.cookie.store(0, std::memory_order_release);
+                pending.stage.store(0, std::memory_order_release);
+            }
+            if (!pending.cookie.load(std::memory_order_acquire) &&
+                !pending.bridge.load(std::memory_order_acquire) &&
+                pending.stage.load(std::memory_order_acquire) != 2) {
+                azexit_receipt value = {
+                    sizeof value, AZEXIT_DELIVERY_VERSION, AZEXIT_RECEIPT_SETTLED, 1, deck,
+                    retired, pending.retired_load.load(std::memory_order_acquire), 0, 0, now(), 0, 0};
+                pending.actor_retired.store(0, std::memory_order_release);
+                (void) azsdk_exit_delivery_publish(&value);
+            }
+        }
+        uint64_t notice = pending.resume.exchange(0, std::memory_order_acq_rel);
+        if (!notice && (collections & (1u << deck))) {
+            notice = pending.persist_ready.load(std::memory_order_acquire);
+            if (!notice && pending.stage.load(std::memory_order_acquire) == 2)
+                notice = pending.stage_token.load(std::memory_order_acquire);
+        }
+        if (notice && azsdk_cue_actor_resume(deck, notice) == AZ_BUSY) {
+            uint64_t empty = 0;
+            pending.resume.compare_exchange_strong(empty, notice, std::memory_order_acq_rel);
+        }
         Cache &cache = s.decks[deck];
         uint64_t token = cache.refresh.load(std::memory_order_acquire);
-        if (token) {
+        if (token
+#ifndef AZSDK_CUE_COMMANDS_TESTING
+            && cache.actor_finished.load(std::memory_order_acquire) == token
+#endif
+        ) {
             azexit_result result = {};
             if (azsdk_cue_actor_take(deck, &result) == AZ_OK && result.token == token) {
                 if (azsdk_cue_actor_release(deck, token) == AZ_OK) cache.refresh.store(0, std::memory_order_release);
@@ -854,6 +946,7 @@ extern "C" void azsdk_cue_commands_tick(void) noexcept {
                 else {
                     cache.waiting_result = {request.identity.token, request.identity.load_generation, 0, AZ_COMMAND_REJECTED, rc};
                     cache.waiting.store(3, std::memory_order_release);
+                    publish_waiting_result(deck, cache.waiting_result);
                 }
             }
         }
@@ -891,10 +984,38 @@ extern "C" void azsdk_cue_commands_tick(void) noexcept {
 }
 
 extern "C" void azsdk_cue_commands_notify(unsigned deck) noexcept {
-    if (deck < 4) state().notifications.fetch_or(1u << deck, std::memory_order_release);
-    azsdk_exit_command_wake();
+    if (deck >= 4) return;
+    state().notifications.fetch_or(1u << deck, std::memory_order_release);
+    azsdk_exit_delivery_notify(deck);
 }
-
+extern "C" void azsdk_cue_commands_actor_finished(unsigned deck, uint64_t token) noexcept {
+    if (deck >= 4) return;
+    state().decks[deck].actor_finished.store(token, std::memory_order_release);
+    azsdk_cue_commands_notify(deck);
+}
+extern "C" void azsdk_cue_commands_actor_retired(unsigned deck, uint64_t token, uint64_t load) noexcept {
+    if (deck >= 4) return;
+    Pending &pending = state().pending[deck];
+    pending.retained.reset(); // manager's retirement still holds the actor lease
+    pending.retired_load.store(load, std::memory_order_relaxed);
+    pending.actor_retired.store(token, std::memory_order_release);
+    azsdk_cue_commands_notify(deck);
+}
+extern "C" void azsdk_cue_commands_persist_retired(unsigned deck, uint64_t token) noexcept {
+    if (deck >= 4) return;
+    state().pending[deck].persist_retired.store(token, std::memory_order_release);
+    azsdk_cue_commands_notify(deck);
+}
+extern "C" void azsdk_cue_commands_recall_finished(unsigned deck, uint64_t token) noexcept {
+    if (deck >= 4) return;
+    state().pending[deck].bridge_ready.store(token, std::memory_order_release);
+    azsdk_cue_commands_notify(deck);
+}
+extern "C" void azsdk_cue_commands_collection_changed(unsigned deck) noexcept {
+    if (deck >= 4) return;
+    state().collections.fetch_or(1u << deck, std::memory_order_release);
+    azsdk_cue_commands_notify(deck);
+}
 extern "C" void azsdk_cue_commands_drive(void) noexcept {
     if (!state().notifications.exchange(0, std::memory_order_acq_rel)) return;
     azsdk_cue_commands_tick();

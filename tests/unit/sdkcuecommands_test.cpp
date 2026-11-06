@@ -446,7 +446,7 @@ static void release(uint64_t token) { assert(azsdk_cue_commands_release(0, token
 static void reply() {
     receipt = true;
     persist.ready(0, active_persist.identity.token, nullptr);
-    azsdk_cue_actor_drive(0);
+    azsdk_cue_commands_tick();
 }
 static void background_query_priority() {
     // A delayed read must not consume the public write's action budget. The
@@ -855,6 +855,8 @@ int main(int argc, char **argv) {
     resume_busy = 2;
     persist.ready(0, active_persist.identity.token, nullptr);
     azexit_result deferred = {};
+    assert(azsdk_cue_commands_poll(0, &deferred) == AZ_PENDING);
+    azsdk_cue_commands_tick();
     assert(azsdk_cue_commands_poll(0, &deferred) == AZ_PENDING);
     azsdk_cue_commands_tick();
     assert(azsdk_cue_commands_poll(0, &deferred) == AZ_PENDING);

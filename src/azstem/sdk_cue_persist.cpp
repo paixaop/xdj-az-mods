@@ -11,6 +11,9 @@
 #include <cstdio>
 #endif
 
+/* Standalone persistence fixtures do not link the command actor. */
+extern "C" void azsdk_cue_commands_persist_retired(unsigned, uint64_t) noexcept __attribute__((weak));
+
 namespace {
 enum {
     FREE,
@@ -253,6 +256,13 @@ void release_witness(Slot &slot) {
             *ref = 0;
         }
 }
+void retire_receipt(Slot &slot) {
+    unsigned deck = slot.request.identity.deck;
+    uint64_t token = slot.request.identity.token;
+    release_witness(slot);
+    slot.phase.store(FREE, std::memory_order_release);
+    if (azsdk_cue_commands_persist_retired) azsdk_cue_commands_persist_retired(deck, token);
+}
 void complete_receipt(Slot &slot) {
     if (!slot.receipt_seen.load(std::memory_order_acquire)) return;
     unsigned active = ACTIVE;
@@ -260,8 +270,7 @@ void complete_receipt(Slot &slot) {
     if (slot.retired.load(std::memory_order_acquire)) {
         unsigned receipt = RECEIPT;
         if (slot.phase.compare_exchange_strong(receipt, POLLING, std::memory_order_acq_rel)) {
-            release_witness(slot);
-            slot.phase.store(FREE, std::memory_order_release);
+            retire_receipt(slot);
         }
     } else state().callbacks.ready(slot.request.identity.deck, slot.request.identity.token, state().callbacks.context);
 }
@@ -785,10 +794,7 @@ extern "C" int azsdk_cue_persist_take(const azexit_cue_request *request, void *m
          * deadline; never submit the native save/delete producer again. */
         eligible = !state().overflow.load(std::memory_order_acquire) && valid(slot);
         if (!applied && eligible) {
-            unsigned deck = slot.request.identity.deck;
-            uint64_t token = slot.request.identity.token;
             slot.phase.store(RECEIPT, std::memory_order_release);
-            state().callbacks.ready(deck, token, state().callbacks.context);
             return AZ_PENDING;
         }
         applied = applied && eligible;
@@ -810,8 +816,7 @@ extern "C" void azsdk_cue_persist_retire(void *manager) noexcept {
             slot.retired.store(1, std::memory_order_release);
             unsigned receipt_phase = RECEIPT;
             if (slot.phase.compare_exchange_strong(receipt_phase, POLLING, std::memory_order_acq_rel)) {
-                release_witness(slot);
-                slot.phase.store(FREE, std::memory_order_release);
+                retire_receipt(slot);
             }
         }
     }

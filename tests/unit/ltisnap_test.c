@@ -48,15 +48,19 @@ static int azsdk_loop_register(int deck, void *unit) {
     return 0;
 }
 static void azsdk_loop_retire(int deck) { (void) deck; }
-static int g_sdk_live_on;
+static int g_sdk_live_on, g_sdk_cue_on;
 static int azsdk_live_register(int deck, void *unit) {
     (void) deck;
     (void) unit;
     return 0;
 }
 static void azsdk_live_retire(int deck) { (void) deck; }
-static int azsdk_cue_register(int deck, void *unit) { (void)deck; (void)unit; return 0; }
-static void azsdk_cue_retire(int deck) { (void)deck; }
+static int azsdk_cue_register(int deck, void *unit) {
+    (void) deck;
+    (void) unit;
+    return 0;
+}
+static void azsdk_cue_retire(int deck) { (void) deck; }
 static _Atomic int g_sdk_load_on;
 static int azsdk_load_register(int deck, void *unit) {
     (void) deck;
@@ -66,6 +70,10 @@ static int azsdk_load_register(int deck, void *unit) {
 static void azsdk_load_retire(int deck) { (void) deck; }
 static int azsdk_exit_register(int deck, void *unit) { (void) deck; (void) unit; return 0; }
 static void azsdk_exit_retire(int deck) { (void) deck; }
+static void azsdk_exit_retire_complete(unsigned deck, uintptr_t unit) {
+    (void) deck;
+    (void) unit;
+}
 /* Test hook, harness only: every __atomic_load_n in the extracted code (the snapshot reader
  * copies its fields byte by byte with it, lti_snap_get) first passes its address to ut_before,
  * which can run one injected call just before the load of a chosen address (the torn-read case

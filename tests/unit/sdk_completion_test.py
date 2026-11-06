@@ -10,7 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 REQUIRED = (
-    "automation", "time", "command", "exit", "cue-actor", "cue-store", "cue-lifecycle", "cue-persist", "cue-recall", "cue-stage", "cue-commands", "stored", "live", "sources", "native-commands", "load",
+    "records", "automation", "time", "command", "command-delivery", "exit", "cue-actor", "cue-store", "cue-lifecycle", "cue-persist", "cue-recall", "cue-stage", "cue-commands", "stored", "live", "sources", "native-commands", "load",
     "load-lifecycle", "vtable", "hook-install", "source-probe", "load-probe",
     "wave-overview", "wave-report",
 )

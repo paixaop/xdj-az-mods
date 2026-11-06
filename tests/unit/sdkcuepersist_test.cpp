@@ -513,7 +513,7 @@ int main() {
     azexit_result delayed = {999, 999, 999, 999, 999};
     unsigned submissions = producer_calls, notifications = ready_calls;
     assert(azsdk_cue_persist_poll(&r, maintainer.bytes, &delayed) == AZ_PENDING && delayed.token == 999);
-    assert(producer_calls == submissions && ready_calls == notifications + 1);
+    assert(producer_calls == submissions && ready_calls == notifications);
     effect_confirmed = true;
     assert(azsdk_cue_persist_poll(&r, maintainer.bytes, &delayed) == AZ_OK && delayed.outcome == AZ_COMMAND_APPLIED);
     assert(producer_calls == submissions && delayed.revision == 91);

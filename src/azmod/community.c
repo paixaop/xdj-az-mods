@@ -109,6 +109,9 @@ typedef struct {
     int log_sized;   /* log_bytes started from the file left by earlier starts */
     const char *refused_said[24]; /* services already logged as refused for a foreign caller */
     uintptr_t lo, hi;           /* the mod's mapped range, for crash blame */
+    uintptr_t image_base;
+    const ElfW(Phdr) *segments; /* the loader keeps the DSO mapped for its lifetime */
+    unsigned nsegments;
 } cm_mod;
 static cm_mod g_cm[CM_MAX];
 static int    g_cm_n = 0, g_cm_live = 0;       /* records / mods with state LOADED */
@@ -1102,6 +1105,16 @@ static pthread_mutex_t g_cm_mu = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
 static int cm_called_by(cm_mod *c, uintptr_t ra) {
     return c && c->hi && ra >= c->lo && ra < c->hi;
 }
+static __attribute__((unused)) int cm_command_code(cm_mod *c, uintptr_t address) {
+    if (!cm_called_by(c, address)) return 0;
+    for (unsigned i = 0; i < c->nsegments; ++i) {
+        const ElfW(Phdr) *ph = &c->segments[i];
+        uintptr_t start = c->image_base + ph->p_vaddr;
+        if (ph->p_type == PT_LOAD && (ph->p_flags & PF_X) && address >= start &&
+            address - start < ph->p_memsz) return 1;
+    }
+    return 0;
+}
 static cm_mod *cm_self(const char *id, uintptr_t ra, const char *what) {
     cm_mod *c = cm_find(id);
     if (!c) return NULL;
@@ -1653,6 +1666,9 @@ static int cm_range_cb(struct dl_phdr_info *info, size_t sz, void *data) {
     if (hi) {
         c->lo = lo;
         c->hi = hi;
+        c->image_base = info->dlpi_addr;
+        c->segments = info->dlpi_phdr;
+        c->nsegments = info->dlpi_phnum;
         return 1;
     }
     return 0;
@@ -1984,6 +2000,9 @@ static void cm_load_one(cm_mod *c) {
     }
     c->m = m;
     g_cm_loading = (int) (c - g_cm);
+#ifndef SDK_PROC_IMPL
+    sdk_command_owner_init(g_cm_loading);
+#endif
     g_sdk_in_init = 1;
     int rc = m->init(&g_cm_core);
     g_sdk_in_init = 0;
@@ -1997,6 +2016,9 @@ static void cm_load_one(cm_mod *c) {
         return;
     }
     c->state = AZCM_LOADED;
+#ifndef SDK_PROC_IMPL
+    sdk_command_owner_ready((int) (c - g_cm));
+#endif
     c->reason[0] = 0;
     g_cm_live++;
     dbg("community: %s %s LOADED (%d hook%s)\n", c->id, c->version, c->nhooks, c->nhooks == 1 ? "" : "s");
@@ -2023,10 +2045,10 @@ static void community_init(void) {
         azexit_service_fn get_exit;
         *(void **) &get_exit = dlsym(RTLD_DEFAULT, "azstem_exit_service_v1");
         const struct azexit_service *api = get_exit ? get_exit() : NULL;
-        if (api && api->version == 1 && api->size >= AZEXIT_SERVICE_DELIVERY_SIZE && api->mask && api->target &&
-            api->submit && api->cancel && api->poll && api->release && api->delivery &&
-            api->delivery->version == AZEXIT_DELIVERY_VERSION && sdk_command_start(api) == AZ_OK)
+        if (api && api->size >= AZEXIT_SERVICE_V1_SIZE && api->version == 1) {
             atomic_store_explicit(&g_sdk_exit_service, api, memory_order_release);
+            (void) sdk_command_start(api);
+        }
     }
 #endif
     cm_derive_fwtag();
@@ -2278,6 +2300,9 @@ static void community_tick(void) {
         if (rf) cm_logf(c, 1, "%u calls to settings or file services from on_frame were refused (allowed in tick, the page callbacks and your own threads)", rf);
     }
 #ifndef SDK_PROC_IMPL
+    /* Keep older companions' independent cue observations available. The
+     * unbound core admits no native commands. */
+    if (!atomic_load_explicit(&g_sdk_exit_bound, memory_order_acquire)) sdk_cue_tick();
     sdk_data_callbacks_tick();                  /* works for mods with no tick callback */
 #endif
     sdk_deck_tick(now);                          /* deck events, before the mods' ticks */

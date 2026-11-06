@@ -20,7 +20,7 @@ else
 fi
 output=$(cd "$output" && pwd)
 printf 'SDK completion logs: %s\n' "$output"
-suites=(records automation time command exit cue-actor cue-store cue-lifecycle cue-persist cue-recall cue-stage cue-commands stored live sources native-commands load load-lifecycle vtable hook-install source-probe load-probe wave-overview wave-report)
+suites=(records automation time command command-delivery exit cue-actor cue-store cue-lifecycle cue-persist cue-recall cue-stage cue-commands stored live sources native-commands load load-lifecycle vtable hook-install source-probe load-probe wave-overview wave-report)
 [ "$extensions_only" -eq 1 ] || suites=(data "${suites[@]}")
 failures=0; incomplete=0
 for name in "${suites[@]}"; do
