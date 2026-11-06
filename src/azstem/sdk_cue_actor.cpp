@@ -68,7 +68,7 @@ class ActorLock {
     State &state_;
     std::unique_lock<std::recursive_mutex> lock_;
     static thread_local unsigned depth_;
-public:
+   public:
     explicit ActorLock(State &state, unsigned deck = 4)
         : state_(state), lock_(state.mutex, std::defer_lock) {
         if (deck >= 4) lock_.lock();
@@ -78,7 +78,9 @@ public:
         }
         ++depth_;
     }
-    ~ActorLock() { if (owns_lock()) unlock(); }
+    ~ActorLock() {
+        if (owns_lock()) unlock();
+    }
     bool owns_lock() const { return lock_.owns_lock(); }
     void unlock() {
         bool outermost = --depth_ == 0;

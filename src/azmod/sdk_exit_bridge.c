@@ -70,8 +70,9 @@ static const struct azexit_delivery_v2 *sdk_exit_delivery(const struct azexit_se
     if (!api || api->version != 1 || api->size < AZEXIT_SERVICE_DELIVERY_SIZE) return NULL;
     const struct azexit_delivery_v2 *d = api->delivery;
     return d && d->size >= sizeof *d && d->version == AZEXIT_DELIVERY_VERSION && d->event_fd &&
-           d->consume && d->reclaim && d->control && d->bind && d->reserve && d->close_local && d->drive && d->ready
-               ? d : NULL;
+                   d->consume && d->reclaim && d->control && d->bind && d->reserve && d->close_local && d->drive && d->ready
+               ? d
+               : NULL;
 }
 static uint64_t sdk_exit_operations(const struct azexit_service *api) {
     const struct azexit_delivery_v2 *bound = atomic_load_explicit(&g_sdk_exit_bound, memory_order_acquire);
@@ -79,7 +80,8 @@ static uint64_t sdk_exit_operations(const struct azexit_service *api) {
     if (api->size >= AZEXIT_SERVICE_COMMAND_SIZE && api->commands) {
         uint64_t basic = (UINT64_C(1) << AZ_CMD_LOOP_EXIT) | (UINT64_C(1) << AZ_CMD_RELOOP);
         uint64_t loops = ((UINT64_C(1) << (AZ_CMD_LOOP_ADJUST_OUT + 1)) - 2) & ~basic;
-        uint64_t supported = api->submit_command ? basic : api->submit ? UINT64_C(1) << AZ_CMD_LOOP_EXIT : 0;
+        uint64_t supported = api->submit_command ? basic : api->submit ? UINT64_C(1) << AZ_CMD_LOOP_EXIT
+                                                                       : 0;
         if (api->size >= AZEXIT_SERVICE_LOOP_SIZE && api->submit_loop) supported |= loops;
         if (sdk_exit_has_cues(api)) supported |= SCMD_ALL_COMMANDS & ~(loops | basic);
         return api->commands() & supported;
@@ -181,9 +183,7 @@ static struct scmd_adapter sdk_exit_adapter(const struct azexit_service *api) {
 
 static struct azexit_receipt sdk_exit_identity(const struct scmd_record *r, uint32_t kind) {
     return (struct azexit_receipt) {
-        .size = sizeof(struct azexit_receipt), .version = AZEXIT_DELIVERY_VERSION, .kind = kind,
-        .deck = r->request.deck, .token = r->token, .load_generation = r->request.expected_load_generation,
-        .lifetime_generation = r->native_lifetime};
+        .size = sizeof(struct azexit_receipt), .version = AZEXIT_DELIVERY_VERSION, .kind = kind, .deck = r->request.deck, .token = r->token, .load_generation = r->request.expected_load_generation, .lifetime_generation = r->native_lifetime};
 }
 /* All receipt projection and reservation return is serialized with admission.
  * Terminal values, settlement and native resource retirement are independent. */
@@ -383,7 +383,8 @@ static __attribute__((unused)) int sdk_command_start(const struct azexit_service
     if (!delivery || !api->target) return AZ_UNSUPPORTED;
     const struct azexit_delivery_v2 *bound = atomic_load_explicit(&g_sdk_exit_bound, memory_order_acquire);
     if (bound) return bound == delivery && api == atomic_load_explicit(&g_sdk_exit_service, memory_order_acquire)
-                          ? AZ_OK : AZ_UNSUPPORTED;
+                          ? AZ_OK
+                          : AZ_UNSUPPORTED;
     g_sdk_command_fd = sdk_eventfd_create();
     g_sdk_ui_fd = sdk_eventfd_create();
     g_sdk_timer_fd = sdk_timerfd_create();
@@ -478,8 +479,8 @@ static int sdk_exit_cancel_request(int owner, uint64_t request_id, az_command_re
         if (p) result = &p->result;
     }
     if (result) {
-        rc = result->outcome == AZ_COMMAND_CANCELLED ? AZ_OK :
-             r && r->phase != SCMD_FINAL ? AZ_PENDING : AZ_STALE;
+        rc = result->outcome == AZ_COMMAND_CANCELLED ? AZ_OK : r && r->phase != SCMD_FINAL ? AZ_PENDING
+                                                                                           : AZ_STALE;
         scmd_copy_result(out, result);
     }
     pthread_mutex_unlock(&e->mu);

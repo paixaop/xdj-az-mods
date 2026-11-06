@@ -108,8 +108,8 @@ extern "C" void fixture_arbitration(void) {
         if (token == 1001) assert(publish(&applied, false, 199) == AZ_OK);
         /* The dispatcher has not consumed any wake or receipt. */
         assert(control(0, token, AZEXIT_STOP_DEADLINE, 200, &winner) == AZ_OK);
-        assert(winner.outcome == (token == 1000 ? AZ_COMMAND_CANCELLED :
-                                  token == 1001 ? AZ_COMMAND_APPLIED : AZ_COMMAND_UNCERTAIN));
+        assert(winner.outcome == (token == 1000 ? AZ_COMMAND_CANCELLED : token == 1001 ? AZ_COMMAND_APPLIED
+                                                                                       : AZ_COMMAND_UNCERTAIN));
         assert(winner.settled == (token == 1002 ? 0u : 1u));
         if (token == 1000) assert(claim(request, 199) == AZ_CANCELLED);
         if (token == 1002) assert(publish(&applied) == AZ_OK); // contributes settlement only

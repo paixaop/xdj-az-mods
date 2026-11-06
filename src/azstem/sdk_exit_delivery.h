@@ -13,7 +13,11 @@ enum Decision {
     ExpiredExecuting,
     CancelledQueued
 };
-enum Evidence { Settled = 1, Retired = 2, Terminal = 4 };
+enum Evidence {
+    Settled = 1,
+    Retired = 2,
+    Terminal = 4
+};
 constexpr uint64_t decision_bits = 7;
 constexpr uint64_t max_token = UINT64_MAX >> 3;
 
@@ -116,14 +120,18 @@ static int claim(const azexit_request &request, uint64_t now) noexcept {
     if (cell->stops.load(std::memory_order_acquire)) return AZ_CANCELLED;
     uint64_t expected = request.token << 3 | Queued;
     return cell->decision.compare_exchange_strong(expected, request.token << 3 | Executing,
-                                                   std::memory_order_acq_rel) ? AZ_OK : AZ_CANCELLED;
+                                                  std::memory_order_acq_rel)
+               ? AZ_OK
+               : AZ_CANCELLED;
 }
 static int continuation(const azexit_request &request, uint64_t now) noexcept {
     auto *cell = find(request.token);
     if (!cell || !matches(*cell, request.deck, request.load_generation) ||
         !before(now, cell->request.deadline_ns)) return AZ_STALE;
     return cell->decision.load(std::memory_order_acquire) == (request.token << 3 | Executing) &&
-           !cell->stops.load(std::memory_order_acquire) ? AZ_OK : AZ_CANCELLED;
+                   !cell->stops.load(std::memory_order_acquire)
+               ? AZ_OK
+               : AZ_CANCELLED;
 }
 static azexit_receipt receipt(const azexit_request &request, unsigned kind, unsigned settled,
                               uint64_t lifetime, uint64_t observed, unsigned outcome = 0,
@@ -233,7 +241,7 @@ static int control(unsigned deck, uint64_t token, uint32_t reasons, uint64_t now
                                 deadline ? AZ_STALE : AZ_CANCELLED);
         unsigned next = deadline ? (executing ? ExpiredExecuting : ExpiredQueued) : CancelledQueued;
         if (cell->decision.compare_exchange_strong(current, token << 3 | next,
-                                                    std::memory_order_acq_rel)) {
+                                                   std::memory_order_acq_rel)) {
             *winner = cell->stopped;
             rc = AZ_OK;
             wake();

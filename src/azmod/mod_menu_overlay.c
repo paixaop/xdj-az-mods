@@ -2851,7 +2851,10 @@ static useconds_t ov_tick_us(void) {
 
 /* X input can start an early frame. SDK callbacks run on this thread between
  * frames without advancing menu timers or rendering once per audio receipt. */
-enum { OV_WAKE_FRAME = 1, OV_WAKE_COMMAND = 2 };
+enum {
+    OV_WAKE_FRAME = 1,
+    OV_WAKE_COMMAND = 2
+};
 static unsigned ov_wait(struct overlay_ctx *c, useconds_t us, long start_ms) {
     const long deadline = start_ms + (long) (us / 1000);
     struct pollfd p[2] = {

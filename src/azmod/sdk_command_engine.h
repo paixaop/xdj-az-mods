@@ -577,8 +577,8 @@ static inline int scmd_release(struct scmd_engine *e, int owner, uint64_t id) {
     if (pthread_mutex_trylock(&e->mu)) return AZ_BUSY;
     struct scmd_record *r = scmd_find_id(e, owner, id);
     int rc = !r ? (scmd_find_pending_id(e, owner, id) ? AZ_INVALID : AZ_STALE) : r->asynchronous                                  ? AZ_INVALID
-                         : r->phase != SCMD_FINAL || r->pinned || r->awaiting ? AZ_BUSY
-                                                                              : AZ_OK;
+                                                                             : r->phase != SCMD_FINAL || r->pinned || r->awaiting ? AZ_BUSY
+                                                                                                                                  : AZ_OK;
     if (rc == AZ_OK) memset(r, 0, sizeof *r);
     pthread_mutex_unlock(&e->mu);
     return rc;

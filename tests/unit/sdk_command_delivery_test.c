@@ -103,9 +103,7 @@ static void prepare(struct client *client, int owner, unsigned deck, uint64_t id
     memset(client, 0, sizeof *client);
     client->owner = owner;
     client->request = (az_command_request) {
-        .size = sizeof client->request, .version = AZ_DATA_VERSION, .deck = deck,
-        .operation = AZ_CMD_LOOP_EXIT, .flags = AZ_COMMAND_NATIVE_LOAD, .request_id = id,
-        .expected_load_generation = deck + 10, .deadline_ns = scmd_monotonic(NULL) + duration_ns};
+        .size = sizeof client->request, .version = AZ_DATA_VERSION, .deck = deck, .operation = AZ_CMD_LOOP_EXIT, .flags = AZ_COMMAND_NATIVE_LOAD, .request_id = id, .expected_load_generation = deck + 10, .deadline_ns = scmd_monotonic(NULL) + duration_ns};
 }
 static int submit(struct client *client) {
     az_command_result out = {.size = sizeof out};
@@ -163,7 +161,10 @@ static void mixed_versions(const struct azexit_service *good) {
                out.request_id == 100 && !g_sdk_commands.next_token);
     }
 }
-struct delayed_finish { unsigned deck; uint64_t token; };
+struct delayed_finish {
+    unsigned deck;
+    uint64_t token;
+};
 static void *complete_after_wait(void *opaque) {
     const struct delayed_finish *finish = opaque;
     struct timespec delay = {.tv_nsec = 20000000};

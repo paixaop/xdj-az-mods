@@ -86,7 +86,7 @@ extern "C" int azsdk_cue_actor_take(unsigned deck, azexit_result *result) noexce
     return azsdk_cue_actor_peek(deck, result);
 }
 extern "C" int azsdk_cue_persist_take(const azexit_cue_request *request, void *manager,
-                                     azexit_result *result) noexcept {
+                                      azexit_result *result) noexcept {
     return azsdk_cue_persist_poll(request, manager, result);
 }
 extern "C" int azsdk_exit_recall_take(unsigned deck, azexit_result *result) noexcept {

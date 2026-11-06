@@ -2867,7 +2867,11 @@ static void loop_only_gating() {
     active(0);
     loop_complete(loop_request(AZ_CMD_LOOP_DOUBLE), AZ_COMMAND_APPLIED, AZ_OK);
 }
-#define NATIVE_CASE(test) do { std::fprintf(stderr, "native fixture: %s\n", #test); test; } while (0)
+#define NATIVE_CASE(test)                                    \
+    do {                                                     \
+        std::fprintf(stderr, "native fixture: %s\n", #test); \
+        test;                                                \
+    } while (0)
 int main(int argc, char **argv) {
     assert(argc == 2 || argc == 3);
     unsigned enabled = argc == 3 ? unsigned(std::strtoul(argv[2], nullptr, 10)) : AZEXIT_ENABLE_EXIT | AZEXIT_ENABLE_RELOOP;

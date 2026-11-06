@@ -1248,14 +1248,14 @@ void settle(unsigned deck, Slot &slot) noexcept {
          * fence until actual disposal of the correlated work. */
         const auto *cell = azsdk_delivery::find(token);
         unsigned stops = cell ? cell->stops.load(std::memory_order_acquire) : 0;
-        int reason = !time ? AZ_FAILED : !current || !(stops & AZEXIT_STOP_CANCEL) ||
-                     (stops & AZEXIT_STOP_DEADLINE) ? AZ_STALE : AZ_CANCELLED;
+        int reason = !time ? AZ_FAILED : !current || !(stops & AZEXIT_STOP_CANCEL) || (stops & AZEXIT_STOP_DEADLINE) ? AZ_STALE
+                                                                                                                     : AZ_CANCELLED;
         bool hot_pending = slot.operation == AZ_CMD_HOT_TRIGGER &&
                            (!coherent(slot) || integer(word(slot.facade + 0x70) + 0x104) != 0);
         if (!pending_nodes(token) && !hot_pending) finish(slot, AZ_COMMAND_UNCERTAIN, reason);
         else if (!slot.internal_recall.load(std::memory_order_acquire)) {
             auto value = azsdk_delivery::receipt(slot.request, AZEXIT_RECEIPT_TERMINAL, 0, 0, time,
-                                                AZ_COMMAND_UNCERTAIN, reason);
+                                                 AZ_COMMAND_UNCERTAIN, reason);
             (void) azsdk_delivery::publish(&value);
         }
         return;
@@ -1366,7 +1366,7 @@ void hot_countdown_hook(void *self) {
                  slot->operation == AZ_CMD_HOT_TRIGGER && word(slot->facade + 0x70) == beat &&
                  table(beat, state().profile.beat);
     int before = track ? integer(beat + 0x104) : 0;
-    trampoline<void (*)(void *)>(&state().hot_countdown_original[I])(self);
+    trampoline<void (*)(void *)> (&state().hot_countdown_original[I])(self);
     if (before > 0 && integer(beat + 0x104) == 0)
         request_review(*slot, slot->request.token);
 }
@@ -1839,7 +1839,7 @@ extern "C" void azsdk_exit_retire(int deck) noexcept {
     else if (expected == RUNNING) {
         if (!slot.internal_recall.load(std::memory_order_acquire)) {
             auto value = azsdk_delivery::receipt(slot.request, AZEXIT_RECEIPT_TERMINAL, 0, 0, now(),
-                                                AZ_COMMAND_UNCERTAIN, AZ_STALE);
+                                                 AZ_COMMAND_UNCERTAIN, AZ_STALE);
             (void) azsdk_delivery::publish(&value);
         }
         if (!slot.untracked) {
