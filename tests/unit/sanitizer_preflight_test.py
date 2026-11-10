@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 
-EXTENSIONS = ["automation", "time", "command", "exit", "cue-actor", "cue-store", "cue-lifecycle", "cue-persist", "cue-recall", "cue-stage", "cue-commands", "stored", "live", "sources", "native-commands", "load",
+EXTENSIONS = ["records", "automation", "time", "command", "exit", "cue-actor", "cue-store", "cue-lifecycle", "cue-persist", "cue-recall", "cue-stage", "cue-commands", "stored", "live", "sources", "native-commands", "load",
               "load-lifecycle", "vtable", "hook-install", "source-probe", "load-probe", "wave-overview", "wave-report"]
 
 
@@ -164,7 +164,9 @@ class SanitizerPreflightTests(unittest.TestCase):
                 '[ "${SAN:-plain}" != "$PREFLIGHT_TEST_OVERVIEW_FAIL_MODE" ]\n')
             for name in ("sdk-cache-reply-native", "sdk-cache-entry", "sdk-cache-entry-caller",
                          "sdk-cache-entry-fp", "sdk-cue", "sdk-cue-public", "sdk-cue-export",
-                         "sdk-cue-events", "sdk-deck-listeners", "sdk-data-lifecycle", "sdk-slip", "sdk-exit"):
+                         "sdk-cue-events", "sdk-deck-listeners", "sdk-data-lifecycle", "sdk-slip", "sdk-exit",
+                         "sdk-status", "sdk-status-ui", "sdk-status-gui", "sdk-status-loader", "sdk-status-native", "sdk-status-maps",
+                         "sdk-status-map-source", "sdk-status-source", "sdk-status-store"):
                 (root / ("tests/" + name + ".sh")).write_text("#!/bin/sh\nexit 0\n")
             docker = root / "bin/docker"
             docker.write_text('''#!/usr/bin/env python3

@@ -4,6 +4,8 @@
 #include <cassert>
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 using namespace azcuestore;
 namespace {
 alignas(8) unsigned char manager[0x188], player_interface[8], service[8], player[0x200], source[0x70], pack[0xf0], publication[0x30], content[0x38];
@@ -15,6 +17,7 @@ alignas(8) unsigned char delta_content[0x38], delta_hot_content[0x38];
 NativeCue delta_rows[2], delta_hot_rows[2];
 alignas(8) unsigned char where_from[0x20]; int where_refs, root_refs;
 unsigned char identity[12]={1,2,3}; int sources,contents,players,cues,properties; bool bad_conversion;
+int strings; std::string last_comment; uint32_t last_color;
 void put(void *p,size_t off,uintptr_t value) { std::memcpy(static_cast<unsigned char *>(p)+off,&value,sizeof value); }
 uint64_t get(const void *p,size_t off) { uint64_t value;std::memcpy(&value,static_cast<const unsigned char *>(p)+off,8);return value; }
 NativePlayer capture(void *) { NativePlayer result; result.value=reinterpret_cast<uintptr_t>(player); ++players; return result; }
@@ -31,8 +34,11 @@ NativeProperty convert(const uintptr_t *ref,const void *p,const void *path,const
     assert(*ref==reinterpret_cast<uintptr_t>(where_from) && p==pack && path==source+0x28);
     assert(get(reinterpret_cast<const void *>(*ref),8)==0x574845524546524fULL);
     assert(static_cast<const NativeCue *>(row)->bytes[0]<=8 || static_cast<const NativeCue *>(row)->bytes[0]==42 || static_cast<const NativeCue *>(row)->bytes[0]==43);
+    last_comment = get(row,0x70) ? reinterpret_cast<const char *>(get(row,0x70)) : "";
+    last_color = uint32_t(get(row,0x78));
     NativeProperty value={}; std::memcpy(value.bytes+0x30,identity,12);put(&value,0x58,reinterpret_cast<uintptr_t>(source));
     put(&value,0x40,get(row,0x10));put(&value,0x60,get(row,4)&0xffffffffu);put(&value,0x68,get(row,8));
+    if (get(row,0x18)!=UINT64_C(0x7fffffffffffffff)) std::memcpy(value.bytes+0x88,identity,12);
     put(&value,0x98,get(row,0x20));put(&value,0xb8,get(row,4)&0xffffffffu);put(&value,0xc0,get(row,0x18));
     if (bad_conversion) {
         ++value.bytes[0x30];
@@ -50,17 +56,21 @@ void destroy_property(void *) { --properties; }
 bool has_cue(const void *p,int kind) { assert(p==player && kind>=0 && kind<=8);return retained_valid; }
 const void *get_current_cue(const void *p,int kind) { assert(p==player && kind>=0 && kind<=8);return &retained[kind]; }
 void copy_property(void *out,const void *in) { std::memcpy(out,in,sizeof(NativeProperty));++properties; }
-Profile profile() { Profile p; p.copy_source=copy_source;p.copy_content=copy_content;p.release_ref=release;p.position=position;p.get_cue=get_cue;p.destroy_cue=destroy_cue;p.convert=convert;p.destroy_property=destroy_property;p.has_cue=has_cue;p.get_current_cue=get_current_cue;p.copy_property=copy_property;p.serialize_property=serialize;p.where_from=capture_where;return p; }
+NativeString allocate(uint64_t count) { NativeString text; text.data=std::malloc(count); if(text.data)++strings;return text; }
+void destroy_string(void *p) { std::free(static_cast<NativeString *>(p)->data); --strings; }
+void color(void *p,unsigned r,unsigned g,unsigned b) { uint32_t rgb=0xff000000u|(r<<16)|(g<<8)|b;std::memcpy(p,&rgb,4); }
+Profile profile() { Profile p; p.copy_source=copy_source;p.copy_content=copy_content;p.release_ref=release;p.position=position;p.get_cue=get_cue;p.destroy_cue=destroy_cue;p.convert=convert;p.destroy_property=destroy_property;p.has_cue=has_cue;p.get_current_cue=get_current_cue;p.copy_property=copy_property;p.serialize_property=serialize;p.where_from=capture_where;p.string_allocate=allocate;p.string_destroy=destroy_string;p.color_construct=color;return p; }
 void setup() {
     player_table[2]=reinterpret_cast<uintptr_t>(capture);service_table[6]=reinterpret_cast<uintptr_t>(lookup);snapshot_table[1]=reinterpret_cast<uintptr_t>(destroy_player);
     put(player_interface,0,reinterpret_cast<uintptr_t>(player_table));put(service,0,reinterpret_cast<uintptr_t>(service_table));put(player,0,reinterpret_cast<uintptr_t>(snapshot_table));
+    put(player,0x18,uint32_t(44100));
     put(manager,0x158,reinterpret_cast<uintptr_t>(player_interface));put(manager,0x160,reinterpret_cast<uintptr_t>(service));
     std::memcpy(player+0xd8,identity,12);put(player,0x100,reinterpret_cast<uintptr_t>(source));put(source,0x58,reinterpret_cast<uintptr_t>(where_from));put(where_from,8,0x574845524546524fULL);
     std::memcpy(pack+0x80,player+0xd8,16);put(pack,0xe8,reinterpret_cast<uintptr_t>(publication));put(publication,0x28,reinterpret_cast<uintptr_t>(content));
     put(content,0x28,reinterpret_cast<uintptr_t>(rows));put(content,0x30,reinterpret_cast<uintptr_t>(rows+2));rows[0].bytes[0]=42;rows[1].bytes[0]=43;
     for (auto &cue:retained) std::memcpy(cue.bytes+0x30,identity,12);
 }
-void clean() { assert(!sources&&!where_refs&&!root_refs&&!contents&&!players&&!cues&&!properties); }
+void clean() { assert(!strings); assert(!sources&&!where_refs&&!root_refs&&!contents&&!players&&!cues&&!properties); }
 }
 int main() {
     azcue_native_timestamps a,b;
@@ -68,6 +78,12 @@ int main() {
     a.in_us=b.in_us=1000000;a.in_sample=96001;b.in_sample=48000;
     a.out_us=b.out_us=a.out_sample=b.out_sample=UINT64_C(0x7fffffffffffffff);
     assert(azcue_timestamps_equal(a,b,48000));assert(azcue_timestamps_equal(b,a,48000));
+    a.out_sample=UINT64_C(0xfffffffffffffff0);b.out_sample=0;
+    assert(azcue_timestamps_equal(a,b,48000));assert(azcue_timestamps_equal(b,a,48000));
+    b.out_us=0;assert(!azcue_timestamps_equal(a,b,48000));
+    a.out_us=b.out_us=1000000;a.out_sample=96000;b.out_sample=48002;
+    assert(!azcue_timestamps_equal(a,b,48000));
+    a.out_us=b.out_us=a.out_sample=b.out_sample=UINT64_C(0x7fffffffffffffff);
     a.in_sample=96002;
     assert(!azcue_timestamps_equal(a,b,48000));assert(!azcue_timestamps_equal(b,a,48000));
     a.in_sample=96000;b.sample_rate=192000;b.in_sample=192001;
@@ -225,5 +241,107 @@ int main() {
     put(&delta_rows[1],0x78,0xff00c3ffu);
     long_after[180]='b';check_metadata(0,2,nullptr,0x00c3ff,false);long_after[180]='a';
     for(auto &ref:delta_refs) { p.release_ref(&ref); }clean();
+    // Production construction: zero is present, source rate comes from the
+    // owned PlayerState, seek variants start empty, and native conversion owns refs.
+    put(pack,0xe8,reinterpret_cast<uintptr_t>(publication));put(pack,0xe0,reinterpret_cast<uintptr_t>(hot_publication));
+    put(publication,0x28,reinterpret_cast<uintptr_t>(content));put(hot_publication,0x28,reinterpret_cast<uintptr_t>(hot_content));
+    put(content,0x28,reinterpret_cast<uintptr_t>(rows));put(content,0x30,reinterpret_cast<uintptr_t>(rows));
+    put(hot_content,0x28,reinterpret_cast<uintptr_t>(hot_rows));put(hot_content,0x30,reinterpret_cast<uintptr_t>(hot_rows));
+    RevisionState timed_state;
+    const uint32_t rates[] = {44100,48000,96000,192000};
+    put(pack,0xbe,uint32_t(16777216)); // Native musical key data must never supply Hertz.
+    for (uint32_t rate : rates) {
+        std::memcpy(player+0x18,&rate,4);
+        assert(snapshot.open(p,manager,4,nullptr,timed_state));
+        assert(snapshot.source_rate()==rate);
+        Property timed;
+        assert(snapshot.timed_property(0,0.,0.,false,0xff0000,"Zero caf\xc3\xa9",timed));
+        assert(compare_timestamps(get(&timed.native,0x40),0,rate,rate,1)==AZ_TIME_EQUAL);
+        assert(last_comment=="Zero caf\xc3\xa9" && last_color==0xffff0000 && !strings);
+        assert(snapshot.timed_property(8,1.234567,9.876543,true,0x123456,"Loop",timed));
+        assert(compare_timestamps(double(get(&timed.native,0x40))/rate,1.234567,1,rate,1)==AZ_TIME_EQUAL);
+        assert(compare_timestamps(double(get(&timed.native,0x98))/rate,9.876543,1,rate,1)==AZ_TIME_EQUAL);
+        assert(last_color==0xff123456 && last_comment=="Loop");
+        const double frames[] = {0.005,0.49,0.5,0.995,100.005,100.49,100.5,100.995,12345678.005,12345678.49,12345678.51,12345678.995};
+        const uint64_t nearest[] = {0,0,1,1,100,100,101,101,12345678,12345678,12345679,12345679};
+        for(unsigned i=0;i<sizeof frames/sizeof *frames;++i) {
+            const double start_s=frames[i]/rate,end_s=(frames[i]+300)/rate;
+            for(bool loop:{false,true}) {
+                assert(snapshot.timed_property(8,start_s,end_s,loop,0x123456,"Fractional frame",timed));
+                const int selected=compare_timestamps(get(&timed.native,0x40),nearest[i],rate,rate,1);
+                assert(selected!=AZ_TIME_INVALID && selected==AZ_TIME_EQUAL);
+                Property canonical;
+                assert(snapshot.canonical_property(8,timed,canonical));
+                const int roundtrip=compare_timestamps(get(&canonical.native,0x40),nearest[i],rate,rate,1);
+                assert(roundtrip!=AZ_TIME_INVALID && roundtrip==AZ_TIME_EQUAL);
+                if(loop) {
+                    const int selected_end=compare_timestamps(get(&timed.native,0x98),nearest[i]+300,rate,rate,1);
+                    const int roundtrip_end=compare_timestamps(get(&canonical.native,0x98),nearest[i]+300,rate,rate,1);
+                    assert(selected_end!=AZ_TIME_INVALID && selected_end==AZ_TIME_EQUAL);
+                    assert(roundtrip_end!=AZ_TIME_INVALID && roundtrip_end==AZ_TIME_EQUAL);
+                }
+            }
+        }
+        assert(!snapshot.timed_property(8,9007199254740991./rate,0.,false,0,"",timed));
+        assert(!snapshot.timed_property(8,9007199254740991./1000000,0.,false,0,"",timed));
+        assert(!snapshot.timed_property(0,1.,2.,true,0x123456,"Invalid memory RGB",timed));
+        assert(!snapshot.timed_property(0,-1.,0.,false,0,"",timed));
+        assert(!snapshot.timed_property(0,1.,1.,true,0,"",timed));
+        bad_conversion=true;assert(!snapshot.timed_property(0,1.,0.,false,0,"",timed));bad_conversion=false;
+        snapshot.reset();timed.reset();clean();
+    }
+    uint32_t unknown=0;std::memcpy(player+0x18,&unknown,4);
+    assert(snapshot.open(p,manager,4,nullptr,timed_state));
+    Property missing;assert(!snapshot.timed_property(1,0.,0.,false,0,"",missing));snapshot.reset();clean();
+    // Production baseline comparison admits exactly one addition and no
+    // changes to the other cue collection, independent of row ordering.
+    uint32_t rate=48000;std::memcpy(player+0x18,&rate,4);
+    put(pack,0xe8,reinterpret_cast<uintptr_t>(publication));put(pack,0xe0,reinterpret_cast<uintptr_t>(hot_publication));
+    put(content,0x28,reinterpret_cast<uintptr_t>(rows));put(content,0x30,reinterpret_cast<uintptr_t>(rows+1));
+    put(hot_content,0x28,reinterpret_cast<uintptr_t>(hot_rows));put(hot_content,0x30,reinterpret_cast<uintptr_t>(hot_rows));
+    rows[0]={};rows[0].bytes[0]=0;put(&rows[0],4,rate);put(&rows[0],8,1000000);put(&rows[0],16,48000);
+    put(&rows[0],24,UINT64_C(0x7fffffffffffffff));put(&rows[0],32,UINT64_C(0x7fffffffffffffff));
+    RevisionState creation_state;assert(snapshot.open(p,manager,6,nullptr,creation_state));
+    azcuepersist_witness before_create={};assert(snapshot.content_witness(snapshot.revision(),&before_create));
+    Property wanted;assert(snapshot.timed_property(0,2.,3.,true,0,"",wanted));
+    delta_rows[0]=rows[0];delta_rows[1]=serialize(0,&wanted.native,false);destroy_cue(nullptr);
+    snapshot.reset();
+    put(delta_content,0x28,reinterpret_cast<uintptr_t>(delta_rows));put(delta_content,0x30,reinterpret_cast<uintptr_t>(delta_rows+2));
+    put(publication,0x28,reinterpret_cast<uintptr_t>(delta_content));
+    assert(snapshot.open(p,manager,6,nullptr,creation_state));assert(snapshot.creation_only_changed(before_create,0,wanted,rate));snapshot.reset();
+    delta_rows[0].bytes[0x78]^=1;
+    assert(snapshot.open(p,manager,6,nullptr,creation_state));assert(!snapshot.creation_only_changed(before_create,0,wanted,rate));snapshot.reset();
+    delta_rows[0].bytes[0x78]^=1;
+    NativeCue swap=delta_rows[0];delta_rows[0]=delta_rows[1];delta_rows[1]=swap;
+    assert(snapshot.open(p,manager,6,nullptr,creation_state));assert(snapshot.creation_only_changed(before_create,0,wanted,rate));snapshot.reset();
+    wanted.reset();clean();
+    // A track can have no publication roots yet. Creation records explicit
+    // absence and later proves the first native root contains only its cue.
+    put(pack,0xe8,0);put(pack,0xe0,0);
+    assert(snapshot.open(p,manager,7,nullptr,creation_state));
+    assert(!snapshot.content_witness(snapshot.revision(),&before_create));
+    assert(snapshot.content_witness(snapshot.revision(),&before_create,true));
+    assert(!before_create.memory_set&&!before_create.hot_set);
+    const char label[]="Native label \342\234\223";const uint32_t rgb=0x00c3ff;
+    assert(snapshot.timed_property(0,0.,0.,false,rgb,label,wanted));
+    rows[0]=serialize(0,&wanted.native,false);destroy_cue(nullptr);snapshot.reset();
+    put(&rows[0],32,UINT64_C(0xfffffffffffffff0)); // Native point's unused OUT sample cache.
+    put(publication,0x28,reinterpret_cast<uintptr_t>(content));put(content,0x30,reinterpret_cast<uintptr_t>(rows+1));put(pack,0xe8,reinterpret_cast<uintptr_t>(publication));
+    assert(snapshot.open(p,manager,7,nullptr,creation_state));
+    assert(!snapshot.creation_only_changed(before_create,0,wanted,rate,label,rgb));snapshot.reset(); // Serializer's empty label is insufficient.
+    put(&rows[0],0x70,reinterpret_cast<uintptr_t>(label));
+    put(&rows[0],0x78,uint32_t(0xff000000u|rgb));rows[0].bytes[0x7c]=6;
+    put(&rows[0],0x48,uint32_t(0x301)); // Native tag0 union copy leaves its inactive length undefined.
+    assert(snapshot.open(p,manager,7,nullptr,creation_state));
+    assert(snapshot.creation_only_changed(before_create,0,wanted,rate,label,rgb));snapshot.reset();
+    rows[0].bytes[0x7c]=0;
+    assert(snapshot.open(p,manager,7,nullptr,creation_state));
+    assert(!snapshot.creation_only_changed(before_create,0,wanted,rate,label,rgb));snapshot.reset();rows[0].bytes[0x7c]=6;
+    rows[0].bytes[0x30]=1;
+    assert(snapshot.open(p,manager,7,nullptr,creation_state));
+    assert(!snapshot.creation_only_changed(before_create,0,wanted,rate,label,rgb));snapshot.reset();rows[0].bytes[0x30]=0;
+    put(&rows[0],24,1000000);
+    assert(snapshot.open(p,manager,7,nullptr,creation_state));
+    assert(!snapshot.creation_only_changed(before_create,0,wanted,rate,label,rgb));snapshot.reset();wanted.reset();clean();
     std::puts("SDK_CUE_STORE_OK");
 }

@@ -19,7 +19,7 @@ import re, sys
 out = Path(sys.argv[1])
 source = Path('src/azstem/stem_playback.c').read_text()
 a = source.index('static _Atomic(void *) g_ls_self[NDECK];')
-m = re.search(r'^#ifndef AZMOD_RELEASE /\* the path scan|^static int is_dir\(const char \*p\) \{', source[a:], re.M)
+m = re.search(r'^static DIR \*stem_opendir\(|^#ifndef AZMOD_RELEASE /\* the path scan|^static int is_dir\(const char \*p\) \{', source[a:], re.M)
 assert m
 lifetime = source[a:a + m.start()]
 source = Path('src/azstem/deck_track_map.c').read_text()
@@ -63,7 +63,7 @@ config = '''#include "azexit.h"
 #define DJPUDTOR_DEFAULT ((uintptr_t)0x20000)
 #define logln(...) ((void)0)
 typedef int (*patch_fn)(uintptr_t,void*,void**);
-static int track_on, load_on, ctor_ok, dtor_ok, configured, configured_build, bad_patch, ctor_calls, dtor_calls;
+static int track_on, load_on, status_off, ctor_ok, dtor_ok, configured, configured_build, bad_patch, ctor_calls, dtor_calls;
 static int sdk_loop_build, g_sdk_loop_on, g_sdk_live_on, g_sdk_cue_on;
 static _Atomic int g_sdk_load_on;
 static uintptr_t g_djpuctor_addr;
@@ -73,6 +73,7 @@ static void djpuctor_hook(void) { different=1; }
 static void djpudtor_hook(void) { different=2; }
 static int access(const char *path,int mode) {
     CHECK(mode==F_OK);
+    if (!strcmp(path,"/home/root/settings/azmod.deck-status.off")) return status_off?0:-1;
     if (!strcmp(path,"/home/root/settings/azmod.track-data.on")) return track_on?0:-1;
     if (!strcmp(path,"/home/root/settings/azmod.native-load.on")) return load_on?0:-1;
     return -1;
@@ -92,12 +93,12 @@ static void configure(unsigned long long v) {
 ''' + body + '''
 }
 int main(void) {
-    for (int build=1;build<=2;++build) for(int flags=0;flags<4;++flags)
+    for (int build=1;build<=2;++build) for(int flags=0;flags<8;++flags)
       for(int ctor=0;ctor<2;++ctor) for(int dtor=0;dtor<2;++dtor) for(int def=0;def<2;++def) {
-        sdk_loop_build=build;track_on=flags&1;load_on=flags&2;ctor_ok=ctor;dtor_ok=dtor;
+        sdk_loop_build=build;status_off=flags&4;track_on=flags&1;load_on=flags&2;ctor_ok=ctor;dtor_ok=dtor;
         configured=bad_patch=ctor_calls=dtor_calls=0;g_sdk_load_on=0;
         configure(def?DJPUCTOR_DEFAULT:0x30000);
-        int expected=flags==3 && ctor && dtor && def;
+        int expected=(!(flags&4) || (flags&3)==3) && ctor && dtor && def;
         CHECK(configured==expected && atomic_load(&g_sdk_load_on)==expected);
         CHECK(ctor_calls==1 && dtor_calls==ctor);
         CHECK(!expected || (configured_build==build && !bad_patch));
@@ -111,7 +112,7 @@ controls = [
     ('load-flag', 'access("/home/root/settings/azmod.native-load.on", F_OK) == 0', '1'),
     ('default-address', 'if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT &&\n                access("/home/root/settings/azmod.track-data.on", F_OK) == 0 &&\n                access("/home/root/settings/azmod.native-load.on", F_OK) == 0)', 'if (td && access("/home/root/settings/azmod.track-data.on", F_OK) == 0 && access("/home/root/settings/azmod.native-load.on", F_OK) == 0)'),
     ('dtor-required', 'if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT &&\n                access("/home/root/settings/azmod.track-data.on", F_OK) == 0 &&\n                access("/home/root/settings/azmod.native-load.on", F_OK) == 0)', 'if (g_djpuctor_addr == DJPUCTOR_DEFAULT && access("/home/root/settings/azmod.track-data.on", F_OK) == 0 && access("/home/root/settings/azmod.native-load.on", F_OK) == 0)'),
-    ('build', 'azsdk_load_configure(1, sdk_loop_build, sdk_patch_slot);', 'azsdk_load_configure(1, 1, sdk_patch_slot);'),
+    ('build', 'azsdk_load_configure(1, sdk_loop_build, sdk_patch_slot);\n                atomic_store_explicit', 'azsdk_load_configure(1, 1, sdk_patch_slot);\n                atomic_store_explicit'),
 ]
 for name, old, new in controls:
     assert config.count(old)==1,(name,config.count(old))

@@ -36,7 +36,7 @@ def read_frame(path,previous_sequence,verify_identity):
         if len(pixels)!=320*240*4 or final!=header:
             raise MissingEvidence('JOG1 frame changed during read')
         if verify_identity() is not True:raise ValueError('pinned jog publisher identity changed')
-        after=os.fstat(fd);current=path.stat(follow_symlinks=False)
+        after=os.fstat(fd);current=path.lstat()
         if (after.st_dev,after.st_ino,after.st_size)!=(before.st_dev,before.st_ino,before.st_size) or \
            (current.st_dev,current.st_ino,current.st_size)!=(before.st_dev,before.st_ino,before.st_size):
             raise ValueError('owned jog backing changed during capture')

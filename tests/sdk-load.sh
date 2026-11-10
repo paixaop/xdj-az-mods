@@ -56,13 +56,13 @@ variants = [
     ('failure', 'result == 0 ? load_generation() : 0', '(static_cast<void>(result), load_generation())'),
     ('monotonic', 'if (value <= previous) return false;', 'if (value < previous) return false;'),
     ('late-consume', 'd.pending_id.store(0, std::memory_order_release);\n            std::uint64_t generation', 'std::uint64_t generation'),
-    ('unload-epoch', 'invalidate(d);\n    std::uint32_t id;', '/* deliberately missing invalidation */\n    std::uint32_t id;'),
-    ('retire-epoch', 'Deck &d = decks[deck];\n    invalidate(d);\n    d.unit_generation.store(0, std::memory_order_release);', 'Deck &d = decks[deck];'),
+    ('unload-epoch', 'const auto epoch = invalidate(d);\n#ifdef AZ_STATUS_NATIVE_PRODUCER\n    d.awaiting_empty', 'const auto epoch = d.epoch.load();\n#ifdef AZ_STATUS_NATIVE_PRODUCER\n    d.awaiting_empty'),
+    ('retire-epoch', 'const auto epoch = invalidate(d);\n#ifdef AZ_STATUS_NATIVE_PRODUCER\n    status_load(deck', 'const auto epoch = d.epoch.load();\n#ifdef AZ_STATUS_NATIVE_PRODUCER\n    status_load(deck'),
     ('partial-ack', 'return acknowledged.load(std::memory_order_acquire) && expected &&', 'return expected &&'),
     ('original-order', 'if (!expected) {\n        expected = current;\n        __atomic_store_n(original, expected, __ATOMIC_RELEASE);\n    }', 'if (!expected) expected = current;'),
     ('native-entry', 'if ((current != hook && current != verified) || (expected && expected != verified)) return false;', 'static_cast<void>(verified);'),
     ('configure-order', 'std::lock_guard<std::mutex> lock(management);\n        enabled.store(0, std::memory_order_release);', 'std::lock_guard<std::mutex> lock(management);'),
-    ('unknown-load', 'if (!native_id(option, id)) {\n        d.poison.store(1, std::memory_order_release);\n        return;\n    }', 'if (!native_id(option, id)) return;'),
+    ('unknown-load', '        d.poison.store(1, std::memory_order_release);\n        return;\n    }\n#ifdef AZ_STATUS_NATIVE_PRODUCER\n    status_load', '        return;\n    }\n#ifdef AZ_STATUS_NATIVE_PRODUCER\n    status_load'),
     ('unknown-unload', 'else d.poison.store(1, std::memory_order_release);', 'else {}'),
     ('shared-listener', 'if (owner < kDecks) {\n            decks[owner].poison.store(1, std::memory_order_release);\n            invalidate(decks[owner]);\n        }', 'static_cast<void>(owner);'),
     ('short-name', 'for (std::size_t i = 0; i < bytes; ++i)\n        if (actual[i] != expected[i]) return 0;', 'if (std::memcmp(const_cast<const char *>(actual), expected, bytes)) return 0;'),
@@ -70,6 +70,9 @@ variants = [
 for name, old, new in variants:
     assert source.count(old) == 1, (name, source.count(old))
     changed = source.replace(old, new)
+    if name == 'retire-epoch':
+        begin = changed.index('extern "C" void azsdk_load_retire')
+        changed = changed[:begin] + changed[begin:].replace('d.unit_generation.store(0, std::memory_order_release);', '/* retired unit deliberately kept live */', 1)
     if name == 'request-id':
         inner = 'd.pending_id.load(std::memory_order_acquire) == std::uint64_t(id) + 1'
         assert changed.count(inner) == 1

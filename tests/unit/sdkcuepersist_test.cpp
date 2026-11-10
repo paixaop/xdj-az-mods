@@ -112,8 +112,8 @@ uint64_t full_hash(const azcuepersist_witness &w) {
     uint64_t hash = 1469598103934665603ULL;
     auto mix = [&](const void *p, size_t n) {const auto*b=static_cast<const unsigned char *>(p);for(size_t i=0;i<n;++i)hash=(hash^b[i])*1099511628211ULL; };
     mix(w.source_id, 12);
-    uintptr_t mb = getword(reinterpret_cast<void *>(w.memory_content), 0x28), me = getword(reinterpret_cast<void *>(w.memory_content), 0x30);
-    uintptr_t hb = getword(reinterpret_cast<void *>(w.hot_content), 0x28), he = getword(reinterpret_cast<void *>(w.hot_content), 0x30);
+    uintptr_t mb = w.memory_content ? getword(reinterpret_cast<void *>(w.memory_content), 0x28) : 0, me = w.memory_content ? getword(reinterpret_cast<void *>(w.memory_content), 0x30) : 0;
+    uintptr_t hb = w.hot_content ? getword(reinterpret_cast<void *>(w.hot_content), 0x28) : 0, he = w.hot_content ? getword(reinterpret_cast<void *>(w.hot_content), 0x30) : 0;
     uint64_t count = (me - mb) / 0x80;
     mix(&count, 8);
     mix(reinterpret_cast<void *>(mb), me - mb);
@@ -248,6 +248,11 @@ void native_request(void *owner, const void *record) {
         std::memcpy(handler.bytes + 0xb0, &zero, 4);
         handler.bytes[0x60] = 0;
         handler.bytes[0xb4] = 0;
+    }
+    if (current_operation == AZ_CMD_CUE_POINT_SET || current_operation == AZ_CMD_CUE_LOOP_SET) {
+        // Both stock serializers drop Property labels before repository work.
+        std::free(reinterpret_cast<void *>(getword(handler.bytes, 0xa8)));
+        setword(handler.bytes, 0xa8, reinterpret_cast<uintptr_t>(::strdup("")));
     }
     assert(handler_entry(handler.bytes));
     if (helper_cue_owned) destroy_row(helper_cue.bytes);
@@ -719,6 +724,29 @@ int main() {
         assert(submit(&r, maintainer.bytes, maintainer.bytes, 0, property.bytes, 7) == AZ_PENDING);
         finish(r, AZ_COMMAND_APPLIED);
     }
+    // Independently exercise the production repository guard. Even if an owner
+    // snapshot were stale, creation cannot call the native write helper on an
+    // occupied Hot slot or an already-full Memory collection.
+    for(unsigned kind : {0u,1u}) {
+        r=request(AZ_CMD_CUE_POINT_SET,token++);r.entry_id=kind;
+        r.classification=kind?AZ_CUE_HOT:AZ_CUE_MEMORY;
+        r.flags|=AZ_COMMAND_NATIVE_CUE_IDS;r.position_s=4;
+        std::strcpy(r.comment,"Create UTF8 \342\234\223");r.rgb=0x00c3ff;
+        assert(submit(&r,maintainer.bytes,maintainer.bytes,kind,property.bytes,7)==AZ_PENDING);
+        assert(observed_comment==r.comment && observed_color==(0xff000000u|r.rgb) && allocations==destructions);
+        helper_pending=true;unsigned before_calls=helper_calls;
+        run_helper(1);assert(helper_calls==before_calls);
+        finish(r,AZ_COMMAND_UNCERTAIN);
+    }
+    // Missing baseline roots may bind only a newly created EMPTY native set.
+    // A raced nonempty repository set must refuse before its native helper.
+    r=request(AZ_CMD_CUE_POINT_SET,token++);r.entry_id=1;r.classification=AZ_CUE_HOT;
+    r.flags|=AZ_COMMAND_NATIVE_CUE_IDS;r.position_s=4;
+    auto absent=witness();absent.memory_set=absent.hot_set=absent.memory_content=absent.hot_content=0;
+    absent.fingerprint=full_hash(absent);current_operation=r.operation;
+    assert(azsdk_cue_persist_submit(&r,maintainer.bytes,maintainer.bytes,1,property.bytes,7,&absent)==AZ_PENDING);
+    helper_pending=true;unsigned before_calls=helper_calls;
+    run_helper(1);assert(helper_calls==before_calls);finish(r,AZ_COMMAND_UNCERTAIN);
     if (helper_cue_owned) destroy_row(helper_cue.bytes);
     for (auto content : owned_contents) {
         uintptr_t v[3];
@@ -729,3 +757,5 @@ int main() {
     ref_releases += 2; /* final fixture publication roots */
     assert(ref_copies == ref_releases);
 }
+
+extern "C" void azsdk_cue_commands_persist_retired(unsigned, uint64_t) noexcept {}

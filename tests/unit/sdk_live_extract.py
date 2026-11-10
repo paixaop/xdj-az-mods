@@ -40,14 +40,17 @@ for name in ('sync-export', 'sync-export-size', 'sync-export-version'):
 s = (root / 'src/azstem/stem_playback.c').read_text()
 a = s.index('static _Atomic(void *) g_ls_self[NDECK];')
 # Match the same published/development boundary used by tests/unit/run.sh.
-m = re.search(r'^#ifndef AZMOD_RELEASE /\* the path scan|^static int is_dir\(const char \*p\) \{', s[a:], re.M)
+m = re.search(r'^static DIR \*stem_opendir\(|^#ifndef AZMOD_RELEASE /\* the path scan|^static int is_dir\(const char \*p\) \{', s[a:], re.M)
 assert m
 lifetime = s[a:a + m.start()]
 s = (root / 'src/azstem/deck_track_map.c').read_text()
 a = s.index('/* ---- DjPlayerUnit ctor hook'); b = s.index('static int lti_id_zero(', a)
 lifetime += s[a:b]
 (out / 'live-lifetime.inc').write_text(lifetime)
-control(lifetime, 'live-lifetime-register', '(void) azsdk_live_register((int) n32, self);', '(void) 0;')
+legacy_register = re.search(r'if \(g_sdk_live_on && \(claimed \|\| exp == self\) &&\n'
+                            r'[^\n]*\n\s*\(void\)\s*azsdk_live_register\(\(int\)\s*n32,\s*self\);', lifetime)
+assert legacy_register
+control(lifetime, 'live-lifetime-register', legacy_register.group(), '(void) 0;')
 control(lifetime, 'live-lifetime-retire', 'if (g_sdk_live_on) azsdk_live_retire(d);', '(void) 0;')
 
 s = (root / 'src/azstem/azstem.c').read_text()

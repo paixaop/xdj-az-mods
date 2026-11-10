@@ -90,7 +90,7 @@ static void malformed_submissions(void) {
         case 0: bad.size--; break;
         case 1: bad.version++; break;
         case 2: bad.operation = 0; break;
-        case 3: bad.operation = AZ_CMD_CUE_COLOR + 1; break;
+        case 3: bad.operation = AZ_CMD_CUE_LOOP_SET + 1; break;
         case 4: bad.deck = 4; break;
         case 5: bad.request_id = 0; break;
         case 6: bad.expected_load_generation = 0; break;

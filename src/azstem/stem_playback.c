@@ -91,6 +91,7 @@ static pthread_mutex_t g_adv_lock = PTHREAD_MUTEX_INITIALIZER;
  * matched case-insensitively by substring ("instruments" -> slot 1, other/INST).
  * Each .ogg is decoded to interleaved stereo f32 @44100 and mlock'd. */
 
+static pthread_mutex_t g_stems_base_mu = PTHREAD_MUTEX_INITIALIZER;
 static char g_stems_base[512]; /* discovered .../MixRack-stems dir, "" if none (shared) */
 
 /* Per-deck gui::LoadState, captured by lsctor_hook (the ctor receives the deck).
@@ -151,6 +152,20 @@ static void ls_wait_readers(int deck) {
     atomic_thread_fence(memory_order_acquire); /* the readers' loads happen before the teardown */
 }
 
+/* A failed lookup may hide a stem. Only a completed discovery can report
+ * absence to the status SDK. The legacy loader still accepts partial searches. */
+static DIR *stem_opendir(const char *path, int *complete) {
+    DIR *d = opendir(path);
+    if (!d && complete && errno != ENOENT && errno != ENOTDIR) *complete = 0;
+    return d;
+}
+static struct dirent *stem_readdir(DIR *d, int *complete) {
+    if (!complete) return readdir(d);
+    errno = 0;
+    struct dirent *entry = readdir(d);
+    if (!entry && errno) *complete = 0;
+    return entry;
+}
 static int is_dir(const char *p) {
     struct stat st;
     return (stat(p, &st) == 0 && S_ISDIR(st.st_mode));
@@ -179,13 +194,13 @@ static int dir_has_entries(const char *p) {
     return n;
 }
 /* <parent>/<name>, case-insensitive, directory only. */
-static int child_named(const char *parent, const char *name, char *out, size_t outsz) {
-    DIR *d = opendir(parent);
+static int child_named_checked(const char *parent, const char *name, char *out, size_t outsz, int *complete) {
+    DIR *d = stem_opendir(parent,complete);
     if (!d)
         return 0;
     struct dirent *de;
     int found = 0;
-    while ((de = readdir(d))) {
+    while ((de = stem_readdir(d,complete))) {
         if (de->d_name[0] == '.')
             continue;
         if (strcasecmp(de->d_name, name))
@@ -197,6 +212,9 @@ static int child_named(const char *parent, const char *name, char *out, size_t o
     }
     closedir(d);
     return found;
+}
+static int child_named(const char *parent, const char *name, char *out, size_t outsz) {
+    return child_named_checked(parent,name,out,outsz,NULL);
 }
 static int root_has_stems(const char *root, char *out, size_t outsz) {
     char p[1024];
@@ -866,10 +884,10 @@ static char **nl_get(const char *base, int *n) {
     return g_nl[k].names;
 }
 static int find_track_folder_any_c(const char *track, const char *src, char *folder, size_t sz,
-                                   int *ident, int cached);
+                                   int *ident, int cached, int *complete);
 static int find_track_folder_any(const char *track, const char *src, char *folder, size_t sz,
                                  int *ident) {
-    return find_track_folder_any_c(track, src, folder, sz, ident, 0);
+    return find_track_folder_any_c(track, src, folder, sz, ident, 0, NULL);
 }
 /* Find the stems folder for `track` across every mounted stick and both layouts.
  * A folder made from a different file is never taken (stem_folder_identity).
@@ -880,7 +898,11 @@ static int find_track_folder_any(const char *track, const char *src, char *folde
  *   4. STEMS/ before legacy MixRack.
  * Read-only. Off-RT. Returns 1 and fills `folder`. */
 static int find_track_folder_any_c(const char *track, const char *src, char *folder, size_t sz,
-                                   int *ident, int cached) {
+                                   int *ident, int cached, int *complete) {
+    char extra_base[sizeof g_stems_base];
+    pthread_mutex_lock(&g_stems_base_mu);
+    memcpy(extra_base,g_stems_base,sizeof extra_base);
+    pthread_mutex_unlock(&g_stems_base_mu);
     folder[0] = 0;
     *ident = 0;
     if (!track || !track[0])
@@ -893,11 +915,11 @@ static int find_track_folder_any_c(const char *track, const char *src, char *fol
     if (sid.size < 0)
         logln("ogg: identity of '%s' unchecked (file '%s' unknown)", track, src ? src : "");
     for (size_t r = 0; r < sizeof sroots / sizeof sroots[0]; r++) {
-        DIR *rd = opendir(sroots[r]);
+        DIR *rd = stem_opendir(sroots[r],complete);
         if (!rd)
             continue;
         struct dirent *rde;
-        while ((rde = readdir(rd))) {
+        while ((rde = stem_readdir(rd,complete))) {
             if (rde->d_name[0] == '.')
                 continue;
             char stick[512];
@@ -907,7 +929,7 @@ static int find_track_folder_any_c(const char *track, const char *src, char *fol
             for (int layout = 0; layout < 2; layout++) {
                 char base[1024];
                 if (layout == 0) {
-                    if (!child_named(stick, "STEMS", base, sizeof base))
+                    if (!child_named_checked(stick, "STEMS", base, sizeof base,complete))
                         continue;
                 } else
                     snprintf(base, sizeof base, "%s/_MixRack_library/MixRack-stems", stick);
@@ -922,7 +944,7 @@ static int find_track_folder_any_c(const char *track, const char *src, char *fol
                         pthread_mutex_unlock(&g_nl_mu);
                         continue;
                     }
-                } else if (!(d = opendir(base)))
+                } else if (!(d = stem_opendir(base,complete)))
                     continue;
                 for (;;) {
                     const char *dn;
@@ -931,7 +953,7 @@ static int find_track_folder_any_c(const char *track, const char *src, char *fol
                             break;
                         dn = nl[ni++];
                     } else {
-                        if (!(de = readdir(d)))
+                        if (!(de = stem_readdir(d,complete)))
                             break;
                         dn = de->d_name;
                     }
@@ -965,20 +987,20 @@ static int find_track_folder_any_c(const char *track, const char *src, char *fol
         }
         closedir(rd);
     }
-    /* g_stems_base covers a base outside the mount roots above (env / control file) */
-    if (!folder[0] && g_stems_base[0]) {
+    /* extra_base covers a base outside the mount roots above (env / control file) */
+    if (!folder[0] && extra_base[0]) {
         DIR *d = 0;
         struct dirent *de;
         char **nl = 0;
         int nn = 0, ni = 0, ok;
         if (cached) {
             pthread_mutex_lock(&g_nl_mu);
-            nl = nl_get(g_stems_base, &nn);
+            nl = nl_get(extra_base, &nn);
             ok = nl != 0;
             if (!ok)
                 pthread_mutex_unlock(&g_nl_mu);
         } else
-            ok = (d = opendir(g_stems_base)) != 0;
+            ok = (d = stem_opendir(extra_base,complete)) != 0;
         if (ok) {
             for (;;) {
                 const char *dn;
@@ -987,7 +1009,7 @@ static int find_track_folder_any_c(const char *track, const char *src, char *fol
                         break;
                     dn = nl[ni++];
                 } else {
-                    if (!(de = readdir(d)))
+                    if (!(de = stem_readdir(d,complete)))
                         break;
                     dn = de->d_name;
                 }
@@ -997,7 +1019,7 @@ static int find_track_folder_any_c(const char *track, const char *src, char *fol
                 if (rank < 0)
                     continue;
                 char p[1600];
-                snprintf(p, sizeof p, "%s/%s", g_stems_base, dn);
+                snprintf(p, sizeof p, "%s/%s", extra_base, dn);
                 if (!is_dir(p))
                     continue;
                 int id = stem_folder_identity(p, &sid);
@@ -1037,11 +1059,39 @@ int azstem_has_stems(const char *abs_path) {
         *dot = 0;
     char folder[1024];
     int ident;
-    return find_track_folder_any_c(key, abs_path, folder, sizeof folder, &ident, 1)
+    return find_track_folder_any_c(key, abs_path, folder, sizeof folder, &ident, 1, NULL)
                ? 1
                : 0; /* cached name lists */
 }
 
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+static int status_stem_probe(const char *src, int *available) {
+    char key[256], folder[1024];
+    const char *base=strrchr(src,'/');
+    struct stat start,end;
+    if (!base || !base[1] || strlen(base+1)>=sizeof key || stat(src,&start)!=0 || !S_ISREG(start.st_mode))
+        return AZ_AVAIL_STALE;
+    strcpy(key,base+1);
+    char *ext=strrchr(key,'.');
+    if (ext) *ext=0;
+    int ident=0, complete=1, found=0;
+    if (find_track_folder_any_c(key,src,folder,sizeof folder,&ident,0,&complete)) {
+        DIR *d=stem_opendir(folder,&complete);
+        if (!d) return AZ_AVAIL_STALE;
+        struct dirent *de;
+        while ((de=stem_readdir(d,&complete)))
+            if (de->d_name[0]!='.' && has_ogg_ext(de->d_name) && slot_for_filename(de->d_name)>=0) found=1;
+        closedir(d);
+        /* A same-name folder without a matching file fingerprint is not a
+         * qualified positive until this engine actually decodes it for src. */
+        if (found && !ident) return AZ_AVAIL_LOADING;
+    }
+    if (!complete || stat(src,&end)!=0 || start.st_dev!=end.st_dev || start.st_ino!=end.st_ino ||
+        start.st_size!=end.st_size || start.st_mtime!=end.st_mtime) return AZ_AVAIL_STALE;
+    *available=found;
+    return AZ_AVAIL_READY;
+}
+#endif
 /* Exported for azmod's stem pads and tiles: which stems the deck's track has,
  * bit k = slot k (0 vocals, 1 other, 2 bass, 3 drums), i.e. found and not failed
  * to decode. 0 = unknown or none; the caller then hides nothing. Atomic loads
@@ -1406,6 +1456,9 @@ typedef struct {
     int deck;
     char track[256];
     char src[600];
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    struct azn_stem_job status_job;
+#endif
 } loadjob_t;
 static void *loader_thread(void *arg) {
     loadjob_t *j = arg;
@@ -1434,6 +1487,9 @@ static void *loader_thread(void *arg) {
         snprintf(g_dk[j->deck].loaded_track, sizeof g_dk[j->deck].loaded_track, "%s", j->track);
         logln("no stems d%d for '%s' -- passthrough", j->deck, g_dk[j->deck].loaded_track);
     }
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    azn_stems_decoded((unsigned)j->deck,j->status_job,j->src,ok);
+#endif
     int d = j->deck; /* read before the free: j is not valid after it */
     free(j);
     atomic_store_explicit(&g_stem_loading[d], 0, memory_order_relaxed);
@@ -1501,7 +1557,17 @@ static void start_load(int deck, const char *tr) {
         return;
     j->deck = deck;
     snprintf(j->track, sizeof j->track, "%s", tr);
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    struct azsdk_load_sample before={0}, after={0};
+    j->status_job=(struct azn_stem_job){0};
+    int matched=azsdk_load_read(deck,&before);
+#endif
     loaded_track_path(deck, j->src, sizeof j->src);
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    if (matched && azsdk_load_read(deck,&after) && before.load_generation==after.load_generation &&
+        before.invalidation_epoch==after.invalidation_epoch && before.unit_generation==after.unit_generation)
+        j->status_job=azn_stems_job((unsigned)deck,before.load_generation,j->src);
+#endif
     atomic_store_explicit(&g_stem_loading[deck], 1, memory_order_relaxed);
     pthread_t th;
     if (az_thread_create(&th, NULL, loader_thread, j) == 0)
@@ -1517,7 +1583,16 @@ static void stems_tick(void) {
     if (!g_stems_base[0]) {
         static int discover_skip = 0;
         if (discover_skip <= 0) {
-            find_stems_base(g_stems_base, sizeof g_stems_base);
+            char candidate[sizeof g_stems_base] = {0};
+            find_stems_base(candidate, sizeof candidate);
+            if (candidate[0]) {
+                pthread_mutex_lock(&g_stems_base_mu);
+                memcpy(g_stems_base,candidate,sizeof g_stems_base);
+                pthread_mutex_unlock(&g_stems_base_mu);
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+                azn_stems_rescan();
+#endif
+            }
             discover_skip = 25;
         } else
             discover_skip--;

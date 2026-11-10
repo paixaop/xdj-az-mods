@@ -171,7 +171,7 @@ class Build:
                       "flags": ("sdkobserverflags_test.c", "OBSERVER_FLAGS_INC", "observer-flags")}
         for mode in ("plain", "asan", "tsan"):
             self.compile("ext-time-samples-" + mode, [self.fixture("sdksampletime_test.cpp")], mode, cpp=True,
-                         extra=[self.macro("SAMPLE_TIME_IMPL", timing / "sample.inc")], links=["-lm"])
+                         extra=common_inc + [self.macro("SAMPLE_TIME_IMPL", timing / "sample.inc")], links=["-lm"])
             binary = self.compile("ext-time-contract-" + mode, [self.fixture("sdktime_test.c")], mode,
                                   extra=mod_inc + [self.macro("INPUT_TIME_IMPL", timing / "input-time.inc")], links=["-lm"], run=False)
             for kind in ("clock", "budget", "elapsed", "grid", "interval"):
@@ -205,7 +205,7 @@ class Build:
                              cpp=True, extra=common_inc + mod_inc + hidden + (["-DAZSDK_NATIVE_COMMANDS_TESTING"] if testing else []))
         for name in TIME_CPP:
             self.compile("ext-time-" + name + "-control", [self.fixture("sdksampletime_test.cpp")], cpp=True,
-                         extra=[self.macro("SAMPLE_TIME_IMPL", timing / (name + ".inc"))], links=["-lm"], diagnostic=ASSERTION)
+                         extra=common_inc + [self.macro("SAMPLE_TIME_IMPL", timing / (name + ".inc"))], links=["-lm"], diagnostic=ASSERTION)
         for name in TIME_INPUT + TIME_ENGINE:
             include = mod_inc if name in TIME_INPUT else ["-I" + str(timing / name)]
             self.compile("ext-time-" + name + "-control", [self.fixture("sdktime_test.c")],
@@ -223,10 +223,10 @@ class Build:
                                          self.macro("SDK_COMMAND_IMPL", command / name / "sdk_command.c")], links=["-lm"], diagnostic=ASSERTION)
         for name in STORED:
             self.compile("ext-stored-" + name + "-control", [self.fixture("sdkstored_test.c")],
-                         extra=["-I" + str(stored / name)], links=["-lm"], diagnostic="FAIL stored:")
+                         extra=["-I" + str(stored / name)] + mod_inc, links=["-lm"], diagnostic="FAIL stored:")
         for name in MONO_STORED:
             self.compile("ext-stored-" + name + "-control", [self.fixture("sdkmonopreview_test.c")],
-                         extra=["-I" + str(stored / name)], links=["-lm"], diagnostic=ASSERTION)
+                         extra=["-I" + str(stored / name)] + mod_inc, links=["-lm"], diagnostic=ASSERTION)
         for name in LIVE_C:
             service = "sync-export" if name.startswith("sync-export-") else "export"
             for candidate in ("deck", "lifetime", "probe"):

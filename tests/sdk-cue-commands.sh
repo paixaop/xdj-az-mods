@@ -8,6 +8,8 @@ flags=(-DAZSDK_CUE_COMMANDS_TESTING -std=c++11 -O1 -g -Wall -Wextra -Werror -pth
 selection=()
 case ${1:-all} in
 all) ;;
+create) selection=(create) ;;
+clock) selection=(clock) ;;
 hot-set) selection=(hot-set) ;;
 admission) selection=(admission) ;;
 priority) selection=(priority) ;;
@@ -22,5 +24,5 @@ tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 *) exit 2 ;;
 esac
 "${HOST_CXX:-c++}" "${flags[@]}" src/azstem/sdk_cue_commands.cpp tests/unit/sdkcuecommands_test.cpp -o "$task_tmp/commands"
-if [[ ${1:-all} == all ]]; then "$task_tmp/commands" priority; "$task_tmp/commands" admission; "$task_tmp/commands" selection; "$task_tmp/commands" refresh; fi
+if [[ ${1:-all} == all ]]; then "$task_tmp/commands" clock; "$task_tmp/commands" create; "$task_tmp/commands" priority; "$task_tmp/commands" admission; "$task_tmp/commands" selection; "$task_tmp/commands" refresh; fi
 "$task_tmp/commands" "${selection[@]}"

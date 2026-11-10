@@ -55,8 +55,12 @@ static int azsdk_live_register(int deck, void *unit) {
     return 0;
 }
 static void azsdk_live_retire(int deck) { (void) deck; }
-static int azsdk_cue_register(int deck, void *unit) { (void)deck; (void)unit; return 0; }
-static void azsdk_cue_retire(int deck) { (void)deck; }
+static int azsdk_cue_register(int deck, void *unit) {
+    (void) deck;
+    (void) unit;
+    return 0;
+}
+static void azsdk_cue_retire(int deck) { (void) deck; }
 static _Atomic int g_sdk_load_on;
 static int azsdk_load_register(int deck, void *unit) {
     (void) deck;
@@ -64,7 +68,11 @@ static int azsdk_load_register(int deck, void *unit) {
     return 0;
 }
 static void azsdk_load_retire(int deck) { (void) deck; }
-static int azsdk_exit_register(int deck, void *unit) { (void) deck; (void) unit; return 0; }
+static int azsdk_exit_register(int deck, void *unit) {
+    (void) deck;
+    (void) unit;
+    return 0;
+}
 static void azsdk_exit_retire(int deck) { (void) deck; }
 static void azsdk_exit_retire_complete(unsigned deck, uintptr_t unit) {
     (void) deck;

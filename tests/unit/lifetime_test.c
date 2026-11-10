@@ -61,7 +61,7 @@ static void *cue_completed_ctor;
 static int azsdk_cue_register(int deck, void *unit) {
     ++cue_registrations;
     cue_bad_owner |= atomic_load(&g_deck_self[STEM_SLOT[deck]]) != unit;
-    cue_bad_owner |= *(uintptr_t *)unit != atomic_load(&g_djpu_vt) || cue_completed_ctor != unit;
+    cue_bad_owner |= *(uintptr_t *) unit != atomic_load(&g_djpu_vt) || cue_completed_ctor != unit;
     return 1;
 }
 static void azsdk_cue_retire(int deck) { cue_retired_mask |= 1 << deck; }
@@ -70,7 +70,10 @@ static int load_registrations, load_retired_mask, load_bad_owner, load_before_ct
 static void *load_completed_ctor;
 static int azsdk_load_register(int deck, void *unit) {
     load_registrations++;
-    if (deck < 0 || deck >= NDECK) { load_bad_owner = 1; return 0; }
+    if (deck < 0 || deck >= NDECK) {
+        load_bad_owner = 1;
+        return 0;
+    }
     load_bad_owner |= atomic_load(&g_deck_self[STEM_SLOT[deck]]) != unit;
     load_bad_owner |= *(uintptr_t *) unit != atomic_load(&g_djpu_vt);
     load_before_ctor |= load_completed_ctor != unit;
@@ -78,7 +81,9 @@ static int azsdk_load_register(int deck, void *unit) {
 }
 static void azsdk_load_retire(int deck) { load_retired_mask |= 1 << deck; }
 static int azsdk_exit_register(int deck, void *unit) {
-    (void) deck; (void) unit; return 0;
+    (void) deck;
+    (void) unit;
+    return 0;
 }
 static void azsdk_exit_retire(int deck) { (void) deck; }
 static void azsdk_exit_retire_complete(unsigned deck, uintptr_t unit) {

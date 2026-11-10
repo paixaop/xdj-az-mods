@@ -91,7 +91,7 @@ int main() {
     assert(p.store[12].address == 0x1492ce0);
     assert(newer.store[12].address == 0x154e220);
     assert(q.store[12].address == p.store[12].address + 0x10000);
-    assert(sizeof p.store / sizeof p.store[0] == 13);
+    assert(sizeof p.store / sizeof p.store[0] == 15);
     assert(q.persist.request == p.persist.request + 0x10000);
     assert(p.persist.memory_helper == 0x1735238);
     assert(newer.persist.memory_helper == 0x1890808);

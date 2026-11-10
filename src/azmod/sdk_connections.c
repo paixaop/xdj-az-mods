@@ -13,7 +13,7 @@ static int sdk_connections_install_at(uintptr_t entry, void *replacement, void *
 }
 
 static void sdk_connections_at_start(void) {
-    if (!g_sdk_sources_on || access("/home/root/settings/azmod.native-connections.on", F_OK) != 0)
+    if (!g_sdk_sources_on || (!sdk_passive_sources && access("/home/root/settings/azmod.native-connections.on", F_OK) != 0))
         return;
     /* Refusal leaves source diagnostics available but cannot mint connection
      * provenance. There is no retry/reset/uninstall of reachable native hooks.

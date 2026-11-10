@@ -89,6 +89,8 @@ azmod_ttf_menu2
 azmod_ttf_menu_width
 azmod_wave_zoom
 azmod_waveband_rect
+azsdk_cue_commands_drive
+azsdk_exit_command_wake
 close
 dup2
 dup3

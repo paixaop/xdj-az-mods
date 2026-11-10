@@ -17,6 +17,10 @@ struct NativeCue {
 struct NativeProperty {
     alignas(8) unsigned char bytes[0xf8];
 };
+struct NativeString {
+    void *data = nullptr;
+    ~NativeString() {}
+};
 struct Profile {
     void (*copy_source)(uintptr_t *, const uintptr_t *) = nullptr;
     void (*copy_content)(uintptr_t *, const uintptr_t *) = nullptr;
@@ -33,6 +37,9 @@ struct Profile {
     /* Nontrivial 8-byte return storage enforces the native hidden-X8 ABI.
      * This result owns a counted WhereFrom ref, not a PlayerState object. */
     NativePlayer (*where_from)(const void *) = nullptr;
+    NativeString (*string_allocate)(uint64_t) = nullptr;
+    void (*string_destroy)(void *) = nullptr;
+    void (*color_construct)(void *, unsigned, unsigned, unsigned) = nullptr;
 };
 Profile native_profile(int build, uintptr_t bias) noexcept;
 struct RevisionState {
@@ -86,11 +93,19 @@ class Snapshot {
     bool row(size_t ordinal, OwnedCue &) const noexcept;
     bool property(uint32_t entry_id, uint64_t expected_revision, Property &) const noexcept;
     bool current_property(unsigned kind, Property &) const noexcept;
+    uint32_t source_rate() const noexcept;
+    /* Build fresh empty seek variants, then let the native stored-Cue converter
+     * qualify the source and construct any compressed-format seek accessor. */
+    bool timed_property(unsigned kind, double in_s, double out_s, bool loop,
+                        uint32_t rgb, const char *comment, Property &) const noexcept;
+    bool creation_only_changed(const azcuepersist_witness &before, unsigned native_kind,
+                               const Property &expected, uint32_t source_rate,
+                               const char *comment = "", uint32_t rgb = 0) const noexcept;
     /* Exact native persisted timestamp projection; the original stays intact. */
     bool canonical_property(unsigned kind, const Property &, Property &) const noexcept;
     /* Internal borrowed roots/contents, pinned by this Snapshot. The submitter
      * must take its own checked counted refs before this Snapshot is destroyed. */
-    bool content_witness(uint64_t expected_revision, azcuepersist_witness *) const noexcept;
+    bool content_witness(uint64_t expected_revision, azcuepersist_witness *, bool allow_absent = false) const noexcept;
     /* Persistence owns all five before refs through this call. Unknown seek
      * representations fail closed; no truncated public strings are compared. */
     bool auto_only_changed(const azcuepersist_witness &before, uint32_t memory_entry_id, bool desired, uint32_t source_rate) const noexcept;

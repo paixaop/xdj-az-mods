@@ -33,12 +33,10 @@ int main(void) {
     assert(compare_timestamps(UINT64_C(0), UINT64_C(0), 1, 0, 1) == AZ_TIME_INVALID);
     assert(compare_timestamps(UINT64_C(0), UINT64_C(0), 0, 1, 1) == AZ_TIME_INVALID);
     assert(compare_timestamps(UINT64_C(0), UINT64_C(0), 1, 1, 0) == AZ_TIME_INVALID);
-#ifdef __cplusplus
-    __uint128_t wide = __uint128_t(1) << 100;
+    __uint128_t wide = (__uint128_t) 1 << 100;
     assert(compare_timestamps(wide, wide + 1, 1, 1, 2) == AZ_TIME_EQUAL);
     assert(compare_timestamps(wide, wide + 2, 1, 1, 2) == AZ_TIME_BEFORE);
-    assert(compare_timestamps(~__uint128_t(0), __uint128_t(0), 1, 2, UINT64_MAX) == AZ_TIME_AFTER);
-#endif
+    assert(compare_timestamps(~(__uint128_t) 0, (__uint128_t) 0, 1, 2, UINT64_MAX) == AZ_TIME_AFTER);
     unsigned evaluations = 0;
     assert(compare_timestamps(++evaluations, 1u, 1, 1, 1) == AZ_TIME_EQUAL && evaluations == 1);
     puts("PASS shared timestamp comparison: sample rates, windows, symmetric order, boundaries and wide arithmetic");

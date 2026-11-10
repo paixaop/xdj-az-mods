@@ -515,7 +515,7 @@ static void sdk_overlay_place(struct overlay_ctx *c, int layer) {
         struct az_surface *p = &g_sdk_surf[i];
         if (!p->used || p->d.layer != layer)
             continue;
-        int want = p->show && sdk_mod_live(p->mod) && (p->d.views & AZ_VIEW_BIT(view));
+        int want = p->show && sdk_mod_live(p->mod) && sdk_surface_matches_view(p->d.views, view, g_four_deck);
         if (want && p->w.id == None) {
             XSetWindowAttributes a;
             memset(&a, 0, sizeof a);

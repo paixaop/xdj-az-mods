@@ -56,7 +56,7 @@ for name,old,new in [
  (root/(name+'.inc')).write_text(input_time.replace(old,new))
 for name,filename,old,new in [
  ('clock', 'sdk_data_engine.h', 'if (clock_gettime(CLOCK_MONOTONIC, &ts) ||', 'if ((clock_gettime(CLOCK_MONOTONIC, &ts), 0) ||'),
- ('grid', 'sdk_analysis.h', 'if (!isfinite(first) || !isfinite(last) || !isfinite(span) || !(compare_timestamps(span, 0., 1, 1000, 1) == AZ_TIME_AFTER))', 'if (0)'),
+ ('grid', 'sdk_analysis.h', 'if (span_order == AZ_TIME_INVALID || span_order != AZ_TIME_AFTER || !isfinite(span)) return AZ_FAILED;', '(void)span_order;'),
  ('interval', 'sdk_analysis.h', '(source_order == AZ_TIME_EQUAL || fpclassify(playback) != FP_ZERO)', '(fpclassify(playback) != FP_ZERO)'),
 ]:
  target=root/name;target.mkdir()

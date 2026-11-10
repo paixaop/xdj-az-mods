@@ -78,7 +78,13 @@ static int fake_arguments(void *context, const az_command_request *r, const stru
     struct fixture *f = context;
     int error = atomic_load_explicit(&f->argument_error, memory_order_relaxed);
     if (error) return error;
-    if (r->operation == AZ_CMD_LOOP_IN && (r->position_s < 0 || r->position_s > 100)) return AZ_INVALID;
+    if (r->operation == AZ_CMD_LOOP_IN) {
+        /* This synthetic adapter models atomic setters on a 1 kHz source. */
+        int begin = compare_timestamps(r->position_s, 0., 1, 1000, 1);
+        int end = compare_timestamps(r->position_s, 100., 1, 1000, 1);
+        if (begin == AZ_TIME_INVALID || end == AZ_TIME_INVALID || begin == AZ_TIME_BEFORE || end == AZ_TIME_AFTER)
+            return AZ_INVALID;
+    }
     if (r->operation == AZ_CMD_LOOP_LENGTH && !(r->beats > 0)) return AZ_INVALID;
     return AZ_OK;
 }
@@ -152,7 +158,8 @@ static void submit(struct fixture *f, int owner, az_command_request r) {
     enum scmd_detail detail;
     assert(scmd_submit(&f->engine, owner, &r, &f->target[r.deck], &f->adapter, &out, &detail) == AZ_OK);
     assert(out.outcome == AZ_COMMAND_ACCEPTED && out.reason == AZ_PENDING && out.request_id == r.request_id);
-    assert(!out.revision && out.observed_ns == fake_clock(f) && detail == SCMD_DETAIL_NONE);
+    int order = compare_timestamps(out.observed_ns, fake_clock(f), 1000000000, 1000000000, 1);
+    assert(!out.revision && order != AZ_TIME_INVALID && order == AZ_TIME_EQUAL && detail == SCMD_DETAIL_NONE);
 }
 static az_command_result poll(struct fixture *f, int owner, uint64_t id) {
     az_command_result out = result();
@@ -194,7 +201,7 @@ static void contracts(void) {
         case 0: bad.size--; break;
         case 1: bad.version++; break;
         case 2: bad.operation = 0; break;
-        case 3: bad.operation = AZ_CMD_CUE_COLOR + 1; break;
+        case 3: bad.operation = AZ_CMD_CUE_LOOP_SET + 1; break;
         case 4: bad.deck = SCMD_DECKS; break;
         case 5: bad.request_id = 0; break;
         case 6: bad.expected_load_generation = 0; break;
@@ -333,6 +340,7 @@ static void deduplication(void) {
         }
         assert(scmd_submit(&f.engine, 0, &conflict, &f.target[0], &f.adapter, &out, &detail) == AZ_INVALID && detail == SCMD_DETAIL_ID_CONFLICT);
     }
+    r.position_s = r.end_s = -0.0;
     r.size += 16;
     r.comment[20] = 'x';
     assert(scmd_submit(&f.engine, 0, &r, NULL, NULL, &out, NULL) == AZ_OK && out.outcome == AZ_COMMAND_ACCEPTED);

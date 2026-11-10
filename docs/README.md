@@ -27,6 +27,7 @@ interoperate with it.
 | [UPDATES-AND-SIGNING.md](UPDATES-AND-SIGNING.md) | how a mods release travels from the release channel to a deck: the assets, the signed manifest, verification on the deck and in the desktop app, version rules, running a separate channel |
 | [COMMUNITY-MODS-INTERNALS.md](COMMUNITY-MODS-INTERNALS.md) | the deck-side machinery behind Community Mods: the fetcher, its cache and catalog, the install pipeline, the core's checks, quarantine and crash blame |
 | [LIBRARY-EDITING.md](LIBRARY-EDITING.md) | how Playlist Editing changes a rekordbox library on the USB and keeps `exportLibrary.db` and `export.pdb` consistent; the desktop app's backup and repair |
+| [STEMS-DESIGN.md](STEMS-DESIGN.md) | how stems integrates controls, audio and native displays; design lessons, current limitations and service recommendations for the public SDK |
 | [REMOTE-STEMS.md](REMOTE-STEMS.md) | making stems on a computer from the deck: discovery, pairing, the HTTP protocol, the security model |
 
 ## Working on the source

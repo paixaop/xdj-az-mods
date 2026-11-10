@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #include "../common/aztimestamp.h"
+#include "../common/azcuetext.h"
 #include "../common/azcuecommands.h"
 #include "../common/azcueactor.h"
 #include "../common/azcueobserver.h"
@@ -192,32 +193,7 @@ bool property_scalar(const azcuestore::NativeProperty &property, az_cue_entry &o
     }
     return true;
 }
-void copy_utf8_prefix(char (&out)[128], const char *text) {
-    unsigned at = 0;
-    while (at < 127 && text[at]) {
-        unsigned char first = static_cast<unsigned char>(text[at]);
-        unsigned width = first < 0x80 ? 1 : first >= 0xc2 && first <= 0xdf ? 2
-                                        : first >= 0xe0 && first <= 0xef   ? 3
-                                        : first >= 0xf0 && first <= 0xf4   ? 4
-                                                                           : 0;
-        if (!width || width > 127 - at) break;
-        uint32_t code = first & (width == 1 ? 0x7f : (1u << (7 - width)) - 1);
-        bool valid = true;
-        for (unsigned i = 1; i < width; ++i) {
-            unsigned char next = static_cast<unsigned char>(text[at + i]);
-            if ((next & 0xc0) != 0x80) {
-                valid = false;
-                break;
-            }
-            code = (code << 6) | (next & 0x3f);
-        }
-        if (!valid || (width == 2 && code < 0x80) || (width == 3 && code < 0x800) ||
-            (width == 4 && code < 0x10000) || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) break;
-        std::memcpy(out + at, text + at, width);
-        at += width;
-    }
-    out[at] = 0;
-}
+
 /* -1 malformed, 0 native absent HOT slot, 1 populated source-qualified row. */
 int scalar(azcuestore::Snapshot &snapshot, size_t ordinal, az_cue_entry &out,
            azcuestore::Property *selected_property = nullptr) {
@@ -247,7 +223,7 @@ int scalar(azcuestore::Snapshot &snapshot, size_t ordinal, az_cue_entry &out,
     out.valid |= AZ_CUE_AUTO_ACTIVE;
     uintptr_t text = read<uintptr_t>(&cue.native, 0x70);
     if (text) {
-        copy_utf8_prefix(out.comment, reinterpret_cast<const char *>(text));
+        azcue_copy_utf8_prefix(out.comment, reinterpret_cast<const char *>(text));
         out.valid |= AZ_CUE_COMMENT;
     }
     return property_scalar(property.native, out) ? 1 : -1;
@@ -259,6 +235,7 @@ bool snapshot_copy(azcuestore::Snapshot &snapshot, unsigned deck, uint64_t gener
     out.deck = deck;
     out.native_load_generation = generation;
     out.revision = snapshot.revision();
+    out.source_rate_hz = snapshot.source_rate();
     for (size_t i = 0; i < snapshot.count(); ++i) {
         int status = scalar(snapshot, i, out.entries[out.count]);
         if (status < 0) return false;
@@ -297,6 +274,7 @@ bool staged_point(const azcuestore::NativeProperty &property, const az_cue_entry
                                     !std::memcmp(p + 0x88, captured.source_id, 12) &&
                                     compare_timestamps(read<uint64_t>(p, 0x98), captured.out_sample, captured.sample_rate, captured.sample_rate, 1) == AZ_TIME_EQUAL));
 }
+bool creating(unsigned operation);
 int confirm_persist(const azexit_cue_request *request, void *manager, uint64_t cookie, uint64_t *revision, void *) {
     if (!validate_persist(request, manager, cookie, nullptr)) return 0;
     State &s = state();
@@ -340,6 +318,16 @@ int confirm_persist(const azexit_cue_request *request, void *manager, uint64_t c
             if (active != 1) return 0;
         }
     }
+    if (creating(request->operation)) {
+        azcuepersist_witness fresh = {};
+        const unsigned kind = request->classification == AZ_CUE_HOT ? request->entry_id : 0;
+        if (!snapshot.content_witness(snapshot.revision(), &fresh, true) ||
+            !azsdk_cue_persist_confirm_publication(request, &fresh) ||
+            !snapshot.creation_only_changed(pending.before_witness, kind, pending.retained, pending.expected_rate, request->comment, request->rgb)) return 0;
+        publish(deck, copied);
+        *revision = copied.revision;
+        return 1;
+    }
     const az_cue_entry &expected = pending.expected;
     bool exists = false, effect = false;
     for (unsigned i = 0; i < copied.count; ++i) {
@@ -359,6 +347,7 @@ int confirm_persist(const azexit_cue_request *request, void *manager, uint64_t c
     *revision = copied.revision;
     return 1;
 }
+bool creating(unsigned operation) { return operation == AZ_CMD_CUE_POINT_SET || operation == AZ_CMD_CUE_LOOP_SET; }
 bool selector(unsigned operation) {
     return operation == AZ_CMD_SAVED_RECALL || operation == AZ_CMD_SAVED_DELETE || operation == AZ_CMD_SAVED_AUTO ||
            operation == AZ_CMD_MEMORY_RECALL || operation == AZ_CMD_MEMORY_DELETE ||
@@ -385,6 +374,23 @@ int execute(const azexit_cue_request *request, void *manager, azexit_result *res
         pending.persist_ready.store(0, std::memory_order_release);
         pending.cookie.store(0, std::memory_order_release);
         pending.stage.store(0, std::memory_order_release);
+        if (creating(request->operation) && request->classification == AZ_CUE_HOT && rc == AZ_OK && result->outcome == AZ_COMMAND_APPLIED) {
+            // Storage completion is necessary but does not prove the playable
+            // Hot bank. Hydrate that slot on the existing DSP owner handoff.
+            const uint64_t saved_revision = result->revision;
+            int next = azsdk_cue_recall_prepare(request, manager, &pending.retained.native);
+            pending.retained.reset();
+            if (next == AZ_PENDING) {
+                pending.active_request = *request; // publish the operation with this exact bridge token
+                pending.bridge_generation.store(request->identity.load_generation, std::memory_order_relaxed);
+                pending.bridge_revision.store(saved_revision, std::memory_order_relaxed);
+                pending.bridge.store(request->identity.token, std::memory_order_release);
+                if (pending.bridge_ready.load(std::memory_order_acquire) == request->identity.token) azsdk_cue_commands_notify(deck);
+                return AZ_PENDING;
+            }
+            *result = {request->identity.token, request->identity.load_generation, 0, AZ_COMMAND_UNCERTAIN, next};
+            return AZ_OK;
+        }
         pending.retained.reset();
         AutoPlan &plan = pending.automatic;
         if (!plan.active || plan.token != request->identity.token) return rc;
@@ -445,7 +451,8 @@ int execute(const azexit_cue_request *request, void *manager, azexit_result *res
             Cache &cache = s.decks[deck];
             std::lock_guard<std::mutex> lock(cache.mutex);
             if (cache.value.native_load_generation == request->identity.load_generation &&
-                cache.value.revision && cache.value.revision == snapshot.revision()) {
+                cache.value.revision && cache.value.revision == snapshot.revision() &&
+                cache.value.source_rate_hz == snapshot.source_rate()) {
                 if (!current(deck, request->identity.load_generation, nullptr)) return fail(AZ_STALE);
                 cache.observed = now();
                 *result = {request->identity.token, request->identity.load_generation, snapshot.revision(), AZ_COMMAND_APPLIED, AZ_OK};
@@ -509,7 +516,41 @@ int execute(const azexit_cue_request *request, void *manager, azexit_result *res
     azcuestore::Property property;
     azcuestore::OwnedCue selected_stored;
     az_cue_entry expected = {};
-    unsigned kind = hot(request->operation) ? request->entry_id : 0;
+    unsigned kind = (hot(request->operation) || (creating(request->operation) && request->classification == AZ_CUE_HOT)) ? request->entry_id : 0;
+    if (request->operation == AZ_CMD_HOT_CLEAR && (request->flags & AZ_COMMAND_NATIVE_CUE_IDS) &&
+        !(pending.stage_token.load(std::memory_order_acquire) == request->identity.token && pending.stage.load(std::memory_order_acquire) == 2) &&
+        snapshot.revision() != request->expected_revision) return fail(AZ_STALE);
+    if (creating(request->operation)) {
+        if (snapshot.revision() != request->expected_revision) return fail(AZ_STALE);
+        const uint32_t rate = snapshot.source_rate();
+        if (!rate) return fail(AZ_UNSUPPORTED);
+        const int start = compare_timestamps(request->position_s, 0., 1, rate, 1);
+        const int end = compare_timestamps(request->end_s, request->position_s, 1, rate, 1);
+        const int unused = compare_timestamps(request->end_s, 0., 1, rate, 1);
+        if (start == AZ_TIME_INVALID || start == AZ_TIME_BEFORE ||
+            (request->operation == AZ_CMD_CUE_LOOP_SET && (end == AZ_TIME_INVALID || end != AZ_TIME_AFTER)) ||
+            (request->operation == AZ_CMD_CUE_POINT_SET && (unused == AZ_TIME_INVALID || unused != AZ_TIME_EQUAL))) return fail(AZ_INVALID);
+        azcuestore::Property live_hot;
+        if (kind && snapshot.current_property(kind, live_hot)) return fail(AZ_LIMIT);
+        az_native_cue_snapshot stored = {};
+        if (!snapshot_copy(snapshot, deck, request->identity.load_generation, stored)) return fail(AZ_UNSUPPORTED);
+        unsigned memory = 0;
+        for (unsigned i = 0; i < stored.count; ++i) {
+            const az_cue_entry &row = stored.entries[i];
+            if (kind && row.classification == AZ_CUE_HOT && row.slot == kind) return fail(AZ_LIMIT);
+            if (row.classification == AZ_CUE_MEMORY) {
+                ++memory;
+                int equal = compare_timestamps(row.start_s, request->position_s, 1, rate, 1);
+                if (equal == AZ_TIME_INVALID) return fail(AZ_UNSUPPORTED);
+                if (!kind && equal == AZ_TIME_EQUAL) return fail(AZ_LIMIT);
+            }
+        }
+        if (!kind && memory >= 10) return fail(AZ_LIMIT);
+        if (!snapshot.timed_property(kind, request->position_s, request->end_s,
+                                      request->operation == AZ_CMD_CUE_LOOP_SET, request->rgb, request->comment, property) ||
+            !property_scalar(property.native, expected)) return fail(AZ_UNSUPPORTED);
+        expected.classification = request->classification; expected.slot = kind;
+    } else
     if (hot(request->operation) && pending.stage_token.load(std::memory_order_acquire) == request->identity.token && pending.stage.load(std::memory_order_acquire) == 2) {
         if (request->operation == AZ_CMD_HOT_CLEAR) {
             if (!pending.retained.copy_to(property)) return fail(AZ_STALE);
@@ -563,6 +604,7 @@ int execute(const azexit_cue_request *request, void *manager, azexit_result *res
         int rc = azsdk_exit_cue_stage_submit(request);
         if (rc == AZ_PENDING) {
             pending.staged_cue = {};
+            pending.active_request = *request; // publish the operation with this exact bridge token
             pending.bridge_generation.store(request->identity.load_generation, std::memory_order_relaxed);
             pending.bridge_revision.store(0, std::memory_order_relaxed);
             pending.stage_token.store(request->identity.token, std::memory_order_release);
@@ -579,6 +621,7 @@ int execute(const azexit_cue_request *request, void *manager, azexit_result *res
         if (rc == AZ_PENDING) {
             /* DSP serials are a separate namespace. The selected, source-qualified
              * copied property belongs to this exact store snapshot revision. */
+            pending.active_request = *request; // publish the operation with this exact bridge token
             pending.bridge_generation.store(request->identity.load_generation, std::memory_order_relaxed);
             pending.bridge_revision.store(snapshot.revision(), std::memory_order_relaxed);
             pending.bridge.store(request->identity.token, std::memory_order_release);
@@ -597,11 +640,25 @@ int execute(const azexit_cue_request *request, void *manager, azexit_result *res
     expected.start_s = expected.end_s = 0;
     if (!property_scalar(canonical.native, expected)) return fail(AZ_UNSUPPORTED);
     if (request->operation == AZ_CMD_SAVED_SAVE && !(expected.valid & AZ_CUE_END)) return fail(AZ_UNSUPPORTED);
+    if (creating(request->operation)) {
+        const uint32_t rate = snapshot.source_rate();
+        const int start = compare_timestamps(expected.start_s, request->position_s, 1, rate, 1);
+        const int end = compare_timestamps(expected.end_s, request->end_s, 1, rate, 1);
+        if (start == AZ_TIME_INVALID || start != AZ_TIME_EQUAL ||
+            (request->operation == AZ_CMD_CUE_LOOP_SET && (end == AZ_TIME_INVALID || end != AZ_TIME_EQUAL))) return fail(AZ_UNSUPPORTED);
+        // Keep the original native label for live Hot hydration: the stock
+        // Property-to-Cue serializer intentionally emits an empty comment.
+        const int same_in = compare_timestamps(read<uint64_t>(&property.native, 0x40), read<uint64_t>(&canonical.native, 0x40), rate, rate, 1);
+        const int same_out = request->operation == AZ_CMD_CUE_LOOP_SET ?
+            compare_timestamps(read<uint64_t>(&property.native, 0x98), read<uint64_t>(&canonical.native, 0x98), rate, rate, 1) : AZ_TIME_EQUAL;
+        if (same_in == AZ_TIME_INVALID || same_in != AZ_TIME_EQUAL ||
+            (request->operation == AZ_CMD_CUE_LOOP_SET && (same_out == AZ_TIME_INVALID || same_out != AZ_TIME_EQUAL))) return fail(AZ_UNSUPPORTED);
+    }
     azcuepersist_witness witness = {};
     const azcuepersist_witness *selected_witness = nullptr;
-    if (request->operation == AZ_CMD_SAVED_AUTO || request->operation == AZ_CMD_CUE_COMMENT || request->operation == AZ_CMD_CUE_COLOR || request->operation == AZ_CMD_HOT_SET) {
+    if (request->operation == AZ_CMD_SAVED_AUTO || request->operation == AZ_CMD_CUE_COMMENT || request->operation == AZ_CMD_CUE_COLOR || request->operation == AZ_CMD_HOT_SET || creating(request->operation)) {
         uint64_t revision = request->operation == AZ_CMD_HOT_SET ? snapshot.revision() : native_request->expected_revision;
-        if (!snapshot.content_witness(revision, &witness)) {
+        if (!snapshot.content_witness(revision, &witness, creating(request->operation))) {
             COMMAND_DIAG(*request, 5, "snapshot-witness");
             // HOT_SET's own asynchronous store can publish between the DSP
             // capture and this witness. No repository request exists yet;
@@ -609,12 +666,13 @@ int execute(const azexit_cue_request *request, void *manager, azexit_result *res
             if (awaiting_hot_view) return resume_hot_completion();
             return fail(AZ_STALE);
         }
-        if (request->operation != AZ_CMD_HOT_SET) witness.selected_cue = reinterpret_cast<uintptr_t>(&selected_stored.native);
+        if (request->operation != AZ_CMD_HOT_SET && !creating(request->operation)) witness.selected_cue = reinterpret_cast<uintptr_t>(&selected_stored.native);
         selected_witness = &witness;
         COMMAND_DIAG(*request, 13, "content-witness");
     }
     uint64_t cookie = s.serial.fetch_add(1, std::memory_order_relaxed) + 1;
     if (!cookie || cookie >= INTERNAL) return fail(AZ_UNSUPPORTED);
+    if (creating(request->operation) && !property.copy_to(pending.retained)) return fail(AZ_FAILED);
     pending.expected = expected;
     pending.active_request = *native_request;
     pending.expected_rate = read<uint32_t>(&canonical.native, 0x60);
@@ -640,12 +698,31 @@ int execute(const azexit_cue_request *request, void *manager, azexit_result *res
     return rc;
 }
 
+// Unused coordinate fields are canonical argument encodings, not observations
+// in a source clock. Check their zero representation before source admission.
+bool unused_coordinate(double value) {
+    uint64_t encoded = 0;
+    std::memcpy(&encoded, &value, sizeof encoded);
+    return !(encoded & UINT64_C(0x7fffffffffffffff));
+}
 int valid(const azexit_cue_request *r) {
     if (!r || r->size < sizeof *r || r->identity.deck >= 4 || !r->identity.token ||
         (r->identity.token & INTERNAL) || !r->identity.load_generation || !r->identity.deadline_ns || r->identity.reserved || r->operation >= 64 ||
-        !std::memchr(r->comment, 0, sizeof r->comment) || !std::isfinite(r->position_s) || r->end_s != 0 || r->beats != 0) return AZ_INVALID;
+        !std::memchr(r->comment, 0, sizeof r->comment) || !std::isfinite(r->position_s) || !std::isfinite(r->end_s) || (!creating(r->operation) && !unused_coordinate(r->end_s)) || r->beats != 0) return AZ_INVALID;
     if (!(azsdk_cue_commands_ready(r->identity.deck) & bit(r->operation))) return AZ_UNSUPPORTED;
-    const bool selected = selector(r->operation);
+    if (creating(r->operation)) {
+        if (r->flags != (AZ_COMMAND_PERSIST | AZ_COMMAND_NATIVE_LOAD | AZ_COMMAND_NATIVE_CUE_IDS) || !r->expected_revision ||
+            (r->classification == AZ_CUE_HOT ? (r->entry_id < 1 || r->entry_id > 8) :
+             (r->classification != AZ_CUE_MEMORY || r->entry_id)) || r->rgb > 0xffffff) return AZ_INVALID;
+        if (r->classification == AZ_CUE_MEMORY) {
+            bool palette = false;
+            for (unsigned rgb : {0x000000u,0xff00c6u,0xff0000u,0xff7100u,0xffff00u,0x00e300u,0x00c3ffu,0x0051ffu,0x9c08ffu}) palette = palette || r->rgb == rgb;
+            if (!palette) return AZ_UNSUPPORTED;
+        }
+        return current(r->identity.deck, r->identity.load_generation, nullptr) ? AZ_OK : AZ_STALE;
+    }
+    const bool fenced_clear = r->operation == AZ_CMD_HOT_CLEAR && (r->flags & AZ_COMMAND_NATIVE_CUE_IDS);
+    const bool selected = selector(r->operation) || fenced_clear;
     uint32_t flags = AZ_COMMAND_NATIVE_LOAD | (recall(r->operation) ? 0 : AZ_COMMAND_PERSIST) |
                      (selected ? AZ_COMMAND_NATIVE_CUE_IDS : 0);
     if (r->flags != flags || (selected ? (!r->expected_revision || !r->entry_id || r->entry_id > AZ_NATIVE_CUE_LIMIT) : r->expected_revision != 0)) return AZ_INVALID;
@@ -656,7 +733,7 @@ int valid(const azexit_cue_request *r) {
                (!selected && r->entry_id) || (r->classification == AZ_CUE_HOT && r->entry_id > 8)) return AZ_INVALID;
     if (r->operation == AZ_CMD_SAVED_AUTO) {
         if (r->position_s != 0 && r->position_s != 1) return AZ_INVALID;
-    } else if (r->position_s != 0) return AZ_INVALID;
+    } else if (!unused_coordinate(r->position_s)) return AZ_INVALID;
     if (r->operation != AZ_CMD_CUE_COMMENT && r->comment[0]) return AZ_INVALID;
     if (r->operation == AZ_CMD_HOT_SET || r->operation == AZ_CMD_CUE_COLOR) {
         if (r->rgb > 0xffffff) return AZ_INVALID;
@@ -719,7 +796,7 @@ extern "C" uint64_t azsdk_cue_commands_commands(void) noexcept {
     return mask;
 }
 extern "C" int azsdk_cue_commands_native_cues(unsigned deck, az_native_cue_snapshot *out) noexcept {
-    if (deck >= 4 || !out || out->size < sizeof *out) return AZ_INVALID;
+    if (deck >= 4 || !out || out->size < AZ_NATIVE_CUE_SNAPSHOT_V1_SIZE) return AZ_INVALID;
     Cache &cache = state().decks[deck];
     std::unique_lock<std::mutex> lock(cache.mutex, std::try_to_lock);
     if (!lock.owns_lock()) {
@@ -728,9 +805,10 @@ extern "C" int azsdk_cue_commands_native_cues(unsigned deck, az_native_cue_snaps
     }
     int rc = AZ_STALE;
     if (cache.value.revision && current(deck, cache.value.native_load_generation, nullptr)) {
-        uint32_t size = out->size;
-        *out = cache.value;
-        out->size = size;
+        const uint32_t size = out->size;
+        az_native_cue_snapshot value = cache.value;
+        value.size = size;
+        std::memcpy(out, &value, size < sizeof value ? size : sizeof value);
         rc = AZ_OK;
     }
     lock.unlock();
@@ -749,7 +827,7 @@ extern "C" int azsdk_cue_commands_target_cue(unsigned deck, azexit_cue_target *o
         target.revision = snapshot.revision;
         target.revision_valid = 1;
         for (unsigned operation = 1; operation < 64; ++operation)
-            if (selector(operation)) target.revision_commands |= azsdk_cue_commands_commands() & bit(operation);
+            if (selector(operation) || creating(operation)) target.revision_commands |= azsdk_cue_commands_commands() & bit(operation);
     }
     azsdk_load_sample load = {};
     if (!azsdk_load_read(int(deck), &load)) return AZ_STALE;
@@ -796,6 +874,12 @@ extern "C" int azsdk_cue_commands_cancel(unsigned deck, uint64_t token) noexcept
     if (pending.bridge.load(std::memory_order_acquire) == token) {
         int rc = azsdk_exit_recall_cancel(deck, token);
         if (rc != AZ_OK) return rc;
+        if (creating(pending.active_request.operation)) {
+            // Its storage receipt already proved an effect. Keep the actor
+            // until the cancelled Hot handoff is collected as UNCERTAIN.
+            azsdk_cue_commands_notify(deck);
+            return AZ_PENDING;
+        }
     }
     if ((pending.cookie.load(std::memory_order_acquire) && pending.token.load(std::memory_order_acquire) == token) ||
         (pending.stage_token.load(std::memory_order_acquire) == token && pending.stage.load(std::memory_order_acquire) == 2)) {
@@ -865,6 +949,8 @@ extern "C" void azsdk_cue_commands_tick(void) noexcept {
                     result.revision = 0;
                     result.outcome = AZ_COMMAND_UNCERTAIN;
                     result.reason = AZ_STALE;
+                } else if (creating(pending.active_request.operation) && result.outcome != AZ_COMMAND_APPLIED) {
+                    result.outcome = AZ_COMMAND_UNCERTAIN;
                 } else if (result.outcome == AZ_COMMAND_APPLIED) {
                     uint64_t revision = pending.bridge_revision.load(std::memory_order_acquire);
                     if (revision) result.revision = revision;

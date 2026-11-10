@@ -5,6 +5,12 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include "../common/azstatus_source.h"
+/* Source-stage observers are optional in the standalone owner/ABI fixtures. */
+#pragma weak azjs_server
+#pragma weak azjs_ticket
+#pragma weak azjs_ticket_return
+#pragma weak azjs_reception
 #include "../common/azsources.h"
 #include "../common/azcachebirth.h"
 #include "../common/azcachepin.h"
@@ -119,6 +125,7 @@ struct Entry {
     /* Immutable part of this source key. Zero is an incomplete owner
      * diagnostic, never an observed SQLite connection incarnation. */
     std::uint64_t connection_generation = 0;
+    std::uint64_t status_connection_generation = 0;
     azsdk_source_sample sample = {};
     bool retired = false;
 };
@@ -403,7 +410,7 @@ bool supported_name(const SqlProfile &p, const char *name) noexcept {
     return false;
 }
 int capture_physical(std::uintptr_t connection, const SqlProfile &p, const MetadataOps &ops,
-                     azsdk_source_sample &out) {
+                     azsdk_source_sample &out, int *descriptor = nullptr) {
     if (!p.ready || !p.file_control) return AZS_PHYSICAL_PROFILE;
     NativeFile *file = nullptr;
     NativeVFS *vfs = nullptr;
@@ -456,6 +463,7 @@ int capture_physical(std::uintptr_t connection, const SqlProfile &p, const Metad
     out.file_size = static_cast<std::uint64_t>(size);
     out.physical_observed_ns = now_ns();
     out.flags |= AZS_PHYSICAL;
+    if (descriptor) *descriptor = native_fd;
     return AZS_PHYSICAL_OK;
 }
 #endif
@@ -497,6 +505,11 @@ bool live(const Entry &e) noexcept {
      * Cache provenance separately requires an observed nonzero generation. */
     return owner_bound(e) &&
            (!e.connection_generation || connection_generation(e.connection) == e.connection_generation);
+}
+bool status_live(const Entry &e) noexcept {
+    return owner_bound(e) && e.status_connection_generation &&
+        source_state().connection_epochs.status_generation(reinterpret_cast<const void *>(e.connection)) ==
+            e.status_connection_generation;
 }
 azsdk_source_sample scalar_sample(const Entry &e) noexcept {
     auto s = e.sample;
@@ -540,6 +553,8 @@ int observe(std::uintptr_t server, const Build &build, const SqlProfile &sql,
         return AZS_GUARD;
     }
     const auto observed_generation = connection_generation(chain.connection);
+    const auto status_generation = source_state().connection_epochs.status_generation(
+        reinterpret_cast<const void *>(chain.connection));
     Binding *binding = nullptr;
     for (auto &b : source_state().bindings)
         if (b.server == server) {
@@ -553,7 +568,7 @@ int observe(std::uintptr_t server, const Build &build, const SqlProfile &sql,
                 break;
             }
     Entry *entry = nullptr, *empty = nullptr;
-    bool was_observed = false;
+    bool was_observed = false, status_was_observed = false;
     for (auto &e : source_state().entries) {
         if (!e.sample.owner_epoch) {
             if (!empty) empty = &e;
@@ -564,9 +579,11 @@ int observe(std::uintptr_t server, const Build &build, const SqlProfile &sql,
             e.sample.native_media_id != chain.media) continue;
         if (!same_owner(e.mount, mount) || !same_owner(e.database, database)) continue;
         if (e.connection_generation) was_observed = true;
-        if (!entry && e.connection_generation == observed_generation && owner_bound(e)) entry = &e;
+        if (e.status_connection_generation) status_was_observed = true;
+        if (!entry && e.connection_generation == observed_generation &&
+            e.status_connection_generation == status_generation && owner_bound(e)) entry = &e;
     }
-    if (!observed_generation && was_observed) {
+    if ((!observed_generation && was_observed) || (!status_generation && status_was_observed)) {
         /* Unavailability cannot downgrade a known incarnation or permanently
          * retire its key. It may be unrelated active lifecycle work. */
         return AZS_STALE;
@@ -586,6 +603,7 @@ int observe(std::uintptr_t server, const Build &build, const SqlProfile &sql,
         candidate.database_address = chain.database_address;
         candidate.connection = chain.connection;
         candidate.connection_generation = observed_generation;
+        candidate.status_connection_generation = status_generation;
     }
     azsdk_source_sample sample = {};
     sample.struct_size = sizeof sample;
@@ -621,7 +639,9 @@ int observe(std::uintptr_t server, const Build &build, const SqlProfile &sql,
     /* A receipt-only refusal is transient/unknown, not retirement evidence.
      * Actual close/reopen can never make the old positive stamp current again;
      * live() continues to reject it without discarding another source's key. */
-    if (connection_generation(chain.connection) != observed_generation) return AZS_STALE;
+    if (connection_generation(chain.connection) != observed_generation ||
+        source_state().connection_epochs.status_generation(reinterpret_cast<const void *>(chain.connection)) !=
+            status_generation) return AZS_STALE;
     if (!entry) {
         if (bit(source_state().seen_media, chain.media)) set_bit(source_state().ambiguous_media, chain.media);
         set_bit(source_state().seen_media, chain.media);
@@ -673,13 +693,14 @@ const Entry *cache_source_entry(std::uint64_t epoch) noexcept {
         if (entry.sample.owner_epoch == epoch) return &entry;
     return nullptr;
 }
-bool cache_source_is(const cb::SourceBorrow &source, const CachePins &pins) noexcept {
+bool cache_source_is(const cb::SourceBorrow &source, const CachePins &pins, bool for_status = false) noexcept {
     bool bound = false;
     for (const auto &binding : source_state().bindings)
         if (binding.server == reinterpret_cast<std::uintptr_t>(source.server) &&
             binding.epoch == source.source_epoch) { bound = true; break; }
     const Entry *entry = cache_source_entry(source.source_epoch);
-    if (!bound || !entry || !entry->connection_generation || !live(*entry) || !pins.mount || !pins.database ||
+    if (!bound || !entry || (for_status ? !status_live(*entry) : (!entry->connection_generation || !live(*entry))) ||
+        !pins.mount || !pins.database ||
         entry->mount_address != reinterpret_cast<std::uintptr_t>(pins.mount.get()) ||
         entry->database_address != reinterpret_cast<std::uintptr_t>(pins.database.get()) ||
         !same_owner(entry->mount, pins.mount) || !same_owner(entry->database, pins.database)) return false;
@@ -971,6 +992,7 @@ struct CacheLibraryScope {
     std::uint64_t row_selection = 0;
     unsigned depth;
     bool ready = false;
+    bool status_ready = false;
     bool row_valid = false;
     CacheLibraryScope(unsigned build, void *server, const Build &value) noexcept
         : parent(cache_library_scope), source {server, build, 0, &pins.mount, &pins.database}, profile(value),
@@ -991,6 +1013,7 @@ struct CacheLibraryScope {
                 if (binding.server == reinterpret_cast<std::uintptr_t>(server)) {
                     source.source_epoch = binding.epoch;
                     ready = cache_source_is(source, pins);
+                    status_ready = cache_source_is(source, pins, true);
                     break;
                 }
         } catch (...) { ready = false; }
@@ -1185,6 +1208,14 @@ void cache_forward_query(azce_call *call, cb::Forward original) {
 void cache_forward_library_impl(unsigned build, void *server, const Build &profile, cb::Forward original) {
     if (!original.call) return;
     CacheLibraryScope scope(build, server, profile);
+    struct JoinScope {
+        bool enabled;
+        ~JoinScope() { if (enabled) azjs_server(0,0,0,0); }
+    } joining {azjs_server != nullptr};
+    auto packet_key=azsdk_cache_message::take_packet_key(server);
+    if (joining.enabled) azjs_server(scope.status_ready ? packet_key : 0, scope.message.parameter,
+                                     scope.status_ready ? scope.source.source_epoch : 0,1);
+    packet_key=0;
     original.call(original.context); // no SDK lock or observer catch across native work
 }
 void cache_forward_library_route(unsigned build, void *server, const Build &profile, cb::Forward original) {
@@ -1399,6 +1430,20 @@ extern "C" int azsdk_sources_read(std::uint64_t epoch, void *out, std::size_t si
         return AZS_UNKNOWN;
     } catch (...) { return AZS_BUSY; }
 }
+extern "C" int azsdk_sources_status_read(std::uint64_t epoch, void *out, std::size_t size) noexcept {
+    if (!epoch || !output_ok(out, size)) return AZS_INVALID;
+    try {
+        std::unique_lock<std::mutex> lock(source_state().registry_mutex, std::try_to_lock);
+        if (!lock.owns_lock()) return AZS_BUSY;
+        for (const auto &entry : source_state().entries)
+            if (entry.sample.owner_epoch == epoch) {
+                if (!status_live(entry)) return AZS_STALE;
+                copy_output(out, size, entry.sample);
+                return AZS_OK;
+            }
+        return AZS_UNKNOWN;
+    } catch (...) { return AZS_BUSY; }
+}
 extern "C" int azsdk_sources_candidate(std::uint16_t media, void *out, std::size_t size) noexcept {
     if (!media || !output_ok(out, size)) return AZS_INVALID;
     try {
@@ -1439,6 +1484,38 @@ extern "C" unsigned azsdk_sources_sweep() noexcept {
 }
 extern "C" int azsdk_sources_physical_ready() noexcept {
     return source_state().enabled.load(std::memory_order_acquire) && source_state().physical_prepared.load(std::memory_order_acquire);
+}
+extern "C" int azsdk_sources_descriptor_identity(int descriptor, std::uint64_t mount_id,
+                                                 std::uint64_t device, std::uint64_t inode) noexcept {
+#if defined(__linux__)
+    struct stat descriptor_before, descriptor_after;
+    std::uint64_t actual_mount = 0;
+    return descriptor >= 0 && mount_id && inode && !metadata_ops.stat(descriptor, &descriptor_before) &&
+           S_ISREG(descriptor_before.st_mode) && static_cast<std::uint64_t>(descriptor_before.st_dev) == device &&
+           static_cast<std::uint64_t>(descriptor_before.st_ino) == inode &&
+           descriptor_mount_id(descriptor, metadata_ops, actual_mount) && actual_mount == mount_id &&
+           !metadata_ops.stat(descriptor, &descriptor_after) && descriptor_before.st_dev == descriptor_after.st_dev && descriptor_before.st_ino == descriptor_after.st_ino;
+#else
+    (void) descriptor;
+    (void) mount_id;
+    (void) device;
+    (void) inode;
+    return 0;
+#endif
+}
+extern "C" int azsdk_sources_reader_fd(void *connection, std::uint64_t mount_id,
+                                       std::uint64_t device, std::uint64_t inode) noexcept {
+#if defined(__linux__)
+    if (!connection || !mount_id || !inode || !azsdk_sources_physical_ready()) return -1;
+    azsdk_source_sample actual = {};
+    int fd = -1;
+    if (capture_physical(reinterpret_cast<std::uintptr_t>(connection), source_state().sql_profile,
+                         metadata_ops, actual, &fd) == AZS_PHYSICAL_OK &&
+        actual.mount_id == mount_id && actual.device == device && actual.inode == inode) return fd;
+#else
+    (void)connection; (void)mount_id; (void)device; (void)inode;
+#endif
+    return -1;
 }
 extern "C" int azsdk_sources_install_connections(
     azsdk_source_connection_installer installer, void *context) noexcept {
@@ -1687,10 +1764,19 @@ void forward_ticket_owned(azce_call *call, azsdk_cache_birth::Forward original) 
             return_pc = code.return_pc;
         }
     }
+    struct TicketJoin {
+        bool enabled;
+        ~TicketJoin() { if (enabled) azjs_ticket(0,0,0); }
+    } joining {azjs_ticket != nullptr};
+    if (joining.enabled) {
+        std::uintptr_t packet = receiver == &empty ? 0 : load<std::uintptr_t>(ticket + 0x28);
+        azjs_ticket(ticket,packet,1);
+    }
     // Ineligible/nested entries still mask an outer scope while forwarding.
     Scope selected(*receiver, request, return_pc);
     receiver = nullptr;
     selected.forward([&] { original.call(original.context); });
+    if (joining.enabled && call && azjs_ticket_return) azjs_ticket_return(ticket,call->result[0]);
 }
 
 void forward_reception_owned(azce_call *call, azsdk_cache_birth::Forward original) {
@@ -1714,6 +1800,13 @@ void forward_reception_owned(azce_call *call, azsdk_cache_birth::Forward origina
             callback.invocation = current_invocation();
             callback.ready = true;
         }
+    }
+    if (azjs_reception && call && checked_vtable(std::uintptr_t(call->args[0]),
+            "N17trackinfo_stocker22LoadInfoRequestHandler9ReceptionE",3)) {
+        auto receiver = std::uintptr_t(call->args[0]);
+        /* Foreign/unpromoted replies revoke any older pending claim for that pack. */
+        azjs_reception(callback.ready ? receiver : 0,load<std::uint32_t>(receiver+8),
+                       reinterpret_cast<const void *>(call->args[1]));
     }
     original.call(original.context);
 }

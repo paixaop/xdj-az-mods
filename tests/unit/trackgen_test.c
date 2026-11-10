@@ -11,6 +11,7 @@
  *     curtrack publish), so it resets the deck's toggles once, not twice. */
 #include <stdarg.h>
 #include <stdatomic.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -29,6 +30,7 @@ static const int STEM_SLOT[NDECK] = {0, 1, 2, 3};
 static _Atomic unsigned g_deck_trackgen[NDECK];
 static _Atomic int g_stem_pending[NDECK], g_stem_loading[NDECK], g_load_again[NDECK];
 static char g_stems_base[512] = "/media/usb/STEMS";
+static pthread_mutex_t g_stems_base_mu = PTHREAD_MUTEX_INITIALIZER;
 static int g_eject_empty[NDECK];
 static char g_pending_name[NDECK][512], g_loaded_src[NDECK][600], g_pending_src[NDECK][600];
 #define EJECT_EMPTY_TICKS 8

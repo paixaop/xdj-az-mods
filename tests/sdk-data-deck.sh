@@ -54,7 +54,7 @@ a = s.index('    return a->source_id == b->source_id')
 b = s.index('\n}', a)
 open(sys.argv[2], 'w').write(s[:a] + '    return a->track_id==b->track_id;' + s[b:])
 PY
-awk '/^static uint32_t sd_live_fields\(/,/^}/; /^static int sd_deck_snapshot_v1\(/,/^}/' src/azmod/sdk_deck.c > "$tmp/deck.inc"
+awk '/^static int sd_native_load_read\(/,/^}/; /^static int sd_native_cue_read\(/,/^}/; /^static uint32_t sd_live_fields\(/,/^}/; /^static int sd_deck_snapshot_v1\(/,/^}/' src/azmod/sdk_deck.c > "$tmp/deck.inc"
 python3 - "$tmp" <<'PY'
 from pathlib import Path
 import sys

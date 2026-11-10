@@ -48,7 +48,7 @@ class State {
     struct Operation {
         State &state;
         std::uint64_t sequence = 0;
-        bool tracked = false, eligible = false;
+        bool tracked = false, eligible = false, status_eligible = false, close = false;
         Operation(State &s, const void *connection, bool closing) noexcept : state(s) {
             state.enter(*this, connection, closing);
         }
@@ -61,12 +61,16 @@ class State {
     mutable std::mutex mutex_;
     mutable std::atomic<bool> saturated_;
     Entry entries_[Capacity];
+    Entry status_entries_[Capacity];
     std::uint64_t next_generation_ = 0, sequence_ = 0;
-    unsigned active_ = 0;
+    std::uint64_t next_status_generation_ = 0, last_close_ = 0;
+    unsigned active_ = 0, closing_ = 0;
 
     void retire(const void *connection) noexcept {
         if (!connection) return;
         for (auto &entry : entries_)
+            if (entry.connection == connection) entry = Entry {};
+        for (auto &entry : status_entries_)
             if (entry.connection == connection) entry = Entry {};
     }
     void enter(Operation &operation, const void *connection, bool closing) noexcept {
@@ -82,6 +86,9 @@ class State {
             }
             operation.eligible = !closing && active_ == 0;
             operation.sequence = ++sequence_;
+            operation.status_eligible = !closing && !closing_;
+            operation.close = closing;
+            if (closing) { ++closing_; last_close_ = operation.sequence; }
             operation.tracked = true;
             ++active_;
         } catch (...) {
@@ -128,6 +135,23 @@ class State {
                 }
                 /* Capacity refusal never evicts another live incarnation. */
             }
+            /* The traced SQLite allocator may open different libraries on independent
+             * workers. Its successful distinct connection outputs are separate native
+             * objects. A close overlapping this open still makes the birth ambiguous.
+             * Keep this namespace separate from the stricter legacy receipt contract. */
+            if (offer && connection) {
+                Entry *slot = nullptr;
+                bool duplicate_status = false;
+                for (auto &entry : status_entries_) {
+                    if (entry.connection == connection) { entry = Entry {}; duplicate_status = true; }
+                    if (!entry.connection && !slot) slot = &entry;
+                }
+                if (slot && !duplicate_status && !result && operation.status_eligible &&
+                    !closing_ && last_close_ < operation.sequence && next_status_generation_ < MaxGeneration &&
+                    !saturated_.load(std::memory_order_acquire))
+                    *slot = Entry {connection, ++next_status_generation_};
+            }
+            if (operation.close) --closing_;
             --active_;
             operation.tracked = false;
         } catch (...) {
@@ -137,7 +161,7 @@ class State {
     }
 
 public:
-    State() noexcept : saturated_(false), entries_{} {}
+    State() noexcept : saturated_(false), entries_{}, status_entries_{} {}
     State(const State &) = delete;
     State &operator=(const State &) = delete;
 
@@ -191,6 +215,19 @@ public:
             saturated_.store(true, std::memory_order_release);
         }
         return false;
+    }
+    /* Close revokes its own status receipt under this same lock before forwarding.
+     * Other workers may open or close an unrelated connection during this read. */
+    std::uint64_t status_generation(const void *connection) const noexcept {
+        PreserveErrno preserve;
+        if (!connection || saturated_.load(std::memory_order_acquire)) return 0;
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!saturated_.load(std::memory_order_acquire))
+                for (const auto &entry : status_entries_)
+                    if (entry.connection == connection) return entry.generation;
+        } catch (...) { saturated_.store(true, std::memory_order_release); }
+        return 0;
     }
 };
 } // namespace azsdk_connection_epoch

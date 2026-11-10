@@ -44,6 +44,15 @@ int main(void) {
     CHECK("view: source before browse", sdk_view_compute(0, 0, 0, 1, 1) == AZ_VIEW_SOURCE);
     CHECK("view: browse", sdk_view_compute(0, 0, 0, 0, 1) == AZ_VIEW_BROWSE);
     CHECK("view: nothing known is OTHER", sdk_view_compute(0, 0, 0, 0, 0) == AZ_VIEW_OTHER);
+    CHECK("view: two-deck surfaces appear in the two-deck layout",
+          sdk_surface_matches_view(AZ_VIEW_TWO_DECKS, AZ_VIEW_DECK, 0));
+    CHECK("view: two-deck surfaces stay hidden in the four-deck layout",
+          !sdk_surface_matches_view(AZ_VIEW_TWO_DECKS, AZ_VIEW_DECK, 1));
+    CHECK("view: two-deck surfaces stay hidden on other screens",
+          !sdk_surface_matches_view(AZ_VIEW_TWO_DECKS, AZ_VIEW_BROWSE, 0));
+    CHECK("view: general deck surfaces appear in either layout",
+          sdk_surface_matches_view(AZ_VIEW_BIT(AZ_VIEW_DECK), AZ_VIEW_DECK, 0) &&
+              sdk_surface_matches_view(AZ_VIEW_BIT(AZ_VIEW_DECK), AZ_VIEW_DECK, 1));
 
     /* 2. descriptors */
     az_surface_v1 ok = {sizeof(az_surface_v1), AZ_LAYER_TOP, AZ_VIEW_BIT(AZ_VIEW_DECK), paint, NULL, NULL};

@@ -1305,8 +1305,10 @@ static struct {
 static uint64_t cm_tempo_event_next(int d) {
     uint64_t old = atomic_load_explicit(&g_cm_tempo_event[d], memory_order_relaxed);
     for (unsigned tries = 0; tries < 8 && old != UINT64_MAX; ++tries)
-        if (atomic_compare_exchange_weak_explicit(&g_cm_tempo_event[d], &old, old + 1,
-                                                  memory_order_acq_rel, memory_order_relaxed))
+        /* A failed ARM reservation can be spurious even with a single
+         * publisher. Only competing updates may consume the retry budget. */
+        if (atomic_compare_exchange_strong_explicit(&g_cm_tempo_event[d], &old, old + 1,
+                                                    memory_order_acq_rel, memory_order_relaxed))
             return old + 1 == UINT64_MAX ? 0 : old + 1;
     atomic_store_explicit(&g_cm_tempo_event[d], UINT64_MAX, memory_order_release);
     return 0;
@@ -1340,7 +1342,8 @@ static void cm_tempo_publish(int d, int sampled, double bpm, uint64_t generation
         return;
     }
     g_cm_tempo[d].valid = 0;
-    g_cm_tempo[d].bpm = g_cm_bpm[d] = 0.0;
+    g_cm_tempo[d].bpm = 0.0;
+    atomic_store_explicit(&g_cm_bpm[d], 0.0, memory_order_seq_cst);
     g_cm_tempo[d].state_generation = 0;
     g_cm_tempo[d].observed_ns = 0;
     g_cm_tempo[d].revision = event;
@@ -1351,7 +1354,8 @@ static void cm_tempo_publish(int d, int sampled, double bpm, uint64_t generation
         /* Preserve the established conservative GUI-feed range. No rate,
          * direction, playback or current-track identity follows from BPM. */
         if (sampled && generation && bpm > 20.0 && bpm < 400.0) {
-            g_cm_tempo[d].bpm = g_cm_bpm[d] = bpm;
+            g_cm_tempo[d].bpm = bpm;
+            atomic_store_explicit(&g_cm_bpm[d], bpm, memory_order_seq_cst);
             g_cm_tempo[d].valid = 1;
         }
     }
@@ -1514,14 +1518,20 @@ static void sdk_ui_tick(void);
 #include "sdk_vslot.c"
 #endif
 
+#include "sdk_status.c"
+#ifndef SDK_PROC_IMPL
+#include "sdk_analysis_service.c"
+#endif
 #ifndef SDK_PROC_IMPL
 #include "sdk_data_callbacks.c"
+#endif
 
 static const az_library_v1 g_sdk_library = {
     .abi = AZ_LIBRARY_ABI,
     .size = sizeof(az_library_v1),
     .lib_playlists = sdk_lib_playlists,
     .lib_tracks = sdk_lib_tracks,
+#ifndef SDK_PROC_IMPL
     .data_capabilities = sdk_data_capabilities,
     .track_resolve = sdk_track_resolve,
     .track_request = sdk_track_request,
@@ -1544,11 +1554,16 @@ static const az_library_v1 g_sdk_library = {
     .on_command_complete = sdk_on_command_complete,
     .command_submit_async = sdk_command_submit_async,
     .command_acknowledge = sdk_command_acknowledge,
+    .analysis_open = sdk_analysis_open,
+    .analysis_commit = sdk_analysis_commit,
+    .analysis_close = sdk_analysis_close,
+#endif
+    .on_deck_status = sdk_on_deck_status,
+    .deck_status_release = sdk_deck_status_release,
 };
 static const az_library_v1 *sdk_library_service(uint32_t abi) {
     return abi == AZ_LIBRARY_ABI ? &g_sdk_library : NULL;
 }
-#endif
 
 static const az_core_v1 g_cm_core = {
     .abi = AZ_MOD_ABI,
@@ -1636,9 +1651,9 @@ static const az_core_v1 g_cm_core = {
     .time_interval = st_interval,
     .command_submit = sdk_command_submit,
     .waveform_request = sdk_waveform_request,
-    .library_service = sdk_library_service,
     .waveform_acquire = sdk_waveform_acquire,
 #endif
+    .library_service = sdk_library_service,
 };
 
 /* ---- loading ------------------------------------------------------------------------ */
@@ -2009,6 +2024,7 @@ static void cm_load_one(cm_mod *c) {
     g_cm_loading = -1;
     unlink(CM_INITING);
     if (rc) {
+        ds_retire((int) (c - g_cm));
         sdk_data_retire_owner((int) (c - g_cm));
         c->m = NULL;
         c->screen = NULL;   /* stays mapped (see above); nothing of it is called again */
@@ -2037,10 +2053,11 @@ static void cm_write_status(void) {
 
 /* Called once from the overlay thread (EP147 only), after load_config. */
 static void community_init(void) {
+    sdk_status_start();
 #ifndef SDK_PROC_IMPL
     /* Resolve the shared SQL table before any community worker can read it. */
     g_st_enabled = access("/home/root/settings/azmod.track-data.on", F_OK) == 0;
-    if (g_st_enabled) sdk_sq_resolve();
+    if (g_st_enabled || ds.enabled) sdk_sq_resolve();
     if (g_st_enabled) {
         azexit_service_fn get_exit;
         *(void **) &get_exit = dlsym(RTLD_DEFAULT, "azstem_exit_service_v1");

@@ -94,7 +94,7 @@ static uint64_t sdk_command_capabilities(void) {
 static int sdk_exit_arguments(void *ctx, const az_command_request *r, const struct scmd_target *target) {
     (void) ctx;
     (void) target;
-    if (r->operation < AZ_CMD_LOOP_IN || r->operation > AZ_CMD_CUE_COLOR ||
+    if (r->operation < AZ_CMD_LOOP_IN || r->operation > AZ_CMD_CUE_LOOP_SET ||
         !(r->flags & AZ_COMMAND_NATIVE_LOAD)) return AZ_UNSUPPORTED;
     if (r->quantization != AZ_QUANTIZE_NATIVE) return AZ_INVALID;
     /* Native cue adapters own the operation-specific selection/unit contract. */
@@ -513,7 +513,7 @@ static __attribute__((unused)) void sdk_cue_tick(void) {
     if (api && api->size >= AZEXIT_SERVICE_CUE_SIZE && api->cue_tick) api->cue_tick();
 }
 static __attribute__((unused)) int sdk_native_cues(int deck, az_native_cue_snapshot *out) {
-    if (deck < 0 || deck >= 4 || !out || out->size < sizeof *out) return AZ_INVALID;
+    if (deck < 0 || deck >= 4 || !out || out->size < AZ_NATIVE_CUE_SNAPSHOT_V1_SIZE) return AZ_INVALID;
     const struct azexit_service *api = atomic_load_explicit(&g_sdk_exit_service, memory_order_acquire);
     return api && api->size >= AZEXIT_SERVICE_CUE_SNAPSHOT_SIZE && api->native_cues
                ? api->native_cues((unsigned) deck, out)

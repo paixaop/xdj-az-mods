@@ -52,6 +52,8 @@ static int XEventsQueued(int fd, int mode) {
     return 0;
 }
 #endif
+static int ds_event_fd = -1, ds_timer_fd = -1;
+static void sdk_status_ui_drain(void) {}
 static long now_ms(void) { return (long) (scmd_monotonic(NULL) / 1000000); }
 #include SDK_OVERLAY_INC
 

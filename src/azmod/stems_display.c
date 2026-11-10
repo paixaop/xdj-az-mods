@@ -115,7 +115,7 @@ static int reset_stems_on_track_change(azmod_state *s) {
  *   self+0x08 u64       low byte deck 0..3, the rest a hash the ctor computes (fixed)
  *   self+0xa0 double    live, tempo-adjusted BPM  (DBL_MAX = no track)
  *   self+0xa8 u32       the same BPM x100         (0xffffffff = no track)
- *   self+0xb0 double    analyzed track BPM        (DBL_MAX = no track)
+ *   self+0xb0 double    unpitched BPM at the source position (DBL_MAX = no track)
  *
  * The BPM is a double. BPMx<10> in this binary belongs to
  * gui::FxState::bpmChanged (the mixer / Beat FX BPM), not a deck.
@@ -137,7 +137,7 @@ static int reset_stems_on_track_change(azmod_state *s) {
  * /proc/self/mem. */
 #define BPMSTATE_CTOR EP_1f5da20 /* gui::BpmState::BpmState(self, int deck) */
 #define BPMSTATE_DECK 0x08       /* low byte of the u64 = the ctor's deck arg */
-#define BPMSTATE_TRACK 0xb0      /* double: analyzed track BPM */
+#define BPMSTATE_TRACK 0xb0      /* double: unpitched BPM at the source position */
 #define BPMCTRL_VT EP_2dede68    /* _Sp_counted_ptr_inplace<gui::BpmState,...> vtable (RTTI) */
 #define BPMCTRL_OFF 0x10         /* the object sits this far into its control block */
 #define BPMCTRL_USE 0x08         /* int: shared (use) count */
@@ -253,6 +253,7 @@ static void bpmctor_hook(long self, long deck, long a3, long a4) {
     g_orig_bpmctor(self, deck, a3, a4); /* the deck byte only exists afterwards */
     int d = (int) (deck & 0xff);
     int pinned = bpmstate_capture((unsigned long) self, d, BPMCTRL_VT);
+    ds_tempo_birth((unsigned)d, pinned ? __atomic_load_n(&g_bpmstate_generation[d],__ATOMIC_ACQUIRE) : 0);
     __atomic_add_fetch(&g_bpmstate_n, 1, __ATOMIC_RELAXED);
     FILE *f = azlog_open("/tmp/azmod-drumbpm.log", "a");
     if (f) {
@@ -355,6 +356,7 @@ static long master_xm_hook(void *self, void *id) {
     if (!clock_gettime(CLOCK_MONOTONIC, &ts) && ts.tv_sec >= 0 && ts.tv_nsec >= 0 &&
         ts.tv_nsec < 1000000000 && (uint64_t) ts.tv_sec <= (UINT64_MAX - (uint64_t) ts.tv_nsec) / 1000000000)
         now = (uint64_t) ts.tv_sec * 1000000000 + (uint64_t) ts.tv_nsec;
+    int captured=0;
     if (!pthread_mutex_trylock(&g_master_state_mu)) {
         if (revision && revision == atomic_load_explicit(&g_master_event, memory_order_acquire)) {
             g_master_state.revision = revision;
@@ -362,9 +364,12 @@ static long master_xm_hook(void *self, void *id) {
             g_master_state.deck = m >= 0 && clock_order == AZ_TIME_AFTER ? m : -1;
             g_master_state.observed_ns = g_master_state.deck >= 0 ? now : 0;
             if (clock_order == AZ_TIME_AFTER) g_master_state.last_ns = now;
+            captured=1;
+            ds_master_capture(revision,now,g_master_state.deck,1);
         }
         pthread_mutex_unlock(&g_master_state_mu);
     }
+    if (!captured) ds_master_capture(revision,now,-1,0);
     if (revision && revision == atomic_load_explicit(&g_master_event, memory_order_acquire) &&
         atomic_exchange_explicit(&g_master_deck, m, memory_order_relaxed) != m) {
         FILE *f = azlog_open("/tmp/azmod-drumbpm.log", "a");
@@ -797,6 +802,7 @@ static int modeget_hook(long p) {
     unsigned seq =
         __atomic_load_n(&g_mode_seq, __ATOMIC_ACQUIRE); /* before the read: stems_page freshness */
     int m = g_orig_modeget(p);
+    ds_pad_fresh((uintptr_t)p);
     __atomic_store_n(&g_true_mode, m, __ATOMIC_RELAXED);
     /* ...and per deck, for "is this deck in slip loop" questions. The pad-title
      * field's own mode object resolves to -1 and does not publish. */

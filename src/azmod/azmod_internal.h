@@ -250,6 +250,12 @@ static int bpmstate_read(int d, double *live, double *track); /* stems_display.c
 static void install_bpmstate_hook(void);
 static _Atomic int g_master_deck; /* stems_display.c: master deck 0..3, -1 = none / unknown */
 static void install_master_hook(void);
+static void ds_tempo_birth(unsigned deck,uint64_t owner);
+static void ds_tempo_install(void);
+static void ds_pad_install(void);
+static void ds_pad_fresh(uintptr_t object);
+static void ds_models_install(void);
+static void ds_master_capture(uint64_t revision,uint64_t observed,int master,int captured);
 static float drum_feed_bpm(int d, double live, int master, int master_ok, double master_live);
 
 static _Atomic int g_ui60_on;
@@ -1162,6 +1168,8 @@ static int install_drag_view(void);
 static int g_cm_live; /* mods with state LOADED: the LED-frame dispatch is skipped at 0 */
 static void community_init(void);
 static void community_tick(void);
+static int ds_event_fd, ds_timer_fd;
+static void sdk_status_ui_drain(void);
 static int sdk_command_ui_fd(void);
 static unsigned sdk_command_ui_drain(unsigned budget);
 static void ssh_approve_tick(void); /* ssh_approve.c */

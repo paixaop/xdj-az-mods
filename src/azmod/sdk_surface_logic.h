@@ -48,6 +48,13 @@ static inline int sdk_view_compute(int menu_open, int deck_view, int search, int
 
 /* ---- surface descriptors and the table ------------------------------------------------ */
 
+static inline int sdk_surface_matches_view(unsigned views, int view, int four_deck) {
+    unsigned active = AZ_VIEW_BIT(view);
+    if (view == AZ_VIEW_DECK && !four_deck)
+        active |= AZ_VIEW_TWO_DECKS;
+    return (views & active) != 0;
+}
+
 /* A caller's descriptor is usable when it is at least as large as the first ABI's fields and
  * names a valid layer and at least one view. */
 static inline int sdk_surface_desc_ok(const az_surface_v1 *s) {

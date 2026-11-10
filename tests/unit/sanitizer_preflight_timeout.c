@@ -10,6 +10,13 @@
 #include <time.h>
 #include <unistd.h>
 
+/* The child establishes its group before exec. On a timeout it may still
+ * be between fork and setpgid. The unreaped PID belongs to this invocation. */
+static void terminate_probe(pid_t child) {
+    kill(child, SIGKILL);
+    kill(-child, SIGKILL);
+}
+
 static volatile sig_atomic_t interrupted;
 static void interrupt_probe(int signal_number) {
     interrupted = signal_number;
@@ -30,14 +37,9 @@ int main(int argc, char **argv) {
         execvp(argv[2], argv + 2);
         _exit(errno == ENOENT ? 127 : 126);
     }
-    if (setpgid(child, child) && errno != EACCES && errno != ESRCH) {
-        kill(child, SIGKILL);
-        while (waitpid(child, NULL, 0) < 0 && errno == EINTR) {}
-        return 125;
-    }
     struct timespec began, now;
     if (clock_gettime(CLOCK_MONOTONIC, &began)) {
-        kill(-child, SIGKILL);
+        terminate_probe(child);
         while (waitpid(child, NULL, 0) < 0 && errno == EINTR) {}
         return 125;
     }
@@ -51,7 +53,7 @@ int main(int argc, char **argv) {
                         (now.tv_sec - began.tv_sec > (time_t) seconds ||
                          (now.tv_sec - began.tv_sec == (time_t) seconds && now.tv_nsec >= began.tv_nsec));
         if (interrupted || clock_failed || timed_out) {
-            kill(-child, SIGKILL);
+            terminate_probe(child);
             while (waitpid(child, NULL, 0) < 0 && errno == EINTR) {}
             if (interrupted) return 128 + interrupted;
             if (clock_failed) return 125;

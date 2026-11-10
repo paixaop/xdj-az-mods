@@ -35,6 +35,9 @@ static int test_install(uintptr_t, void *, void **);
 #define MASTER_EXCHANGED ((uintptr_t) 0xaabb78)
 #define azm_install_hook(target,hook,out) test_install(target,hook,out)
 #define clock_gettime test_clock_gettime
+static void ds_master_capture(uint64_t revision,uint64_t observed,int master,int captured) {
+    (void)revision; (void)observed; (void)master; (void)captured;
+}
 #include MASTER_INC
 #undef clock_gettime
 #undef azm_install_hook

@@ -39,6 +39,7 @@ azstem_loop_observer_mask_v1
 azstem_overview_lease_v1
 azstem_play_obs
 azstem_present
+azstem_status_service_v1
 azstem_stem_eq
 azstem_stem_gain
 azstem_sync_observation_v1

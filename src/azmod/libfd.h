@@ -17,19 +17,21 @@
 #define LIBFD_MAX 16
 enum {
     LIBFD_STEMS = 1,
-    LIBFD_FIELDS = 2
+    LIBFD_FIELDS = 2,
+    LIBFD_STATUS = 3
 };
 static int g_libfd[LIBFD_MAX]; /* (owner << 24) | (fd + 1), 0 free (__atomic only) */
 
-static void libfd_add(int fd, int owner) {
+static int libfd_add(int fd, int owner) {
     if (fd < 0 || fd >= (1 << 24) || owner <= 0 || owner > 127)
-        return;
+        return 0;
     int v = (owner << 24) | (fd + 1);
     for (int i = 0; i < LIBFD_MAX; i++) {
         int z = 0;
         if (__atomic_compare_exchange_n(&g_libfd[i], &z, v, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-            return;
+            return 1;
     }
+    return 0;
 }
 static void libfd_del(int fd) {
     if (fd < 0 || fd >= (1 << 24))

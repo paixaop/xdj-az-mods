@@ -528,5 +528,6 @@ int main(int argc, char **argv) {
     else if (std::strncmp(argv[2], "wrong", 5) == 0) wrong_function(build, unsigned(argv[2][5] - '0'));
     else declined(build, argv[2]);
     std::printf("PASS load: build%d %s (synthetic native virtual dispatch)\n", build, argv[2]);
+    return 0;
 }
 #endif

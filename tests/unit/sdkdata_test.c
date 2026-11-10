@@ -10,6 +10,11 @@
 #define ST_ENGINE_HEADER "sdk_data_engine.h"
 #endif
 #include ST_ENGINE_HEADER
+static int file_seconds_equal(double actual, double expected, uint64_t clock_rate) {
+    int order = compare_timestamps(actual, expected, 1, clock_rate, 1);
+    assert(order != AZ_TIME_INVALID);
+    return order == AZ_TIME_EQUAL;
+}
 static void put32(uint8_t *p, uint32_t n) {
     p[0] = n >> 24;
     p[1] = n >> 16;
@@ -90,8 +95,8 @@ static void parser(void) {
     assert(d);
     st_data_init(d);
     assert(st_parse_pair(d, b, sizes, 31) == AZ_OK);
-    assert(d->view.cue_count == 2 && d->cues[0].start_s == 0 && d->cues[1].start_s == 0);
-    assert(d->cues[0].type == AZ_CUE_LOOP && d->cues[0].end_s == 1);
+    assert(d->view.cue_count == 2 && file_seconds_equal(d->cues[0].start_s, 0, 1000) && file_seconds_equal(d->cues[1].start_s, 0, 1000));
+    assert(d->cues[0].type == AZ_CUE_LOOP && file_seconds_equal(d->cues[0].end_s, 1, 1000));
     assert(d->cues[0].rgb == 0x123456 && !strcmp(d->cues[0].comment, "A"));
     assert(!(d->cues[0].valid & AZ_CUE_AUTO_ACTIVE) && d->cues[0].auto_active == -1);
     assert(d->cues[1].classification == AZ_CUE_MEMORY && d->cues[1].type == AZ_CUE_POINT);
@@ -100,12 +105,12 @@ static void parser(void) {
     assert(d->view.waveform.sample_count == 4 && d->wave[3] == 4);
     double beat, time;
     assert(st_time_to_beat(&d->view, 1, &beat) == AZ_OK && beat == 1.5);
-    assert(st_beat_to_time(&d->view, beat, &time) == AZ_OK && time == 1);
+    assert(st_beat_to_time(&d->view, beat, &time) == AZ_OK && file_seconds_equal(time, 1, 1000));
     assert(st_time_to_beat(&d->view, 0, &beat) == AZ_OK && beat == 0);
     assert(st_time_to_beat(&d->view, 1.6, &beat) == AZ_NOT_FOUND);
     assert(st_beat_to_time(&d->view, NAN, &time) == AZ_INVALID);
     az_time_interval v = {.size = sizeof v};
-    assert(st_interval(&d->view, .25, 1, 2, &v) == AZ_OK && v.beats == 1 && v.source_s == .75 && v.playback_s == .375);
+    assert(st_interval(&d->view, .25, 1, 2, &v) == AZ_OK && v.beats == 1 && file_seconds_equal(v.source_s, .75, 1000) && file_seconds_equal(v.playback_s, .375, 2000));
     assert(!(v.valid & AZ_INTERVAL_BARS));
     assert(st_interval(&d->view, 0, 1, 1e-320, &v) == AZ_OK && !(v.valid & AZ_INTERVAL_PLAYBACK));
     assert(st_interval(&d->view, 0, 1, 0, &v) == AZ_OK && !(v.valid & AZ_INTERVAL_PLAYBACK));
@@ -197,8 +202,8 @@ static void timing_envelopes(void) {
     s.version = AZ_DATA_VERSION;
     s.size += 32; /* A newer, compatible record prefix remains usable. */
     assert(st_time_to_beat(&s, 1, &out) == AZ_OK && out == 1.5);
-    assert(st_beat_to_time(&s, 1.5, &out) == AZ_OK && out == 1);
-    assert(st_interval(NULL, 0, 1, 2, &interval) == AZ_OK && interval.playback_s == .5 && !(interval.valid & AZ_INTERVAL_BEATS));
+    assert(st_beat_to_time(&s, 1.5, &out) == AZ_OK && file_seconds_equal(out, 1, 1000));
+    assert(st_interval(NULL, 0, 1, 2, &interval) == AZ_OK && file_seconds_equal(interval.playback_s, .5, 2000) && !(interval.valid & AZ_INTERVAL_BEATS));
 }
 /* Cross-DLL callers provide an opaque allocation. Keep the deliberately short
  * heap object real for ASan without GCC7's inlined fortify false positives. */
@@ -238,7 +243,7 @@ static int freshness(const az_track_ref *ref, const struct st_data *d, void *ctx
 static void ticket_exhaustion(void) {
     for (int owner = 0; owner < 4; ++owner) {
         struct st_engine e = ST_ENGINE_INIT;
-        az_track_ref ref = {sizeof ref, AZ_DATA_VERSION, (uint64_t)owner + 1, 1, 9, 42, 0};
+        az_track_ref ref = {sizeof ref, AZ_DATA_VERSION, (uint64_t) owner + 1, 1, 9, 42, 0};
         e.next = UINT64_MAX - 3;
         uint64_t last = 0;
         assert(st_request(&e, owner, &ref, AZ_DATA_METADATA, &last) == AZ_OK && last == UINT64_MAX - 1);
@@ -484,9 +489,12 @@ static void retention_and_event_edges(void) {
     free(short_event);
     st_destroy(&e);
 }
-struct epoch_source { uint64_t generation[4]; };
+struct epoch_source {
+    uint64_t generation[4];
+};
 static int epoch_load(const az_track_ref *ref, uint32_t mask, struct st_data *data, void *context) {
-    (void) mask; (void) context;
+    (void) mask;
+    (void) context;
     snprintf(data->view.metadata.title, sizeof data->view.metadata.title, "source %llu epoch %llu",
              (unsigned long long) ref->source_id, (unsigned long long) ref->source_generation);
     data->view.metadata_info.availability = AZ_AVAIL_READY;
@@ -500,41 +508,43 @@ static int epoch_fresh(const az_track_ref *ref, const struct st_data *data, void
 }
 static void reconnect_matrix(void) {
     struct st_engine engine = ST_ENGINE_INIT;
-    struct epoch_source source = {{1,1,1,1}};
+    struct epoch_source source = {{1, 1, 1, 1}};
     uint64_t tickets[4];
     const az_track_snapshot *snapshots[4];
     az_track_ref refs[4];
     for (unsigned i = 0; i < 4; ++i) {
-        refs[i] = (az_track_ref){sizeof(az_track_ref), 1, i + 1, 1, 9, 42, 0};
+        refs[i] = (az_track_ref) {sizeof(az_track_ref), 1, i + 1, 1, 9, 42, 0};
         assert(st_request(&engine, i, &refs[i], AZ_DATA_METADATA, &tickets[i]) == AZ_OK);
     }
     st_work(&engine, epoch_load, epoch_fresh, &source);
     for (unsigned i = 0; i < 4; ++i) assert(st_acquire(&engine, i, tickets[i], &snapshots[i]) == AZ_OK);
-    for (unsigned round = 0; round < 32; ++round) for (unsigned i = 0; i < 4; ++i) {
-        const az_track_snapshot *old = snapshots[i], *out = NULL;
-        uint64_t old_ticket = tickets[i], old_revision = old->revision;
-        char old_title[sizeof old->metadata.title];
-        memcpy(old_title, old->metadata.title, sizeof old_title);
-        source.generation[i]++;
-        st_work(&engine, epoch_load, epoch_fresh, &source);
-        assert(st_acquire(&engine, i, old_ticket, &out) == AZ_STALE && !out);
-        assert(!memcmp(old->metadata.title, old_title, sizeof old_title));
-        refs[i].source_generation = source.generation[i];
-        assert(st_request(&engine, i, &refs[i], AZ_DATA_METADATA, &tickets[i]) == AZ_OK);
-        st_work(&engine, epoch_load, epoch_fresh, &source);
-        assert(st_acquire(&engine, i, tickets[i], &out) == AZ_OK && out != old);
-        assert(out->revision > old_revision && out->track.track_id == 42 && out->track.source_id == i + 1);
-        assert(out->track.source_generation == source.generation[i]);
-        assert(!memcmp(old->metadata.title, old_title, sizeof old_title));
-        snapshots[i] = out;
-        for (unsigned other = 0; other < 4; ++other) if (other != i) {
-            const az_track_snapshot *peer;
-            assert(st_acquire(&engine, other, tickets[other], &peer) == AZ_OK && peer == snapshots[other]);
+    for (unsigned round = 0; round < 32; ++round)
+        for (unsigned i = 0; i < 4; ++i) {
+            const az_track_snapshot *old = snapshots[i], *out = NULL;
+            uint64_t old_ticket = tickets[i], old_revision = old->revision;
+            char old_title[sizeof old->metadata.title];
+            memcpy(old_title, old->metadata.title, sizeof old_title);
+            source.generation[i]++;
+            st_work(&engine, epoch_load, epoch_fresh, &source);
+            assert(st_acquire(&engine, i, old_ticket, &out) == AZ_STALE && !out);
+            assert(!memcmp(old->metadata.title, old_title, sizeof old_title));
+            refs[i].source_generation = source.generation[i];
+            assert(st_request(&engine, i, &refs[i], AZ_DATA_METADATA, &tickets[i]) == AZ_OK);
+            st_work(&engine, epoch_load, epoch_fresh, &source);
+            assert(st_acquire(&engine, i, tickets[i], &out) == AZ_OK && out != old);
+            assert(out->revision > old_revision && out->track.track_id == 42 && out->track.source_id == i + 1);
+            assert(out->track.source_generation == source.generation[i]);
+            assert(!memcmp(old->metadata.title, old_title, sizeof old_title));
+            snapshots[i] = out;
+            for (unsigned other = 0; other < 4; ++other)
+                if (other != i) {
+                    const az_track_snapshot *peer;
+                    assert(st_acquire(&engine, other, tickets[other], &peer) == AZ_OK && peer == snapshots[other]);
+                }
+            assert(st_release(&engine, i, old_ticket, 0) == AZ_OK);
+            assert(st_acquire(&engine, i, old_ticket, &out) == AZ_STALE && !out);
+            assert(st_acquire(&engine, (i + 1) % 4, tickets[i], &out) == AZ_STALE && !out);
         }
-        assert(st_release(&engine, i, old_ticket, 0) == AZ_OK);
-        assert(st_acquire(&engine, i, old_ticket, &out) == AZ_STALE && !out);
-        assert(st_acquire(&engine, (i + 1) % 4, tickets[i], &out) == AZ_STALE && !out);
-    }
     for (unsigned i = 0; i < 4; ++i) {
         az_data_change change = {.size = sizeof change};
         assert(st_event_read(&engine, i, 0, &change) == AZ_OK && change.missed);

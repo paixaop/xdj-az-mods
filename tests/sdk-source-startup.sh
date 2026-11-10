@@ -17,7 +17,7 @@ from pathlib import Path
 import hashlib,json,sys
 out=Path(sys.argv[1]);src=Path('src/azmod/azmod.c').resolve();text=src.read_text()
 init=text.index('__attribute__((constructor)) static void azmod_init(void)')
-start=text.index('        if (access("/home/root/settings/azmod.track-data.on", F_OK) == 0 &&',init)
+start=text.index('        if (sdk_passive_sources || (access("/home/root/settings/azmod.track-data.on", F_OK)==0 &&',init)
 end=text.index('        msg_thread_note();',start)
 # This packet qualifies the source/SQL lifecycle stage. The separately tested
 # cache stage follows it and requires its own generated profile/entry backend.
@@ -36,6 +36,7 @@ header=Path('src/common/azsources.h').resolve()
 extern int azsdk_test_startup_access(const char *,int);
 extern int azsdk_test_connection_island(uintptr_t,void*,void**);
 static int g_sdk_sources_on;
+static int sdk_passive_sources; /* existing explicit-provider matrix with status off */
 /* Link adapter only: the existing object executes the unmodified real
  * azm_install_island_hook_at. No mocked original/entry/protection semantics. */
 static int azm_install_island_hook_at(uintptr_t,void*,void**,const char*) __attribute__((unused));

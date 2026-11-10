@@ -1,0 +1,32 @@
+/* SPDX-License-Identifier: GPL-3.0-only */
+/* SHA-bound EP147 entries, in copy, reset, set-IN, set-loop, set-beat-loop, flags, commit-kind order. */
+static const struct azn_entry {
+    uintptr_t address;
+    uint32_t prologue[4];
+} azn_entries[2][7] = {
+    {
+      /* 1.30 */
+        {0x13e7290, {0xa9b97bfd, 0x910003fd, 0xa90153f3, 0xaa0003f3}},
+        {0x13ea530, {0xa9b87bfd, 0x90ffffe1, 0x912ee021, 0x910003fd}},
+        {0x13eb9b0, {0xa9b77bfd, 0xf0ffffc5, 0x911380a5, 0x910003fd}},
+        {0x13ec120, {0xa9bd7bfd, 0x910003fd, 0xa90153f3, 0x2a0403f4}},
+        {0x13ec190, {0xa9bd7bfd, 0x910003fd, 0xa9025bf5, 0xaa0303f5}},
+        {0x13ec208, {0x79400022, 0x79002002, 0xb9400802, 0x39400821}},
+        {0x13e6340, {0xa9bd7bfd, 0x910003fd, 0xf9400003, 0x790053ff}},
+    },
+    {
+      /* 2.00 */
+        {0x14a26d0, {0xa9b97bfd, 0x910003fd, 0xa90153f3, 0xaa0003f3}},
+        {0x14a5970, {0xa9b87bfd, 0x90ffffe1, 0x91248021, 0x910003fd}},
+        {0x14a6df0, {0xa9b77bfd, 0xf0ffffc5, 0x913fe0a5, 0x910003fd}},
+        {0x14a7560, {0xa9bd7bfd, 0x910003fd, 0xa90153f3, 0x2a0403f4}},
+        {0x14a75d0, {0xa9bd7bfd, 0x910003fd, 0xa9025bf5, 0xaa0303f5}},
+        {0x14a7648, {0x79400022, 0x79002002, 0xb9400802, 0x39400821}},
+        {0x14a1780, {0xa9bd7bfd, 0x910003fd, 0xf9400003, 0x790053ff}},
+    },
+};
+/* The outer point writer clears CueComment after the nested point/color writers. */
+static const struct azn_entry azn_hot_edit_entries[2] = {
+    {0x13fcbc0, {0xa9be7bfd, 0x910003fd, 0xa90153f3, 0xaa0103f3}},
+    {0x14b7ef8, {0xa9be7bfd, 0x910003fd, 0xa90153f3, 0xaa0103f3}},
+};

@@ -1144,7 +1144,7 @@ region() {
 }
 d="$OUT/lifetime"; mkdir -p "$d"
 SP=guest/azstem/stem_playback.c; DT=guest/azstem/deck_track_map.c; DR=guest/azstem/drumroll.c
-region $SP '^static _Atomic\(void \*\) g_ls_self\[NDECK\];' '^#ifndef AZMOD_RELEASE /\* the path scan|^static int is_dir\(const char \*p\) \{' > "$d/ls.inc"  # the published tree has no dev block
+region $SP '^static _Atomic\(void \*\) g_ls_self\[NDECK\];' '^static DIR \*stem_opendir\(|^#ifndef AZMOD_RELEASE /\* the path scan|^static int is_dir\(const char \*p\) \{' > "$d/ls.inc"
 region $DT '^/\* ---- DjPlayerUnit ctor hook' '^static int lti_id_zero\(' > "$d/dt.inc"
 cat "$d/ls.inc" "$d/dt.inc" > "$d/real.inc"
 grep -q 'ls_wait_readers' "$d/real.inc" && grep -q 'lti_update_hook' "$d/real.inc" && grep -q 'djpudtor_hook' "$d/real.inc" &&
@@ -3326,7 +3326,7 @@ suite "sdk: audio_tap" "$d/real"
 
 d="$OUT/sdklib"; mkdir -p "$d"
 cp guest/azmod/sdk_lib.c "$d/real.c"
-mutate "$d/real.c" "$d/ctl-rw.c" 's/"file:%s\?immutable=1"/"file:%s"/; s/0x01 \| 0x40 \/\* READONLY \| URI \*\//0x02 | 0x40/'
+mutate "$d/real.c" "$d/ctl-rw.c" 's/suffix\[\] = "\?immutable=1"/suffix[] = ""/; s/0x01 \| 0x40 \/\* READONLY \| URI \*\//0x02 | 0x40/'
 mutate "$d/real.c" "$d/ctl-ui.c"      's/    if \(g_cm_on_ui\)\n/    if (0)\n/'
 mutate "$d/real.c" "$d/ctl-anyport.c" 's/ \|\| sdk_port_of_sysfs\(real\) != stick \+ 1\)/)/'
 mutate "$d/real.c" "$d/ctl-guess.c"   's/    if \(hits != 1\)\n/    if (hits < 1)\n/'
@@ -3382,6 +3382,8 @@ d="$OUT/sdkdata"; mkdir -p "$d"
 cp guest/azmod/sdk_data_engine.h guest/azmod/sdk_analysis.h guest/azmod/hc_anlz.h guest/azmod/azmod-mod.h "$d/"
 $CC "${CFLAGS[@]}" -pthread -I"$d" -o "$d/real" $T/sdkdata_test.c -lm
 suite "sdk track data, parser, timing and concurrent consumers" "$d/real"
+$CC "${CFLAGS[@]}" -Iguest/azmod -o "$d/analysis-write" $T/sdkanalysis_write_test.c
+suite "sdk analysis insertion preserves existing ANLZ data" "$d/analysis-write"
 $CC "${CFLAGS[@]}" -Wno-unused-function -pthread -Iguest/azmod -o "$d/callbacks" $T/sdk_data_callbacks_test.c -lm
 suite "sdk data and command callbacks without mod polling" "$d/callbacks"
 python3 "$T/sdk_review_controls.py" guest/azmod "$d/review"
@@ -3398,6 +3400,8 @@ control "sdk track data: duplicate IDs merged across sources" "$d/control"
 if [ "$(uname -s)" = Linux ]; then
     $CC "${CFLAGS[@]}" $SDK_EXPORT -pthread -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$OUT/sdkdata/provider" $T/sdktrack_test.c -lsqlite3 -ldl -lm
     suite "sdk stored track disk provider" "$OUT/sdkdata/provider"
+    $CC "${CFLAGS[@]}" $SDK_EXPORT -Wno-unused-function -Wno-missing-field-initializers -pthread -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$d/analysis-service" $T/sdkanalysis_service_test.c -lsqlite3 -ldl -lm
+    suite "sdk analysis source leases and USB persistence" "$d/analysis-service"
     for v in database-alias database-uri missing-parent wave-errors analysis-binding track-fifo wave-fifo analysis-path-limit preview-extension; do
         $CC "${CFLAGS[@]}" $SDK_EXPORT -pthread -I"$d/review/$v" -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$d/$v" $T/sdktrack_test.c -lsqlite3 -ldl -lm
         control "sdk stored track: $v regression" "$d/$v"

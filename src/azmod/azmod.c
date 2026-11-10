@@ -2875,6 +2875,14 @@ static void ep147_late_init(void) { /* EP147 addresses that cannot be constant i
     g_wp_real[1] = (void *) EP_1b949b8;
     g_wp_real[2] = (void *) EP_1b95e80;
 }
+#include "sdk_status_source.c"
+#include "sdk_status_map_source.c"
+#include "sdk_status_save.c"
+static int sdk_source_join_patch(uintptr_t at,uintptr_t expected,void *hook,void **original,int slot) {
+    if (slot) return *(uintptr_t *)at==expected && azm_patch_vtable(at,hook,original)==1;
+    return azm_install_hook_at(at,hook,original,"status-source")==1;
+}
+static int sdk_passive_sources;
 #include "sdk_connections.c"
 #include "sdk_cache_startup.c"
 #include "sdk_slip_startup.c"
@@ -2898,15 +2906,28 @@ __attribute__((constructor)) static void azmod_init(void) {
         g_ep147_build = b;
         ep147_late_init();
         ep_img_init();     /* img_q: EP147's own image bounds */
-        if (access("/home/root/settings/azmod.track-data.on", F_OK) == 0 &&
-            access("/home/root/settings/azmod.native-sources.on", F_OK) == 0) {
-            unsigned policy = access("/home/root/settings/azmod.native-source-files.on", F_OK) == 0
-                                  ? AZS_CAPTURE_PHYSICAL_ON_LIBRARY_WORKER
-                                  : 0u;
-            g_sdk_sources_on = azsdk_sources_configure(1, b, policy) == AZS_OK;
+        sdk_passive_sources = access("/home/root/settings/azmod.deck-status.off",F_OK)!=0;
+        if (sdk_passive_sources || (access("/home/root/settings/azmod.track-data.on", F_OK)==0 &&
+            access("/home/root/settings/azmod.native-sources.on", F_OK)==0)) {
+            unsigned policy = sdk_passive_sources || access("/home/root/settings/azmod.native-source-files.on",F_OK)==0
+                ? AZS_CAPTURE_PHYSICAL_ON_LIBRARY_WORKER : 0u;
+            g_sdk_sources_on=azsdk_sources_configure(1,b,policy)==AZS_OK;
         }
         sdk_connections_at_start();
         sdk_cache_at_start();
+        if (sdk_passive_sources) {
+            int physical=g_sdk_sources_on && azsdk_sources_physical_ready();
+            int cache=g_sdk_sources_on && azsdk_cache_capture_ready();
+            int installed=physical && cache && azjs_install(b,sdk_source_join_patch);
+            int map_installed=sdk_status_map_source_install(b,sdk_source_join_patch);
+            int save_installed=sdk_status_save_install(b,sdk_source_join_patch);
+            FILE *source_log=azlog_open("/tmp/azmod-build.log","a");
+            if (source_log) {
+                fprintf(source_log,"[status-source] registry=%d physical=%d cache=%d capture=%d map=%d save=%d\n",
+                        g_sdk_sources_on,physical,cache,installed,map_installed,save_installed);
+                fclose(source_log);
+            }
+        }
         sdk_slip_at_start();
         msg_thread_note(); /* this constructor runs on EP147's main thread = JUCE's message thread */
         g_azm_inert = 0;

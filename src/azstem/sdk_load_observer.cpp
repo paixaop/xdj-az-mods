@@ -5,7 +5,17 @@
 #endif
 #include "../common/azcuecommands.h"
 #include "../common/azloadobserver.h"
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+#include "../common/azstatus_source_kind.h"
+#endif
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+#include "../common/azstatus_native.h"
+#ifdef AZ_STATUS_MEMORY_PRODUCER
+#include "../common/azstatus_memory.h"
+#endif
+#endif
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -60,6 +70,21 @@ struct Deck {
     std::atomic<std::uintptr_t> unit {0}, facade {0}, listener {0};
     std::atomic<std::uint64_t> unit_generation {0}, epoch {1}, history {0};
     std::atomic<std::uint64_t> pending_epoch {0}, pending_unit {0}, pending_id {0};
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    std::atomic<uint64_t> awaiting_empty {0}, pending_source_pin {0}, sample_source_pin {0};
+    std::atomic<uint64_t> confirmed_empty {0};
+    std::atomic<uintptr_t> pending_wherefrom {0};
+    unsigned char pending_track[12]={}; /* capture flag owns pending writes/consumption */
+    std::atomic<uint64_t> pending_track_lo {0};
+    std::atomic<uint32_t> pending_track_hi {0};
+    double pending_original_bpm=0;
+    unsigned pending_bpm_state=AZN_BPM_UNKNOWN;
+    std::atomic<uint64_t> sample_original_bpm {0};
+    std::atomic<unsigned> sample_bpm_state {AZN_BPM_UNKNOWN};
+    std::atomic<uint64_t> sample_track_lo {0};
+    std::atomic<uint32_t> sample_track_hi {0};
+    std::atomic<unsigned> sample_source_kind {0};
+#endif
     std::atomic<unsigned> ready {0}, poison {0}, valid {0};
     std::atomic<std::uint64_t> sequence {0}, sample_unit {0}, sample_load {0}, sample_epoch {0}, observed {0}, sample_id {0};
 };
@@ -136,6 +161,10 @@ std::uint64_t now() noexcept {
 std::uint64_t invalidate(Deck &d) noexcept {
     d.valid.store(0, std::memory_order_release);
     azsdk_exit_load_changed(unsigned(&d - decks));
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    d.pending_wherefrom.store(0,std::memory_order_release);
+    d.pending_source_pin.store(0,std::memory_order_release);
+#endif
     std::uint64_t e = d.epoch.load(std::memory_order_acquire);
     for (unsigned n = 0; n < 8; ++n) {
         if (e == UINT64_MAX) break;
@@ -245,7 +274,34 @@ bool reserve_listener(unsigned deck, std::uintptr_t listener) noexcept {
     invalidate(decks[deck]);
     return false;
 }
-void begin_load(std::uintptr_t facade, const void *option, void *listener) noexcept {
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+std::atomic<azn_source_capture_fn> source_capture {nullptr};
+uintptr_t contained_wherefrom(const void *borrowed) noexcept {
+    uintptr_t ref=reinterpret_cast<uintptr_t>(borrowed);
+    return canonical(ref) ? word(ref) : 0;
+}
+void status_load(unsigned deck, uint64_t unit, uint64_t epoch, int state,
+                 uint64_t attempt, bool known_id, uint64_t load_generation = 0, uint64_t source_pin = 0,
+                 unsigned source_kind=0, double bpm=0, unsigned bpm_state=AZN_BPM_UNKNOWN) noexcept {
+    if (!unit || !epoch) return;
+    azstatus_native_receipt r {};
+    r.deck = deck;
+    r.kind = AZN_LOAD;
+    r.unit = unit;
+    r.epoch = epoch;
+    r.a = state;
+    r.attempt = attempt;
+    r.valid = known_id;
+    r.load_generation = load_generation;
+    r.source_pin = source_pin;
+    r.source_kind=source_kind;
+    r.original_bpm=bpm;
+    r.original_bpm_state=bpm_state;
+    azn_emit(&r);
+}
+#endif
+void begin_load(std::uintptr_t facade, const void *option, void *listener,const void *track,const void *where) noexcept {
+    (void)track; (void)where;
     if (!enabled.load(std::memory_order_acquire)) return;
     int deck = facade_deck(facade);
     if (deck < 0) return;
@@ -253,10 +309,22 @@ void begin_load(std::uintptr_t facade, const void *option, void *listener) noexc
     std::uint64_t epoch = invalidate(d), unit = d.unit_generation.load(std::memory_order_acquire);
     std::uint32_t id;
     if (!epoch || !unit || d.poison.load(std::memory_order_acquire)) return;
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    d.awaiting_empty.store(0, std::memory_order_release);
+#ifdef AZ_STATUS_MEMORY_PRODUCER
+    azn_memory_retire(deck,epoch);
+#endif
+#endif
     if (!native_id(option, id)) {
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+        status_load(deck, unit, epoch, AZN_UNKNOWN, 0, false);
+#endif
         d.poison.store(1, std::memory_order_release);
         return;
     }
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    status_load(deck, unit, epoch, AZN_LOADING, id, true);
+#endif
     if (!fresh_id(d, id) ||
         !d.ready.load(std::memory_order_acquire) || !completion_ready(reinterpret_cast<std::uintptr_t>(listener))) return;
     if (!reserve_listener(unsigned(deck), reinterpret_cast<std::uintptr_t>(listener)) ||
@@ -264,6 +332,40 @@ void begin_load(std::uintptr_t facade, const void *option, void *listener) noexc
     if (enabled.load(std::memory_order_acquire) && d.epoch.load(std::memory_order_acquire) == epoch &&
         d.unit_generation.load(std::memory_order_acquire) == unit && !d.poison.load(std::memory_order_acquire)) {
         d.listener.store(reinterpret_cast<std::uintptr_t>(listener), std::memory_order_release);
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+        uint64_t pin=0;
+        uintptr_t object=0;
+        std::memset(d.pending_track,0,sizeof d.pending_track);
+        if (track) std::memcpy(d.pending_track,track,sizeof d.pending_track);
+        uint64_t pending_lo; uint32_t pending_hi;
+        std::memcpy(&pending_lo,d.pending_track,8); std::memcpy(&pending_hi,d.pending_track+8,4);
+        d.pending_track_lo.store(pending_lo,std::memory_order_release);
+        d.pending_track_hi.store(pending_hi,std::memory_order_release);
+        /* Both admitted firmware loaders copy the complete 0x38-byte
+         * TrackInfoToLoad into their queued task. Its +0x30 double is copied
+         * unchanged into SourceInfo+0x60, unlike the position-dependent grid
+         * BPM. Copy only while the original load argument is borrowed. */
+        d.pending_original_bpm=0;
+        d.pending_bpm_state=AZN_BPM_UNAVAILABLE;
+        if (track) {
+            double bpm;
+            std::memcpy(&bpm,static_cast<const unsigned char *>(track)+0x30,sizeof bpm);
+            if (bpm==std::numeric_limits<double>::max()) d.pending_bpm_state=AZN_BPM_EMPTY;
+            else if (std::isfinite(bpm) && bpm>0) {
+                d.pending_original_bpm=bpm;
+                d.pending_bpm_state=AZN_BPM_READY;
+            }
+        }
+        auto capture_source=source_capture.load(std::memory_order_acquire);
+        if (track && where) {
+            object=contained_wherefrom(where);
+            if (canonical(object)) {
+                if (capture_source) pin=capture_source(unsigned(deck),unit,epoch,object,d.pending_track);
+            }
+        }
+        d.pending_source_pin.store(pin,std::memory_order_relaxed);
+        d.pending_wherefrom.store(object,std::memory_order_relaxed);
+#endif
         d.pending_unit.store(unit, std::memory_order_relaxed);
         d.pending_id.store(std::uint64_t(id) + 1, std::memory_order_relaxed);
         d.pending_epoch.store(epoch, std::memory_order_release);
@@ -275,7 +377,17 @@ void begin_unload(std::uintptr_t facade, const void *option) noexcept {
     int deck = facade_deck(facade);
     if (deck < 0) return;
     Deck &d = decks[deck];
-    invalidate(d);
+    const auto epoch = invalidate(d);
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    d.awaiting_empty.store(epoch, std::memory_order_release);
+#ifdef AZ_STATUS_MEMORY_PRODUCER
+    azn_memory_retire(deck,epoch);
+#endif
+    // Entry invalidates the previous load. It is not an unload completion.
+    status_load(deck, d.unit_generation.load(std::memory_order_acquire), epoch, AZN_UNKNOWN, 0, false);
+#else
+    (void)epoch;
+#endif
     std::uint32_t id;
     if (native_id(option, id)) (void) fresh_id(d, id);
     else d.poison.store(1, std::memory_order_release);
@@ -284,7 +396,8 @@ void begin_unload(std::uintptr_t facade, const void *option) noexcept {
     d.pending_id.store(0, std::memory_order_release);
     unlock(d);
 }
-void complete(std::uintptr_t listener, const void *request, std::uint32_t result) noexcept {
+void complete(std::uintptr_t listener, const void *request, std::uint32_t result,const void *where) noexcept {
+    (void)where;
     if (!enabled.load(std::memory_order_acquire) || !nominal(listener, "N7usecase4load14LoadControllerE", kCompleteThis, 3)) return;
     std::uint32_t id;
     if (!native_id(request, id)) return;
@@ -303,6 +416,9 @@ void complete(std::uintptr_t listener, const void *request, std::uint32_t result
             d.pending_id.load(std::memory_order_acquire) == std::uint64_t(id) + 1) {
             d.pending_id.store(0, std::memory_order_release);
             std::uint64_t generation = result == 0 ? load_generation() : 0, observed = generation ? now() : 0;
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+            if (result) status_load(deck, unit, epoch, AZN_FAILED, id, true);
+#endif
             std::uint64_t sequence = d.sequence.load(std::memory_order_relaxed);
 #ifdef AZSDK_LOAD_TESTING
             if (before_publish) before_publish(static_cast<int>(deck));
@@ -312,15 +428,40 @@ void complete(std::uintptr_t listener, const void *request, std::uint32_t result
                 d.sequence.store(sequence + 1, std::memory_order_release);
                 /* Acquiring any field of a newer write must also observe its
                  * preceding odd sequence at the final sequence check. */
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+                uint64_t pin=d.pending_source_pin.exchange(0,std::memory_order_relaxed);
+                uintptr_t origin=d.pending_wherefrom.exchange(0,std::memory_order_relaxed);
+                if (!origin || !where || contained_wherefrom(where)!=origin) {pin=0;origin=0;}
+                unsigned kind=origin ? unsigned(azn_source_kind(int(installed_build),d.pending_track)):0;
+                d.sample_source_kind.store(kind,std::memory_order_release);
+                d.sample_source_pin.store(pin,std::memory_order_release);
+                unsigned bpm_state=origin ? d.pending_bpm_state : unsigned(AZN_BPM_UNAVAILABLE);
+                double bpm=bpm_state==AZN_BPM_READY ? d.pending_original_bpm : 0;
+                uint64_t bpm_bits;std::memcpy(&bpm_bits,&bpm,sizeof bpm_bits);
+                d.sample_original_bpm.store(bpm_bits,std::memory_order_release);
+                d.sample_bpm_state.store(bpm_state,std::memory_order_release);
+                uint64_t lo;uint32_t hi;
+                std::memcpy(&lo,d.pending_track,8);std::memcpy(&hi,d.pending_track+8,4);
+                d.sample_track_lo.store(lo,std::memory_order_release);
+                d.sample_track_hi.store(hi,std::memory_order_release);
+#endif
                 d.sample_unit.store(unit, std::memory_order_release);
                 d.sample_load.store(generation, std::memory_order_release);
                 d.sample_epoch.store(epoch, std::memory_order_release);
                 d.sample_id.store(id, std::memory_order_release);
                 d.observed.store(observed, std::memory_order_release);
                 d.sequence.store(sequence + 2, std::memory_order_release);
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+                // Reserve the load barrier before this matched generation is visible to owner writers.
+                if (d.epoch.load(std::memory_order_acquire)==epoch && d.unit_generation.load(std::memory_order_acquire)==unit)
+                    status_load(deck,unit,epoch,AZN_LOADED,id,true,generation,pin,kind,bpm,bpm_state);
+#endif
                 d.valid.store(1, std::memory_order_release);
                 if (d.epoch.load(std::memory_order_acquire) != epoch || d.unit_generation.load(std::memory_order_acquire) != unit)
                     d.valid.store(0, std::memory_order_release);
+#ifdef AZ_STATUS_MEMORY_PRODUCER
+                else if (origin) azn_memory_bind(deck,unit,epoch,generation,origin,d.pending_track);
+#endif
             }
         }
         unlock(d);
@@ -329,7 +470,7 @@ void complete(std::uintptr_t listener, const void *request, std::uint32_t result
     }
 }
 void load_hook(void *self, const void *track, const void *option, const void *where, const void *speed, void *listener) {
-    begin_load(reinterpret_cast<std::uintptr_t>(self), option, listener);
+    begin_load(reinterpret_cast<std::uintptr_t>(self), option, listener,track,where);
     auto original = reinterpret_cast<Load>(__atomic_load_n(&original_load, __ATOMIC_ACQUIRE));
     if (original) original(self, track, option, where, speed, listener);
 }
@@ -345,12 +486,122 @@ void secondary_unload_hook(void *self, const void *option, void *listener) {
     if (original) original(self, option, listener);
 }
 void complete_hook(void *self, const void *request, std::uint32_t result, const void *where) {
-    complete(reinterpret_cast<std::uintptr_t>(self), request, result);
+    complete(reinterpret_cast<std::uintptr_t>(self), request, result,where);
     auto original = reinterpret_cast<Complete>(__atomic_load_n(&original_complete, __ATOMIC_ACQUIRE));
     if (original) original(self, request, result, where);
 }
 } // namespace
 
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+extern "C" int azn_register_source_capture(azn_source_capture_fn callback) {
+    if (!callback) return 0;
+    azn_source_capture_fn empty=nullptr;
+    return source_capture.compare_exchange_strong(empty,callback,std::memory_order_acq_rel) || empty==callback;
+}
+extern "C" uint64_t azn_load_source_pin(unsigned deck,uint64_t epoch,uint64_t load) {
+    if (deck>=kDecks) return 0;
+    Deck &d=decks[deck];
+    uint64_t seq=d.sequence.load(std::memory_order_acquire);
+    if ((seq&1u) || d.sample_epoch.load(std::memory_order_acquire)!=epoch ||
+        d.sample_load.load(std::memory_order_acquire)!=load) return 0;
+    uint64_t pin=d.sample_source_pin.load(std::memory_order_acquire);
+    return seq==d.sequence.load(std::memory_order_acquire) && d.epoch.load(std::memory_order_acquire)==epoch &&
+        d.valid.load(std::memory_order_acquire) ? pin : 0;
+}
+/* A scalar-only pre-completion witness. Never take capture here: completion
+ * intentionally invalidates a contended writer, and a reader must not cause it.
+ * Each new request has a new epoch; acquiring any newly copied field carries
+ * that invalidation to the final epoch check. Completion clears pending_id
+ * before publishing its matched load, including on failure. */
+extern "C" uint64_t azn_load_pending(unsigned deck,uint64_t epoch,const unsigned char source[12]) {
+    if (deck>=kDecks || !epoch || !enabled.load(std::memory_order_acquire)) return 0;
+    auto &d=decks[deck];
+    uint64_t request=d.pending_id.load(std::memory_order_acquire);
+    uint64_t unit=d.pending_unit.load(std::memory_order_acquire);
+    if (!request || !unit || d.pending_epoch.load(std::memory_order_acquire)!=epoch) return 0;
+    if (source) {
+        uint64_t lo; uint32_t hi;
+        std::memcpy(&lo,source,8); std::memcpy(&hi,source+8,4);
+        if (!hi || d.pending_track_lo.load(std::memory_order_acquire)!=lo ||
+            d.pending_track_hi.load(std::memory_order_acquire)!=hi) return 0;
+    }
+    return d.pending_id.load(std::memory_order_acquire)==request &&
+        d.pending_epoch.load(std::memory_order_acquire)==epoch &&
+        d.unit_generation.load(std::memory_order_acquire)==unit &&
+        !d.poison.load(std::memory_order_acquire) && d.epoch.load(std::memory_order_acquire)==epoch &&
+        enabled.load(std::memory_order_acquire) ? request : 0;
+}
+extern "C" int azn_load_track_matches(unsigned deck,uint64_t epoch,uint64_t load,const unsigned char source[12]) {
+    if (deck>=kDecks || !source || !epoch || !load) return 0;
+    auto &d=decks[deck];
+    uint64_t seq=d.sequence.load(std::memory_order_acquire);
+    if (!seq || (seq&1)) return 0;
+    uint64_t lo;uint32_t hi;
+    std::memcpy(&lo,source,8);std::memcpy(&hi,source+8,4);
+    return hi && d.sample_track_lo.load(std::memory_order_acquire)==lo && d.sample_track_hi.load(std::memory_order_acquire)==hi &&
+        d.sample_load.load(std::memory_order_acquire)==load && d.sample_epoch.load(std::memory_order_acquire)==epoch &&
+        d.valid.load(std::memory_order_acquire) && d.epoch.load(std::memory_order_acquire)==epoch &&
+        !d.poison.load(std::memory_order_acquire) && d.sequence.load(std::memory_order_acquire)==seq;
+}
+extern "C" unsigned azn_load_kind(unsigned deck,uint64_t epoch,uint64_t load) {
+    if (deck>=kDecks || !epoch || !load) return 0;
+    auto &d=decks[deck];
+    uint64_t seq=d.sequence.load(std::memory_order_acquire);
+    unsigned kind=d.sample_source_kind.load(std::memory_order_acquire);
+    return seq && !(seq&1) && d.sample_load.load(std::memory_order_acquire)==load &&
+        d.sample_epoch.load(std::memory_order_acquire)==epoch && d.epoch.load(std::memory_order_acquire)==epoch &&
+        d.valid.load(std::memory_order_acquire) && d.sequence.load(std::memory_order_acquire)==seq ? kind:0;
+}
+extern "C" unsigned azn_load_original_bpm(unsigned deck,uint64_t unit,uint64_t epoch,uint64_t load,double *out) {
+    if (deck>=kDecks || !out || !unit || !epoch || !load) return AZN_BPM_UNKNOWN;
+    auto &d=decks[deck];
+    uint64_t seq=d.sequence.load(std::memory_order_acquire);
+    uint64_t bits=d.sample_original_bpm.load(std::memory_order_acquire);
+    unsigned state=d.sample_bpm_state.load(std::memory_order_acquire);
+    if (!seq || (seq&1) || d.sample_load.load(std::memory_order_acquire)!=load ||
+        d.sample_epoch.load(std::memory_order_acquire)!=epoch || d.sample_unit.load(std::memory_order_acquire)!=unit ||
+        d.epoch.load(std::memory_order_acquire)!=epoch || d.unit_generation.load(std::memory_order_acquire)!=unit ||
+        !d.valid.load(std::memory_order_acquire) || d.poison.load(std::memory_order_acquire) ||
+        !enabled.load(std::memory_order_acquire) || d.sequence.load(std::memory_order_acquire)!=seq) return AZN_BPM_UNKNOWN;
+    std::memcpy(out,&bits,sizeof bits);
+    return state;
+}
+extern "C" uint64_t azn_lifecycle_fence(unsigned deck) {
+    return deck<kDecks && decks[deck].unit_generation.load(std::memory_order_acquire)
+        ? decks[deck].epoch.load(std::memory_order_acquire) : 0;
+}
+extern "C" int azn_load_history_revoked(unsigned deck, uint64_t epoch) {
+    if (deck >= kDecks || !epoch) return 0;
+    const auto &d = decks[deck];
+    const auto current = d.epoch.load(std::memory_order_acquire);
+    /* An invalidated incarnation with no active replacement has no playback
+     * history to capture. A failed load_read alone does not prove this. */
+    return current > epoch && !d.valid.load(std::memory_order_acquire) &&
+           d.epoch.load(std::memory_order_acquire) == current;
+}
+extern "C" uint64_t azn_empty_fence(unsigned deck) {
+    if (deck >= kDecks) return 0;
+    auto &d = decks[deck];
+    uint64_t f = d.awaiting_empty.load(std::memory_order_acquire);
+    return f && d.epoch.load(std::memory_order_acquire)==f ? f : 0;
+}
+extern "C" void azn_empty_commit(unsigned deck, uint64_t fence) {
+    if (!fence || deck>=kDecks || azn_empty_fence(deck)!=fence) return;
+    auto &d=decks[deck];auto unit=d.unit_generation.load(std::memory_order_acquire);
+    uint64_t old=d.confirmed_empty.load(std::memory_order_acquire);
+    if (old<fence && d.confirmed_empty.compare_exchange_strong(old,fence,std::memory_order_acq_rel) &&
+        azn_empty_fence(deck)==fence) status_load(deck,unit,fence,AZN_EMPTY,0,false);
+}
+extern "C" int azn_empty_seed(unsigned deck,azstatus_native_receipt *out) {
+    uint64_t fence=azn_empty_fence(deck);
+    if (!fence || !out || decks[deck].confirmed_empty.load(std::memory_order_acquire)!=fence) return 0;
+    auto unit=decks[deck].unit_generation.load(std::memory_order_acquire);
+    if (!unit || azn_empty_fence(deck)!=fence) return 0;
+    *out={};out->size=sizeof *out;out->version=1;out->kind=AZN_LOAD;out->a=AZN_EMPTY;
+    out->deck=deck;out->unit=unit;out->epoch=fence;
+    return 1;
+}
+#endif
 extern "C" void azsdk_load_configure(int on, int build, azsdk_load_patch_fn patch) noexcept {
     enabled.store(0, std::memory_order_release);
     for (unsigned d = 0; d < kDecks; ++d) {
@@ -422,6 +673,10 @@ extern "C" int azsdk_load_register(int deck, void *owned_unit) noexcept {
         d.facade.store(facade, std::memory_order_release);
         d.ready.store(1, std::memory_order_release);
         d.unit_generation.store(++next_unit, std::memory_order_release);
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+        d.awaiting_empty.store(epoch, std::memory_order_release);
+        azn_capability(deck,AZN_CAP_LOAD|AZN_CAP_ORIGINAL_BPM,1);
+#endif
         unlock(d);
         return 1;
     } catch (...) { return 0; }
@@ -429,7 +684,16 @@ extern "C" int azsdk_load_register(int deck, void *owned_unit) noexcept {
 extern "C" void azsdk_load_retire(int deck) noexcept {
     if (!deck_ok(deck)) return;
     Deck &d = decks[deck];
-    invalidate(d);
+    const auto epoch = invalidate(d);
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    status_load(deck, d.unit_generation.load(std::memory_order_acquire), epoch, AZN_UNKNOWN, 0, false);
+    azn_capability(deck,AZN_CAP_LOAD|AZN_CAP_ORIGINAL_BPM,0);
+#ifdef AZ_STATUS_MEMORY_PRODUCER
+    azn_memory_retire(deck,epoch);
+#endif
+#else
+    (void)epoch;
+#endif
     d.unit_generation.store(0, std::memory_order_release);
     d.facade.store(0, std::memory_order_release);
     d.unit.store(0, std::memory_order_release);

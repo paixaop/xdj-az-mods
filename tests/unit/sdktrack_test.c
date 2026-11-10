@@ -53,6 +53,11 @@ static int st_test_thread_name(pthread_t thread, const char *name) {
 #undef st_mtim
 #undef pthread_setname_np
 #endif
+static int st_test_seconds(double actual, double expected, uint64_t clock_rate) {
+    int order = compare_timestamps(actual, expected, 1, clock_rate, 1);
+    assert(order != AZ_TIME_INVALID);
+    return order == AZ_TIME_EQUAL;
+}
 unsigned azsdk_sources_sweep(void) { return 0; } /* Registry ownership is tested separately. */
 /* The library fixture exposes SQLite's opaque typed handle. The provider's
  * dynamic API uses void*, so retain its exact function-pointer signature. */
@@ -170,7 +175,7 @@ static void provider_bindings(const az_track_ref *ref) {
         const az_wave_snapshot *window = NULL;
         assert((wave ? sdk_waveform_acquire("mod-a", ticket, &window)
                      : sdk_track_acquire("mod-a", ticket, &track)) == AZ_OK);
-        assert(wave ? window->columns[0] == 0x11 : track->beats[1].time_s == .5);
+        assert(wave ? window->columns[0] == 0x11 : st_test_seconds(track->beats[1].time_s, .5, 1000));
         assert(!unlink(alias) && !symlink(second, alias));
         st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
         const az_track_snapshot *new_track = NULL;
@@ -179,7 +184,7 @@ static void provider_bindings(const az_track_ref *ref) {
               (wave ? sdk_waveform_acquire("mod-a", ticket, &new_window)
                     : sdk_track_acquire("mod-a", ticket, &new_track)) == AZ_STALE);
         CHECK("retargeting keeps the acquired old allocation readable",
-              wave ? window->columns[0] == 0x11 : track->beats[1].time_s == .5);
+              wave ? window->columns[0] == 0x11 : st_test_seconds(track->beats[1].time_s, .5, 1000));
         assert(sdk_track_release("mod-a", ticket) == AZ_OK);
         assert((wave ? sdk_waveform_request("mod-a", ref, &query, &ticket)
                      : sdk_track_request("mod-a", ref, AZ_DATA_GRID, &ticket)) == AZ_OK);
@@ -187,7 +192,7 @@ static void provider_bindings(const az_track_ref *ref) {
         assert((wave ? sdk_waveform_acquire("mod-a", ticket, &new_window)
                      : sdk_track_acquire("mod-a", ticket, &new_track)) == AZ_OK);
         CHECK("a new request reads the replacement analysis target",
-              wave ? new_window->columns[0] == 0x77 : new_track->beats[1].time_s == 1);
+              wave ? new_window->columns[0] == 0x77 : st_test_seconds(new_track->beats[1].time_s, 1, 1000));
         assert(sdk_track_release("mod-a", ticket) == AZ_OK);
     }
     assert(!sqlite3_open(dbname, &db));
@@ -317,7 +322,7 @@ static void provider_paths(const az_track_ref *ref) {
     assert(sdk_track_request("mod-a", ref, AZ_DATA_GRID, &ticket) == AZ_OK);
     st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
     assert(sdk_track_acquire("mod-a", ticket, &view) == AZ_OK);
-    CHECK("fresh request sees the newly created beat grid", view->grid_info.availability == AZ_AVAIL_READY && view->beat_count == 2 && view->beats[1].time_s == .5);
+    CHECK("fresh request sees the newly created beat grid", view->grid_info.availability == AZ_AVAIL_READY && view->beat_count == 2 && st_test_seconds(view->beats[1].time_s, .5, 1000));
     assert(sdk_track_release("mod-a", ticket) == AZ_OK);
     assert(!sqlite3_open(dbname, &db));
     sql(db, "UPDATE content SET analysisDataFilePath='/analysis.DAT' WHERE content_id=10");
@@ -365,8 +370,8 @@ static void provider_previews(const az_track_ref *ref) {
             CHECK("preview public snapshot preserves source columns and stride", view->encoding == encoding &&
                                                                                      view->column_count == 3 && view->total_columns == 4 && view->bytes_per_column == stride &&
                                                                                      view->data_bytes == 3 * stride && view->columns[0] == encoding * 32 + stride);
-            CHECK("preview public snapshot uses DB duration, never 150 Hz", view->start_s == 75.25 &&
-                                                                                view->seconds_per_column == 75.25 && view->info.provenance == AZ_PROV_FILE);
+            CHECK("preview public snapshot uses DB duration, never 150 Hz", st_test_seconds(view->start_s, 75.25, 4) &&
+                                                                                st_test_seconds(view->seconds_per_column, 75.25, 4) && view->info.provenance == AZ_PROV_FILE);
         }
         assert(sdk_track_release("mod-a", ticket) == AZ_OK);
     }
@@ -446,7 +451,7 @@ static void provider_mono_previews(const az_track_ref *ref) {
             CHECK("PWV2/PWAV public range selects DAT rather than EXT", rc == AZ_OK && view);
             if (rc == AZ_OK && view) {
                 CHECK("mono preview preserves exact byte columns and file provenance", view->encoding == encoding && view->column_count == 4 && view->total_columns == 5 && view->bytes_per_column == 1 && view->columns[0] == encoding * 16 + 1 && view->info.provenance == AZ_PROV_FILE);
-                CHECK("mono preview uses metadata duration rather than detail clock", view->start_s == 60.2 && view->seconds_per_column == 60.2);
+                CHECK("mono preview uses metadata duration rather than detail clock", st_test_seconds(view->start_s, 60.2, 5) && st_test_seconds(view->seconds_per_column, 60.2, 5));
             }
             assert(st_release(&g_st, deck_owner, ticket, 0) == AZ_OK);
         }
@@ -524,9 +529,15 @@ static void provider_resolution_reuse(az_track_ref *ref, const az_track_ref *oth
     sql(db, "UPDATE content SET analysisDataFilePath='/resolution.DAT' WHERE content_id=10");
     assert(!sqlite3_close(db));
     uint8_t file[36 + 6 * 3] = {0};
-    memcpy(file, "PMAI", 4); layered_put32(file + 4, 12); layered_put32(file + 8, sizeof file);
-    memcpy(file + 12, "PWV7", 4); layered_put32(file + 16, 24); layered_put32(file + 20, sizeof file - 12);
-    layered_put32(file + 24, 3); layered_put32(file + 28, 6); layered_put32(file + 32, 0x00960000);
+    memcpy(file, "PMAI", 4);
+    layered_put32(file + 4, 12);
+    layered_put32(file + 8, sizeof file);
+    memcpy(file + 12, "PWV7", 4);
+    layered_put32(file + 16, 24);
+    layered_put32(file + 20, sizeof file - 12);
+    layered_put32(file + 24, 3);
+    layered_put32(file + 28, 6);
+    layered_put32(file + 32, 0x00960000);
     for (unsigned i = 0; i < 6; ++i) {
         file[36 + i * 3] = (uint8_t) (200 + i);
         file[37 + i * 3] = (uint8_t) (100 + i);
@@ -534,10 +545,14 @@ static void provider_resolution_reuse(az_track_ref *ref, const az_track_ref *oth
     }
     FILE *f = fopen(path, "wb");
     assert(f && fwrite(file, 1, sizeof file, f) == sizeof file && !fclose(f));
-    resolution_open = g_sdk_sq.open_v2; resolution_prepare = g_sdk_sq.prepare;
-    resolution_key = g_sdk_sq.key; resolution_close = g_sdk_sq.close;
-    g_sdk_sq.open_v2 = counted_resolution_open; g_sdk_sq.prepare = counted_resolution_prepare;
-    g_sdk_sq.key = counted_resolution_key; g_sdk_sq.close = counted_resolution_close;
+    resolution_open = g_sdk_sq.open_v2;
+    resolution_prepare = g_sdk_sq.prepare;
+    resolution_key = g_sdk_sq.key;
+    resolution_close = g_sdk_sq.close;
+    g_sdk_sq.open_v2 = counted_resolution_open;
+    g_sdk_sq.prepare = counted_resolution_prepare;
+    g_sdk_sq.key = counted_resolution_key;
+    g_sdk_sq.close = counted_resolution_close;
     resolution_opens = resolution_queries = resolution_keys = resolution_closes = 0;
     struct st_data *data = malloc(sizeof *data);
     assert(data);
@@ -547,8 +562,8 @@ static void provider_resolution_reuse(az_track_ref *ref, const az_track_ref *oth
         data->wave_query = (az_wave_query) {sizeof(az_wave_query), AZ_DATA_VERSION, encoding, i, 2, 0};
         int rc = st_disk_load(ref, ST_DETAIL, data, NULL);
         CHECK("resolution reuse still reads each actual raw/derived window", rc == AZ_OK &&
-              data->wave_view.first_column == i && data->wave_view.column_count == 2 &&
-              data->wave_view.encoding == encoding && data->detail[encoding == AZ_WAVE_PWV7_BANDS ? 0 : 2] == 200 + i);
+                                                                                 data->wave_view.first_column == i && data->wave_view.column_count == 2 &&
+                                                                                 data->wave_view.encoding == encoding && data->detail[encoding == AZ_WAVE_PWV7_BANDS ? 0 : 2] == 200 + i);
         if (!i) {
             CHECK("first real disk resolution opens, keys, queries and closes its fixture database", resolution_opens == 1 && resolution_keys == 1 && resolution_queries == 1 && resolution_closes == 1);
             puts("disk resolution baseline: actual SQL lookup and file window passed");
@@ -562,13 +577,13 @@ static void provider_resolution_reuse(az_track_ref *ref, const az_track_ref *oth
     unsigned before = resolution_opens;
     resolution_update(database, "UPDATE content SET title='Changed resolution',length=123 WHERE content_id=10");
     CHECK("database edits replace cached metadata", resolution_metadata(ref, data) == AZ_OK &&
-          !strcmp(data->view.metadata.title, "Changed resolution") && data->view.metadata.duration_s == 123 && resolution_opens == before + 1);
+                                                        !strcmp(data->view.metadata.title, "Changed resolution") && st_test_seconds(data->view.metadata.duration_s, 123, 1) && resolution_opens == before + 1);
     CHECK("fresh edited metadata is reusable", resolution_metadata(ref, data) == AZ_OK && resolution_opens == before + 1);
     before = resolution_opens;
     CHECK("equal track IDs on a different source require their own resolution", resolution_metadata(other, data) == AZ_OK &&
-          !strcmp(data->view.metadata.title, "Track Ten") && resolution_opens == before + 1);
+                                                                                    !strcmp(data->view.metadata.title, "Track Ten") && resolution_opens == before + 1);
     CHECK("the other source cannot relabel cached metadata", resolution_metadata(ref, data) == AZ_OK &&
-          !strcmp(data->view.metadata.title, "Changed resolution") && resolution_opens == before + 1);
+                                                                 !strcmp(data->view.metadata.title, "Changed resolution") && resolution_opens == before + 1);
 
     char sidecar[PATH_MAX];
     snprintf(sidecar, sizeof sidecar, "%s-wal", database);
@@ -600,7 +615,7 @@ static void provider_resolution_reuse(az_track_ref *ref, const az_track_ref *oth
     before = resolution_opens;
     assert(!unlink(audio) && !symlink(target[1], audio));
     CHECK("reused row re-resolves the current contained audio target", resolution_metadata(ref, data) == AZ_OK &&
-          !strcmp(data->view.metadata.path, target[1]) && resolution_opens == before);
+                                                                           !strcmp(data->view.metadata.path, target[1]) && resolution_opens == before);
     assert(!unlink(audio) && !unlink(target[0]) && !unlink(target[1]));
 
     /* Same physical DB/inode and fingerprint, different canonical filename. */
@@ -614,7 +629,7 @@ static void provider_resolution_reuse(az_track_ref *ref, const az_track_ref *oth
     CHECK("canonical DB retarget invalidates a held stored snapshot", !st_disk_fresh(ref, held, NULL));
     before = resolution_opens;
     CHECK("same inode through a different canonical DB path is re-resolved", resolution_metadata(ref, data) == AZ_OK &&
-          !strcmp(data->files[0], backup) && resolution_opens == before + 1);
+                                                                                 !strcmp(data->files[0], backup) && resolution_opens == before + 1);
     assert(!unlink(database) && !rename(backup, database));
     before = resolution_opens;
     CHECK("restoring the DB pathname also validates a new locator", resolution_metadata(ref, data) == AZ_OK && resolution_opens == before + 1);
@@ -632,7 +647,7 @@ static void provider_resolution_reuse(az_track_ref *ref, const az_track_ref *oth
     before = resolution_opens;
     CHECK("failed query refuses a different exact track reference", resolution_metadata(&different, data) == AZ_FAILED && resolution_opens == before + 1);
     CHECK("failed query is retried through actual SQL", resolution_metadata(&different, data) == AZ_OK &&
-          !strcmp(data->view.metadata.title, "Track Eleven") && resolution_opens == before + 2);
+                                                            !strcmp(data->view.metadata.title, "Track Eleven") && resolution_opens == before + 2);
     different.track_id = 999999;
     before = resolution_opens;
     CHECK("missing lookup does not reuse a preceding track", resolution_metadata(&different, data) == AZ_NOT_FOUND && resolution_opens == before + 1);
@@ -644,7 +659,7 @@ static void provider_resolution_reuse(az_track_ref *ref, const az_track_ref *oth
     before = resolution_opens;
     CHECK("DB edit during resolution refuses publication", resolution_metadata(ref, data) == AZ_STALE && resolution_opens == before + 1);
     CHECK("retry after the edit queries and publishes current metadata", resolution_metadata(ref, data) == AZ_OK &&
-          !strcmp(data->view.metadata.title, "Changed during resolution") && resolution_opens == before + 2);
+                                                                             !strcmp(data->view.metadata.title, "Changed during resolution") && resolution_opens == before + 2);
 
     size_t db_bytes = 0;
     uint8_t *copy = st_read_file(database, &db_bytes);
@@ -666,8 +681,10 @@ static void provider_resolution_reuse(az_track_ref *ref, const az_track_ref *oth
     CHECK("a remounted source must query before reusing metadata", resolution_metadata(ref, data) == AZ_OK && resolution_opens == before + 1);
     CHECK("another source keeps its independently valid locator", resolution_metadata(other, data) == AZ_OK && resolution_opens == before + 1);
     CHECK("every actual resolution SQL handle was keyed and closed", resolution_opens == resolution_keys && resolution_opens == resolution_queries && resolution_opens == resolution_closes);
-    g_sdk_sq.open_v2 = resolution_open; g_sdk_sq.prepare = resolution_prepare;
-    g_sdk_sq.key = resolution_key; g_sdk_sq.close = resolution_close;
+    g_sdk_sq.open_v2 = resolution_open;
+    g_sdk_sq.prepare = resolution_prepare;
+    g_sdk_sq.key = resolution_key;
+    g_sdk_sq.close = resolution_close;
     free(data);
     assert(!unlink(path));
     assert(!sqlite3_open(database, &db));
@@ -675,7 +692,9 @@ static void provider_resolution_reuse(az_track_ref *ref, const az_track_ref *oth
     assert(!sqlite3_close(db));
 }
 static void provider_layered_detail(const az_track_ref *ref) {
-    enum { LAYERED = 8 };
+    enum {
+        LAYERED = 8
+    };
     _Static_assert((unsigned) AZ_WAVE_PWV7_LAYERED_RAW == (unsigned) LAYERED,
                    "append-only derived layered waveform ID");
     char database[PATH_MAX], path[PATH_MAX], ext[PATH_MAX], dat[PATH_MAX];
@@ -697,7 +716,7 @@ static void provider_layered_detail(const az_track_ref *ref) {
     bytes[27] = 3;
     bytes[31] = 5;
     bytes[33] = 0x96;
-    const uint8_t raw[] = {255,128,1, 0,0,255, 128,128,128, 0,0,0, 255,255,0};
+    const uint8_t raw[] = {255, 128, 1, 0, 0, 255, 128, 128, 128, 0, 0, 0, 255, 255, 0};
     memcpy(bytes + 36, raw, sizeof raw);
     FILE *f = fopen(path, "wb");
     assert(f && fwrite(bytes, 1, sizeof bytes, f) == sizeof bytes && !fclose(f));
@@ -711,8 +730,8 @@ static void provider_layered_detail(const az_track_ref *ref) {
     assert(!ut_fail);
     puts("LAYERED_PROVIDER_BASELINE_OK existing_file_windows=1 old_encodings=1");
     fflush(stdout);
-    const uint8_t expected[] = {1,16,255,0,0,0, 8,16,128,0,0,0,
-                                8,16,0,0,0,0, 6,16,255,0,0,0};
+    const uint8_t expected[] = {1, 16, 255, 0, 0, 0, 8, 16, 128, 0, 0, 0,
+                                8, 16, 0, 0, 0, 0, 6, 16, 255, 0, 0, 0};
     az_wave_query query = {sizeof query, AZ_DATA_VERSION, LAYERED, 1, AZ_WAVE_WINDOW_MAX, 0};
     uint64_t tickets[4] = {0};
     const az_wave_snapshot *views[4] = {NULL};
@@ -729,7 +748,7 @@ static void provider_layered_detail(const az_track_ref *ref) {
         if (rc != AZ_OK || !views[owner]) continue;
         const az_wave_snapshot *v = views[owner];
         CHECK("layered snapshot has deterministic SDK reserved bytes and absolute raw magnitudes", v->encoding == LAYERED && v->first_column == 1 && v->column_count == 4 && v->total_columns == 5 && v->bytes_per_column == 6 && v->data_bytes == sizeof expected && !memcmp(v->columns, expected, sizeof expected));
-        CHECK("layered detail uses150Hz rather than metadata duration", v->start_s == 1.0 / 150.0 && v->seconds_per_column == 1.0 / 150.0);
+        CHECK("layered detail uses150Hz rather than metadata duration", st_test_seconds(v->start_s, 1.0 / 150.0, 150) && st_test_seconds(v->seconds_per_column, 1.0 / 150.0, 150));
         CHECK("layered conversion is derived with retained revision/clock", v->info.provenance == AZ_PROV_DERIVED && v->revision && v->observed_ns && v->info.availability == AZ_AVAIL_READY);
     }
     /* The raw query must remain distinct from its derived layered query. */
@@ -778,15 +797,15 @@ static void provider_layered_detail(const az_track_ref *ref) {
     st_test_count_reads = 1;
     int rc = st_wave_read(path, scratch);
     st_test_count_reads = 0;
-    CHECK("layered provider retains at most4096 converted columns", rc == AZ_OK && scratch->wave_view.column_count == AZ_WAVE_WINDOW_MAX && scratch->wave_view.total_columns == total && scratch->wave_view.data_bytes == sizeof scratch->detail && scratch->wave_view.start_s == 1.0);
+    CHECK("layered provider retains at most4096 converted columns", rc == AZ_OK && scratch->wave_view.column_count == AZ_WAVE_WINDOW_MAX && scratch->wave_view.total_columns == total && scratch->wave_view.data_bytes == sizeof scratch->detail && st_test_seconds(scratch->wave_view.start_s, 1.0, 150));
     CHECK("layered provider reads only bounded packed input rather than entire analysis", st_test_read_bytes <= AZ_WAVE_WINDOW_MAX * 3u + 60u && st_test_largest_read <= AZ_WAVE_WINDOW_MAX * 3u);
-    const uint8_t first_record[] = {0x63,0x38,255,128,1,0};
+    const uint8_t first_record[] = {0x63, 0x38, 255, 128, 1, 0};
     CHECK("layered SDK reserved byte is zero even when destination was nonzero", !memcmp(scratch->detail, first_record, sizeof first_record) && !memcmp(scratch->detail + sizeof scratch->detail - 6, first_record, sizeof first_record));
     scratch->wave_query.first_column = total;
     az_wave_snapshot before = scratch->wave_view;
     CHECK("out-of-range layered request refuses unchanged view", st_wave_read(path, scratch) == AZ_INVALID && !memcmp(&scratch->wave_view, &before, sizeof before));
     scratch->wave_query.first_column = total - 1;
-    CHECK("last-column layered request clips and preserves detail clock", st_wave_read(path, scratch) == AZ_OK && scratch->wave_view.column_count == 1 && scratch->wave_view.data_bytes == 6 && scratch->wave_view.seconds_per_column == 1.0 / 150.0);
+    CHECK("last-column layered request clips and preserves detail clock", st_wave_read(path, scratch) == AZ_OK && scratch->wave_view.column_count == 1 && scratch->wave_view.data_bytes == 6 && st_test_seconds(scratch->wave_view.seconds_per_column, 1.0 / 150.0, 150));
     free(scratch);
     assert(!unlink(path) && !unlink(ext) && !unlink(dat));
     assert(!sqlite3_open(database, &db));
@@ -794,6 +813,9 @@ static void provider_layered_detail(const az_track_ref *ref) {
     assert(!sqlite3_close(db));
 }
 int main(void) {
+    /* The FIFO watchdog writes its failure from a signal handler. Keep it
+     * from landing inside a buffered PASS line when both streams share a log. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
     ut_suite = "sdk disk provider";
     char root_template[] = "/tmp/az-sdk-provider.XXXXXX", root[PATH_MAX];
     assert(mkdtemp(root_template) && realpath(root_template, root));
@@ -839,7 +861,7 @@ int main(void) {
     st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
     const az_track_snapshot *view;
     assert(sdk_track_acquire("mod-a", ticket, &view) == AZ_OK);
-    assert(!strcmp(view->metadata.title, "Track Ten") && view->metadata.original_bpm == 128 && view->metadata.duration_s == 301);
+    assert(!strcmp(view->metadata.title, "Track Ten") && view->metadata.original_bpm == 128 && st_test_seconds(view->metadata.duration_s, 301, 1));
     assert(view->metadata_info.provenance == AZ_PROV_FILE && view->grid_info.availability == AZ_AVAIL_UNSUPPORTED);
     assert(sdk_track_acquire("mod-b", ticket, &view) == AZ_INVALID);
     /* A committed WAL must not be silently ignored by an immutable DB reader. */
@@ -898,7 +920,7 @@ int main(void) {
     const az_wave_snapshot *wv, *shared_wave;
     assert(sdk_waveform_acquire("mod-a", wt, &wv) == AZ_OK);
     assert(wv->column_count == 50 && wv->total_columns == 200 && wv->columns[0] == 150 && wv->columns[49] == 199);
-    assert(wv->start_s == 1.0 && wv->seconds_per_column == 1.0 / 150.0 && wv->info.provenance == AZ_PROV_FILE);
+    assert(st_test_seconds(wv->start_s, 1.0, 150) && st_test_seconds(wv->seconds_per_column, 1.0 / 150.0, 150) && wv->info.provenance == AZ_PROV_FILE);
     assert(sdk_waveform_acquire("mod-a", ws, &shared_wave) == AZ_OK && shared_wave == wv);
     assert(sdk_waveform_acquire("mod-b", wt, &shared_wave) == AZ_INVALID);
     assert(sdk_track_acquire("mod-a", wt, &view) == AZ_INVALID);
@@ -955,7 +977,7 @@ int main(void) {
         case 1: invalid.version++; break;
         case 2: invalid.deck = 4; break;
         case 3: invalid.operation = 0; break;
-        case 4: invalid.operation = AZ_CMD_CUE_COLOR + 1; break;
+        case 4: invalid.operation = AZ_CMD_CUE_LOOP_SET + 1; break;
         case 5: invalid.request_id = 0; break;
         case 6: invalid.expected_load_generation = 0; break;
         case 7: invalid.deadline_ns = 0; break;

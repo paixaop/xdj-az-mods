@@ -67,11 +67,12 @@ inline Frame *&head() noexcept { static thread_local Frame *value = nullptr; ret
 struct Frame {
     Frame *parent;
     const void *server;
+    std::uintptr_t packet_key;
     Envelope value;
     unsigned depth;
     bool valid;
     explicit Frame(const Borrow &borrow) noexcept
-        : parent(head()),server(borrow.server),depth(parent ? (parent->depth < 32 ? parent->depth+1 : 32) : 1),
+        : parent(head()),server(borrow.server),packet_key(reinterpret_cast<std::uintptr_t>(borrow.message)),depth(parent ? (parent->depth < 32 ? parent->depth+1 : 32) : 1),
           valid((!parent || parent->depth < 32) && capture(borrow,value)) {
         /* Even an unsupported/overflow invocation hides the older frame. No
          * depth counter wraps and no native call is suppressed by this quota. */
@@ -85,6 +86,13 @@ struct Frame {
 /* The original runs exactly once, outside any observer catch boundary. Only
  * scalars survive its message destruction; no message/argument pointer is
  * retained in Frame and teardown never rereads the native input. */
+inline std::uintptr_t take_packet_key(const void *server) noexcept {
+    auto *frame=detail::head();
+    if (!frame || !frame->valid || frame->server!=server) return 0;
+    auto key=frame->packet_key;
+    frame->packet_key=0;
+    return key;
+}
 template<class F> inline void forward_owned(const Borrow &borrow,F &&original) {
     detail::Frame frame(borrow);
     std::forward<F>(original)();

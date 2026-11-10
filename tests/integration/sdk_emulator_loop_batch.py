@@ -7,6 +7,7 @@ SDK. Host code independently validates its per-command receipts and observations
 a PLAN PASS marker is never sufficient by itself.
 """
 from sdk_timestamps import compare_timestamps
+import re
 import time
 from sdk_emulator_loop import LoopClient, records, ready, applied, ALL_COMMANDS
 from sdk_emulator_controls import MissingEvidence
@@ -30,7 +31,7 @@ def plans(text):
         row = {k: raw[k] for k in ('event', 'kind', 'status')}
         for key in PLAN_FIELDS - row.keys():
             value = raw[key]
-            if not value.isascii() or not value.isdecimal() or (value.startswith('0') and value != '0'):
+            if not re.fullmatch(r"[0-9]+", value) or (value.startswith('0') and value != '0'):
                 raise ValueError('canonical diagnostic plan integer required')
             row[key] = int(value)
             if not 0 <= row[key] < 2**64:
@@ -57,7 +58,7 @@ def next_id(text, *, sample_rate=None):
 
 
 def batch_request(pid, kind, identity, deck, load, deadline):
-    if kind not in COUNTS or not str(pid).isascii() or not str(pid).isdigit() or int(pid) <= 0:
+    if kind not in COUNTS or not re.fullmatch(r"[0-9]+", str(pid)) or int(pid) <= 0:
         raise ValueError('explicit process-bound diagnostic plan required')
     if any(type(v) is not int or not 0 < v < 2**64 for v in (identity, load, deadline)) or type(deck) is not int or deck not in range(4):
         raise ValueError('bounded diagnostic plan scalars required')

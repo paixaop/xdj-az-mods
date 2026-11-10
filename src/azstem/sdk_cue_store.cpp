@@ -4,6 +4,7 @@
 #include "../common/azcueprofile.h"
 #include "../common/azcuepersist.h"
 #include <cstring>
+#include <cmath>
 #include <limits>
 #ifdef AZSDK_CUE_DIAGNOSTIC
 #include <atomic>
@@ -76,8 +77,9 @@ bool cue_vector(uintptr_t content, size_t limit, CueVector &out) {
 }
 bool same_variant(uintptr_t a, uintptr_t b) {
     const int32_t tag = read<int32_t>(a);
-    if (tag != read<int32_t>(b) || read<uint32_t>(a + 0x18) != read<uint32_t>(b + 0x18)) return false;
+    if (tag != read<int32_t>(b)) return false;
     if (tag == 0) return true; /* Native copy does not read the inactive union. */
+    if (read<uint32_t>(a + 0x18) != read<uint32_t>(b + 0x18)) return false;
     /* Native stored-Cue serializer 1177a00 reads a single MPEG point (tag 2)
      * as two u32 values, or a single FLAC point (tag 4) as two u64 and one u32.
      * Ref/control addresses and FLAC tail padding are not values. Full seek
@@ -86,7 +88,7 @@ bool same_variant(uintptr_t a, uintptr_t b) {
     const uintptr_t value_a = word(a + 8), value_b = word(b + 8);
     return value_a && value_b && !std::memcmp(reinterpret_cast<const void *>(value_a), reinterpret_cast<const void *>(value_b), tag == 2 ? 8 : 20);
 }
-enum class CueDelta { None, Auto, Comment, Color };
+enum class CueDelta { None, Auto, Comment, Color, Creation };
 bool same_cue(uintptr_t a, uintptr_t b, CueDelta delta, bool desired, uint32_t source_rate,
               const char *comment = nullptr, uint32_t rgb = 0) {
     if (read<unsigned char>(a) != read<unsigned char>(b) || read<uint32_t>(a + 4) != read<uint32_t>(b + 4) ||
@@ -95,9 +97,10 @@ bool same_cue(uintptr_t a, uintptr_t b, CueDelta delta, bool desired, uint32_t s
     if (delta == CueDelta::Auto ? read<unsigned char>(b + 0x28) != unsigned(desired)
                                : read<unsigned char>(a + 0x28) != read<unsigned char>(b + 0x28)) return false;
     const uint32_t old_color = read<uint32_t>(a + 0x78), new_color = read<uint32_t>(b + 0x78);
-    const bool memory_color = delta == CueDelta::Color && read<unsigned char>(a) == 0;
+    const bool color_edit = delta == CueDelta::Color || delta == CueDelta::Creation;
+    const bool memory_color = color_edit && read<unsigned char>(a) == 0;
     if (!memory_color && read<unsigned char>(a + 0x7c) != read<unsigned char>(b + 0x7c)) return false;
-    if (delta == CueDelta::Color) {
+    if (color_edit) {
         // A Memory RGB edit also updates the native palette index. The native
         // opaque color constructor uses 0xff; uncolored Memory black can be 0.
         if (new_color != (0xff000000u | rgb) && !(memory_color && !rgb && !new_color)) return false;
@@ -110,7 +113,7 @@ bool same_cue(uintptr_t a, uintptr_t b, CueDelta delta, bool desired, uint32_t s
     } else if (old_color != new_color) return false;
     if (!same_variant(a + 0x30, b + 0x30) || !same_variant(a + 0x50, b + 0x50)) return false;
     const uintptr_t text_a = word(a + 0x70), text_b = word(b + 0x70);
-    const char *expected = delta == CueDelta::Comment ? comment : text_a ? reinterpret_cast<const char *>(text_a) : "";
+    const char *expected = delta == CueDelta::Comment || delta == CueDelta::Creation ? comment : text_a ? reinterpret_cast<const char *>(text_a) : "";
     return expected && !std::strcmp(expected, text_b ? reinterpret_cast<const char *>(text_b) : "");
 }
 } // namespace
@@ -137,6 +140,9 @@ Profile native_profile(int build, uintptr_t bias) noexcept {
     NATIVE(copy_property, 10);
     NATIVE(serialize_property, 11);
     NATIVE(where_from, 12);
+    p.string_allocate = reinterpret_cast<decltype(p.string_allocate)>(profile.persist.string_allocate);
+    p.string_destroy = reinterpret_cast<decltype(p.string_destroy)>(profile.persist.string_destroy);
+    p.color_construct = reinterpret_cast<decltype(p.color_construct)>(profile.persist.color_construct);
 #undef NATIVE
 #else
     (void) build;
@@ -304,6 +310,90 @@ bool Snapshot::current_property(unsigned kind, Property &out) const noexcept {
     out.copy_ = p_.copy_property;
     return true;
 }
+uint32_t Snapshot::source_rate() const noexcept {
+    if (!revision_ || !player_ || !pack_ || std::memcmp(reinterpret_cast<const void *>(pack_ + 0x80), track_id_, 12)) return 0;
+    // Both stock PlayerState::getPositionTime implementations divide the
+    // selected source-position samples by this owned snapshot's Hertz value.
+    // UnitStateServer publishes the same Core sampling-rate getter used by
+    // the stock cue builder. Pack+0xbe is musical key data, not a clock.
+    uint32_t rate = read<uint32_t>(player_ + 0x18);
+    return rate && rate < 0x7fffffffu ? rate : 0;
+}
+bool Snapshot::timed_property(unsigned kind, double in_s, double out_s, bool loop,
+                              uint32_t rgb, const char *comment, Property &out) const noexcept {
+    out.reset();
+    try {
+    uint32_t rate = source_rate();
+    if (!rate || kind > 8 || rgb > 0xffffff || !comment || !p_.string_allocate ||
+        !p_.string_destroy || !p_.color_construct || !p_.copy_property ||
+        !std::isfinite(in_s) || !std::isfinite(out_s)) return false;
+    int start = compare_timestamps(in_s, 0., 1, rate, 1);
+    int length = compare_timestamps(out_s, in_s, 1, rate, 1);
+    int bound = compare_timestamps(in_s * rate, 9007199254740992., rate, rate, 1);
+    int end_bound = compare_timestamps(out_s * rate, 9007199254740992., rate, rate, 1);
+    int us_bound = compare_timestamps(in_s * 1000000., 9007199254740992., 1000000, rate, 1);
+    int end_us_bound = compare_timestamps(out_s * 1000000., 9007199254740992., 1000000, rate, 1);
+    if (start == AZ_TIME_INVALID || start == AZ_TIME_BEFORE || bound == AZ_TIME_INVALID || bound != AZ_TIME_BEFORE ||
+        us_bound == AZ_TIME_INVALID || us_bound != AZ_TIME_BEFORE ||
+        (loop && (length == AZ_TIME_INVALID || length != AZ_TIME_AFTER || end_bound == AZ_TIME_INVALID || end_bound != AZ_TIME_BEFORE || end_us_bound == AZ_TIME_INVALID || end_us_bound != AZ_TIME_BEFORE))) return false;
+    size_t length_bytes = 0;
+    while (length_bytes < 128 && comment[length_bytes]) ++length_bytes;
+    if (length_bytes == 128) return false;
+    NativeString text = p_.string_allocate(length_bytes + 1);
+    if (!text.data) return false;
+    struct Release { NativeString &text; const Profile &p; ~Release() { p.string_destroy(&text); } } release {text, p_};
+    std::memcpy(text.data, comment, length_bytes + 1);
+    // Cue80 is a value carrier, not a polymorphic firmware object. Its two
+    // tagged seek variants are empty (tag=0); no counted reference is forged.
+    // Native conversion owns every object it constructs from this borrowed row.
+    NativeCue cue = {};
+    cue.bytes[0] = static_cast<unsigned char>(kind);
+    auto put = [&](unsigned offset, const void *value, size_t size) { std::memcpy(cue.bytes + offset, value, size); };
+    auto coordinates = [rate](double seconds, uint64_t &sample, uint64_t &usec) {
+        double rounded = std::round(seconds * rate);
+        // Preserve the origin window accepted above, including a tiny negative
+        // input, without converting a negative frame to unsigned storage.
+        if (std::signbit(rounded)) rounded = 0;
+        const int sample_bound = compare_timestamps(rounded, 9007199254740992., rate, rate, 1);
+        if (sample_bound == AZ_TIME_INVALID || sample_bound != AZ_TIME_BEFORE) return false;
+        sample = static_cast<uint64_t>(rounded);
+        // Stock Property-to-Cue serialization floors cached_usec * Fs / 1e6.
+        // Ceil the exact source-frame time so that this roundtrip retains the
+        // selected frame instead of introducing another truncation toward zero.
+        const __uint128_t cached = (__uint128_t(sample) * 1000000 + rate - 1) / rate;
+        const int cache_bound = compare_timestamps(cached, __uint128_t(1) << 53, 1000000, rate, 1);
+        if (cache_bound == AZ_TIME_INVALID || cache_bound != AZ_TIME_BEFORE) return false;
+        usec = static_cast<uint64_t>(cached);
+        return true;
+    };
+    uint64_t in_us = 0, in_sample = 0;
+    uint64_t out_us = UINT64_C(0x7fffffffffffffff), out_sample = out_us;
+    if (!coordinates(in_s, in_sample, in_us) || (loop && !coordinates(out_s, out_sample, out_us))) return false;
+    put(4, &rate, sizeof rate); put(8, &in_us, sizeof in_us); put(16, &in_sample, sizeof in_sample);
+    put(24, &out_us, sizeof out_us); put(32, &out_sample, sizeof out_sample); put(0x70, &text.data, sizeof text.data);
+    p_.color_construct(cue.bytes + 0x78, (rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255);
+    if (!kind) {
+        const uint32_t palette[] = {0,0xff00c6,0xff0000,0xff7100,0xffff00,0x00e300,0x00c3ff,0x0051ff,0x9c08ff};
+        unsigned index = 0;
+        while (index < sizeof palette / sizeof *palette && palette[index] != rgb) ++index;
+        if (index == sizeof palette / sizeof *palette) return false;
+        cue.bytes[0x7c] = static_cast<unsigned char>(index);
+    }
+    out.native = p_.convert(&where_from_, reinterpret_cast<const void *>(pack_),
+                            reinterpret_cast<const void *>(source_ + 0x28), &cue);
+    out.destroy_ = p_.destroy_property; out.copy_ = p_.copy_property;
+    if (std::memcmp(out.native.bytes + 0x30, source_id_, 12) ||
+        read<uint32_t>(reinterpret_cast<uintptr_t>(out.native.bytes + 0x60)) != rate ||
+        compare_timestamps(double(read<uint64_t>(reinterpret_cast<uintptr_t>(out.native.bytes + 0x40))) / rate, in_s, 1, rate, 1) != AZ_TIME_EQUAL ||
+        (loop && (std::memcmp(out.native.bytes + 0x88, source_id_, 12) ||
+                  read<uint32_t>(reinterpret_cast<uintptr_t>(out.native.bytes + 0xb8)) != rate ||
+                  compare_timestamps(double(read<uint64_t>(reinterpret_cast<uintptr_t>(out.native.bytes + 0x98))) / rate, out_s, 1, rate, 1) != AZ_TIME_EQUAL)) ||
+        std::memcmp(reinterpret_cast<const void *>(pack_ + 0x80), track_id_, 12)) {
+        out.reset(); return false;
+    }
+    return true;
+    } catch (...) { out.reset(); return false; }
+}
 bool Snapshot::canonical_property(unsigned kind, const Property &original, Property &out) const noexcept {
     if (&out == &original) return false;
     if (!revision_ || kind > 8 || !original.valid() || !p_.serialize_property ||
@@ -329,10 +419,10 @@ bool Snapshot::canonical_property(unsigned kind, const Property &original, Prope
     }
     return true;
 }
-bool Snapshot::content_witness(uint64_t expected_revision, azcuepersist_witness *out) const noexcept {
+bool Snapshot::content_witness(uint64_t expected_revision, azcuepersist_witness *out, bool allow_absent) const noexcept {
     if (!out) return false;
     *out = {};
-    if (!revision_ || expected_revision != revision_ || !memory_set_ || !hot_set_ ||
+    if (!revision_ || expected_revision != revision_ || (!allow_absent && (!memory_set_ || !hot_set_)) ||
         std::memcmp(reinterpret_cast<const void *>(pack_ + 0x80), track_id_, 12)) return false;
     if (word(pack_ + 0xe8) != memory_set_ || word(pack_ + 0xe0) != hot_set_ ||
         (memory_set_ && word(memory_set_ + 0x28) != content_) ||
@@ -358,6 +448,50 @@ bool Snapshot::content_witness(uint64_t expected_revision, azcuepersist_witness 
     out->fingerprint = current;
     out->revision = revision_;
     return true;
+}
+bool Snapshot::creation_only_changed(const azcuepersist_witness &before, unsigned kind,
+                                     const Property &expected, uint32_t rate,
+                                     const char *comment, uint32_t rgb) const noexcept {
+    azcuepersist_witness fresh {};
+    CueVector old_memory, old_hot, memory, hot;
+    if (!rate || kind > 8 || !comment || rgb > 0xffffffu || !expected.valid() || !before.revision || !before.source_info ||
+        std::memcmp(before.source_id, source_id_, 12) ||
+        !content_witness(revision_, &fresh, true) || !cue_vector(before.memory_content, 10, old_memory) ||
+        !cue_vector(before.hot_content, 8, old_hot) || !cue_vector(content_, 10, memory) || !cue_vector(hot_content_, 8, hot)) return false;
+    const uint64_t count = old_memory.count;
+    uint64_t baseline = hash(1469598103934665603ULL, before.source_id, 12);
+    baseline = hash(baseline, &count, sizeof count);
+    baseline = hash(baseline, reinterpret_cast<const void *>(old_memory.begin), old_memory.count * 0x80);
+    baseline = hash(baseline, reinterpret_cast<const void *>(old_hot.begin), old_hot.count * 0x80);
+    if (baseline != before.fingerprint) return false;
+    OwnedCue wanted;
+    wanted.native = p_.serialize_property(kind, &expected.native, kind != 0);
+    wanted.destroy_ = p_.destroy_cue;
+    auto absent = [](uintptr_t row) {
+        const uint64_t marker = UINT64_C(0x7fffffffffffffff);
+        return read<unsigned char>(row) == 0xff || read<uint64_t>(row + 8) == marker || read<uint64_t>(row + 16) == marker;
+    };
+    auto unchanged = [&](CueVector a, CueVector b, bool changed) {
+        bool matched[10] = {};
+        unsigned additions = 0, removed_empty = 0;
+        for (size_t i = 0; i < a.count; ++i) {
+            uintptr_t old = a.begin + i * 0x80;
+            bool found = false;
+            for (size_t j = 0; j < b.count; ++j) if (!matched[j] &&
+                same_cue(old, b.begin + j * 0x80, CueDelta::None, false, rate)) {
+                matched[j] = true; found = true; break;
+            }
+            if (!found) {
+                if (!changed || !kind || !absent(old) || ++removed_empty > 1) return false;
+            }
+        }
+        for (size_t j = 0; j < b.count; ++j) if (!matched[j]) {
+            if (!changed || ++additions > 1 || !same_cue(reinterpret_cast<uintptr_t>(&wanted.native),
+                b.begin + j * 0x80, CueDelta::Creation, false, rate, comment, rgb)) return false;
+        }
+        return changed ? additions == 1 && (kind ? b.count + removed_empty == a.count + 1 : b.count == a.count + 1) : !additions;
+    };
+    return unchanged(old_memory, memory, !kind) && unchanged(old_hot, hot, kind != 0);
 }
 bool Snapshot::auto_only_changed(const azcuepersist_witness &before, uint32_t memory_entry_id, bool desired, uint32_t source_rate) const noexcept {
     azcuepersist_witness fresh {};

@@ -18,7 +18,7 @@ class PositionProbe(unittest.TestCase):
         cls.temporary=tempfile.TemporaryDirectory(prefix='az-position-test-')
         cls.binary=Path(cls.temporary.name)/'fixture'
         flags=['-std=gnu11','-O1','-g','-Wall','-Wextra','-Werror','-pthread']
-        mode=os.environ.get('SAN','plain')
+        mode=os.environ.get('SAN') or 'plain'
         if mode=='asan': flags+=['-fsanitize=address,undefined','-fno-sanitize-recover=all']
         elif mode=='tsan': flags+=['-fsanitize=thread']
         elif mode!='plain': raise ValueError('invalid SAN')

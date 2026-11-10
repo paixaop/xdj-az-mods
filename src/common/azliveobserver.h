@@ -42,6 +42,11 @@ struct azsdk_tempo_lock_sample {
 
 /* Configure before unit creation. Only the existing EP147 build IDs 1 and 2 are admitted. */
 __attribute__((visibility("hidden"))) void azsdk_live_configure(int on, int build_id) AZSDK_LIVE_NOTHROW;
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+/* Start passive raw play-pause receipt capture. Keep the legacy exports gated
+ * by their existing flag. Passive mode registers play and the typed Sync seed. */
+__attribute__((visibility("hidden"))) void azsdk_live_status_start(int build_id, int legacy_active) AZSDK_LIVE_NOTHROW;
+#endif
 /* The caller owns the fully constructed native DjPlayerUnit for the whole call and must
  * check its existing build-specific unit vtable. No native pointer is retained. Returns 1
  * when all five weak observer registrations were submitted, not replay/completion proof. */

@@ -169,7 +169,7 @@ class LoopContinuationTests(unittest.TestCase):
             )
         self.assertEqual(observed, {"status": "PASS", "post_deadline_wraps": 2})
         self.assertEqual(qualifier.call_count, 2)
-        self.assertTrue(all(call.args[2] == str(PID) for call in qualifier.call_args_list))
+        self.assertTrue(all(call[0][2] == str(PID) for call in qualifier.call_args_list))
         self.assertEqual([op for _, op, _ in case.calls], [4, 1, 2, 9, 4, 6])
 
     def test_predeadline_wraps_alone_cannot_pass(self):

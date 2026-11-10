@@ -33,7 +33,7 @@ extern "C" {
  * version and is bumped with every release, whether or not the mod interface changed. A mod
  * whose azmod.json "min_core" is above it is refused with "Needs AZ-MODS <min_core> or newer",
  * so set "min_core" to the first release that has everything your mod relies on. */
-#define AZ_CORE_VERSION "1.2.3"
+#define AZ_CORE_VERSION "1.2.6"
 
 /* ---- on_frame ---------------------------------------------------------------------
  * A mod that only reads a frame returns AZ_FRAME_OK. A mod that wants later mods not to
@@ -131,6 +131,8 @@ typedef int (*az_touch_fn)(const az_touch *t, void *user);
 enum { AZ_VIEW_OTHER = 0, AZ_VIEW_SOURCE, AZ_VIEW_BROWSE, AZ_VIEW_SEARCH, AZ_VIEW_DECK,
        AZ_VIEW_MENU };   /* the Tag List and Playlist screens count as AZ_VIEW_BROWSE */
 #define AZ_VIEW_BIT(v) (1u << (v))
+/* Surface views only. Match the two-deck waveform layout; view() still returns AZ_VIEW_DECK. */
+#define AZ_VIEW_TWO_DECKS (1u << 6)
 
 /* Surfaces: a rectangle you paint over EP147's screen, shown only on the views you name. */
 typedef struct az_surface az_surface;
@@ -405,7 +407,7 @@ enum { AZ_CMD_LOOP_IN = 1, AZ_CMD_LOOP_OUT, AZ_CMD_LOOP_ENTER, AZ_CMD_LOOP_EXIT,
        AZ_CMD_SAVED_RECALL, AZ_CMD_SAVED_SAVE, AZ_CMD_SAVED_DELETE, AZ_CMD_SAVED_AUTO,
        AZ_CMD_HOT_TRIGGER, AZ_CMD_HOT_SET, AZ_CMD_HOT_CLEAR, AZ_CMD_MEMORY_RECALL,
        AZ_CMD_MEMORY_SET, AZ_CMD_MEMORY_DELETE, AZ_CMD_MAIN_SET, AZ_CMD_MAIN_RECALL,
-       AZ_CMD_CUE_COMMENT, AZ_CMD_CUE_COLOR };
+       AZ_CMD_CUE_COMMENT, AZ_CMD_CUE_COLOR, AZ_CMD_CUE_POINT_SET, AZ_CMD_CUE_LOOP_SET };
 enum { AZ_QUANTIZE_NATIVE, AZ_QUANTIZE_OFF, AZ_QUANTIZE_ON };
 enum { AZ_COMMAND_ACCEPTED, AZ_COMMAND_APPLIED, AZ_COMMAND_REJECTED,
        AZ_COMMAND_CANCELLED, AZ_COMMAND_UNCERTAIN };
@@ -444,6 +446,15 @@ enum { AZ_COMMAND_ACCEPTED, AZ_COMMAND_APPLIED, AZ_COMMAND_REJECTED,
  * Other unused arguments are zero. Saves settle only after native storage
  * completion and observation of the requested effect; partial edits can be
  * UNCERTAIN and are not rolled back. */
+/* CUE_POINT_SET / CUE_LOOP_SET create a saved cue at original-track seconds
+ * without seeking or changing working/retained cues. Require PERSIST,
+ * NATIVE_LOAD, NATIVE_CUE_IDS and the exact native_cues revision. HOT uses
+ * entry_id 1..8; MEMORY uses entry_id 0. Occupied hot slots, duplicate memory
+ * positions and the ten-memory limit refuse before writing. position_s is IN;
+ * LOOP_SET also takes end_s > IN. POINT_SET leaves end_s zero. rgb and UTF-8
+ * comment are saved together. Native quantization only: callers resolve their
+ * desired grid position first. beats and reserved are zero. Capability-check
+ * each operation; older cores do not implement these appended IDs. */
 /* Select entry_id from native_cues, fenced by its exact revision. */
 #define AZ_COMMAND_NATIVE_CUE_IDS 4u
 #define AZ_NATIVE_CUE_LIMIT 64u
@@ -451,7 +462,15 @@ typedef struct az_native_cue_snapshot {
     uint32_t size, version, deck, count;
     uint64_t native_load_generation, revision;
     az_cue_entry entries[AZ_NATIVE_CUE_LIMIT];
+    /* Optional tail. Hertz used by source-time cue creation, from the owned
+     * native PlayerState source-position clock. 0 = unknown/older provider.
+     * Qualify it with native_load_generation; do not assume equality with a
+     * file metadata rate or the separately reported POSITION engine clock. */
+    uint32_t source_rate_hz, reserved;
 } az_native_cue_snapshot;
+/* Native cue readers accept this original v1 prefix, preserve caller size and
+ * copy only min(caller size, provider size). Initialize optional fields to 0. */
+#define AZ_NATIVE_CUE_SNAPSHOT_V1_SIZE offsetof(az_native_cue_snapshot, source_rate_hz)
 typedef struct az_command_request {
     uint32_t size, version, operation, deck;
     uint64_t request_id, expected_load_generation, expected_revision, deadline_ns;
@@ -476,12 +495,310 @@ typedef struct az_command_completion {
 typedef void (*az_command_completion_fn)(const az_command_completion *completion, void *user);
 
 
+/* ---- Passive deck status. Borrowed values and nested arrays live through the UI callback. */
+#define AZ_DECK_STATUS_MIN_CORE "1.2.6" /* also check AZ_LIB_HAS for both status members */
+enum {
+    AZ_STATUS_LOAD, AZ_STATUS_METADATA, AZ_STATUS_KEY, AZ_STATUS_CUES,
+    AZ_STATUS_LOOP, AZ_STATUS_GRID, AZ_STATUS_PHRASES, AZ_STATUS_TRANSPORT,
+    AZ_STATUS_POSITION, AZ_STATUS_TEMPO, AZ_STATUS_SYNC, AZ_STATUS_SETTINGS,
+    AZ_STATUS_PHASE, AZ_STATUS_STEMS, AZ_STATUS_OVERVIEW,
+    AZ_STATUS_PHRASE_TRANSITION, AZ_STATUS_TOPIC_COUNT
+};
+/* n must be a known topic ordinal. This macro is a constant expression for named topics. */
+#define AZ_STATUS_TOPIC(n) (UINT64_C(1) << (n))
+#define AZ_STATUS_ALL_V1 ((UINT64_C(1) << (AZ_STATUS_PHRASE_TRANSITION + 1)) - UINT64_C(1))
+#define AZ_STATUS_ALL_DECKS 0x0fu
+
+/* Field selectors are ordinals local to each topic. Header masks contain bits. */
+static inline uint64_t az_status_field_bit(uint32_t field)
+{
+    return field < 64u ? UINT64_C(1) << field : UINT64_C(0);
+}
+enum {
+    AZ_STATUS_LOAD_STATE, AZ_STATUS_LOAD_ATTEMPT, AZ_STATUS_LOAD_SOURCE,
+    AZ_STATUS_LOAD_TRACK
+};
+enum {
+    AZ_STATUS_METADATA_CONTENT_ID, AZ_STATUS_METADATA_TITLE, AZ_STATUS_METADATA_ARTIST,
+    AZ_STATUS_METADATA_ALBUM, AZ_STATUS_METADATA_PATH, AZ_STATUS_METADATA_FORMAT,
+    AZ_STATUS_METADATA_DURATION_S, AZ_STATUS_METADATA_DURATION_PRECISION_S
+};
+enum { AZ_STATUS_KEY_ORIGINAL, AZ_STATUS_KEY_SHIFT_SEMITONES, AZ_STATUS_KEY_EFFECTIVE };
+enum {
+    AZ_STATUS_CUES_MAIN, AZ_STATUS_CUES_LIVE_HOT, AZ_STATUS_CUES_LIVE_MEMORY,
+    AZ_STATUS_CUES_SAVED_HOT, AZ_STATUS_CUES_SAVED_MEMORY
+};
+enum {
+    AZ_STATUS_LOOP_RETAINED_IN, AZ_STATUS_LOOP_RETAINED_OUT,
+    AZ_STATUS_LOOP_DEFINED, AZ_STATUS_LOOP_ENGAGED, AZ_STATUS_LOOP_WORKING_IN,
+    AZ_STATUS_LOOP_WORKING_OUT, AZ_STATUS_LOOP_RELOOP_AVAILABLE,
+    AZ_STATUS_LOOP_MODE, AZ_STATUS_LOOP_SAVED_ENTRY
+};
+/* LOOP.mode describes a complete active working loop. TIME stores duration
+ * in source samples. BEAT stores the native beat fraction for its length. */
+enum { AZ_STATUS_LOOP_MODE_TIME = 1, AZ_STATUS_LOOP_MODE_BEAT = 2 };
+enum { AZ_STATUS_GRID_CURRENT, AZ_STATUS_GRID_SAVED };
+enum {
+    AZ_STATUS_PHRASES_CURRENT, AZ_STATUS_PHRASES_SAVED,
+    AZ_STATUS_PHRASES_CURRENT_GRID, AZ_STATUS_PHRASES_SAVED_GRID
+};
+enum {
+    AZ_STATUS_TRANSPORT_STATE, AZ_STATUS_TRANSPORT_DIRECTION, AZ_STATUS_TRANSPORT_RATE,
+    AZ_STATUS_TRANSPORT_RAW_MODE_IS_2, AZ_STATUS_TRANSPORT_RAW_PLAY_PAUSE,
+    AZ_STATUS_TRANSPORT_RAW_AUX
+};
+enum {
+    AZ_STATUS_POSITION_HEAD, AZ_STATUS_POSITION_SLIP_HEAD, AZ_STATUS_POSITION_REMAINING_S,
+    AZ_STATUS_POSITION_ESTIMATED_S
+};
+enum {
+    AZ_STATUS_TEMPO_ORIGINAL_BPM, AZ_STATUS_TEMPO_CURRENT_BPM,
+    AZ_STATUS_TEMPO_SLIDER_PERCENT, AZ_STATUS_TEMPO_SLIDER_LOCKED
+};
+enum {
+    AZ_STATUS_SYNC_ENABLED, AZ_STATUS_SYNC_LOCKED, AZ_STATUS_SYNC_FOLLOWING,
+    AZ_STATUS_SYNC_MASTER, AZ_STATUS_SYNC_RAW_MODE
+};
+enum {
+    AZ_STATUS_SETTINGS_MASTER_TEMPO, AZ_STATUS_SETTINGS_KEY_LOCK,
+    AZ_STATUS_SETTINGS_QUANTIZE, AZ_STATUS_SETTINGS_SLIP, AZ_STATUS_SETTINGS_PAD_MODE
+};
+enum { AZ_STATUS_PHASE_BEAT, AZ_STATUS_PHASE_BAR };
+enum { AZ_STATUS_STEMS_AVAILABLE, AZ_STATUS_STEMS_ENABLED };
+enum { AZ_STATUS_OVERVIEW_SAVED };
+enum { AZ_STATUS_PHRASE_TRANSITION_ACTIVE };
+
+/* Public scalar values. AZ_PLAYBACK_PAUSED, _PLAYING and _CUEING already exist. */
+enum {
+    AZ_STATUS_LOAD_EMPTY = 0, AZ_STATUS_LOAD_LOADING, AZ_STATUS_LOAD_LOADED,
+    AZ_STATUS_LOAD_FAILED
+};
+enum {
+    AZ_STATUS_SOURCE_USB1 = 1, AZ_STATUS_SOURCE_USB2, AZ_STATUS_SOURCE_STREAMING,
+    AZ_STATUS_SOURCE_CLOUD, AZ_STATUS_SOURCE_LINKED, AZ_STATUS_SOURCE_OTHER
+};
+enum { AZ_PLAYBACK_STOPPED = 4, AZ_PLAYBACK_ENDED = 5 };
+enum {
+    AZ_STATUS_DIRECTION_REVERSE = -1, AZ_STATUS_DIRECTION_STATIONARY = 0,
+    AZ_STATUS_DIRECTION_FORWARD = 1
+};
+enum {
+    AZ_STATUS_PAD_HOT_CUE = 0, AZ_STATUS_PAD_BEAT_LOOP, AZ_STATUS_PAD_SLIP_LOOP,
+    AZ_STATUS_PAD_BEAT_JUMP
+};
+enum { AZ_PHRASE_START = 1, AZ_PHRASE_ITEM, AZ_PHRASE_END, AZ_PHRASE_GAP };
+enum { AZ_STATUS_INITIAL = 1, AZ_STATUS_CHANGE, AZ_STATUS_RESYNC };
+enum { AZ_STATUS_TRAVERSAL = 0, AZ_STATUS_SEEK, AZ_STATUS_JUMP, AZ_STATUS_WRAP };
+enum { AZ_STATUS_OCCURRENCE_FROM = 1, AZ_STATUS_OCCURRENCE_TO = 2 };
+enum {
+    AZ_STATUS_CAPTURE_GAP = 1, AZ_STATUS_EVICTED = 2,
+    AZ_STATUS_REVISION_LOST = 4, AZ_STATUS_CUT_SKIPPED = 8
+};
+enum { AZ_STATUS_UNIT = 1, AZ_STATUS_LOAD_SCOPE };
+typedef struct az_status_coord_v1 {
+    double seconds;
+    int64_t samples;
+    uint32_t rate_hz, reserved;          /* rate_hz == 0: only seconds supplied */
+} az_status_coord_v1;
+typedef struct az_status_grid_ref_v1 {
+    uint64_t load_epoch, provider_id, revision;
+    uint32_t provenance, grid_field;             /* AZ_STATUS_GRID_CURRENT or _SAVED */
+} az_status_grid_ref_v1;
+typedef struct az_status_phrase_endpoint_v1 {
+    uint32_t kind, index;                 /* index is zero-based and valid only for ITEM */
+    az_phrase phrase;                     /* copied PHRASES.current row for ITEM */
+    uint64_t phrase_provider_id, phrase_revision;
+    az_status_grid_ref_v1 grid;           /* qualified PHRASES.current_grid */
+} az_status_phrase_endpoint_v1;
+typedef struct az_status_phrase_transition_v1 {
+    uint32_t size, version, discontinuity, reserved; /* TRAVERSAL, SEEK, JUMP or WRAP */
+    az_status_phrase_endpoint_v1 from, to;
+} az_status_phrase_transition_v1;
+typedef struct az_status_cue_ref_v1 {
+    uint64_t load_epoch, provider_id, collection_revision;
+    uint32_t provenance, cue_field;              /* originating CUES field ordinal */
+    az_cue_entry entry;
+} az_status_cue_ref_v1;
+typedef struct az_status_field_info_v1 {
+    az_component_info info;              /* availability, provenance, revision, observed_ns */
+    uint32_t scope, count;
+    uint64_t scope_id, provider_id;
+} az_status_field_info_v1;
+typedef struct az_status_topic_v1 {
+    uint32_t size, version;               /* size of the enclosing typed topic */
+    uint64_t supported, valid, changed;
+} az_status_topic_v1;
+
+typedef struct az_status_load_v1 {
+    az_status_topic_v1 header;
+    int32_t state;
+    uint64_t attempt;
+    int32_t source;
+    az_track_ref track;
+    az_status_field_info_v1 state_info, attempt_info, source_info;
+    az_status_field_info_v1 track_info;
+} az_status_load_v1;
+typedef struct az_status_metadata_v1 {
+    az_status_topic_v1 header;
+    uint32_t content_id;
+    const char *title, *artist, *album, *path, *format;
+    double duration_s, duration_precision_s;
+    az_status_field_info_v1 content_id_info, title_info, artist_info;
+    az_status_field_info_v1 album_info, path_info, format_info;
+    az_status_field_info_v1 duration_s_info, duration_precision_s_info;
+} az_status_metadata_v1;
+typedef struct az_status_key_v1 {
+    az_status_topic_v1 header;
+    const char *original;
+    int32_t shift_semitones;
+    const char *effective;
+    az_status_field_info_v1 original_info, shift_semitones_info, effective_info;
+} az_status_key_v1;
+typedef struct az_status_cues_v1 {
+    az_status_topic_v1 header;
+    const az_cue_entry *main, *live_hot, *live_memory, *saved_hot, *saved_memory;
+    az_status_field_info_v1 main_info, live_hot_info, live_memory_info;
+    az_status_field_info_v1 saved_hot_info, saved_memory_info;
+} az_status_cues_v1;
+typedef struct az_status_loop_v1 {
+    az_status_topic_v1 header;
+    az_status_coord_v1 retained_in, retained_out;
+    int32_t defined, engaged;
+    az_status_coord_v1 working_in, working_out;
+    int32_t reloop_available, mode;
+    const az_status_cue_ref_v1 *saved_entry;
+    az_status_field_info_v1 retained_in_info, retained_out_info, defined_info;
+    az_status_field_info_v1 engaged_info, working_in_info, working_out_info;
+    az_status_field_info_v1 reloop_available_info, mode_info, saved_entry_info;
+} az_status_loop_v1;
+typedef struct az_status_grid_v1 {
+    az_status_topic_v1 header;
+    const az_beat *current, *saved;
+    az_status_field_info_v1 current_info, saved_info;
+} az_status_grid_v1;
+typedef struct az_status_phrases_v1 {
+    az_status_topic_v1 header;
+    const az_phrase *current, *saved;
+    az_status_grid_ref_v1 current_grid, saved_grid;
+    az_status_field_info_v1 current_info, saved_info, current_grid_info;
+    az_status_field_info_v1 saved_grid_info;
+} az_status_phrases_v1;
+typedef struct az_status_transport_v1 {
+    az_status_topic_v1 header;
+    int32_t state, direction;
+    double rate;
+    int32_t raw_mode_is_2, raw_play_pause, raw_aux;
+    az_status_field_info_v1 state_info, direction_info, rate_info;
+    az_status_field_info_v1 raw_mode_is_2_info, raw_play_pause_info, raw_aux_info;
+} az_status_transport_v1;
+typedef struct az_status_position_v1 {
+    az_status_topic_v1 header;
+    az_status_coord_v1 head, slip_head;
+    double remaining_s, estimated_s;
+    az_status_field_info_v1 head_info, slip_head_info, remaining_s_info;
+    az_status_field_info_v1 estimated_s_info;
+} az_status_position_v1;
+typedef struct az_status_tempo_v1 {
+    az_status_topic_v1 header;
+    double original_bpm, current_bpm, slider_percent;
+    int32_t slider_locked;
+    az_status_field_info_v1 original_bpm_info, current_bpm_info, slider_percent_info;
+    az_status_field_info_v1 slider_locked_info;
+} az_status_tempo_v1;
+typedef struct az_status_sync_v1 {
+    az_status_topic_v1 header;
+    int32_t enabled, locked, following, master, raw_mode;
+    az_status_field_info_v1 enabled_info, locked_info, following_info;
+    az_status_field_info_v1 master_info, raw_mode_info;
+} az_status_sync_v1;
+typedef struct az_status_settings_v1 {
+    az_status_topic_v1 header;
+    int32_t master_tempo, key_lock, quantize, slip, pad_mode;
+    az_status_field_info_v1 master_tempo_info, key_lock_info, quantize_info;
+    az_status_field_info_v1 slip_info, pad_mode_info;
+} az_status_settings_v1;
+typedef struct az_status_phase_v1 {
+    az_status_topic_v1 header;
+    double beat, bar;
+    az_status_field_info_v1 beat_info, bar_info;
+} az_status_phase_v1;
+typedef struct az_status_stems_v1 {
+    az_status_topic_v1 header;
+    int32_t available, enabled;
+    az_status_field_info_v1 available_info, enabled_info;
+} az_status_stems_v1;
+typedef struct az_status_overview_v1 {
+    az_status_topic_v1 header;
+    const az_waveform *saved;
+    az_status_field_info_v1 saved_info;
+} az_status_overview_v1;
+typedef struct az_status_phrase_playback_v1 {
+    az_status_topic_v1 header;
+    const az_status_phrase_endpoint_v1 *active;
+    az_status_field_info_v1 active_info;
+} az_status_phrase_playback_v1;
+typedef struct az_deck_status_view_v1 {
+    uint32_t size, version;
+    const az_status_load_v1 *load;
+    const az_status_metadata_v1 *metadata;
+    const az_status_key_v1 *key;
+    const az_status_cues_v1 *cues;
+    const az_status_loop_v1 *loop;
+    const az_status_grid_v1 *grid;
+    const az_status_phrases_v1 *phrases;
+    const az_status_transport_v1 *transport;
+    const az_status_position_v1 *position;
+    const az_status_tempo_v1 *tempo;
+    const az_status_sync_v1 *sync;
+    const az_status_settings_v1 *settings;
+    const az_status_phase_v1 *phase;
+    const az_status_stems_v1 *stems;
+    const az_status_overview_v1 *overview;
+    const az_status_phrase_playback_v1 *phrase_playback;
+} az_deck_status_view_v1;
+typedef struct az_status_occurrence_v1 {
+    uint32_t size, version, kind, endpoints;     /* AZ_STATUS_OCCURRENCE_FROM / _TO bits */
+    uint64_t ordinal;                            /* never reused on this deck */
+    az_status_coord_v1 from, to;
+} az_status_occurrence_v1;
+typedef uint64_t az_deck_subscription;
+/* When LOAD.state is READY, NATIVE and LOADED, nonzero load_epoch is the
+ * matched native_load_generation. A READY LOAD.track scoped to that epoch
+ * supplies its qualified library identity. INITIAL/CHANGE/RESYNC preserve the
+ * image's epoch; compare it with a fresh native load target before commands. */
+typedef struct az_deck_status_event_v1 {
+    uint32_t size, version, kind, deck;
+    uint64_t subscription, sequence, load_epoch, observed_ns, published_ns;
+    uint64_t topics, changed_topics, lost_topics;
+    uint32_t loss_reason, reserved;
+    const az_deck_status_view_v1 *view;
+    const az_status_occurrence_v1 *occurrence;
+    const az_status_phrase_transition_v1 *phrase_transition;
+} az_deck_status_event_v1;
+typedef struct az_deck_watch_v1 {
+    uint32_t size, version, deck_mask, position_hz;
+    uint64_t topics;
+} az_deck_watch_v1;
+typedef void (*az_deck_status_fn)(const az_deck_status_event_v1 *event, void *user);
+
 /* ---- services the core hands every mod at init() ------------------------------------
  * Append-only: a mod built against a newer core checks AZ_HAS(core, field) before calling
  * an entry this core may not have. Every deck number is 0..3, and -1 means unknown: never
  * act on a guessed deck. Services that take an `id` take your mod id, and the core checks
  * that the call comes from your library's code; a call made with another mod's id is
  * refused. */
+/* Background phrase analysis. Paths are read-only locators, valid until close.
+ * Only core publication may edit ANLZ. Jobs pin source/file fingerprints, never
+ * native pointers. All three entries are worker-only and may do I/O. */
+typedef struct az_analysis_job_v1 {
+    uint32_t size, version, needed, flags;
+    uint64_t job;
+    az_track_ref track;
+    double original_bpm;
+    char audio_path[1024], analysis_path[1024];
+} az_analysis_job_v1;
+#define AZ_ANALYSIS_NEEDS_LINK 1u /* new ANLZ locator needs native spool application */
+
 /* One shared library service. All consumers use the same source identities, bounded cache,
  * snapshots, event journal and native command policy. No per-mod data backend is created. */
 #define AZ_LIBRARY_ABI 1u
@@ -547,6 +864,19 @@ typedef struct az_library_v1 {
                                 az_command_completion_fn callback, void *user,
                                 az_command_result *out);
     int (*command_acknowledge)(const char *id, uint64_t request_id);
+    /* Read-only listeners. Size-check each member. Registration and release run on UI. */
+    int (*on_deck_status)(const char *id, const az_deck_watch_v1 *watch,
+                          az_deck_status_fn fn, void *user, az_deck_subscription *out);
+    int (*deck_status_release)(const char *id, az_deck_subscription subscription);
+    /* Returns AZ_NOT_FOUND when phrases are populated. Check all three members.
+     * commit accepts the bounded TA01/PQTZ/PSSI worker output documented in
+     * docs/18-track-analysis.md; it never replaces an existing nonempty map.
+     * Successful commit consumes the job. Close every unsuccessful/open job.
+     * AZ_NOT_FOUND returns job=0 and flags; NEEDS_LINK asks the mod to retry
+     * core->lib_spool_kick on its worker until the existing playback gate admits it. */
+    int (*analysis_open)(const char *id, const az_track_ref *track, az_analysis_job_v1 *out);
+    int (*analysis_commit)(const char *id, uint64_t job, const void *data, uint32_t size);
+    int (*analysis_close)(const char *id, uint64_t job);
 } az_library_v1;
 #define AZ_LIB_HAS(service, field) \
     ((service) && (service)->abi == AZ_LIBRARY_ABI && \

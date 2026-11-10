@@ -122,7 +122,7 @@ class SourceTests(unittest.TestCase):
             # Execute the actual generated memory-read shell, with the exact
             # legacy BusyBox option set (no od -A/-t) against a fixture memfile.
             shell='od() { for arg in "$@"; do case "$arg" in -A*|-t*) return 2;; esac; done; command od "$@"; };\n'+body.replace('/proc/123/mem',str(file))
-            return subprocess.run(['sh','-c',shell],text=True,capture_output=True,check=True,timeout=2).stdout
+            return subprocess.run(['sh','-c',shell],universal_newlines=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=True,timeout=2).stdout
         result=source.capture(Controller(),read,'123','456',proof,lambda:NOW,verify,20,previous=previous)
         return result,calls
 
@@ -194,7 +194,7 @@ class SourceTests(unittest.TestCase):
                     return ('d'*64 if mutation=='final-hash' and calls.count(body)>1 else proof['sha256'])+'  '+core_path+'\n'
                 if body=='sha256sum '+native_path:return hashlib.sha256(image.data).hexdigest()+'  '+native_path+'\n'
                 self.assertIn('if=/proc/7585/mem',body)
-                result=subprocess.run(['sh','-c',shell_prefix+body],text=True,capture_output=True,check=True,timeout=3).stdout
+                result=subprocess.run(['sh','-c',shell_prefix+body],universal_newlines=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=True,timeout=3).stdout
                 if exercise is not None:
                     for name,values,pack in (('symbol',source_rows,packed),('getter_symbol',getters,packed_getters)):
                         for value in values:value['sequence']+=2
@@ -317,7 +317,7 @@ class SourceTests(unittest.TestCase):
                 if mutation=='code':
                     with memory.open('r+b') as out:out.seek(0x400080);out.write(b'bad!')
                 shell='od() { for arg in "$@"; do case "$arg" in -A*|-t*) return 2;; esac; done; command od "$@"; };\n'+body.replace('/proc/123/mem',str(memory))
-                return subprocess.run(['sh','-c',shell],text=True,capture_output=True,check=True,timeout=2).stdout
+                return subprocess.run(['sh','-c',shell],universal_newlines=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=True,timeout=2).stdout
             images={} if mutation=='unknown-library' else {native:image}
             value=source.identify_targets(Controller(),read,observation,images,lambda pid,birth:alive[0],20)
             return value,calls

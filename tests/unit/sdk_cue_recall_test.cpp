@@ -5,6 +5,7 @@
 #include <cstring>
 #include <cstdint>
 #include <atomic>
+#include <initializer_list>
 #include <thread>
 template <unsigned N>
 struct alignas(8) Raw {
@@ -19,7 +20,7 @@ static T get(const void *p, unsigned at) {
     std::memcpy(&v, static_cast<const unsigned char *>(p) + at, sizeof v);
     return v;
 }
-static uintptr_t manager_table[2], loader_table[2], load_table[4], property_table[2], box_table[6];
+static uintptr_t manager_table[2], loader_table[2], load_table[4], property_table[8], box_table[6];
 static Raw<0x180> manager;
 static Raw<0x1d0> loader;
 static Raw<0x90> load, control;
@@ -29,6 +30,13 @@ static Raw<0x10> available;
 static unsigned copies, destroys, dispatches, references = 1, submissions;
 static bool foreign_thread;
 static std::atomic<bool> dispatch_hold {false}, dispatch_inside {false}, bridge_quiescent {true};
+static Raw<0xf8> hot_target;
+static unsigned assignments;
+static void native_assign(void *self, const void *source) {
+    assert(self==hot_target.bytes);
+    std::memcpy(hot_target.bytes+8, static_cast<const unsigned char *>(source)+8, 0xf0);
+    ++assignments;
+}
 static unsigned cancel_calls;
 static int submit_result = AZ_PENDING;
 static uint64_t submitted_token;
@@ -92,9 +100,10 @@ static void bindings() {
 }
 int main() {
     load_table[3] = uintptr_t(native_call);
+    property_table[7] = uintptr_t(native_assign);
     box_table[5] = uintptr_t(native_affinity);
     azcue_recall_profile profile = {uintptr_t(manager_table), uintptr_t(loader_table), uintptr_t(load_table), uintptr_t(property_table),
-                                    uintptr_t(native_call), uintptr_t(native_copy), uintptr_t(native_destroy), uintptr_t(native_affinity)};
+                                    uintptr_t(native_call), uintptr_t(native_copy), uintptr_t(native_destroy), uintptr_t(native_affinity), 0, uintptr_t(native_assign), 0};
     azsdk_cue_recall_test_profile(&profile);
     assert(azsdk_cue_recall_configure(0, 0) == AZ_INVALID);
     assert(azsdk_cue_recall_configure(1, 0) == AZ_OK);
@@ -155,6 +164,49 @@ int main() {
     assert(azsdk_cue_recall_prepare(&r, manager.bytes, property.bytes) == AZ_PENDING);
     azsdk_cue_recall_release(0, r.identity.token);
     assert(references == 1);
+    // Arbitrary Hot hydration invokes only the typed property update. The
+    // general CueLoadFacade path would alter unrelated playback state.
+    unsigned recalls_before=dispatches;
+    for (unsigned operation : {unsigned(AZ_CMD_CUE_POINT_SET), unsigned(AZ_CMD_CUE_LOOP_SET)}) {
+        bindings();
+        // Stock CueLoader starts with an empty lazy recall cache. Neither new
+        // Hot operation needs that wrapper, even before any stock cue recall.
+        put(loader.bytes,0x1b8,uintptr_t(0));
+        for (unsigned generic : {unsigned(AZ_CMD_MEMORY_RECALL), unsigned(AZ_CMD_SAVED_RECALL)}) {
+            r=request(35);r.operation=generic;
+            assert(azsdk_cue_recall_prepare(&r,manager.bytes,property.bytes)==AZ_UNSUPPORTED);
+        }
+        put(hot_target.bytes,0,uintptr_t(property_table));
+        put(context.bytes,0x18+3*8,hot_target.address());
+        r=request(35);r.operation=operation;r.classification=AZ_CUE_HOT;r.entry_id=3;
+        assert(azsdk_cue_recall_prepare(&r,manager.bytes,property.bytes)==AZ_PENDING);
+        unsigned assignments_before=assignments;
+        assert(azsdk_cue_recall_dispatch(0,35,core.bytes,control.bytes)==AZ_OK);
+        assert(assignments==assignments_before+1 && dispatches==recalls_before);
+        assert(!std::memcmp(hot_target.bytes+8,property.bytes+8,0xf0));
+        azsdk_cue_recall_release(0,35);assert(references==1);
+    }
+    // Excluding the unused recall cache must retain the actual Core owner,
+    // available source context, affinity and target type/method checks.
+    for (unsigned fault=0;fault<6;++fault) {
+        bindings();
+        put(loader.bytes,0x1b8,uintptr_t(0));
+        put(hot_target.bytes,0,uintptr_t(property_table));
+        put(context.bytes,0x18+3*8,hot_target.address());
+        r=request(36);r.operation=AZ_CMD_CUE_POINT_SET;r.classification=AZ_CUE_HOT;r.entry_id=3;
+        assert(azsdk_cue_recall_prepare(&r,manager.bytes,property.bytes)==AZ_PENDING);
+        unsigned assignments_before=assignments;
+        if(fault==0) foreign_thread=true;
+        if(fault==1) put(control.bytes,0x18,core.address());
+        if(fault==2) put(control.bytes,0x68,uintptr_t(0));
+        if(fault==3) put(available.bytes,8,uint8_t(0));
+        if(fault==4) put(hot_target.bytes,0,uintptr_t(loader_table));
+        if(fault==5) property_table[7]=uintptr_t(native_call);
+        assert(azsdk_cue_recall_dispatch(0,36,core.bytes,control.bytes)==AZ_UNSUPPORTED);
+        assert(assignments==assignments_before && dispatches==recalls_before);
+        property_table[7]=uintptr_t(native_assign);
+        azsdk_cue_recall_release(0,36);assert(references==1);
+    }
     /* Manager destruction invalidates the borrowed facade before a queued DSP
      * dispatch, while keeping its independent owned property until settlement. */
     bindings();

@@ -53,7 +53,7 @@ void *operator new[](std::size_t bytes, const std::nothrow_t &) noexcept {
         return nullptr;
     }
 }
-#if defined(__GNUC__) && !defined(__clang__)
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 11
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmismatched-new-delete"
 #endif
@@ -63,7 +63,7 @@ void operator delete(void *p, std::size_t) noexcept { std::free(p); }
 void operator delete[](void *p, std::size_t) noexcept { std::free(p); }
 void operator delete(void *p, const std::nothrow_t &) noexcept { ::operator delete(p); }
 void operator delete[](void *p, const std::nothrow_t &) noexcept { ::operator delete[](p); }
-#if defined(__GNUC__) && !defined(__clang__)
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 11
 #pragma GCC diagnostic pop
 #endif
 

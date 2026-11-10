@@ -9,6 +9,10 @@
 #define _GNU_SOURCE
 #endif
 #include "../common/azliveobserver.h"
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+#include "../common/azstatus_native.h"
+#include "../azmod/azmod-mod.h"
+#endif
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -55,6 +59,9 @@ struct Component {
 };
 struct Published {
     std::atomic<std::uint64_t> active_generation {0};
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    std::atomic<std::uintptr_t> unit {0};
+#endif
     Component components[kStreams];
 };
 Published published[kDecks];
@@ -117,6 +124,17 @@ std::uint64_t observed_now() noexcept {
     if (s > (UINT64_MAX - static_cast<unsigned long>(t.tv_nsec)) / UINT64_C(1000000000)) return 0;
     return s * UINT64_C(1000000000) + static_cast<unsigned long>(t.tv_nsec);
 }
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+std::atomic_bool status_enabled{false};
+void raw_play(unsigned deck, std::uint64_t unit, std::uint64_t revision, std::uint64_t now,
+              unsigned a,unsigned b,unsigned c,int valid,std::uint64_t lost=0) noexcept {
+    if (!status_enabled.load(std::memory_order_acquire)) return;
+    azstatus_native_receipt r{};
+    r.kind=AZN_PLAY; r.deck=deck; r.unit=unit; r.observed_ns=now; r.revision=revision;
+    r.a=int(a); r.b=int(b); r.c=int(c); r.valid=valid; r.lost_topics=lost;
+    azn_emit(&r);
+}
+#endif
 void publish(unsigned deck, unsigned stream, std::uint64_t generation, const Notification &n) noexcept {
     Published &p = published[deck];
     if (p.active_generation.load(std::memory_order_acquire) != generation) return;
@@ -137,7 +155,12 @@ void publish(unsigned deck, unsigned stream, std::uint64_t generation, const Not
     if (stream == kSync) valid = a == 0 || a == 2;
     Component &v = p.components[stream];
     std::uint64_t seq = v.sequence.load(std::memory_order_acquire);
-    if ((seq & 1u) || seq > UINT64_MAX - 2 || !v.sequence.compare_exchange_strong(seq, seq + 1, std::memory_order_acq_rel, std::memory_order_relaxed)) return;
+    if ((seq & 1u) || seq > UINT64_MAX - 2 || !v.sequence.compare_exchange_strong(seq, seq + 1, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+        if (!stream) raw_play(deck,generation,0,observed_now(),0,0,0,0,AZ_STATUS_TOPIC(AZ_STATUS_TRANSPORT));
+#endif
+        return;
+    }
     if (p.active_generation.load(std::memory_order_acquire) != generation) {
         v.sequence.store(seq + 2, std::memory_order_release);
         return;
@@ -154,6 +177,14 @@ void publish(unsigned deck, unsigned stream, std::uint64_t generation, const Not
     v.c.store(c, std::memory_order_relaxed);
     v.observed.store(now, std::memory_order_relaxed);
     v.revision.store(revision + 1, std::memory_order_relaxed);
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    /* Capture every authenticated notification while its native borrow is
+     * valid, before releasing the latest-value slot to a seed reader. */
+    if (!stream && status_enabled.load(std::memory_order_acquire)) {
+        azn_raw_state(deck,generation,0);
+        raw_play(deck,generation,revision+1,now,a,b,c,valid);
+    }
+#endif
     v.sequence.store(seq + 2, std::memory_order_release);
 }
 class CaptureListener final : public Listener {
@@ -193,7 +224,16 @@ bool read_scalar(int deck, unsigned stream, ScalarReceipt &value) noexcept {
     return true;
 }
 void invalidate(unsigned deck) noexcept {
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    published[deck].unit.store(0,std::memory_order_release);
+    auto prior=published[deck].active_generation.exchange(0,std::memory_order_acq_rel);
+    if (prior && status_enabled.load(std::memory_order_acquire)) {
+        azn_raw_state(deck,prior,1);
+        raw_play(deck,prior,0,observed_now(),0,0,0,-1);
+    }
+#else
     published[deck].active_generation.store(0, std::memory_order_release);
+#endif
     submitted.fetch_and(~(1u << deck), std::memory_order_acq_rel);
 }
 } // namespace
@@ -210,7 +250,7 @@ extern "C" void azsdk_live_configure(int on, int build) noexcept {
 #if defined(__linux__)
         if (on && (build == 1 || build == 2)) {
             if (!image_count) dl_iterate_phdr(main_image, nullptr);
-            if (image_count) enabled.store(1, std::memory_order_release);
+            if (image_count) enabled.store(on==2 ? 2 : 1, std::memory_order_release);
         }
 #else
         (void) on;
@@ -218,6 +258,12 @@ extern "C" void azsdk_live_configure(int on, int build) noexcept {
 #endif
     } catch (...) {}
 }
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+extern "C" void azsdk_live_status_start(int build,int legacy_active) noexcept {
+    if (!legacy_active) azsdk_live_configure(2,build);
+    status_enabled.store(true,std::memory_order_release);
+}
+#endif
 extern "C" int azsdk_live_register(int deck, void *owned_unit) noexcept {
     if (!deck_ok(deck) || !owned_unit || !enabled.load(std::memory_order_acquire)) return 0;
     try {
@@ -230,8 +276,11 @@ extern "C" int azsdk_live_register(int deck, void *owned_unit) noexcept {
         std::uintptr_t server = word(publisher + kPublisherServer);
         std::uintptr_t table = checked_vtable(server, "N9dj_player23StateNotificationServerE", 26);
         if (!table) return 0;
+        const bool passive=enabled.load(std::memory_order_acquire)==2;
+        const unsigned mask=passive ? (1u|(1u<<kSync)):(1u<<kStreams)-1;
         std::uintptr_t entries[kStreams];
         for (unsigned s = 0; s < kStreams; ++s) {
+            if (!(mask&(1u<<s))) continue;
             entries[s] = word(table + slots[s] * 8);
             if (!image_contains(entries[s], 4, kExecute)) return 0;
         }
@@ -239,12 +288,15 @@ extern "C" int azsdk_live_register(int deck, void *owned_unit) noexcept {
         std::uint64_t generation = ++next_generation;
         /* Allocate before publishing an active generation; a throw cannot leave a half set. */
         std::shared_ptr<Listener> pending[kStreams];
-        for (unsigned s = 0; s < kStreams; ++s) pending[s] = std::make_shared<CaptureListener>(static_cast<unsigned>(deck), s, generation);
+        for (unsigned s = 0; s < kStreams; ++s) if (mask&(1u<<s)) pending[s] = std::make_shared<CaptureListener>(static_cast<unsigned>(deck), s, generation);
         for (unsigned s = 0; s < kStreams; ++s) owners[deck][s] = pending[s];
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+        published[deck].unit.store(unit,std::memory_order_release);
+#endif
         published[deck].active_generation.store(generation, std::memory_order_release);
         try {
             using Register = void (*)(void *, std::weak_ptr<Listener>);
-            for (unsigned s = 0; s < kStreams; ++s)
+            for (unsigned s = 0; s < kStreams; ++s) if (mask&(1u<<s))
                 reinterpret_cast<Register>(entries[s])(reinterpret_cast<void *>(server), std::weak_ptr<Listener>(owners[deck][s]));
         } catch (...) {
             invalidate(static_cast<unsigned>(deck));
@@ -303,6 +355,17 @@ extern "C" int azsdk_live_read(int deck, azsdk_live_sample *out) noexcept {
     *out = value;
     return 1;
 }
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+extern "C" int azn_sync_seed(unsigned deck,uintptr_t unit,int *raw) {
+    if (deck>=kDecks || !unit || !raw || published[deck].unit.load(std::memory_order_acquire)!=unit) return 0;
+    ScalarReceipt value;
+    if (!read_scalar(deck,kSync,value) || !value.valid ||
+        published[deck].unit.load(std::memory_order_acquire)!=unit ||
+        published[deck].active_generation.load(std::memory_order_acquire)!=value.unit_generation) return 0;
+    *raw=int(value.raw);
+    return 1;
+}
+#endif
 extern "C" int azsdk_sync_read(int deck, azsdk_sync_sample *out) noexcept {
     if (!out) return 0;
     ScalarReceipt value;

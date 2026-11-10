@@ -4,7 +4,7 @@
 from sdk_timestamps import compare_timestamps
 from sdk_emulator_loop_runtime import *
 from sdk_emulator_controls import position_motion,MissingEvidence
-import math,time
+import math,re,time
 ID='sdk-cue-command-probe'
 LOG='/tmp/azmod-community/'+ID+'.log'
 OPS=tuple(range(13,27));ALL_OPS=tuple(range(1,27));MASK=sum(1<<op for op in OPS)
@@ -72,7 +72,7 @@ def request(pid,action,identity=0,deck=0,op=0,load=0,revision=0,timeout=0,flags=
   if type(value) not in (int,float) or not math.isfinite(value):raise ValueError('finite cue arguments required')
  values=(int(pid),identity,deck,op,load,revision,timeout,flags,classification,entry_id,rgb)
  if any(type(v)is not int or not 0<=v<2**64 for v in values) or deck not in range(4) or action not in ('snapshot','state','submit','cancel'):raise ValueError('bounded cue request identity required')
- if not 0<=flags<=7 or not 0<=classification<=2 or not 0<=op<=26 or not 0<=entry_id<2**32 or not 0<=rgb<=0xFFFFFF:raise ValueError('bounded native cue arguments required')
+ if not 0<=flags<=7 or not 0<=classification<=2 or not 0<=op<=28 or not 0<=entry_id<2**32 or not 0<=rgb<=0xFFFFFF:raise ValueError('bounded native cue arguments required')
  line=f'v=1 pid={pid} action={action} id={identity} deck={deck} op={op} load={load} revision={revision} timeout_ns={timeout} flags={flags} classification={classification} entry_id={entry_id} position={position:.17g} end={end:.17g} beats={beats:.17g} rgb={rgb} comment_hex={raw.hex() if raw else "-"}\n'
  if len(line.encode())>1023:raise ValueError('bounded cue request required')
  return line
@@ -200,7 +200,7 @@ def run_logged_case(argv):
  """Stream an existing behavioral runner and read its final qualified report."""
  import subprocess
  report_path=None
- with subprocess.Popen(argv,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1) as process:
+ with subprocess.Popen(argv,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,universal_newlines=True,bufsize=1) as process:
   for line in process.stdout:
    print(line,end='',flush=True)
    if line.startswith('CURRENT_NATIVE_RESULT '):report_path=Path(line[len('CURRENT_NATIVE_RESULT '):].strip())
@@ -223,7 +223,7 @@ def run_loaded_command_groups(run_loops,run_cues,observe,*,decks=(0,)):
  def identity(deck):
   value=observe(deck)
   if not isinstance(value,dict) or set(value)!=set(('pid','birth','native_load','load_unit','title','sample_rate')):raise MissingEvidence('complete loaded process/source identity required')
-  if any(not isinstance(value[k],str) or not value[k].isascii() or not value[k].isdecimal() or int(value[k])<=0 for k in ('pid','birth')) or any(type(value[k])is not int or value[k]<=0 for k in ('native_load','load_unit','sample_rate')) or not isinstance(value['title'],str) or not value['title']:raise MissingEvidence('qualified loaded track required before command groups')
+  if any(not isinstance(value[k],str) or not re.fullmatch(r"[0-9]+",value[k]) or int(value[k])<=0 for k in ('pid','birth')) or any(type(value[k])is not int or value[k]<=0 for k in ('native_load','load_unit','sample_rate')) or not isinstance(value['title'],str) or not value['title']:raise MissingEvidence('qualified loaded track required before command groups')
   return dict(value)
  try:
   pinned={deck:identity(deck) for deck in decks}

@@ -76,7 +76,7 @@ class LoadedTests(unittest.TestCase):
             script=loaded.native_birth_check_script('123',birth).replace('/proc/123/stat',str(stat))
             def check(text):
                 stat.write_text(text)
-                return subprocess.run(['sh','-c',script],capture_output=True,timeout=2,check=True).stdout
+                return subprocess.run(['sh','-c',script],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=2,check=True).stdout
             fields=['S']+['0']*18+[birth]+['0']*3
             self.assertEqual(check('123 (EP (odd) 147) '+' '.join(fields)+'\n'),b'AZSDK_NATIVE_BIRTH_MATCH\n')
             fields[19]='18446744073709551613'

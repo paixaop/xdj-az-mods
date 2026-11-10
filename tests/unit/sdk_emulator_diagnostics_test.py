@@ -82,7 +82,7 @@ class SchedulerCollectorLifecycleTests(unittest.TestCase):
         return proc,base
     def run_capture(self,proc):
         script=diagnostic.scheduler_snapshot_script('123','42').replace('/proc',str(proc))
-        result=subprocess.run(['sh','-c',script],capture_output=True,text=True,timeout=10)
+        result=subprocess.run(['sh','-c',script],stdout=subprocess.PIPE,stderr=subprocess.PIPE,universal_newlines=True,timeout=10)
         return result,result.stdout.replace(str(proc),'/proc')
     def test_actual_shell_collects_all_three_fields_without_newlines(self):
         with tempfile.TemporaryDirectory() as root:

@@ -100,17 +100,25 @@ static inline bool azcue_timestamps_equal(const azcue_native_timestamps &a, cons
     auto microseconds = [&](uint64_t first, uint64_t second) {
         // Absence markers do not represent timestamps.
         if (first == absent || second == absent) return first == absent && second == absent;
-        return compare_timestamps(first, second, 1000000, source_rate, 1) == AZ_TIME_EQUAL;
+        const int order = compare_timestamps(first, second, 1000000, source_rate, 1);
+        return order != AZ_TIME_INVALID && order == AZ_TIME_EQUAL;
     };
     auto samples = [&](uint64_t first, uint64_t second) {
         if (first == absent || second == absent) return first == absent && second == absent;
         if (!a.sample_rate || !b.sample_rate || a.sample_rate >= 0x7fffffffu || b.sample_rate >= 0x7fffffffu) return false;
         // Exact common ticks explicitly convert the two encoded sample rates.
-        return compare_timestamps(__uint128_t(first) * b.sample_rate, __uint128_t(second) * a.sample_rate,
-                                  uint64_t(a.sample_rate) * b.sample_rate, source_rate, 1) == AZ_TIME_EQUAL;
+        const int order = compare_timestamps(__uint128_t(first) * b.sample_rate, __uint128_t(second) * a.sample_rate,
+                                             uint64_t(a.sample_rate) * b.sample_rate, source_rate, 1);
+        return order != AZ_TIME_INVALID && order == AZ_TIME_EQUAL;
     };
+    // Native point serialization leaves an unused cached OUT sample value,
+    // which need not be the absence marker. An absent endpoint has no sample
+    // coordinate to compare, even if that cache contains an overflowed value.
+    const bool in_absent = a.in_us == absent && b.in_us == absent;
+    const bool out_absent = a.out_us == absent && b.out_us == absent;
     return microseconds(a.in_us, b.in_us) && microseconds(a.out_us, b.out_us) &&
-           samples(a.in_sample, b.in_sample) && samples(a.out_sample, b.out_sample);
+           (in_absent || samples(a.in_sample, b.in_sample)) &&
+           (out_absent || samples(a.out_sample, b.out_sample));
 }
 #endif
 #undef AZCUEPERSIST_NOEXCEPT

@@ -546,6 +546,20 @@ SqlProfile physical_profile() {
     p.ready = true;
     return p;
 }
+void borrowed_descriptor_identity() {
+    char name[] = "/tmp/azstatus-input-fd.XXXXXX";
+    int fd = ::mkstemp(name);
+    assert(fd >= 0 && !::unlink(name));
+    assert(!::fcntl(fd, F_SETFD, FD_CLOEXEC));
+    struct stat sb;
+    std::uint64_t mount = 0;
+    assert(!::fstat(fd, &sb) && descriptor_mount_id(fd, metadata_ops, mount));
+    assert(azsdk_sources_descriptor_identity(fd, mount, sb.st_dev, sb.st_ino));
+    assert(!azsdk_sources_descriptor_identity(fd, mount + 1, sb.st_dev, sb.st_ino));
+    assert(!azsdk_sources_descriptor_identity(fd, mount, sb.st_dev, sb.st_ino + 1));
+    assert(!azsdk_sources_descriptor_identity(-1, mount, sb.st_dev, sb.st_ino));
+    assert(::fcntl(fd, F_GETFD) >= 0 && !::close(fd));
+}
 void mount_id_parser() {
     std::uint64_t out = 99;
     auto parse = [&](const char *s) { return parse_mount_id(s, std::strlen(s), out); };
@@ -966,6 +980,7 @@ int main(int argc, char **argv) {
     owner_address_reuse();
     binding_and_quota();
     mount_id_parser();
+    borrowed_descriptor_identity();
     vfs_name_boundaries();
     rtti_name_boundaries();
     physical_capture();

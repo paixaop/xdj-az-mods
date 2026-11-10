@@ -30,6 +30,7 @@
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,6 +52,9 @@
 #include "../common/azlogcap.h" /* every /tmp append is size-capped */
 #include "../common/azprot.h" /* hook writes: unlock, write, restore the original protection */
 #include "../common/azexit.h"
+#ifdef AZ_STATUS_MEMORY_PRODUCER
+#include "../common/azstatus_memory.h"
+#endif
 #include "sdk_vtable_patch.h" /* ordered replacement of verified native virtual entries */
 #include "../common/azaltstack.h" /* every thread we start has an alternate signal stack */
 #include "../common/azoverviewlease.h"
@@ -227,6 +231,11 @@ static _Atomic int g_trace_on = 0; /* /home/root/settings/azstem.trace */
 #define TRACE_PATH "/home/root/settings/azstem.trace"
 #define MUTE_PATH "/home/root/settings/azstem.mute" /* decimal bitmask; development builds only (dev_input_open) */
 #include "azstem_internal.h"
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+#include "../common/azstatus_native.h"
+#include "../common/azloadobserver.h"
+#include "../azmod/azmod-mod.h"
+#endif
 #include "stem_playback.c"
 #include "stem_envelopes.c"
 #include "deck_track_map.c"
@@ -519,6 +528,10 @@ static void read_stems(void) {
         fclose(ef);
     }
     atomic_store_explicit(&g_enable, en, memory_order_relaxed);
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    for (int d = 0; d < NDECK; ++d)
+        azn_stems_control((unsigned) d, en && (atomic_load_explicit(&g_dk[d].ctrl, memory_order_relaxed) & 0x80u));
+#endif
 }
 
 /* ---- flusher (all off RT): mute at 5Hz, per-deck levels ~1/s ----------- */
@@ -1077,6 +1090,9 @@ __attribute__((constructor)) static void azstem_init(void) {
                                        (void **) &g_orig_djpudtor);
             logln("djpudtor: %s @0x%lx", td ? "hooked" : "install FAILED",
                   (unsigned long) DJPUDTOR_DEFAULT);
+            unsigned passive_status = access("/home/root/settings/azmod.deck-status.off", F_OK) == 0
+                                          ? 0
+                                          : AZEXIT_PASSIVE_STATUS;
             if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT &&
                 access("/home/root/settings/azmod.track-data.on", F_OK) == 0 &&
                 access("/home/root/settings/azmod.native-loop.on", F_OK) == 0) {
@@ -1110,7 +1126,26 @@ __attribute__((constructor)) static void azstem_init(void) {
                         g_sdk_cue_on = 1;
                     }
                 }
-                if (sdk_commands) (void) azsdk_exit_configure((int) sdk_commands, sdk_loop_build, install_hook_at);
+                if (sdk_commands) (void) azsdk_exit_configure((int) (sdk_commands | passive_status), sdk_loop_build, install_hook_at);
+            }
+            if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT && passive_status) {
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+                azsdk_live_status_start(sdk_loop_build, g_sdk_live_on);
+                g_status_play_on = 1;
+#endif
+                /* Independent passive status startup. Command capability still checks
+                 * its original, individual gates; the owner hooks are shared. */
+                if (!atomic_load_explicit(&g_sdk_load_on, memory_order_acquire)) {
+                    azsdk_load_configure(1, sdk_loop_build, sdk_patch_slot);
+                    atomic_store_explicit(&g_sdk_load_on, 1, memory_order_release);
+                }
+                (void) azsdk_exit_configure(AZEXIT_PASSIVE_STATUS, sdk_loop_build, install_hook_at);
+#ifdef AZ_STATUS_MEMORY_PRODUCER
+                (void) azn_memory_configure(sdk_loop_build, install_hook_at);
+#ifdef AZ_STATUS_MAPS_PRODUCER
+                (void) azn_maps_configure(sdk_loop_build);
+#endif
+#endif
             }
         } else
             logln("djpuctor: install FAILED @0x%llx (identity falls back to ap_deck_of)", v);
@@ -1134,6 +1169,10 @@ __attribute__((constructor)) static void azstem_init(void) {
             fclose(lf);
         }
         g_lsctor_addr = (uintptr_t) v;
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+        g_status_lti_on = g_lsctor_addr == LSCTOR_DEFAULT &&
+                          access("/home/root/settings/azmod.deck-status.off", F_OK) != 0;
+#endif
         /* The destructor and LoadedTrackInfo-update hooks first: a LoadState is published only
          * by lsctor_hook, so with all three in place nothing is ever published that the other
          * two cannot see. Without the destructor hook the bracket readers rely on is missing,
@@ -1171,6 +1210,9 @@ __attribute__((constructor)) static void azstem_init(void) {
      * screen. The flusher does stems discovery in the background. */
     int rc = install_hook();
     atomic_store_explicit(&g_installed, rc, memory_order_release);
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    if (rc == 1 && access("/home/root/settings/azmod.deck-status.off", F_OK) != 0) azn_stems_start(status_stem_probe);
+#endif
     /* PageBuffer::read: stem injection and the observation ring (pbread_hook). */
     {
         FILE *pf = addr_override_open(PBREAD_PATH);
@@ -1319,4 +1361,18 @@ __attribute__((constructor)) static void azstem_init(void) {
     }
 }
 
+#ifdef AZ_STATUS_MEMORY_PRODUCER
+/* Only called with a genuine native owning lease already held. Bounded
+ * contention fails acquisition; no weak pointer or arbitrary address can enter. */
+int azn_ref_pin(uintptr_t o) {
+    if (!g_meow_destroy_fn || !bg_ptr_ok(o) ||
+        *(volatile uint32_t *) (o + MEOW_GUARD_OFF) != BG_XOCR) return 0;
+    _Atomic int *rc = (_Atomic int *) (o + MEOW_RC_OFF);
+    int count = atomic_load_explicit(rc, memory_order_acquire);
+    for (unsigned n = 0; n < 8 && count > 0 && count < INT_MAX; n++)
+        if (atomic_compare_exchange_strong_explicit(rc, &count, count + 1, memory_order_acq_rel, memory_order_acquire)) return 1;
+    return 0;
+}
+void azn_ref_release(uintptr_t o) { meow_release(o); }
+#endif
 #include "sdk_export.c" /* per-deck state for the community mod services */

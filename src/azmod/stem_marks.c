@@ -603,8 +603,8 @@ static int sm_fds_on(const char *path) {
         if (k <= 0)
             continue;
         tgt[k] = 0;
-        if (!strcmp(tgt, path) && libfd_owner(atoi(e->d_name)) != LIBFD_FIELDS)
-            n++; /* browse_fields.c's connection is not EP147's */
+        int owner = libfd_owner(atoi(e->d_name));
+        if (!strcmp(tgt, path) && (!owner || owner == LIBFD_STEMS)) n++;
     }
     closedir(fd);
     return n;

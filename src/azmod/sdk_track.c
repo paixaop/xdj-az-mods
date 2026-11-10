@@ -8,6 +8,7 @@
 #include "utf8_cut.h"
 #include "sdk_wave_provider.h"
 #include "../common/azsources.h"
+#include "../common/azsha256.h"
 static struct st_engine g_st = ST_ENGINE_INIT;
 static pthread_mutex_t g_st_source_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic int g_st_started;
@@ -25,8 +26,9 @@ struct st_resolution {
     struct st_source source;
     uint64_t signature;
     az_track_metadata metadata;
+    int64_t duration_ticks; /* original OneLibrary integral seconds */
     char database[1024], content[2048], analysis[1024];
-    int valid, analysis_limited;
+    int valid, analysis_limited, analysis_generated;
 };
 static struct st_resolution g_st_resolutions[2];
 static int st_source_path(const char *mount, const char *relative, char out[1024]);
@@ -36,14 +38,17 @@ static uint64_t sdk_command_capabilities(void);
 static void sdk_command_retire_owner(int owner);
 /* A stat fingerprint detects file replacement and edits, including nanosecond timestamps.
  * It is a freshness hint, not a content hash or a permanent library identifier. */
+static uint64_t st_stat_sig(const struct stat *st) {
+    if (!S_ISREG(st->st_mode)) return 0;
+    uint64_t v = (uint64_t) st->st_dev * 0x9e3779b185ebca87ULL ^ (uint64_t) st->st_ino;
+    v = v * 1099511628211ULL ^ (uint64_t) st->st_size;
+    v = v * 1099511628211ULL ^ (uint64_t) st->st_mtim.tv_sec;
+    v = v * 1099511628211ULL ^ (uint64_t) st->st_mtim.tv_nsec;
+    return v ? v : 1;
+}
 static uint64_t st_disk_sig(const char *path) {
     struct stat st;
-    if (stat(path, &st) || !S_ISREG(st.st_mode)) return 0;
-    uint64_t v = (uint64_t) st.st_dev * 0x9e3779b185ebca87ULL ^ (uint64_t) st.st_ino;
-    v = v * 1099511628211ULL ^ (uint64_t) st.st_size;
-    v = v * 1099511628211ULL ^ (uint64_t) st.st_mtim.tv_sec;
-    v = v * 1099511628211ULL ^ (uint64_t) st.st_mtim.tv_nsec;
-    return v ? v : 1;
+    return stat(path, &st) ? 0 : st_stat_sig(&st);
 }
 #ifndef ST_MOUNTINFO
 #define ST_MOUNTINFO "/proc/self/mountinfo"
@@ -144,24 +149,31 @@ static int st_database_quiet(const char *db) {
     }
     return 1;
 }
-static uint8_t *st_read_file(const char *path, size_t *size) {
+static int st_read_matches(const struct stat *sb, uint64_t device, uint64_t inode, uint64_t signature) {
+    return !signature || ((uint64_t) sb->st_dev == device && (uint64_t) sb->st_ino == inode &&
+                          st_stat_sig(sb) == signature);
+}
+static uint8_t *st_read_file_checked(const char *path, size_t *size,
+                                     uint64_t device, uint64_t inode, uint64_t signature) {
     /* A path can change after the fingerprint check; never wait for a FIFO writer
      * before fstat establishes that the opened object is a regular file. */
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) return NULL;
     struct stat sb;
     uint8_t *b = NULL;
-    if (!fstat(fd, &sb) && S_ISREG(sb.st_mode) && sb.st_size >= 12 && (uint64_t) sb.st_size <= ST_FILE_MAX) {
+    if (!fstat(fd, &sb) && S_ISREG(sb.st_mode) && sb.st_size >= 12 &&
+        (uint64_t) sb.st_size <= ST_FILE_MAX && st_read_matches(&sb, device, inode, signature)) {
         *size = (size_t) sb.st_size;
         b = malloc(*size);
         if (b) {
             size_t n = 0;
             while (n < *size) {
                 ssize_t k = read(fd, b + n, *size - n);
+                if (k < 0 && errno == EINTR) continue;
                 if (k <= 0) break;
                 n += (size_t) k;
             }
-            if (n != *size) {
+            if (n != *size || (signature && (fstat(fd, &sb) || !st_read_matches(&sb, device, inode, signature)))) {
                 free(b);
                 b = NULL;
             }
@@ -169,6 +181,9 @@ static uint8_t *st_read_file(const char *path, size_t *size) {
     }
     close(fd);
     return b;
+}
+static uint8_t *st_read_file(const char *path, size_t *size) {
+    return st_read_file_checked(path, size, 0, 0, 0);
 }
 static void st_resolution_retire(const az_track_ref *ref, const char *database) {
     if (ref->source_id < 1 || ref->source_id > 2) return;
@@ -224,6 +239,66 @@ static int st_resolution_current(const struct st_source *source, const char *dat
            st_source_path(current.mount, "/PIONEER/rekordbox/exportLibrary.db", path) &&
            !strcmp(database, path) && st_database_quiet(path) && st_disk_sig(path) == signature;
 }
+/* Both immutable tickets and transaction-aware status reads decode the same unique row. */
+static int st_read_row_checked(void *db, uint32_t track_id, struct st_resolution *row, int *ambiguous) {
+    static const char query[] = "SELECT c.title,a.name,al.name,k.name,c.path,c.bpmx100,c.length,c.analysisDataFilePath "
+                                "FROM content c LEFT JOIN artist a ON a.artist_id=c.artist_id_artist "
+                                "LEFT JOIN album al ON al.album_id=c.album_id LEFT JOIN key k ON k.key_id=c.key_id "
+                                "WHERE c.content_id=?1";
+    void *stmt = NULL;
+    int rc = AZ_FAILED;
+    if (!g_sdk_sq.prepare(db, query, -1, &stmt, NULL) && stmt &&
+        !g_sdk_sq.bind_int64(stmt, 1, track_id)) {
+        int step = g_sdk_sq.step(stmt);
+        if (step == 100) {
+            az_track_metadata *m = &row->metadata;
+            char *texts[] = {m->title, m->artist, m->album, m->key};
+            size_t caps[] = {sizeof m->title, sizeof m->artist, sizeof m->album, sizeof m->key};
+            for (int i = 0; i < 4; i++) {
+                const unsigned char *v = g_sdk_sq.col_text(stmt, i);
+                if (v) {
+                    snprintf(texts[i], caps[i], "%s", v);
+                    utf8_cut(texts[i]);
+                    m->valid |= 1u << i;
+                }
+            }
+            const unsigned char *path = g_sdk_sq.col_text(stmt, 4), *ap = g_sdk_sq.col_text(stmt, 7);
+            /* Oversized raw paths could not fit st_source_path's joined buffer
+             * either. Do not retain a truncated prefix as an audio locator. */
+            if (path && snprintf(row->content, sizeof row->content, "%s", path) >= (int) sizeof row->content)
+                row->content[0] = 0;
+            m->original_bpm = g_sdk_sq.col_int64(stmt, 5) / 100.0;
+            row->duration_ticks = g_sdk_sq.col_int64(stmt, 6);
+            m->duration_s = (double) row->duration_ticks;
+            if (m->original_bpm > 0) m->valid |= AZ_META_TEMPO;
+            int duration_order = compare_timestamps(row->duration_ticks, 0, 1, 1, 1);
+            if (duration_order != AZ_TIME_INVALID && duration_order == AZ_TIME_AFTER) m->valid |= AZ_META_DURATION;
+            rc = AZ_OK;
+            if (ap && snprintf(row->analysis, sizeof row->analysis, "%s", ap) >= (int) sizeof row->analysis) {
+                row->analysis_limited = 1;
+                row->analysis[0] = 0;
+            }
+            /* Reserve a stable source-local locator for an unanalysed export.
+             * Its files can be read before the native spool links the row. */
+            if (!row->analysis[0] && !row->analysis_limited && row->content[0]) {
+                char digest[65];
+                azsha256_hex(row->content, strlen(row->content), digest);
+                snprintf(row->analysis, sizeof row->analysis,
+                         "/PIONEER/USBANLZ/AZMODS/%08x-%.32s/ANLZ0000.DAT", track_id, digest);
+                row->analysis_generated = 1;
+            }
+            /* A duplicate content id is ambiguous inside this exact library as well. */
+            int next = g_sdk_sq.step(stmt);
+            if (next != 101) rc = AZ_FAILED;
+            if (ambiguous) *ambiguous = next == 100;
+        } else if (step == 101) rc = AZ_NOT_FOUND;
+    }
+    if (stmt) g_sdk_sq.finalize(stmt);
+    return rc;
+}
+static int st_read_row(void *db, uint32_t track_id, struct st_resolution *row) {
+    return st_read_row_checked(db, track_id, row, NULL);
+}
 static int st_disk_load(const az_track_ref *ref, uint32_t mask, struct st_data *data, void *ctx) {
     (void) ctx;
     struct st_source src;
@@ -250,10 +325,6 @@ static int st_disk_load(const az_track_ref *ref, uint32_t mask, struct st_data *
         cached->valid = 0;
         return AZ_STALE;
     }
-    static const char query[] = "SELECT c.title,a.name,al.name,k.name,c.path,c.bpmx100,c.length,c.analysisDataFilePath "
-                                "FROM content c LEFT JOIN artist a ON a.artist_id=c.artist_id_artist "
-                                "LEFT JOIN album al ON al.album_id=c.album_id LEFT JOIN key k ON k.key_id=c.key_id "
-                                "WHERE c.content_id=?1";
     int rc = AZ_OK;
     struct st_resolution row;
     int reuse = cached->valid && st_resolution_source_equal(&cached->source, &src) &&
@@ -267,43 +338,9 @@ static int st_disk_load(const az_track_ref *ref, uint32_t mask, struct st_data *
         snprintf(row.database, sizeof row.database, "%s", data->files[0]);
         row.metadata.size = sizeof row.metadata;
         row.metadata.version = AZ_DATA_VERSION;
-        void *db = sdk_db_open(data->files[0]), *stmt = NULL;
+        void *db = sdk_db_open(data->files[0]);
         if (!db) return AZ_FAILED;
-        rc = AZ_FAILED;
-        if (!g_sdk_sq.prepare(db, query, -1, &stmt, NULL) && stmt &&
-            !g_sdk_sq.bind_int64(stmt, 1, ref->track_id)) {
-            int step = g_sdk_sq.step(stmt);
-            if (step == 100) {
-                az_track_metadata *m = &row.metadata;
-                char *texts[] = {m->title, m->artist, m->album, m->key};
-                size_t caps[] = {sizeof m->title, sizeof m->artist, sizeof m->album, sizeof m->key};
-                for (int i = 0; i < 4; i++) {
-                    const unsigned char *v = g_sdk_sq.col_text(stmt, i);
-                    if (v) {
-                        snprintf(texts[i], caps[i], "%s", v);
-                        utf8_cut(texts[i]);
-                        m->valid |= 1u << i;
-                    }
-                }
-                const unsigned char *path = g_sdk_sq.col_text(stmt, 4), *ap = g_sdk_sq.col_text(stmt, 7);
-                /* Oversized raw paths could not fit st_source_path's joined buffer
-                 * either. Do not retain a truncated prefix as an audio locator. */
-                if (path && snprintf(row.content, sizeof row.content, "%s", path) >= (int) sizeof row.content)
-                    row.content[0] = 0;
-                m->original_bpm = g_sdk_sq.col_int64(stmt, 5) / 100.0;
-                m->duration_s = (double) g_sdk_sq.col_int64(stmt, 6);
-                if (m->original_bpm > 0) m->valid |= AZ_META_TEMPO;
-                if (m->duration_s > 0) m->valid |= AZ_META_DURATION;
-                rc = AZ_OK;
-                if (ap && snprintf(row.analysis, sizeof row.analysis, "%s", ap) >= (int) sizeof row.analysis) {
-                    row.analysis_limited = 1;
-                    row.analysis[0] = 0;
-                }
-                /* A duplicate content id is ambiguous inside this exact library as well. */
-                if (g_sdk_sq.step(stmt) != 101) rc = AZ_FAILED;
-            } else if (step == 101) rc = AZ_NOT_FOUND;
-        }
-        if (stmt) g_sdk_sq.finalize(stmt);
+        rc = st_read_row(db, ref->track_id, &row);
         g_sdk_sq.close(db);
         if (rc) return rc;
     }
@@ -384,6 +421,18 @@ static int st_disk_load(const az_track_ref *ref, uint32_t mask, struct st_data *
     }
     return st_disk_fresh(ref, data, NULL) ? AZ_OK : AZ_STALE;
 }
+/* Only the core worker runs the optional status jobs. Starting or changing
+ * interest wakes it independently of the explicit-ticket freshness deadline. */
+static _Atomic(void (*)(void)) g_st_status_jobs;
+static pthread_mutex_t g_st_wake_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_st_wake_cv = PTHREAD_COND_INITIALIZER;
+static int g_st_wake_pending;
+static void st_worker_wake(void) {
+    pthread_mutex_lock(&g_st_wake_mu);
+    g_st_wake_pending = 1;
+    pthread_cond_signal(&g_st_wake_cv);
+    pthread_mutex_unlock(&g_st_wake_mu);
+}
 static void *st_worker(void *arg) {
     (void) arg;
     pthread_setname_np(pthread_self(), "az-track-data");
@@ -391,12 +440,21 @@ static void *st_worker(void *arg) {
         st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
         /* Weak native control blocks are reclaimed off the library/audio/UI hooks. */
         (void) azsdk_sources_sweep();
-        struct timespec delay = {0, 100000000};
-        nanosleep(&delay, NULL); /* core worker only; no native or playback callbacks */
+        void (*status_jobs)(void) = atomic_load(&g_st_status_jobs);
+        if (status_jobs) status_jobs();
+        struct timespec deadline;
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        uint64_t nanos = (uint64_t) deadline.tv_nsec + UINT64_C(100000000);
+        deadline.tv_sec += (time_t) (nanos / UINT64_C(1000000000));
+        deadline.tv_nsec = (long) (nanos % UINT64_C(1000000000));
+        pthread_mutex_lock(&g_st_wake_mu);
+        while (!g_st_wake_pending && pthread_cond_timedwait(&g_st_wake_cv, &g_st_wake_mu, &deadline) == 0) {}
+        g_st_wake_pending = 0;
+        pthread_mutex_unlock(&g_st_wake_mu);
     }
     return NULL;
 }
-/* Called only by track_resolve on a mod worker, serialized by the source mutex. */
+/* Start once, independently of whether explicit tickets or loaded-track watches came first. */
 static int st_start_worker(void) {
     pthread_mutex_lock(&g_st_source_mu);
     if (!g_st_started) {

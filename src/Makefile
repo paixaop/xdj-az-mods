@@ -78,7 +78,7 @@ endif
 # menu.c #includes the Mod Menu's parts (ui_draw.c ... menu_composite.c, listed there): they are
 # not translation units of their own, and the azmod/*.c wildcard below makes them prerequisites.
 AZMOD_SRCS := azmod/azmod.c azmod/menu.c azmod/text.c azmod/azconf.c
-AZMOD_HDRS := $(wildcard azmod/*.h azmod/*.c azmod/*.cpp azmod/*.S azmod/*.def) $(wildcard common/*.h) azstem/sdk_native_cpp.map
+AZMOD_HDRS := $(wildcard azmod/*.h azmod/*.c azmod/*.cpp azmod/*.inc azmod/*.S azmod/*.def) $(wildcard common/*.h) azstem/sdk_native_cpp.map
 AZSDK_NATIVE_CXXFLAGS := $(AZ_UNWIND) -std=c++11 -O2 $(AZ_WARN) -fPIC $(NO_OUTLINE_ATOMICS) -fvisibility=hidden -fvisibility-inlines-hidden
 $(AZMOD): $(AZMOD_SRCS) $(AZMOD_HDRS) | $(OUT)
 	$(CXX) $(AZSDK_NATIVE_CXXFLAGS) -c -o $(OUT)/sdk_native_sources.o azmod/sdk_native_sources.cpp
@@ -97,12 +97,14 @@ $(AZMOD): $(AZMOD_SRCS) $(AZMOD_HDRS) | $(OUT)
 
 # --- azstem.so (stems audio, drum rolls; LD_PRELOAD into EP147) ---
 # stb_vorbis.c (public domain / MIT, vendored) is its own translation unit.
-AZSTEM_CFLAGS := $(AZ_UNWIND) -O2 $(AZ_WARN) -fPIC -shared -static-libgcc $(NO_OUTLINE_ATOMICS) -Iazstem -DAZMOD_RELEASE
+AZSTEM_CFLAGS := -DAZ_STATUS_MAPS_PRODUCER -DAZ_STATUS_MEMORY_PRODUCER -DAZ_STATUS_NATIVE_PRODUCER $(AZ_UNWIND) -O2 $(AZ_WARN) -fPIC -shared -static-libgcc $(NO_OUTLINE_ATOMICS) -Iazstem -DAZMOD_RELEASE
 AZSTEM_STB_CFLAGS := $(AZ_UNWIND) -O2 -w -fPIC $(NO_OUTLINE_ATOMICS) -Iazstem -fvisibility=hidden
-AZSTEM_OBSERVER_CXXFLAGS := $(AZ_UNWIND) -std=c++11 -O2 $(AZ_WARN) -fPIC $(NO_OUTLINE_ATOMICS) -fvisibility=hidden -fvisibility-inlines-hidden
-$(AZSTEM): $(wildcard azstem/*.c azstem/*.h azstem/*.cpp azstem/*.map) $(wildcard common/*.h) | $(OUT)
+AZSTEM_OBSERVER_CXXFLAGS := -DAZ_STATUS_MAPS_PRODUCER -DAZ_STATUS_MEMORY_PRODUCER -DAZ_STATUS_NATIVE_PRODUCER $(AZ_UNWIND) -std=c++11 -O2 $(AZ_WARN) -fPIC $(NO_OUTLINE_ATOMICS) -fvisibility=hidden -fvisibility-inlines-hidden
+$(AZSTEM): $(wildcard azstem/*.c azstem/*.h azstem/*.cpp azstem/*.map azstem/*.inc) $(wildcard common/*.h) | $(OUT)
 	$(CC) $(AZSTEM_STB_CFLAGS) -c -o $(OUT)/stb_vorbis.o azstem/stb_vorbis.c
 	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_loop_observer.o azstem/sdk_loop_observer.cpp
+	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_status_memory.o azstem/sdk_status_memory.cpp
+	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_status_maps.o azstem/sdk_status_maps.cpp
 	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_live_observer.o azstem/sdk_live_observer.cpp
 	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_native_commands.o azstem/sdk_native_commands.cpp
 	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_exit.o azstem/sdk_exit.cpp
@@ -114,7 +116,7 @@ $(AZSTEM): $(wildcard azstem/*.c azstem/*.h azstem/*.cpp azstem/*.map) $(wildcar
 	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_cue_recall.o azstem/sdk_cue_recall.cpp
 	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_load_observer.o azstem/sdk_load_observer.cpp
 	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_cue_observer.o azstem/sdk_cue_observer.cpp
-	$(CC) $(AZSTEM_CFLAGS) -Wl,--version-script=azstem/sdk_native_cpp.map -o $@.full azstem/azstem.c azstem/overview_lease.c $(OUT)/stb_vorbis.o $(OUT)/sdk_loop_observer.o $(OUT)/sdk_live_observer.o $(OUT)/sdk_native_commands.o $(OUT)/sdk_exit.o $(OUT)/sdk_cue_actor.o $(OUT)/sdk_cue_store.o $(OUT)/sdk_cue_persist.o $(OUT)/sdk_cue_lifecycle.o $(OUT)/sdk_cue_commands.o $(OUT)/sdk_cue_recall.o $(OUT)/sdk_load_observer.o $(OUT)/sdk_cue_observer.o -lm -ldl -lpthread -lstdc++
+	$(CC) $(AZSTEM_CFLAGS) -Wl,--version-script=azstem/sdk_native_cpp.map -o $@.full azstem/azstem.c azstem/overview_lease.c azstem/sdk_status_capture.c $(OUT)/stb_vorbis.o $(OUT)/sdk_loop_observer.o $(OUT)/sdk_status_memory.o $(OUT)/sdk_status_maps.o $(OUT)/sdk_live_observer.o $(OUT)/sdk_native_commands.o $(OUT)/sdk_exit.o $(OUT)/sdk_cue_actor.o $(OUT)/sdk_cue_store.o $(OUT)/sdk_cue_persist.o $(OUT)/sdk_cue_lifecycle.o $(OUT)/sdk_cue_commands.o $(OUT)/sdk_cue_recall.o $(OUT)/sdk_load_observer.o $(OUT)/sdk_cue_observer.o -lm -ldl -lpthread -lstdc++
 	$(call az_strip,$@)
 	@echo "Built: $@"
 

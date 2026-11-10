@@ -42,7 +42,7 @@ controls = {
     'load': ('t->load_generation != r->expected_load_generation', '0'),
     'revision': ('t->revision != r->expected_revision', '0'),
     'persistence': ('(t->persistent_commands & bit)', '0'),
-    'deadline': ('if (now && compare_timestamps(request.deadline_ns, now, 1000000000, 1000000000, 1) <= AZ_TIME_EQUAL)', 'if (0)'),
+    'deadline': ('if (now && (deadline_order == AZ_TIME_BEFORE || deadline_order == AZ_TIME_EQUAL))', 'if (0)'),
     'cancel-claim': ('else if (r->phase == SCMD_DISPATCHED || r->awaiting) rc = AZ_PENDING;',
                      'else if (r->phase == SCMD_DISPATCHED || r->awaiting) rc = AZ_OK;'),
     'deck-barrier': ('if (e->active[deck])', 'if (0)'),

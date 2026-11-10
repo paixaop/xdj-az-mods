@@ -40,7 +40,7 @@ scan() { # dir -> prints violations, exit 1 if any
             if (!defined $3) { push @why, "fopen with a non-literal mode" }
             elsif ($3 !~ /e/) { push @why, "fopen mode \"$3\" lacks e" }
         }
-        if ($c =~ /(?<![\w.>])(?:next_)?open(?:64|at)?\s*\(/ && $c !~ /^\s*(?:int|static|extern)\b[^=]*\bopen(?:64)?\s*\(\s*const/
+        if ($c =~ /(?<![\w.>])(?:next_)?open(?:64|at)?\s*\(/ && $c !~ /^\s*(?:bool|int|static|extern)\b[^=]*\bopen(?:64)?\s*\(\s*const/
             && $c !~ /O_CLOEXEC/) { push @why, "open without O_CLOEXEC" }
         if ($c =~ /\bsocket(?:pair)?\s*\(/ && $c !~ /SOCK_CLOEXEC/) { push @why, "socket without SOCK_CLOEXEC" }
         if ($c =~ /(?<![\w.>])(accept|pipe|dup|dup2|popen)\s*\(/) { push @why, "$1() creates an inheritable fd" }

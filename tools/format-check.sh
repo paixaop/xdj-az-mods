@@ -77,7 +77,8 @@ else
     # is checked by tests/run.sh, which assembles that layout in tests/.work/tree
     [ -d guest ] || die "no guest/ here (the published source layout): run tests/run.sh, which assembles
     the tree and runs this check on it, or name the files: $0 [--fix] src/azmod/<file>.c ..."
-    if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+    if command -v git >/dev/null 2>&1 && git_root=$(git rev-parse --show-toplevel 2>/dev/null) &&
+        [ "$git_root" = "$(pwd -P)" ]; then
         all=$(git ls-files -- "${DIRS[@]}" | grep -E '\.[ch]$' || true)
     else # a tree without git metadata (a source archive): every C file under those folders
         all=$(for d in "${DIRS[@]}"; do [ ! -d "$d" ] || find "$d" -type f \( -name '*.c' -o -name '*.h' \); done | LC_ALL=C sort)

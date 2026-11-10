@@ -40,6 +40,11 @@ static int fail_init, borrow_data, wave_data, request_status;
 static uint64_t owned[CM_MAX][ST_PER_OWNER];
 static const az_track_snapshot *held;
 static const az_wave_snapshot *held_wave;
+static unsigned status_retired[CM_MAX];
+static void ds_retire(int owner) {
+    assert(owner >= 0 && owner < CM_MAX);
+    ++status_retired[owner];
+}
 static void sdk_command_owner_init(int owner) { (void) owner; }
 static void sdk_command_owner_ready(int owner) { (void) owner; }
 static void sdk_command_retire_owner(int owner) { (void)owner; }
@@ -78,6 +83,7 @@ static int module_init(const az_core_v1 *core) {
 static void reset_lifecycle(void) {
     memset(g_cm, 0, sizeof g_cm);
     memset(owned, 0, sizeof owned);
+    memset(status_retired, 0, sizeof status_retired);
     held = NULL; held_wave = NULL;
     fail_init = borrow_data = wave_data = g_cm_live = 0;
 }
@@ -101,12 +107,14 @@ int main(void) {
         fail_init = 1;
         wave_data = i & 1;
         run_actual_init(&g_cm[i], &module);
+        assert(status_retired[i] == 1);
         assert(g_cm[i].state == AZCM_FAILED && !g_cm[i].m && g_cm_loading == -1 && !g_sdk_in_init);
     }
     puts("FAILED_INIT_DATA_BASELINE_OK: actual init/result branch ran for eight failed plugins");
     fflush(stdout);
     fail_init = wave_data = 0;
     run_actual_init(&g_cm[8], &module);
+    assert(!status_retired[8]);
     assert(request_status == AZ_OK && "failed initialization must not strand unacquired data ticket quota");
     assert(g_cm[8].state == AZCM_LOADED && g_cm_live == 1);
     assert(st_release(&lifecycle, 8, owned[8][0], 0) == AZ_OK);

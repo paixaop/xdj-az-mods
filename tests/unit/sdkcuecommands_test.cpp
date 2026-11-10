@@ -31,6 +31,7 @@ struct WitnessRows {
 };
 static std::map<uint64_t, WitnessRows> witnessed_rows;
 static uint64_t generation = 42, revision = 1;
+static uint32_t source_clock=48000;
 static bool main_valid = true;
 static int stored_memory_count = -1, fail_property = -1;
 static unsigned property_calls = 0, canonical_calls = 0, witness_calls = 0;
@@ -52,7 +53,7 @@ static unsigned loaded_decks = 1, background_attempts[4];
 static uint64_t cancelled_background_query;
 static unsigned background_cancel_busy, background_release_busy;
 static uint64_t cookie, submitted_sample;
-static bool receipt, bridge_done;
+static bool receipt, bridge_done, bridge_cancel_success;
 static azexit_cue_request stage_request = {};
 static bool override_hot_view = false, missing_hot_view = false, override_stage_sample = false;
 static bool fail_snapshot = false, fail_stage_capture = false;
@@ -65,6 +66,12 @@ static std::vector<azexit_cue_request> submissions;
 static std::vector<uint64_t> submitted_cookies;
 template <class T>
 static void put(void *p, unsigned offset, T value) { std::memcpy(static_cast<char *>(p) + offset, &value, sizeof value); }
+template <class T>
+static T get(const void *p, unsigned offset) {
+    T value;
+    std::memcpy(&value, static_cast<const char *>(p) + offset, sizeof value);
+    return value;
+}
 static void property(azcuestore::NativeProperty &p, uint64_t sample, bool loop) {
     p = {};
     for (unsigned offset : {0x30u, 0x88u}) {
@@ -91,7 +98,7 @@ static Row row(unsigned kind, uint64_t sample, bool loop, const char *comment = 
 static uint64_t all_persist() {
     uint64_t mask = 0;
     for (unsigned operation : {AZ_CMD_SAVED_SAVE, AZ_CMD_SAVED_DELETE, AZ_CMD_SAVED_AUTO, AZ_CMD_HOT_SET, AZ_CMD_HOT_CLEAR,
-                               AZ_CMD_MEMORY_SET, AZ_CMD_MEMORY_DELETE, AZ_CMD_CUE_COMMENT, AZ_CMD_CUE_COLOR}) mask |= UINT64_C(1) << operation;
+                               AZ_CMD_MEMORY_SET, AZ_CMD_MEMORY_DELETE, AZ_CMD_CUE_COMMENT, AZ_CMD_CUE_COLOR, AZ_CMD_CUE_POINT_SET, AZ_CMD_CUE_LOOP_SET}) mask |= UINT64_C(1) << operation;
     return mask;
 }
 namespace azcuestore {
@@ -141,7 +148,7 @@ bool Snapshot::property(uint32_t id, uint64_t rev, Property &out) const noexcept
     out.destroy_ = dummy_destroy;
     return true;
 }
-bool Snapshot::content_witness(uint64_t expected, azcuepersist_witness *out) const noexcept {
+bool Snapshot::content_witness(uint64_t expected, azcuepersist_witness *out, bool) const noexcept {
     ++witness_calls;
     if (!out || expected != revision_ || fail_witness) return false;
     *out = {};
@@ -212,9 +219,40 @@ bool Snapshot::metadata_only_changed(const azcuepersist_witness &before, unsigne
     }
     return matches == 1;
 }
+uint32_t Snapshot::source_rate() const noexcept { return source_clock; }
+bool Snapshot::timed_property(unsigned, double in, double out, bool loop, uint32_t, const char *comment, Property &value) const noexcept {
+    ::property(value.native, uint64_t(in * 48000), loop);
+    put<uintptr_t>(&value.native, 0xe8, reinterpret_cast<uintptr_t>(comment));
+    if (loop) {
+        put<uint64_t>(&value.native, 0x98, uint64_t(out * 48000));
+        put<uint64_t>(&value.native, 0xc0, uint64_t(out * 1000000));
+    }
+    value.destroy_ = dummy_destroy;
+    return true;
+}
+bool Snapshot::creation_only_changed(const azcuepersist_witness &before, unsigned kind, const Property &wanted, uint32_t rate, const char *comment, uint32_t rgb) const noexcept {
+    const auto found = witnessed_rows.find(before.fingerprint);
+    if (!rate || found == witnessed_rows.end() || rows.size() != found->second.rows.size() + 1) return false;
+    unsigned matched = 0;
+    for (const auto &old : found->second.rows) {
+        bool present = false;
+        for (const auto &fresh : rows) if (!std::memcmp(&old, &fresh, sizeof old)) present = true;
+        if (!present) return false;
+    }
+    uint64_t sample; std::memcpy(&sample, wanted.native.bytes + 0x40, sizeof sample);
+    for (const auto &fresh : rows) {
+        uint64_t actual; std::memcpy(&actual, fresh.property.bytes + 0x40, sizeof actual);
+        const char *text = reinterpret_cast<const char *>(get<uintptr_t>(&fresh.cue, 0x70));
+        uint32_t color = get<uint32_t>(&fresh.cue, 0x78) & 0xffffff;
+        if (fresh.cue.bytes[0] == kind && compare_timestamps(actual, sample, rate, rate, 1) == AZ_TIME_EQUAL &&
+            !std::strcmp(text ? text : "", comment) && color == rgb) ++matched;
+    }
+    return matched == 1;
+}
 bool Snapshot::canonical_property(unsigned, const Property &original, Property &out) const noexcept {
     ++canonical_calls;
     if (!original.copy_to(out)) return false;
+    put<uintptr_t>(&out.native, 0xe8, 0); // Stock Property-to-Cue roundtrip omits labels.
     for (unsigned offset : {0x30u, 0x88u}) {
         uint32_t rate;
         uint64_t usec;
@@ -327,13 +365,13 @@ extern "C" int azsdk_cue_persist_submit(const azexit_cue_request *r, void *m, vo
     assert(persist.validate(r, m, source_cookie, nullptr));
     if (persist_busy) { --persist_busy; return AZ_BUSY; } // No producer/request/reply was created.
     if (persist_stale) { --persist_stale; return AZ_STALE; } // Preflight witness changed; no producer/request/reply.
-    bool metadata = r->operation == AZ_CMD_SAVED_AUTO || r->operation == AZ_CMD_CUE_COMMENT || r->operation == AZ_CMD_CUE_COLOR || r->operation == AZ_CMD_HOT_SET;
+    bool metadata = r->operation == AZ_CMD_SAVED_AUTO || r->operation == AZ_CMD_CUE_COMMENT || r->operation == AZ_CMD_CUE_COLOR || r->operation == AZ_CMD_HOT_SET || r->operation == AZ_CMD_CUE_POINT_SET || r->operation == AZ_CMD_CUE_LOOP_SET;
     assert(metadata == (witness != nullptr));
     if (witness) {
         assert(witness->revision == (r->operation == AZ_CMD_HOT_SET ? ::revision : r->expected_revision) && witness->fingerprint);
         assert(witness->source_info == 0x50000 && witness->memory_set == 0x60000 && witness->hot_set == 0x70000);
         assert(witness->memory_content == 0x80000 && witness->hot_content == 0x90000 && witness->source_id[0] == 1);
-        assert(bool(witness->selected_cue) == (r->operation != AZ_CMD_HOT_SET));
+        assert(bool(witness->selected_cue) == (r->operation != AZ_CMD_HOT_SET && r->operation != AZ_CMD_CUE_POINT_SET && r->operation != AZ_CMD_CUE_LOOP_SET));
         if (witness->selected_cue) {
             const void *native = reinterpret_cast<const void *>(witness->selected_cue);
             bool found = false;
@@ -374,7 +412,11 @@ extern "C" int azsdk_cue_persist_confirm_publication(const azexit_cue_request *r
     return publication_matches ? publication_mode : 0;
 }
 extern "C" int azsdk_cue_recall_configure(int, uintptr_t) noexcept { return AZ_OK; }
-extern "C" int azsdk_cue_recall_prepare(const azexit_cue_request *r, void *, const void *) noexcept {
+extern "C" int azsdk_cue_recall_prepare(const azexit_cue_request *r, void *, const void *property) noexcept {
+    if (r->operation == AZ_CMD_CUE_POINT_SET || r->operation == AZ_CMD_CUE_LOOP_SET) {
+        const char *label = reinterpret_cast<const char *>(get<uintptr_t>(property, 0xe8));
+        assert(label && !std::strcmp(label, r->comment));
+    }
     ++recalls;
     bridge_result = {r->identity.token, r->identity.load_generation, 1, AZ_COMMAND_APPLIED, AZ_OK};
     bridge_done = false;
@@ -404,7 +446,11 @@ extern "C" int azsdk_exit_cue_stage_capture(unsigned deck, uint64_t token, azexi
     }
     return AZ_STALE;
 }
-extern "C" int azsdk_exit_recall_cancel(unsigned, uint64_t) noexcept { return AZ_PENDING; }
+extern "C" int azsdk_exit_recall_cancel(unsigned, uint64_t) noexcept {
+    if (!bridge_cancel_success) return AZ_PENDING;
+    bridge_result.outcome=AZ_COMMAND_CANCELLED;bridge_result.reason=AZ_CANCELLED;bridge_result.revision=0;bridge_done=true;
+    return AZ_OK;
+}
 extern "C" int azsdk_exit_recall_poll(unsigned deck, azexit_result *r) noexcept {
     if (deck || !bridge_done) return AZ_PENDING;
     *r = bridge_result;
@@ -779,6 +825,81 @@ static void hot_set_publication() {
     override_hot_view = override_stage_sample = false;
     std::puts("PASS HOT_SET waits for its DSP-captured source point, rate and shape before persistence");
 }
+static void cue_snapshot_clock_tail() {
+    az_native_cue_snapshot current={};current.size=sizeof current;
+    assert(azsdk_cue_commands_native_cues(0,&current)==AZ_OK && current.source_rate_hz==48000);
+    struct Legacy {
+        uint32_t size,version,deck,count;
+        uint64_t native_load_generation,revision;
+        az_cue_entry entries[AZ_NATIVE_CUE_LIMIT];
+        uint64_t canary;
+    } old={};
+    static_assert(offsetof(Legacy,canary)==AZ_NATIVE_CUE_SNAPSHOT_V1_SIZE,"original native snapshot prefix");
+    old.size=AZ_NATIVE_CUE_SNAPSHOT_V1_SIZE;old.canary=UINT64_C(0x0123456789abcdef);
+    assert(azsdk_cue_commands_native_cues(0,reinterpret_cast<az_native_cue_snapshot *>(&old))==AZ_OK);
+    assert(old.size==AZ_NATIVE_CUE_SNAPSHOT_V1_SIZE && old.count==current.count && old.revision==current.revision && old.canary==UINT64_C(0x0123456789abcdef));
+    old.size=AZ_NATIVE_CUE_SNAPSHOT_V1_SIZE-1;Legacy before=old;
+    assert(azsdk_cue_commands_native_cues(0,reinterpret_cast<az_native_cue_snapshot *>(&old))==AZ_INVALID && !std::memcmp(&old,&before,sizeof old));
+    struct Extended { az_native_cue_snapshot value; uint64_t canary; } extended={};
+    extended.value.size=sizeof extended;extended.canary=UINT64_C(0xfedcba9876543210);
+    assert(azsdk_cue_commands_native_cues(0,&extended.value)==AZ_OK);
+    assert(extended.value.size==sizeof extended && extended.value.source_rate_hz==48000 && extended.canary==UINT64_C(0xfedcba9876543210));
+    // Same cue revision can acquire its previously unavailable source clock.
+    // The unchanged-publication fast path must not retain an old clock value.
+    source_clock=44100;azsdk_cue_commands_test_time(UINT64_C(1000000000));
+    azsdk_cue_commands_tick();azsdk_cue_commands_tick();current.size=sizeof current;
+    assert(azsdk_cue_commands_native_cues(0,&current)==AZ_OK && current.source_rate_hz==44100);
+    source_clock=48000;rows.clear();++revision;azsdk_cue_commands_test_time(UINT64_C(1200000000));
+    azsdk_cue_commands_tick();azsdk_cue_commands_tick();
+    assert(azsdk_cue_commands_native_cues(0,&current)==AZ_OK && !current.count && current.source_rate_hz==48000);
+    azsdk_cue_commands_test_time(0);
+    std::puts("PASS native cue snapshot source clock: old-prefix and unknown-tail canaries, clock refresh and empty bank");
+}
+static void arbitrary_creation() {
+    const auto main_before = main_property;
+    unsigned writes = persist_calls, dsp = stages;
+    auto r = request(2000, AZ_CMD_CUE_POINT_SET, AZ_CUE_MEMORY, 0, true);
+    r.position_s = 0; std::strcpy(r.comment, "Start");r.rgb=0xff0000;
+    dispatch(r);assert(persist_calls==writes+1 && compare_timestamps(submitted_sample,0,48000,48000,1)==AZ_TIME_EQUAL && stages==dsp);
+    rows.insert(rows.begin()+1,row(0,0,false,"Start",r.rgb));++revision;reply();
+    assert(result(2000).outcome==AZ_COMMAND_APPLIED);release(2000);
+    assert(!std::memcmp(&main_property,&main_before,sizeof main_before));
+    r=request(2001,AZ_CMD_CUE_LOOP_SET,AZ_CUE_MEMORY,0,true);r.position_s=4;r.end_s=6;
+    dispatch(r);Row loop=row(0,192000,true);put<uint64_t>(&loop.property,0x98,288000);put<uint64_t>(&loop.property,0xc0,6000000);
+    rows.insert(rows.begin()+2,loop);++revision;reply();assert(result(2001).outcome==AZ_COMMAND_APPLIED);release(2001);
+    r=request(2002,AZ_CMD_CUE_POINT_SET,AZ_CUE_HOT,7,true);r.position_s=8;std::strcpy(r.comment,"Hot \342\234\223");
+    unsigned loads=recalls;dispatch(r);rows.push_back(row(7,384000,false,"Hot \342\234\223"));++revision;reply();
+    azexit_result pending_result={};assert(azsdk_cue_commands_poll(0,&pending_result)==AZ_PENDING && recalls==loads+1);
+    bridge_done=true;azsdk_cue_commands_tick();assert(result(2002).outcome==AZ_COMMAND_APPLIED);release(2002);
+    // Stored and currently unsaved Hot occupancy refuse before writing.
+    r=request(2003,AZ_CMD_CUE_POINT_SET,AZ_CUE_HOT,8,true);r.position_s=10;
+    writes=persist_calls;dispatch(r);assert(result(2003).reason==AZ_LIMIT && persist_calls==writes);release(2003);
+    override_hot_view=true;missing_hot_view=false;property(hot_view,123456,false);
+    r=request(2004,AZ_CMD_CUE_POINT_SET,AZ_CUE_HOT,6,true);r.position_s=10;
+    dispatch(r);assert(result(2004).reason==AZ_LIMIT && persist_calls==writes);release(2004);override_hot_view=false;
+    r=request(2005,AZ_CMD_CUE_POINT_SET,AZ_CUE_MEMORY,0,true);r.position_s=0;
+    dispatch(r);assert(result(2005).reason==AZ_LIMIT && persist_calls==writes);release(2005);
+    r=request(2006,AZ_CMD_CUE_LOOP_SET,AZ_CUE_MEMORY,0,true);r.position_s=10;r.end_s=9;
+    dispatch(r);assert(result(2006).reason==AZ_INVALID && persist_calls==writes);release(2006);
+    r=request(2007,AZ_CMD_CUE_POINT_SET,AZ_CUE_MEMORY,0,true);r.position_s=10;--r.expected_revision;
+    dispatch(r);assert(result(2007).reason==AZ_STALE && persist_calls==writes);release(2007);
+    r=request(2008,AZ_CMD_HOT_CLEAR,AZ_CUE_HOT,7,true);--r.expected_revision;
+    unsigned stages_before=stages;dispatch(r);assert(result(2008).reason==AZ_STALE && stages==stages_before);release(2008);
+    // Cancellation after the storage receipt is a partial application even
+    // while the playable Hot update is still queued. Never claim no effect.
+    r=request(2009,AZ_CMD_CUE_LOOP_SET,AZ_CUE_HOT,5,true);r.position_s=12;r.end_s=14;
+    dispatch(r);Row created=row(5,576000,true);put<uint64_t>(&created.property,0x98,672000);put<uint64_t>(&created.property,0xc0,14000000);
+    rows.push_back(created);++revision;reply();bridge_cancel_success=true;
+    assert(azsdk_cue_commands_cancel(0,2009)==AZ_PENDING);
+    azsdk_cue_commands_tick();assert(result(2009).outcome==AZ_COMMAND_UNCERTAIN);release(2009);
+    r=request(2010,AZ_CMD_MEMORY_RECALL,AZ_CUE_MEMORY,1,true);dispatch(r);
+    assert(azsdk_cue_commands_cancel(0,2010)==AZ_OK);assert(result(2010).outcome==AZ_COMMAND_CANCELLED);release(2010);
+    r=request(2011,AZ_CMD_CUE_POINT_SET,AZ_CUE_MEMORY,0,true);r.position_s=16;std::strcpy(r.comment,"Required label");
+    dispatch(r);rows.push_back(row(0,768000,false));++revision;reply();
+    assert(result(2011).outcome==AZ_COMMAND_UNCERTAIN);release(2011); // Empty canonical label cannot prove requested metadata.
+    azsdk_cue_commands_tick();bridge_cancel_success=false;
+    std::puts("PASS arbitrary source-time cue creation: zero, loop bounds, revision, occupancy, preservation and Hot DSP settlement");
+}
 int main(int argc, char **argv) {
     property(main_property, 48000, true);
     std::string long_comment(126, 'x');
@@ -789,6 +910,8 @@ int main(int argc, char **argv) {
     azsdk_cue_commands_tick();
     azsdk_cue_commands_tick(); // refresh captures scalar IDs; second releases internal result
     if (argc == 2) {
+        if (!std::strcmp(argv[1], "clock")) { cue_snapshot_clock_tail(); return 0; }
+        if (!std::strcmp(argv[1], "create")) { arbitrary_creation(); return 0; }
         if (!std::strcmp(argv[1], "priority")) {
             background_query_priority();
             return 0;

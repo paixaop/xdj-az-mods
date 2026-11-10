@@ -23,6 +23,7 @@ void azsdk_cue_recall_retire(void *manager) AZCUERECALL_NOEXCEPT;
 struct azcue_recall_profile {
     uintptr_t manager_table, loader_table, load_table, property_table;
     uintptr_t load_call, copy_property, destroy_property, affinity;
+    uintptr_t locked_property_table, assign_property, assign_locked;
 };
 void azsdk_cue_recall_test_profile(const struct azcue_recall_profile *) AZCUERECALL_NOEXCEPT;
 #endif

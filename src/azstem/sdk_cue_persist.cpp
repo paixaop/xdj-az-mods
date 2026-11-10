@@ -107,6 +107,7 @@ void persist_diagnostic(unsigned deck, uint64_t token, const char *stage, int re
 #else
 #define PERSIST_DIAG(...) ((void) 0)
 #endif
+bool creating(unsigned operation) { return operation == AZ_CMD_CUE_POINT_SET || operation == AZ_CMD_CUE_LOOP_SET; }
 bool supported(unsigned operation) {
     switch (operation) {
     case AZ_CMD_HOT_SET:
@@ -117,7 +118,9 @@ bool supported(unsigned operation) {
     case AZ_CMD_SAVED_DELETE:
     case AZ_CMD_SAVED_AUTO:
     case AZ_CMD_CUE_COMMENT:
-    case AZ_CMD_CUE_COLOR: return true;
+    case AZ_CMD_CUE_COLOR:
+    case AZ_CMD_CUE_POINT_SET:
+    case AZ_CMD_CUE_LOOP_SET: return true;
     default: return false;
     }
 }
@@ -182,7 +185,7 @@ struct NativeString {
 };
 void mutate_row(Slot &slot, uintptr_t row) {
     const auto &profile = state().profile;
-    if (slot.request.operation == AZ_CMD_CUE_COMMENT) {
+    if (slot.request.operation == AZ_CMD_CUE_COMMENT || creating(slot.request.operation)) {
         size_t length = 0;
         if (!utf8(slot.request.comment, length)) throw std::exception();
         NativeString text = reinterpret_cast<NativeString (*)(uint64_t)>(profile.string_allocate)(length + 1);
@@ -195,7 +198,7 @@ void mutate_row(Slot &slot, uintptr_t row) {
         std::memcpy(text.data, slot.request.comment, length + 1);
         reinterpret_cast<void (*)(void *, const void *)>(profile.string_assign)(reinterpret_cast<void *>(row + 0x70), &text);
     }
-    if (slot.request.operation == AZ_CMD_CUE_COLOR || slot.request.operation == AZ_CMD_HOT_SET) {
+    if (slot.request.operation == AZ_CMD_CUE_COLOR || slot.request.operation == AZ_CMD_HOT_SET || creating(slot.request.operation)) {
         unsigned rgb = slot.request.rgb;
         reinterpret_cast<void (*)(void *, unsigned, unsigned, unsigned)>(profile.color_construct)(
             reinterpret_cast<void *>(row + 0x78), (rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255);
@@ -205,7 +208,7 @@ void mutate_row(Slot &slot, uintptr_t row) {
         std::memcpy(reinterpret_cast<void *>(row + 0x28), &automatic, 1);
     }
 }
-bool metadata(unsigned operation) { return operation == AZ_CMD_SAVED_AUTO || operation == AZ_CMD_CUE_COMMENT || operation == AZ_CMD_CUE_COLOR || operation == AZ_CMD_HOT_SET; }
+bool metadata(unsigned operation) { return operation == AZ_CMD_SAVED_AUTO || operation == AZ_CMD_CUE_COMMENT || operation == AZ_CMD_CUE_COLOR || operation == AZ_CMD_HOT_SET || creating(operation); }
 bool vector_bounds(uintptr_t content, uintptr_t &begin, uintptr_t &end, uint64_t &count) {
     begin = end = count = 0;
     if (!content) return true;
@@ -233,7 +236,7 @@ uint64_t witness_hash(const azcuepersist_witness &w) {
 }
 bool witness_current(const Slot &s) {
     const auto &w = s.witness;
-    return w.source_info && w.memory_set && w.hot_set && w.revision && (s.request.operation == AZ_CMD_HOT_SET || w.revision == s.request.expected_revision) && w.fingerprint &&
+    return w.source_info && (creating(s.request.operation) || (w.memory_set && w.hot_set)) && w.revision && (s.request.operation == AZ_CMD_HOT_SET || w.revision == s.request.expected_revision) && w.fingerprint &&
            (w.memory_set ? word(w.memory_set + 0x28) == w.memory_content : !w.memory_content) &&
            (w.hot_set ? word(w.hot_set + 0x28) == w.hot_content : !w.hot_content) &&
            witness_hash(w) == w.fingerprint;
@@ -313,9 +316,31 @@ int metadata_hook(bool hot, void *cache, const void *request, const void *track,
     if (!slot->helper_claim.compare_exchange_strong(expected, 1, std::memory_order_acq_rel) || !valid(*slot) || !witness_current(*slot) ||
         static_cast<const unsigned char *>(cue)[0] != slot->kind || !azcue_timestamps_equal(azcue_read_timestamps(cue), slot->native_times, slot->property_rate) ||
         std::memcmp(slot->native_track, slot->witness.source_id, 12) ||
-        word(reinterpret_cast<uintptr_t>(set_ref)) != (hot ? slot->witness.hot_set : slot->witness.memory_set)) {
+        (!creating(slot->request.operation) && word(reinterpret_cast<uintptr_t>(set_ref)) != (hot ? slot->witness.hot_set : slot->witness.memory_set))) {
         slot->invalid.store(1, std::memory_order_release);
         return 1;
+    }
+    if (creating(slot->request.operation)) {
+        uintptr_t actual = word(reinterpret_cast<uintptr_t>(set_ref));
+        uintptr_t &root = hot ? slot->witness.hot_set : slot->witness.memory_set;
+        uintptr_t &content = hot ? slot->witness.hot_content : slot->witness.memory_content;
+        if (!root) {
+            // The native repository may construct the first publication root
+            // after an empty-source admission. Bind only its still-empty set,
+            // under this exact correlated source/request helper lease.
+            uintptr_t begin = 0, end = 0; uint64_t count = 0;
+            uintptr_t actual_content = actual ? word(actual + 0x28) : 0;
+            if (!actual || !vector_bounds(actual_content, begin, end, count) || count) {
+                slot->invalid.store(1, std::memory_order_release); return 1;
+            }
+            auto copy = reinterpret_cast<void (*)(void *, const void *)>(state().profile.content_copy);
+            copy(&root, &actual); if (actual_content) copy(&content, &actual_content);
+            if (root != actual || content != actual_content || !witness_current(*slot)) {
+                slot->invalid.store(1, std::memory_order_release); return 1;
+            }
+        } else if (actual != root) {
+            slot->invalid.store(1, std::memory_order_release); return 1;
+        }
     }
     uintptr_t target_content = hot ? slot->witness.hot_content : slot->witness.memory_content;
     uintptr_t target_begin, target_end;
@@ -323,6 +348,23 @@ int metadata_hook(bool hot, void *cache, const void *request, const void *track,
     if (!vector_bounds(target_content, target_begin, target_end, target_count)) {
         slot->invalid.store(1, std::memory_order_release);
         return 1;
+    }
+    if (creating(slot->request.operation)) {
+        if (!hot && target_count >= 10) { slot->invalid.store(1, std::memory_order_release); return 1; }
+        const uint64_t absent = UINT64_C(0x7fffffffffffffff);
+        for (uintptr_t row = target_begin; row != target_end; row += 0x80) {
+            const unsigned kind = *reinterpret_cast<const unsigned char *>(row);
+            const auto times = azcue_read_timestamps(reinterpret_cast<const void *>(row));
+            if (kind == 0xff || times.in_us == absent || times.in_sample == absent) continue;
+            const int collision = compare_timestamps(times.in_us, slot->native_times.in_us, 1000000, slot->property_rate, 1);
+            if ((hot && kind == slot->kind) || (!hot && (collision == AZ_TIME_INVALID || collision == AZ_TIME_EQUAL))) {
+                slot->invalid.store(1, std::memory_order_release); return 1;
+            }
+        }
+        int result = original<Helper>(hot ? &state().hot_original : &state().memory_original)(cache, request, track, cue, set_ref, priority);
+        if (result == 0) slot->metadata_applied.store(1, std::memory_order_release);
+        else slot->invalid.store(1, std::memory_order_release);
+        return result;
     }
     unsigned target_matches = 0;
     for (uintptr_t row = target_begin; row != target_end; row += 0x80)
@@ -509,7 +551,7 @@ void reply_hook(void *self, const void *request_id, const void *track, const voi
                 bool hot_present = hot && word(reinterpret_cast<uintptr_t>(hot));
                 copy(&owner->reply_memory_set, memory_present ? memory : &owner->witness.memory_set);
                 copy(&owner->reply_hot_set, hot_present ? hot : &owner->witness.hot_set);
-                if (!owner->reply_memory_set || !owner->reply_hot_set) throw std::exception();
+                if (!creating(owner->request.operation) && (!owner->reply_memory_set || !owner->reply_hot_set)) throw std::exception();
                 if (memory_present) copy(&owner->reply_memory_content, reinterpret_cast<const void *>(owner->reply_memory_set + 0x28));
                 if (hot_present) copy(&owner->reply_hot_content, reinterpret_cast<const void *>(owner->reply_hot_set + 0x28));
                 owner->reply_captured.store(2, std::memory_order_release);
@@ -611,7 +653,7 @@ extern "C" int azsdk_cue_persist_configure(const azcuepersist_profile *profile, 
 extern "C" uint64_t azsdk_cue_persist_capabilities(void) noexcept {
     if (!state().enabled.load(std::memory_order_acquire) || state().overflow.load(std::memory_order_acquire)) return 0;
     uint64_t result = 0;
-    for (unsigned operation = AZ_CMD_SAVED_SAVE; operation <= AZ_CMD_CUE_COLOR; ++operation)
+    for (unsigned operation = AZ_CMD_SAVED_SAVE; operation <= AZ_CMD_CUE_LOOP_SET; ++operation)
         if (supported(operation)) result |= UINT64_C(1) << operation;
     return result;
 }
@@ -764,11 +806,13 @@ extern "C" int azsdk_cue_persist_confirm_publication(const azexit_cue_request *r
         slot.request.identity.token != request->identity.token || slot.request.identity.load_generation != request->identity.load_generation ||
         slot.request.operation != request->operation || slot.request.expected_revision != request->expected_revision ||
         slot.request.entry_id != request->entry_id || slot.request.classification != request->classification ||
-        slot.request.position_s != request->position_s || !valid(slot)) return 0;
+        compare_timestamps(slot.request.position_s, request->position_s, 1, slot.property_rate, 1) != AZ_TIME_EQUAL ||
+        compare_timestamps(slot.request.end_s, request->end_s, 1, slot.property_rate, 1) != AZ_TIME_EQUAL || !valid(slot)) return 0;
     if (!fresh->revision || fresh->source_info != slot.witness.source_info || fresh->memory_set != slot.reply_memory_set ||
         fresh->hot_set != slot.reply_hot_set || std::memcmp(fresh->source_id, slot.native_track, 12) ||
         !fresh->fingerprint || witness_hash(*fresh) != fresh->fingerprint ||
-        word(fresh->memory_set + 0x28) != fresh->memory_content || word(fresh->hot_set + 0x28) != fresh->hot_content || !valid(slot)) return 0;
+        (fresh->memory_set ? word(fresh->memory_set + 0x28) != fresh->memory_content : bool(fresh->memory_content)) ||
+        (fresh->hot_set ? word(fresh->hot_set + 0x28) != fresh->hot_content : bool(fresh->hot_content)) || !valid(slot)) return 0;
     return fresh->memory_content == slot.reply_memory_content && fresh->hot_content == slot.reply_hot_content ? 1 : 2;
 }
 extern "C" int azsdk_cue_persist_take(const azexit_cue_request *request, void *manager, azexit_result *out) noexcept {

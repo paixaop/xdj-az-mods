@@ -54,6 +54,10 @@ Stated in the file headers and visible throughout the code.
 | **Nothing heavy on real-time or paint paths.** | Hooks on EP147's audio thread do no file I/O, allocation or locking; they read and publish atomics, and a background thread does the rest (`azstem.c`, `drumroll.c`). Flags read by hot hooks are refreshed off the hot path (`key_shift.c`, `vinyl_brake.c`). |
 | **Features are gated.** | Each mod follows a Mod Menu row (declared once in `features.def`, read through `azfeatures.h`), an opt-in flag file (`*.on`) or a kill switch (`*.off`) under `/home/root/settings`. Hooks that must be installed at start stay installed and pass through while their feature is off. |
 
+The [stems design lessons](docs/STEMS-DESIGN.md) examine these principles across pad and
+EQ ownership, source audio, native widgets and waveform data, including the current
+file-polling limitation and recommendations for public SDK services.
+
 ### Diagnostics
 
 | Gate | Effect |

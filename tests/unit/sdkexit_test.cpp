@@ -40,6 +40,10 @@ static T get(const void *object, unsigned offset) {
     std::memcpy(&value, static_cast<const unsigned char *>(object) + offset, sizeof value);
     return value;
 }
+static bool sample_at(uint64_t sample, uint64_t expected, uint32_t rate) {
+    const int order = compare_timestamps(sample, expected, rate, rate, 1);
+    return order != AZ_TIME_INVALID && order == AZ_TIME_EQUAL;
+}
 template <class T>
 static void store(void *object, unsigned offset, T value) {
     std::memcpy(static_cast<unsigned char *>(object) + offset, &value, sizeof value);
@@ -1789,8 +1793,9 @@ static bool same_loop_property(const unsigned char *first, const unsigned char *
     }
     for (unsigned point_offset : {0x30u, 0x88u}) {
         auto rate = get<uint32_t>(first, point_offset + 0x30);
-        if (!rate || compare_timestamps(get<uint64_t>(first, point_offset + 0x10), get<uint64_t>(second, point_offset + 0x10), rate, rate, 1) != AZ_TIME_EQUAL ||
-            compare_timestamps(get<uint64_t>(first, point_offset + 0x38), get<uint64_t>(second, point_offset + 0x38), 1000000, rate, 1) != AZ_TIME_EQUAL) return false;
+        const int samples = compare_timestamps(get<uint64_t>(first, point_offset + 0x10), get<uint64_t>(second, point_offset + 0x10), rate, rate, 1);
+        const int micros = compare_timestamps(get<uint64_t>(first, point_offset + 0x38), get<uint64_t>(second, point_offset + 0x38), 1000000, rate, 1);
+        if (samples == AZ_TIME_INVALID || samples != AZ_TIME_EQUAL || micros == AZ_TIME_INVALID || micros != AZ_TIME_EQUAL) return false;
     }
     return true;
 }
@@ -1870,8 +1875,8 @@ static void loop_commands() {
         loop_complete(r, AZ_COMMAND_APPLIED, AZ_OK);
         auto in = get<uint64_t>(natives[0].context.bytes + 0x160, 0x40);
         auto end = get<uint64_t>(natives[0].context.bytes + 0x160, 0x98);
-        assert(in == (operation == AZ_CMD_LOOP_ADJUST_OUT ? 48000u : 36000u));
-        assert(end == (operation == AZ_CMD_LOOP_ADJUST_IN ? 144000u : 132000u));
+        assert(sample_at(in, operation == AZ_CMD_LOOP_ADJUST_OUT ? 48000u : 36000u, get<uint32_t>(natives[0].context.bytes + 0x160, 0x60)));
+        assert(sample_at(end, operation == AZ_CMD_LOOP_ADJUST_IN ? 144000u : 132000u, get<uint32_t>(natives[0].context.bytes + 0x160, 0xb8)));
     }
     for (bool deferred : {false, true}) {
         for (unsigned operation : {AZ_CMD_LOOP_DOUBLE, AZ_CMD_LOOP_HALVE}) {
@@ -1882,9 +1887,9 @@ static void loop_commands() {
             put(n.context, 0x160 + 0xd8, uint32_t(0x00010002));
             n.deferred = deferred;
             loop_complete(loop_request(operation), AZ_COMMAND_APPLIED, AZ_OK);
-            assert(get<uint64_t>(n.context.bytes + 0x160, 0x40) == 48000);
-            assert(get<uint64_t>(n.context.bytes + 0x160, 0x98) ==
-                   (operation == AZ_CMD_LOOP_DOUBLE ? 192000u : 120000u));
+            assert(sample_at(get<uint64_t>(n.context.bytes + 0x160, 0x40), 48000, get<uint32_t>(n.context.bytes + 0x160, 0x60)));
+            assert(sample_at(get<uint64_t>(n.context.bytes + 0x160, 0x98),
+                             operation == AZ_CMD_LOOP_DOUBLE ? 192000u : 120000u, get<uint32_t>(n.context.bytes + 0x160, 0xb8)));
             n.deferred = false;
             loop_points(0);
             active(0);
@@ -1978,10 +1983,7 @@ static void loop_commands() {
             if (move_out.outcome != AZ_COMMAND_ACCEPTED) break;
         }
         assert(move_out.outcome == AZ_COMMAND_UNCERTAIN && move_out.reason == (stale_load ? AZ_STALE : AZ_FAILED));
-        const auto *loop = natives[0].context.bytes + 0x160;
-        const uint32_t rate = get<uint32_t>(loop, 0x60);
-        const int order = compare_timestamps(get<uint64_t>(loop, 0x40), 48000u, rate, rate, 1);
-        assert(order != AZ_TIME_INVALID && order == AZ_TIME_EQUAL);
+        assert(sample_at(get<uint64_t>(natives[0].context.bytes + 0x160, 0x40), 48000, get<uint32_t>(natives[0].context.bytes + 0x160, 0x60)));
         dispose_pending(0); /* native load replacement owns holder disposal */
         process(0);
         terminal(r, AZ_COMMAND_UNCERTAIN, stale_load ? AZ_STALE : AZ_FAILED);
@@ -2274,6 +2276,9 @@ static void cue_reset(unsigned d) {
     n.cue_seek_window = 0;
     loop_points(d);
     std::memcpy(n.core.bytes + 0x18, n.retained_property.bytes + 0x30, 12);
+    /* This synthetic loaded source owns both the core head and retained
+     * cue clock; cue-only runs must initialize the core clock explicitly. */
+    put(n.core, 0x68, get<uint32_t>(n.retained_property.bytes, 0x60));
     put(n.core, 0x28, uint64_t(24000));
     put(n.core, 9, uint8_t(1));
     put(n.play_pause, 8, uint8_t(1));
@@ -2306,7 +2311,7 @@ static void cue_commands() {
                 put(n.core, 9, uint8_t(playing));
                 put(n.play_pause, 8, uint8_t(playing));
                 loop_complete(cue_request(AZ_CMD_MAIN_SET, d), AZ_COMMAND_APPLIED, AZ_OK);
-                assert(get<uint64_t>(n.retained_property.bytes, 0x40) == 96000);
+                assert(sample_at(get<uint64_t>(n.retained_property.bytes, 0x40), 96000, get<uint32_t>(n.retained_property.bytes, 0x60)));
                 assert(n.core.bytes[9] == playing && n.play_pause.bytes[8] == playing); /* setting a cue preserves transport */
             }
             cue_reset(d);
@@ -2316,7 +2321,7 @@ static void cue_commands() {
             loop_complete(cue_request(AZ_CMD_MAIN_RECALL, d), AZ_COMMAND_APPLIED, AZ_OK);
             assert(n.cue_seeks == seeks + 1 && !n.play_pause.bytes[8] && n.core.bytes[9] == 1);
             assert(n.cue_seek_calls == native_seeks + 1 && n.cue_jump_calls == native_jumps + 1);
-            assert(get<uint64_t>(n.core.bytes, 0x28) == 48000);
+            assert(sample_at(get<uint64_t>(n.core.bytes, 0x28), 48000, get<uint32_t>(n.core.bytes, 0x68)));
             loop_complete(cue_request(AZ_CMD_MAIN_RECALL, d), AZ_COMMAND_APPLIED, AZ_OK);
             assert(n.cue_seeks == seeks + 2 && !n.play_pause.bytes[8] && n.core.bytes[9] == 1); /* recall while already paused still seeks */
             for (unsigned kind = 1; kind <= 8; ++kind) {
@@ -2330,7 +2335,7 @@ static void cue_commands() {
                 loop_complete(cue_request(AZ_CMD_HOT_TRIGGER, d, kind), AZ_COMMAND_APPLIED, AZ_OK);
                 assert(n.cue_seeks == seeks + 1 && n.play_pause.bytes[8] && n.core.bytes[9]);
                 assert(n.cue_seek_calls == native_seeks && n.cue_jump_calls == native_jumps + 1);
-                assert(get<uint64_t>(n.core.bytes, 0x28) == 48000 * (kind + 1));
+                assert(sample_at(get<uint64_t>(n.core.bytes, 0x28), 48000 * (kind + 1), get<uint32_t>(n.core.bytes, 0x68)));
                 loop_complete(cue_request(AZ_CMD_HOT_TRIGGER, d, kind), AZ_COMMAND_APPLIED, AZ_OK);
                 assert(n.cue_seeks == seeks + 2 && n.play_pause.bytes[8] && n.core.bytes[9]); /* retrigger while playing needs a fresh receipt */
             }
@@ -2361,7 +2366,7 @@ static void cue_commands() {
         n.deferred = deferred;
         point(n.retained_property.bytes, 0x18, 152423);
         loop_complete(cue_request(AZ_CMD_MAIN_RECALL), AZ_COMMAND_APPLIED, AZ_OK);
-        assert(get<uint64_t>(n.core.bytes, 0x28) == 152423 && n.core.bytes[9] == 1 && n.play_pause.bytes[8] == 0);
+        assert(sample_at(get<uint64_t>(n.core.bytes, 0x28), 152423, get<uint32_t>(n.core.bytes, 0x68)) && n.core.bytes[9] == 1 && n.play_pause.bytes[8] == 0);
         /* Real CDJ pause keeps the base stream playing while logical playback
          * and the visible cue position are paused. Setting a cue preserves it. */
         loop_complete(cue_request(AZ_CMD_MAIN_SET), AZ_COMMAND_APPLIED, AZ_OK);
@@ -2533,6 +2538,8 @@ static void hot_countdown_retirement() {
     terminal(r, AZ_COMMAND_UNCERTAIN, AZ_STALE);
 }
 #ifdef AZSDK_CUE_STAGE_TESTING
+static bool hydrating_hot;
+static unsigned hydrate_deck, hydrate_fault;
 extern "C" const void *azsdk_cue_recall_property(unsigned deck, uint64_t token) noexcept {
     assert(deck < 4 && token);
     return natives[deck].hot_properties[7].bytes;
@@ -2540,6 +2547,14 @@ extern "C" const void *azsdk_cue_recall_property(unsigned deck, uint64_t token) 
 extern "C" int azsdk_cue_recall_dispatch(unsigned deck, uint64_t token, void *core, void *facade) noexcept {
     assert(deck < 4 && token && core == natives[deck].core.bytes && facade == natives[deck].facade.bytes);
     auto &n = natives[deck];
+    if (hydrating_hot) {
+        assert(deck==hydrate_deck);
+        std::memcpy(n.hot_properties[0].bytes+8,n.hot_properties[7].bytes+8,0xf0);
+        if(hydrate_fault==1) point(n.retained_property.bytes,0x18,999999);
+        if(hydrate_fault==2) point(n.context.bytes+0x160,0x18,999999);
+        if(hydrate_fault==3) put(n.play_pause,8,uint8_t(!n.play_pause.bytes[8]));
+        return AZ_OK;
+    }
     // A persisted Active Loop can establish native setup before the point
     // recall cancels it. No replacement wrap should follow a Memory point.
     n.making_setup = true;
@@ -2636,11 +2651,11 @@ static void hot_stage_commands() {
                     auto r = hot_stage_request(AZ_CMD_HOT_SET, d, kind, rgb);
                     hot_stage_complete(r, AZ_COMMAND_APPLIED, AZ_OK);
                     auto &p = n.hot_properties[kind - 1];
-                    assert(get<uint64_t>(p.bytes, 0x40) == (loop ? 48000u : 96000u));
+                    assert(sample_at(get<uint64_t>(p.bytes, 0x40), loop ? 48000u : 96000u, get<uint32_t>(p.bytes, 0x60)));
                     assert((p.bytes[0x88] != 0) == loop);
-                    if (loop) assert(get<uint64_t>(p.bytes, 0x98) == 144000u);
+                    if (loop) assert(sample_at(get<uint64_t>(p.bytes, 0x98), 144000u, get<uint32_t>(p.bytes, 0xb8)));
                     assert(p.bytes[0x10] == 0x12 && p.bytes[0x11] == 0xa5 && p.bytes[0x12] == 0xe7);
-                    assert(n.core.bytes[9] == playing && n.play_pause.bytes[8] == playing && get<uint64_t>(n.core.bytes, 0x28) == 96000u);
+                    assert(n.core.bytes[9] == playing && n.play_pause.bytes[8] == playing && sample_at(get<uint64_t>(n.core.bytes, 0x28), 96000u, get<uint32_t>(n.core.bytes, 0x68)));
                     r = hot_stage_request(AZ_CMD_HOT_CLEAR, d, kind);
                     hot_stage_complete(r, AZ_COMMAND_APPLIED, AZ_OK);
                     assert(!p.bytes[0x30] && !p.bytes[0x88] && n.core.bytes[9] == playing && n.play_pause.bytes[8] == playing);
@@ -2667,7 +2682,7 @@ static void hot_stage_commands() {
             uint64_t in_before = get<uint64_t>(existing.bytes, 0x40);
             n.deferred = deferred;
             hot_stage_complete(hot_stage_request(AZ_CMD_HOT_SET, 0, 1, 0xaabbcc), AZ_COMMAND_APPLIED, AZ_OK);
-            assert(get<uint64_t>(existing.bytes, 0x40) == in_before && existing.bytes[0x10] == 0xaa && existing.bytes[0x11] == 0xbb && existing.bytes[0x12] == 0xcc);
+            assert(sample_at(get<uint64_t>(existing.bytes, 0x40), in_before, get<uint32_t>(existing.bytes, 0x60)) && existing.bytes[0x10] == 0xaa && existing.bytes[0x11] == 0xbb && existing.bytes[0x12] == 0xcc);
             hot_stage_complete(hot_stage_request(AZ_CMD_HOT_SET, 0, 1, 0xaabbcc), AZ_COMMAND_UNCERTAIN, AZ_FAILED);
         }
     hot_stage_reset(0, false);
@@ -2785,6 +2800,41 @@ static void hot_clear_commands() {
         assert(calls.load() == before);
     }
 }
+static void arbitrary_hot_hydration() {
+    for(unsigned d=0;d<4;++d) for(bool loop:{false,true}) for(unsigned fault:{0u,1u,2u,3u}) {
+        hot_stage_reset(d,loop);
+        auto &n=natives[d];n.deferred=false;
+        point(n.hot_properties[7].bytes,0x18,48000*20);
+        if(loop) point(n.hot_properties[7].bytes,0x70,48000*24);
+        n.hot_properties[7].bytes[0x10]=0x12;n.hot_properties[7].bytes[0x11]=0x34;n.hot_properties[7].bytes[0x12]=0x56;
+        uint64_t head=get<uint64_t>(n.core.bytes,0x28);
+        auto r=hot_stage_request(loop?AZ_CMD_CUE_LOOP_SET:AZ_CMD_CUE_POINT_SET,d,1,0x123456);
+        hydrating_hot=true;hydrate_deck=d;hydrate_fault=fault;
+        hot_stage_complete(r,fault?AZ_COMMAND_UNCERTAIN:AZ_COMMAND_APPLIED,fault?AZ_FAILED:AZ_OK);
+        assert(compare_timestamps(get<uint64_t>(n.core.bytes,0x28),head,48000,48000,1)==AZ_TIME_EQUAL);
+        hydrating_hot=false;
+    }
+    for(unsigned d=0;d<4;++d) for(bool stale:{false,true}) {
+        hot_stage_reset(d,false);
+        auto &n=natives[d];n.deferred=false;
+        point(n.hot_properties[7].bytes,0x18,48000*20);
+        auto r=hot_stage_request(AZ_CMD_CUE_POINT_SET,d,1,0x123456);
+        unsigned char before[0xf8];
+        std::memcpy(before,n.hot_properties[0].bytes,sizeof before);
+        hydrating_hot=true;hydrate_deck=d;hydrate_fault=0;
+        if(stale) {
+            assert(azsdk_exit_cue_stage_submit(&r)==AZ_PENDING);
+            advance_load(d);
+            process(d);
+            hot_stage_terminal(r,AZ_COMMAND_REJECTED,AZ_STALE);
+        } else {
+            n.hot_properties[7].bytes[0x30]^=2;
+            hot_stage_complete(r,AZ_COMMAND_REJECTED,AZ_UNSUPPORTED);
+        }
+        assert(!std::memcmp(before,n.hot_properties[0].bytes,sizeof before));
+        hydrating_hot=false;
+    }
+}
 static void hot_set_capture_commands() {
     for (unsigned d = 0; d < 4; ++d) for (bool deferred : {false, true}) for (bool loop : {false, true}) for (unsigned playing : {0u, 1u}) {
         hot_stage_reset(d, loop);
@@ -2853,6 +2903,40 @@ static void hot_set_capture_commands() {
     reader.join();
     hot_stage_terminal(next, AZ_COMMAND_APPLIED, AZ_OK);
 }
+static bool capture_persistent_route;
+static unsigned persistent_route_calls;
+static azexit_cue_request persistent_route_request;
+extern "C" int azsdk_exit_test_persistent_cue_submit(const azexit_cue_request *r) noexcept {
+    if (!capture_persistent_route) return AZ_INVALID;
+    persistent_route_request = *r;
+    ++persistent_route_calls;
+    return AZ_PENDING; // Selection proof only; no native effect is simulated.
+}
+static void arbitrary_cue_public_routing() {
+    const auto *api = azstem_exit_service_v1();
+    capture_persistent_route = true;
+    for (unsigned deck = 0; deck < 4; ++deck) for (unsigned classification : {AZ_CUE_HOT, AZ_CUE_MEMORY})
+    for (unsigned operation : {AZ_CMD_CUE_POINT_SET, AZ_CMD_CUE_LOOP_SET}) {
+        hot_stage_reset(deck, false);
+        auto r = hot_stage_request(operation, deck, classification == AZ_CUE_HOT ? 2 : 0, 0x00c3ff);
+        r.flags = AZ_COMMAND_PERSIST | AZ_COMMAND_NATIVE_LOAD | AZ_COMMAND_NATIVE_CUE_IDS;
+        r.expected_revision = 19;
+        r.classification = classification;
+        r.position_s = operation == AZ_CMD_CUE_POINT_SET ? 0 : 12.25;
+        r.end_s = operation == AZ_CMD_CUE_LOOP_SET ? 15.5 : 0;
+        std::strcpy(r.comment, "Create UTF8 \342\234\223");
+        const unsigned before = persistent_route_calls;
+        assert(api->submit_cue(&r) == AZ_PENDING && persistent_route_calls == before + 1);
+        const auto &forwarded = persistent_route_request;
+        assert(forwarded.operation == r.operation && forwarded.classification == r.classification &&
+               forwarded.flags == r.flags && forwarded.expected_revision == r.expected_revision &&
+               forwarded.entry_id == r.entry_id && !std::strcmp(forwarded.comment, r.comment));
+        const auto rate = get<uint32_t>(natives[deck].core.bytes, 0x68);
+        assert(compare_timestamps(forwarded.position_s, r.position_s, 1, rate, 1) == AZ_TIME_EQUAL &&
+               compare_timestamps(forwarded.end_s, r.end_s, 1, rate, 1) == AZ_TIME_EQUAL);
+    }
+    capture_persistent_route = false;
+}
 #endif
 static void loop_only_gating() {
     const auto *api = azstem_exit_service_v1();
@@ -2884,6 +2968,8 @@ int main(int argc, char **argv) {
 #elif defined(AZSDK_HOT_SET_ONLY)
     hot_set_capture_commands();
 #else
+    arbitrary_cue_public_routing();
+    arbitrary_hot_hydration();
     memory_point_recall_commands();
     hot_stage_commands();
     hot_set_capture_commands();

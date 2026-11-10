@@ -59,6 +59,18 @@ class ActiveLoopFixture:
   return [(1,self.position if self.paused else self.position-.01),(2,self.position)]
 
 class CueTests(unittest.TestCase):
+ def test_appended_creation_requests_preserve_public_arguments(self):
+  for op in (27,28):
+   line=cue.request(723,'submit',identity=7,deck=0,op=op,load=1,revision=4,timeout=10000000000,flags=7,classification=2,position=0,end=2 if op==28 else 0,rgb=0x00c3ff,comment='Native creation ✓')
+   fields=dict(item.split('=',1) for item in line.split())
+   self.assertEqual(int(fields['op']),op)
+   self.assertEqual(int(fields['flags']),7)
+   self.assertEqual(int(fields['revision']),4)
+   self.assertEqual(cue.compare_timestamps(float(fields['position']),0,units_per_second=1,sample_rate=48000),0)
+   self.assertEqual(bytes.fromhex(fields['comment_hex']).decode(),'Native creation ✓')
+  for op in (29,2**32,-1):
+   with self.subTest(op=op),self.assertRaises(ValueError):
+    cue.request(723,'submit',identity=7,op=op)
  def test_capture_bracket_waits_for_post_render_source_publication(self):
   for rate in (44100,48000):
    with self.subTest(rate=rate):
@@ -736,7 +748,7 @@ class LoadedSessionTests(unittest.TestCase):
    reload=Mock(side_effect=AssertionError('unexpected GUI reload'))
    with patch.object(cue,'run_memory_color',return_value=dict(status='PASS',decks={'0':dict(status='PASS')})) as run:
     result=cue.run_test_phase(phase,None,None,None,'123',setup_deck=None,read_positions=None,selection=selection,reload_deck=reload,sample_rate=44100)
-   self.assertEqual(result['status'],'PASS');self.assertIsNone(run.call_args.kwargs['reload_deck']);reload.assert_not_called()
+   self.assertEqual(result['status'],'PASS');self.assertIsNone(run.call_args[1]['reload_deck']);reload.assert_not_called()
 
  def test_reload_persistence_is_explicit_and_requires_a_real_callback(self):
   for phase,selection in (('memory-color-reload',None),('selected','memory-color-reload')):
@@ -745,7 +757,7 @@ class LoadedSessionTests(unittest.TestCase):
    reload=Mock()
    with patch.object(cue,'run_memory_color',return_value=dict(status='PASS',decks={'0':dict(status='PASS')})) as run:
     cue.run_test_phase(phase,None,None,None,'123',setup_deck=None,read_positions=None,selection=selection,reload_deck=reload,sample_rate=44100)
-   self.assertIs(run.call_args.kwargs['reload_deck'],reload)
+   self.assertIs(run.call_args[1]['reload_deck'],reload)
 
  def memory_fixture(self):
   class Fixture:

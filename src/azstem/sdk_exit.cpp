@@ -5,10 +5,18 @@
 #define _GNU_SOURCE
 #endif
 #include "../common/aztimestamp.h"
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+#include "../common/azstatus_native.h"
+#include "../common/azcuetext.h"
+#ifdef AZ_STATUS_MEMORY_PRODUCER
+#include "../common/azstatus_memory.h"
+#endif
+#endif
 #include "../common/azexit.h"
 #include "../common/azcuerecallbridge.h"
 #include "../common/azexitprofile.h"
 #include "../common/azcuecommands.h"
+#include "../common/azcueprofile.h"
 #if !defined(AZSDK_EXIT_TESTING) || defined(AZSDK_CUE_STAGE_TESTING)
 #include "../common/azcuerecall.h"
 #endif
@@ -41,6 +49,7 @@
 
 #ifdef AZSDK_EXIT_TESTING
 extern "C" __attribute__((weak)) void azsdk_cue_commands_recall_finished(unsigned, uint64_t) noexcept {}
+extern "C" __attribute__((weak)) int azsdk_exit_test_persistent_cue_submit(const azexit_cue_request *) noexcept { return AZ_INVALID; }
 #endif
 
 #include "sdk_exit_delivery.h"
@@ -78,7 +87,70 @@ struct Slot {
     bool cue_aux_before = false;
     unsigned cue_rgb_before = 0;
     std::atomic<bool> internal_recall {false};
-    LoopPoints before, retained_before;
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    std::atomic_flag status_busy = ATOMIC_FLAG_INIT;
+    uint64_t status_epoch = 0;
+    uintptr_t status_retained = 0;
+    uint32_t status_retained_rev = 0, status_working_rev = 0;
+    uint64_t status_seed = 0;
+    azn_hot_link working_origin {};
+    uint64_t working_file_row = 0;
+    uint64_t status_loop_cut = 0;
+    struct Setting {
+        std::atomic<uintptr_t> address {0};
+        std::atomic<uint64_t> provider {0}, fault {0};
+        std::atomic_flag busy = ATOMIC_FLAG_INIT;
+        uint64_t seed = 0, sealed_fault = 0;
+        unsigned last = std::numeric_limits<unsigned>::max();
+        int raw = -1;
+    } settings[4];
+    struct HotState {
+        std::atomic_flag busy = ATOMIC_FLAG_INIT;
+        uint64_t load = 0, seed = 0, provider = 0, serial = 0, loss_cut = 0;
+        uintptr_t property[8] = {};
+        uint32_t revision[8] = {};
+        azn_hot_slot previous[8] = {};
+        azn_hot_details details {};
+        bool ready = false;
+    } hot;
+    struct Motion {
+        enum {
+            FREE,
+            HEAD,
+            MAP,
+            OBSERVE
+        };
+        std::atomic<unsigned> busy {FREE};
+        std::atomic<unsigned> active_writers {0};
+        std::atomic<uint64_t> active_serial {0};
+        std::atomic<uint64_t> interference {0};
+        std::atomic<unsigned> foreign {0};
+        std::atomic<uint64_t> slip_load {0}, slip_generation {0}, slip_interference {0};
+        std::atomic<uint64_t> landing_order {0}, landing_stamp {0}, landing_epoch {0}, landing_lo {0};
+        std::atomic<uint32_t> landing_hi {0};
+        std::atomic<uint64_t> opening_landing {0};
+        std::atomic<uint64_t> adoption_render {0};
+        std::atomic<unsigned> adoption_render_writers {0};
+        uint64_t adoption_request = 0, adoption_render_cut = 0; /* landing_publish owns these scalars */
+        std::atomic<uint64_t> adoption_sample {0};
+        std::atomic<uint32_t> adoption_rate {0};
+        std::atomic<bool> opening {false};
+        std::atomic<unsigned> landing_writers {0};
+        std::atomic_flag landing_publish = ATOMIC_FLAG_INIT;
+        uint64_t frame_epoch = 0, frame_landing_order = 0;
+        unsigned char first_source[12] = {};
+        uint64_t load = 0, order = 0, generation = 0, occurrence = 0, seed = 0, captured_interference = 0;
+        uint64_t previous = 0;
+        uint64_t stationary_order = 0, stationary_load = 0, stationary_map = 0;
+        unsigned stationary_flags = 0;
+        uint64_t opening_sample = 0;
+        unsigned char identity[12] = {};
+        uint32_t rate = 0, window_samples = 0, window_rate = 0;
+        uint32_t opening_rate = 0;
+        bool known = false;
+    } motion;
+#endif
+    LoopPoints before, retained_before, main_before;
     uintptr_t retained = 0;
     azexit_cue_stage_sample staged_cue = {};
     uint64_t expected_in = 0, expected_out = 0;
@@ -120,6 +192,10 @@ struct State {
     void *hot_countdown_original[2] = {};
     bool hot_countdown_ready = false;
     bool configured = false;
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    bool motion_hooked = false;
+    bool motion_actions = false;
+#endif
 };
 struct Scope {
     Slot *slot;
@@ -131,6 +207,25 @@ struct Scope {
 };
 thread_local Scope causal = {};
 thread_local Slot *processing = nullptr;
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+struct StatusActionScope {
+    static thread_local StatusActionScope *current;
+    StatusActionScope *previous;
+    uintptr_t command, callback;
+    bool controller;
+    bool beat = false;
+    uint64_t beat_sample = 0;
+    unsigned char beat_source[12] = {};
+    unsigned direct_kind = 0;
+    uint32_t direct_rate = 0;
+    uint64_t direct_sample = 0;
+    unsigned char direct_source[12] = {};
+    StatusActionScope(uintptr_t cmd, uintptr_t cb, bool direct = false) noexcept : previous(current), command(cmd), callback(cb), controller(direct) { current = this; }
+    ~StatusActionScope() { current = previous; }
+};
+thread_local StatusActionScope *StatusActionScope::current = nullptr;
+static void status_direct_request(StatusActionScope &, const void *, int, uintptr_t) noexcept;
+#endif
 struct CausalScope {
     Scope previous;
     explicit CausalScope(const Scope &value) : previous(causal) { causal = value; }
@@ -451,6 +546,9 @@ int quantize_hook(void *self, int selector, const void *reference, const void *o
     if (!causal.slot && result != -1) transfer_pending(self);
     return result;
 }
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+#include "sdk_status_noqua.inc"
+#endif
 void jump_hook(void *self, const void *property, int mode, const void *reference, bool option, double timing) {
     Scope next = causal;
     next.setup = causal.slot && word(word(causal.slot->unit + 0x180) + 0x38) == reinterpret_cast<uintptr_t>(self) &&
@@ -458,6 +556,15 @@ void jump_hook(void *self, const void *property, int mode, const void *reference
     CausalScope scope(next);
     if (next.slot && word(word(next.slot->unit + 0x180) + 0x38) == reinterpret_cast<uintptr_t>(self))
         capture_list(word(reinterpret_cast<uintptr_t>(reference)));
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    uintptr_t callback = 0;
+    uintptr_t basis = processing && state().motion_actions ? word(processing->unit + 0x180) : 0;
+    if (pointer(basis) && reference && word(basis + 0x38) == reinterpret_cast<uintptr_t>(self))
+        callback = word(reinterpret_cast<uintptr_t>(reference));
+    StatusActionScope observed(0, callback, pointer(basis) && word(basis + 0x38) == reinterpret_cast<uintptr_t>(self));
+    status_noqua_request(observed, property, mode, reinterpret_cast<uintptr_t>(__builtin_return_address(0)));
+    status_direct_request(observed, property, mode, reinterpret_cast<uintptr_t>(__builtin_return_address(0)));
+#endif
     reinterpret_cast<void (*)(void *, const void *, int, const void *, bool, double)>(state().profile.jump_request)(self, property, mode, reference, option, timing);
 }
 void loop_schedule_hook(void *self, const void *forward, const void *reverse, int mode,
@@ -488,8 +595,11 @@ bool recall_operation(uint32_t operation) noexcept {
     return false;
 #endif
 }
+bool hot_install(uint32_t operation) noexcept {
+    return operation == AZ_CMD_CUE_POINT_SET || operation == AZ_CMD_CUE_LOOP_SET;
+}
 bool cue_operation(uint32_t operation) noexcept {
-    return hot_edit(operation) || recall_operation(operation) || operation == AZ_CMD_MAIN_SET || operation == AZ_CMD_MAIN_RECALL || operation == AZ_CMD_HOT_TRIGGER;
+    return hot_install(operation) || hot_edit(operation) || recall_operation(operation) || operation == AZ_CMD_MAIN_SET || operation == AZ_CMD_MAIN_RECALL || operation == AZ_CMD_HOT_TRIGGER;
 }
 bool cue_seek_operation(uint32_t operation) noexcept {
     return recall_operation(operation) || operation == AZ_CMD_MAIN_RECALL || operation == AZ_CMD_HOT_TRIGGER;
@@ -501,7 +611,16 @@ bool cue_position_matches(const Slot &slot) noexcept {
            compare_timestamps(word(core + 0x28), slot.retained_before.in,
                               slot.retained_before.rate, slot.retained_before.rate, 1) == AZ_TIME_EQUAL;
 }
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+#include "sdk_status_rate.inc"
+#include "sdk_status_transport.inc"
+#include "sdk_status_motion.inc"
+#endif
 void core_jump_hook(void *self, const void *position) {
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    StatusMotionWrite motion(self, true, 1);
+    StatusLanding landing(self);
+#endif
     Slot *slot = causal.slot;
     uint64_t target = word(reinterpret_cast<uintptr_t>(position) + 0x18);
     uint64_t window = 1;
@@ -520,7 +639,10 @@ void core_jump_hook(void *self, const void *position) {
             uint64_t forward = word(command + 0x40), reverse = word(command + 0x48);
             const uint64_t rate = slot->retained_before.rate;
             int order = compare_timestamps(forward, reverse, rate, rate, 1);
-            planned = forward <= UINT64_C(9007199254740992) && reverse <= UINT64_C(9007199254740992) && order != AZ_TIME_INVALID;
+            const int forward_range = compare_timestamps(forward, UINT64_C(9007199254740992), rate, rate, 1);
+            const int reverse_range = compare_timestamps(reverse, UINT64_C(9007199254740992), rate, rate, 1);
+            planned = forward_range != AZ_TIME_INVALID && forward_range <= AZ_TIME_EQUAL &&
+                      reverse_range != AZ_TIME_INVALID && reverse_range <= AZ_TIME_EQUAL && order != AZ_TIME_INVALID;
             if (planned) {
                 window = (order == AZ_TIME_BEFORE ? reverse - forward : forward - reverse) + 1;
                 planned = compare_timestamps(slot->retained_before.in, forward, rate, rate, window) == AZ_TIME_EQUAL &&
@@ -537,6 +659,10 @@ void core_jump_hook(void *self, const void *position) {
                  !std::memcmp(reinterpret_cast<const unsigned char *>(position) + 8, slot->retained_before.identity, 12) &&
                  planned && compare_timestamps(target, slot->retained_before.in, slot->retained_before.rate, slot->retained_before.rate, window) == AZ_TIME_EQUAL;
     trampoline<void (*)(void *, const void *)> (&state().core_jump_original)(self, position);
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    landing.finish(reinterpret_cast<uintptr_t>(position));
+    motion.finish(reinterpret_cast<uintptr_t>(position));
+#endif
     if (owned && same_load(causal.deck, *slot) &&
         !std::memcmp(reinterpret_cast<const void *>(slot->core.load(std::memory_order_relaxed) + 0x18), slot->retained_before.identity, 12) &&
         compare_timestamps(word(slot->core.load(std::memory_order_relaxed) + 0x28), target,
@@ -551,6 +677,11 @@ bool command_hook(void *self) {
     uintptr_t address = reinterpret_cast<uintptr_t>(self);
     int type = command_type(address);
     if (type < 0) std::terminate(); /* only verified nominal slots are patched */
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    StatusActionScope observed(type == 0 && processing ? address : 0, 0);
+    if (!(state().enabled.load(std::memory_order_acquire) & ~AZEXIT_PASSIVE_STATUS))
+        return reinterpret_cast<bool (*)(void *)>(state().profile.commands[type].execute)(self);
+#endif
     Node *node = find_node(address);
     if (!node && causal.slot) node = capture(address);
     if (!node) {
@@ -646,8 +777,10 @@ bool set_bindings(Slot &slot) noexcept {
            word(p.set_table + 16 * 8) == p.length_beat && word(p.set_table + 17 * 8) == p.length_square;
 }
 bool valid_position(uintptr_t source) noexcept {
-    return byte(source) && (byte(source + 4) & 0x1f) && byte(source + 6) &&
-           integer(source + 8) != 0 && word(source + 16) <= UINT64_C(9007199254740992);
+    const unsigned rate = unsigned(integer(source + 0x30));
+    const int range = compare_timestamps(word(source + 16), UINT64_C(9007199254740992), rate, rate, 1);
+    return rate && rate < 0x7fffffffu && byte(source) && (byte(source + 4) & 0x1f) && byte(source + 6) &&
+           integer(source + 8) != 0 && range != AZ_TIME_INVALID && range <= AZ_TIME_EQUAL;
 }
 bool empty_position(uintptr_t source) noexcept {
     /* Native empty constructor values are absence markers, not timestamps.
@@ -678,7 +811,10 @@ LoopPoints points(uintptr_t property) noexcept {
     return result;
 }
 uintptr_t working(Slot &slot) noexcept { return word(slot.facade + 0x68) + 0x160; }
-bool complete_points(const LoopPoints &p) noexcept { return p.in_valid && p.out_valid && compare_timestamps(p.out, p.in, p.rate, p.rate, 1) == AZ_TIME_AFTER; }
+bool complete_points(const LoopPoints &p) noexcept {
+    const int order = compare_timestamps(p.out, p.in, p.rate, p.rate, 1);
+    return p.in_valid && p.out_valid && order != AZ_TIME_INVALID && order == AZ_TIME_AFTER;
+}
 bool same_source(const LoopPoints &a, const LoopPoints &b) noexcept { return a.rate == b.rate && a.source == b.source && !std::memcmp(a.identity, b.identity, 12); }
 struct LoopView {
     uintptr_t property, holder;
@@ -694,11 +830,12 @@ bool loop_view(Slot &slot, LoopView &view) noexcept {
 }
 bool interval_matches(uintptr_t object, const LoopView &view, bool reverse, bool sourced) noexcept {
     const auto &p = state().profile;
-    return table(object, sourced ? p.interval_source_table : p.interval_table) &&
-           !std::memcmp(reinterpret_cast<void *>(object + 8), view.points.identity, 12) &&
-           compare_timestamps(word(object + 0x18), reverse ? view.points.out : view.points.in, view.points.rate, view.points.rate, 1) == AZ_TIME_EQUAL &&
-           compare_timestamps(word(object + 0x20), reverse ? view.points.in : view.points.out, view.points.rate, view.points.rate, 1) == AZ_TIME_EQUAL &&
-           (!sourced || word(object + 0x28) == view.holder);
+    if (!table(object, sourced ? p.interval_source_table : p.interval_table) ||
+        std::memcmp(reinterpret_cast<void *>(object + 8), view.points.identity, 12) ||
+        (sourced && word(object + 0x28) != view.holder)) return false;
+    const int begin = compare_timestamps(word(object + 0x18), reverse ? view.points.out : view.points.in, view.points.rate, view.points.rate, 1);
+    const int end = compare_timestamps(word(object + 0x20), reverse ? view.points.in : view.points.out, view.points.rate, view.points.rate, 1);
+    return begin != AZ_TIME_INVALID && end != AZ_TIME_INVALID && begin == AZ_TIME_EQUAL && end == AZ_TIME_EQUAL;
 }
 bool loop_callback(Slot &slot, uintptr_t loop, const LoopView &view, uintptr_t &play) noexcept {
     const auto &p = state().profile;
@@ -736,6 +873,147 @@ bool loop_schedule_matches(Slot &slot, const void *forward, const void *reverse,
            (loop_callback(slot, word(reinterpret_cast<uintptr_t>(reference)), view, play) ||
             future_hidden(slot, word(reinterpret_cast<uintptr_t>(reference))));
 }
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+/* A classified occurrence requires the stock JumpCommand or direct JumpController
+ * scope which is currently executing, the exact callback owner, and the actual
+ * setCurrentPos commit. Loop active plus a negative displacement cannot qualify. */
+static bool status_jump_origin(const Slot &slot) noexcept {
+    auto scope = StatusActionScope::current;
+    return scope && (scope->controller || (scope->command && table(scope->command, state().profile.commands[0].table) &&
+                                           word(scope->command + 0x20) == slot.core.load(std::memory_order_acquire)));
+}
+static void status_direct_request(StatusActionScope &out, const void *position, int mode, uintptr_t caller) noexcept {
+    auto &s = state();
+    Slot *slot = processing;
+    const uintptr_t pos = reinterpret_cast<uintptr_t>(position);
+    if (!slot || !out.controller || out.callback || out.command || out.beat || !pointer(pos) ||
+        s.build < 1 || s.build > 2 || !coherent(*slot) || !set_bindings(*slot)) return;
+    const uintptr_t core = slot->core.load(std::memory_order_acquire);
+    const uint32_t source_rate = uint32_t(integer(core + 0x68));
+    const uintptr_t basis = word(slot->unit + 0x180), pause = word(slot->facade + 0x58);
+    if (!pointer(basis) || !table(pause, s.profile.play_pause_table) || word(pause + 0x58) != core) return;
+    const uintptr_t controller = word(basis + 0x38);
+    unsigned kind = 0;
+    const uintptr_t pause_return = s.bias + (s.build == 1 ? 0x1421d08u : 0x14dd4b0u);
+    if (mode == 2 && caller == pause_return && pos == pause + 0x10 && word(pause + 0x50) == controller) {
+        /* PlayPauseFunction updates its stored source position, then directly
+         * commits that exact point through its owned JumpController. */
+        kind = AZN_SEEK;
+    } else if (mode == 0) {
+        const auto &p = noqua_profiles[s.build - 1];
+        const uintptr_t quantize = word(slot->facade + 0x50);
+        if ((caller != s.bias + p.jump_returns[0] && caller != s.bias + p.jump_returns[1]) ||
+            !table(quantize, s.profile.quantize) || word(quantize + 0x20) != controller ||
+            word(quantize + 0x40) != quantize || word(quantize + 0x48) != pause) return;
+        LoopView view {};
+        if (!loop_view(*slot, view) || view.points.rate != source_rate ||
+            memcmp(reinterpret_cast<const void *>(pos + 8), view.points.identity, 12)) return;
+        const int in = compare_timestamps(word(pos + 0x18), view.points.in, view.points.rate, view.points.rate, 1);
+        const int end = compare_timestamps(word(pos + 0x18), view.points.out, view.points.rate, view.points.rate, 1);
+        if (in == AZ_TIME_INVALID || end == AZ_TIME_INVALID || in < AZ_TIME_EQUAL || end > AZ_TIME_EQUAL) return;
+        /* Quantize forwards its genuine source position to this owned
+         * controller. RELOOP can preserve an offset inside the active loop;
+         * capture that requested point and require its exact later commit.
+         * This synchronous entry has no recurring LoopCommand. A later
+         * boundary traversal is classified independently by its own chain. */
+        kind = AZN_JUMP;
+    }
+    if (!kind) return;
+    azsdk_load_sample load {};
+    if (!azsdk_load_read(int(slot - s.decks), &load) ||
+        !azn_load_track_matches(unsigned(slot - s.decks), load.invalidation_epoch, load.load_generation,
+                               reinterpret_cast<const unsigned char *>(pos + 8))) return;
+    out.direct_kind = kind;
+    out.direct_rate = source_rate;
+    out.direct_sample = word(pos + 0x18);
+    memcpy(out.direct_source, reinterpret_cast<const void *>(pos + 8), sizeof out.direct_source);
+}
+static unsigned status_action(Slot &slot, const StatusHead &from, const StatusHead &to) noexcept {
+    auto scope = StatusActionScope::current;
+    if (!scope || !to.ready || !coherent(slot) || !set_bindings(slot)) return 0;
+    const auto &p = state().profile;
+    uintptr_t cb = scope->callback, cmd = scope->command;
+    if (cmd) {
+        if (!table(cmd, p.commands[0].table) || word(cmd + 0x20) != slot.core.load(std::memory_order_acquire)) return 0;
+        cb = word(cmd + 0x18);
+    }
+    if (scope->beat) {
+        const int beat_order = compare_timestamps(scope->beat_sample, to.sample, to.rate, to.rate, 1);
+        if (beat_order == AZ_TIME_INVALID) return 0;
+        if (beat_order == AZ_TIME_EQUAL && !std::memcmp(scope->beat_source, to.source, 12)) return AZN_JUMP;
+    }
+    if (scope->direct_kind) {
+        if (!scope->direct_rate || scope->direct_rate != to.rate) return 0;
+        const int order = compare_timestamps(scope->direct_sample, to.sample, to.rate, to.rate, 1);
+        if (order == AZ_TIME_INVALID) return 0;
+        if (order == AZ_TIME_EQUAL && !memcmp(scope->direct_source, to.source, 12)) return scope->direct_kind;
+    }
+    if (!pointer(cb)) return 0;
+    uintptr_t context = word(slot.facade + 0x68);
+    if (table(cb, p.commands[14].table)) {
+        const uintptr_t needle_vt = state().bias + (state().build == 1 ? 0x28958d0u : 0x2be8390u);
+        uintptr_t owner = word(cb + 0x20), pause = word(slot.facade + 0x58);
+        if (table(owner, needle_vt) && table(pause, p.play_pause_table) && word(owner + 0x18) == pause &&
+            word(pause + 0x58) == slot.core.load(std::memory_order_acquire)) return AZN_SEEK;
+    }
+    if (table(cb, p.commands[8].table) && word(cb + 0x20) == context) return AZN_JUMP;
+    if (table(cb, p.commands[10].table)) {
+        /* beatJumpOnQua creates this exact callback with its owning
+         * BeatJumpFunction at +0x20, then dispatches via that function's
+         * Quantize member at +0x10 (1.30 0x14588e4 / 2.00 0x1513fac). */
+        uintptr_t owner = word(cb + 0x20), quantize = word(slot.facade + 0x50);
+        if (pointer(owner) && table(quantize, p.quantize) && word(owner + 0x10) == quantize)
+            return AZN_JUMP;
+    }
+    if (table(cb, p.commands[7].table) && word(cb + 0x30) == context && word(cb + 0x38) == word(slot.facade + 0x58))
+        return AZN_JUMP;
+    if (!cmd || !from.ready || from.rate != to.rate || memcmp(from.source, to.source, 12)) return 0;
+    LoopView v = {};
+    uintptr_t play = 0;
+    if (!loop_view(slot, v) || v.points.rate != to.rate || memcmp(v.points.identity, to.source, 12)) return 0;
+    const bool direct_loop = loop_callback(slot, cb, v, play);
+    if (!direct_loop && !future_hidden(slot, cb)) return 0;
+    if (!interval_matches(cmd + 0x28, v, false, true)) {
+        /* Initial loop activation uses a temporary source interval at the
+         * actual entry point. Its owned Loop callback installs the recurring
+         * loop. Classify that committed command target as a JUMP; it need not
+         * land on IN and does not relax the ordinary WRAP windows below.
+         * The controller builds forward/reverse targets around the requested
+         * point in descending order. Its one-time Loop callback owns a Play
+         * callback; recurring hidden work has no such Play callback. */
+        if (!direct_loop || !play || !slot.motion.window_samples || !slot.motion.window_rate ||
+            !table(cmd + 0x28, p.interval_source_table) ||
+            memcmp(reinterpret_cast<const void *>(cmd + 0x30), v.points.identity, 12) || word(cmd + 0x50) != v.holder) return 0;
+        const uint64_t first = word(cmd + 0x40), second = word(cmd + 0x48);
+        const int shape = compare_timestamps(first, second, to.rate, to.rate, 1);
+        const int first_range = compare_timestamps(first, UINT64_C(9007199254740992), to.rate, to.rate, 1);
+        const int second_range = compare_timestamps(second, UINT64_C(9007199254740992), to.rate, to.rate, 1);
+        const int first_target = compare_timestamps(to.sample, first, to.rate, to.rate, 1);
+        const int second_target = compare_timestamps(to.sample, second, to.rate, to.rate, 1);
+        const int lower = compare_timestamps(to.sample, v.points.in, to.rate, to.rate, 1);
+        const int upper = compare_timestamps(to.sample, v.points.out, to.rate, to.rate, 1);
+        if (shape == AZ_TIME_INVALID || shape != AZ_TIME_AFTER || first_range == AZ_TIME_INVALID || second_range == AZ_TIME_INVALID || first_target == AZ_TIME_INVALID ||
+            second_target == AZ_TIME_INVALID || lower == AZ_TIME_INVALID || upper == AZ_TIME_INVALID) return 0;
+        return first_range <= AZ_TIME_EQUAL && second_range <= AZ_TIME_EQUAL &&
+            (first_target == AZ_TIME_EQUAL || second_target == AZ_TIME_EQUAL) && lower >= AZ_TIME_EQUAL && upper <= AZ_TIME_EQUAL
+            ? unsigned(AZN_JUMP) : 0;
+    }
+    /* processWithReservedCommnadChain renders a whole number of output
+     * frames before executing this owned interval. At a changed speed the
+     * measured source position can pass its boundary by a sample. Preserve
+     * that departure instead of requiring a sample the engine never wrote. */
+    const auto &motion = slot.motion;
+    if (!motion.window_samples || !motion.window_rate) return 0;
+    const int out_order = compare_timestamps(from.sample, v.points.out, from.rate, motion.window_rate, motion.window_samples);
+    const int in_order = compare_timestamps(from.sample, v.points.in, from.rate, motion.window_rate, motion.window_samples);
+    const int landed_in = compare_timestamps(to.sample, v.points.in, to.rate, to.rate, 1);
+    const int landed_out = compare_timestamps(to.sample, v.points.out, to.rate, to.rate, 1);
+    if (out_order == AZ_TIME_INVALID || in_order == AZ_TIME_INVALID || landed_in == AZ_TIME_INVALID || landed_out == AZ_TIME_INVALID) return 0;
+    bool forward = out_order >= AZ_TIME_EQUAL && landed_in == AZ_TIME_EQUAL;
+    bool reverse = in_order <= AZ_TIME_EQUAL && landed_out == AZ_TIME_EQUAL;
+    return forward || reverse ? AZN_WRAP : 0;
+}
+#endif
 bool future_chain(Slot &slot, uintptr_t chain, uintptr_t *addresses, unsigned &count) noexcept {
     const auto &p = state().profile;
     LoopView view = {};
@@ -777,13 +1055,17 @@ bool initial_chain(Slot &slot, uintptr_t chain) noexcept {
     if (timing != std::numeric_limits<double>::max() ||
         (byte(chain + 0x48) != 0 && byte(chain + 0x48) != 3)) return false;
     uintptr_t jump = word(chain + 0x18), play = 0;
+    const auto outside_range = [&](uint64_t sample) {
+        const int range = compare_timestamps(sample, UINT64_C(9007199254740992), view.points.rate, view.points.rate, 1);
+        return range == AZ_TIME_INVALID || range > AZ_TIME_EQUAL;
+    };
     if (!table(jump, p.commands[0].table) || word(jump + 0x20) != slot.core.load(std::memory_order_relaxed) ||
         !table(jump + 0x28, p.interval_source_table) ||
         std::memcmp(reinterpret_cast<void *>(jump + 0x30), view.points.identity, 12) ||
-        word(jump + 0x40) > UINT64_C(9007199254740992) || word(jump + 0x48) > UINT64_C(9007199254740992) ||
+        outside_range(word(jump + 0x40)) || outside_range(word(jump + 0x48)) ||
         word(jump + 0x50) != view.holder || !table(chain + 0x20, p.interval_table) ||
         std::memcmp(reinterpret_cast<void *>(chain + 0x28), view.points.identity, 12) ||
-        word(chain + 0x38) > UINT64_C(9007199254740992) || word(chain + 0x40) > UINT64_C(9007199254740992)) return false;
+        outside_range(word(chain + 0x38)) || outside_range(word(chain + 0x40))) return false;
     return loop_callback(slot, word(jump + 0x18), view, play);
 }
 /* Native OUT initialization can replace an initial position-jump chain before
@@ -871,10 +1153,14 @@ bool shifted(uint64_t value, double seconds, uint32_t rate, uint64_t &out) noexc
      * could overflow native signed arithmetic before the firmware sees them. */
     double milliseconds = seconds * 1000.0;
     double samples = state().build == 1 ? (milliseconds * rate) / 1000.0 : (milliseconds * 0.001) * rate;
-    if (!std::isfinite(samples) || std::fabs(samples) > 9007199254740992.0) return false;
+    const int range = compare_timestamps(std::fabs(samples), 9007199254740992.0, rate, rate, 1);
+    if (range == AZ_TIME_INVALID || range > AZ_TIME_EQUAL) return false;
     int64_t delta = static_cast<int64_t>(samples);
     int64_t target = static_cast<int64_t>(value) + delta;
-    if (!delta || target < 0 || target > INT64_C(9007199254740992)) return false;
+    const int movement = compare_timestamps(static_cast<long double>(delta), 0.L, rate, rate, 1);
+    const int target_range = compare_timestamps(target, INT64_C(9007199254740992), rate, rate, 1);
+    if (movement == AZ_TIME_INVALID || movement == AZ_TIME_EQUAL ||
+        target_range == AZ_TIME_INVALID || target_range > AZ_TIME_EQUAL) return false;
     out = uint64_t(target);
     return true;
 }
@@ -900,6 +1186,7 @@ bool prepare_loop(Slot &slot) noexcept {
     slot.retained = word(context + 0x18); /* native CueKind0, separate from working */
     if (!table(slot.retained, state().profile.cue_table)) return false;
     slot.retained_before = points(slot.retained);
+
     slot.expected_in = slot.before.in;
     slot.expected_out = slot.before.out;
     slot.move_stage = 0;
@@ -935,7 +1222,7 @@ bool prepare_cue(Slot &slot) noexcept {
     if (!cue_operation(slot.operation)) return false;
     if ((slot.operation == AZ_CMD_MAIN_SET || hot_edit(slot.operation)) && !set_bindings(slot)) return false;
     uintptr_t context = word(slot.facade + 0x68);
-    unsigned kind = slot.operation == AZ_CMD_HOT_TRIGGER || hot_edit(slot.operation) ? slot.cue_arguments.entry_id : 0;
+    unsigned kind = slot.operation == AZ_CMD_HOT_TRIGGER || hot_edit(slot.operation) || hot_install(slot.operation) ? slot.cue_arguments.entry_id : 0;
     if (kind > 8) return false;
     slot.retained = word(context + 0x18 + kind * 8);
 #if !defined(AZSDK_EXIT_TESTING) || defined(AZSDK_CUE_STAGE_TESTING)
@@ -945,6 +1232,7 @@ bool prepare_cue(Slot &slot) noexcept {
     if (!table(slot.retained, p.cue_table) && !table(slot.retained, p.cue_base_table)) return false;
     slot.before = points(working(slot));
     slot.retained_before = points(slot.retained);
+    if (hot_install(slot.operation)) slot.main_before = points(word(context + 0x18));
     std::memcpy(slot.cue_source_before, reinterpret_cast<const void *>(slot.core.load(std::memory_order_relaxed) + 0x18), 12);
     slot.cue_seek_seen = false;
     slot.staged_cue = {};
@@ -952,6 +1240,22 @@ bool prepare_cue(Slot &slot) noexcept {
     if (!cue_playing(slot, slot.cue_playing_before, &slot.cue_aux_before)) return false;
     if (slot.operation == AZ_CMD_HOT_TRIGGER && integer(word(slot.facade + 0x70) + 0x104)) return false;
     if (slot.operation == AZ_CMD_HOT_SET && slot.initially_engaged && !complete_points(slot.before)) return false;
+    if (hot_install(slot.operation)) {
+#if !defined(AZSDK_EXIT_TESTING) || defined(AZSDK_CUE_STAGE_TESTING)
+        const uintptr_t desired = reinterpret_cast<uintptr_t>(azsdk_cue_recall_property(unsigned(&slot - state().decks), slot.request.token));
+        if (!desired) return false;
+        LoopPoints wanted = points(desired);
+        if (!wanted.in_valid || std::memcmp(wanted.identity, slot.cue_source_before, 12)) return false;
+        if (slot.retained_before.in_valid &&
+            (slot.retained_before.rate != wanted.rate || std::memcmp(slot.retained_before.identity, wanted.identity, 12) ||
+             compare_timestamps(slot.retained_before.in, wanted.in, wanted.rate, wanted.rate, 1) != AZ_TIME_EQUAL ||
+             slot.retained_before.out_valid != wanted.out_valid ||
+             (wanted.out_valid && compare_timestamps(slot.retained_before.out, wanted.out, wanted.rate, wanted.rate, 1) != AZ_TIME_EQUAL))) return false;
+        return true;
+#else
+        return false;
+#endif
+    }
     return slot.operation == AZ_CMD_MAIN_SET || slot.operation == AZ_CMD_HOT_SET ||
            (slot.operation == AZ_CMD_HOT_CLEAR && empty_position(slot.retained + 0x30) && empty_position(slot.retained + 0x88)) ||
            (slot.retained_before.in_valid && !std::memcmp(slot.retained_before.identity, slot.cue_source_before, 12));
@@ -959,7 +1263,7 @@ bool prepare_cue(Slot &slot) noexcept {
 void dispatch_cue(Slot &slot) {
     const auto &p = state().profile;
 #if !defined(AZSDK_EXIT_TESTING) || defined(AZSDK_CUE_STAGE_TESTING)
-    if (recall_operation(slot.operation)) {
+    if (recall_operation(slot.operation) || hot_install(slot.operation)) {
         if (azsdk_cue_recall_dispatch(unsigned(&slot - state().decks), slot.request.token,
                                       reinterpret_cast<void *>(slot.core.load(std::memory_order_relaxed)), reinterpret_cast<void *>(slot.facade)) != AZ_OK) throw std::exception();
         return;
@@ -982,6 +1286,30 @@ void dispatch_cue(Slot &slot) {
 bool cue_postcondition(Slot &slot) noexcept {
     bool playing = false, auxiliary = false;
     if (!cue_playing(slot, playing, &auxiliary)) return false;
+    if (hot_install(slot.operation)) {
+#if !defined(AZSDK_EXIT_TESTING) || defined(AZSDK_CUE_STAGE_TESTING)
+        uintptr_t context = word(slot.facade + 0x68);
+        uintptr_t desired = reinterpret_cast<uintptr_t>(azsdk_cue_recall_property(unsigned(&slot - state().decks), slot.request.token));
+        if (!desired) return false;
+        auto equivalent = [](const LoopPoints &a, const LoopPoints &b) {
+            if (a.in_valid != b.in_valid || a.out_valid != b.out_valid) return false;
+            if (!a.in_valid && !a.out_valid) return true;
+            return same_source(a, b) &&
+                (!a.in_valid || compare_timestamps(a.in, b.in, a.rate, a.rate, 1) == AZ_TIME_EQUAL) &&
+                (!a.out_valid || compare_timestamps(a.out, b.out, a.rate, a.rate, 1) == AZ_TIME_EQUAL);
+        };
+        LoopPoints wanted = points(desired), actual = points(slot.retained);
+        bool active;
+        unsigned rgb = (byte(slot.retained + 0x10) << 16) | (byte(slot.retained + 0x11) << 8) | byte(slot.retained + 0x12);
+        return !slot.cue_seek_seen && playing == slot.cue_playing_before && auxiliary == slot.cue_aux_before &&
+               engaged(slot, active) && active == slot.initially_engaged &&
+               word(context + 0x18 + slot.cue_arguments.entry_id * 8) == slot.retained &&
+               equivalent(actual, wanted) && rgb == slot.cue_arguments.rgb &&
+               equivalent(points(word(context + 0x18)), slot.main_before) && equivalent(points(working(slot)), slot.before);
+#else
+        return false;
+#endif
+    }
     if (recall_operation(slot.operation)) {
         LoopPoints current = points(word(word(slot.facade + 0x68) + 0x18));
         bool engaged_now = false;
@@ -997,7 +1325,7 @@ bool cue_postcondition(Slot &slot) noexcept {
                current.out_valid == slot.retained_before.out_valid &&
                (!current.out_valid || compare_timestamps(current.out, slot.retained_before.out, current.rate, current.rate, 1) == AZ_TIME_EQUAL);
     }
-    unsigned kind = slot.operation == AZ_CMD_HOT_TRIGGER || hot_edit(slot.operation) ? slot.cue_arguments.entry_id : 0;
+    unsigned kind = slot.operation == AZ_CMD_HOT_TRIGGER || hot_edit(slot.operation) || hot_install(slot.operation) ? slot.cue_arguments.entry_id : 0;
     if (word(word(slot.facade + 0x68) + 0x18 + kind * 8) != slot.retained) return false;
     LoopPoints retained = points(slot.retained);
     if ((hot_edit(slot.operation) || slot.operation == AZ_CMD_MAIN_SET) &&
@@ -1303,10 +1631,14 @@ void settle(unsigned deck, Slot &slot) noexcept {
     }
     finish(slot, AZ_COMMAND_APPLIED, AZ_OK, ++slot.revision);
 }
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+#include "sdk_status_loop.inc"
+#include "sdk_status_settings.inc"
+#endif
 __attribute__((unused)) bool preprocess_hook(void *self, const void *frames) {
     using Preprocess = bool (*)(void *, const void *);
     bool result = trampoline<Preprocess>(&state().pre_original)(self, frames);
-    if (result && processing && processing->core.load(std::memory_order_acquire) == reinterpret_cast<uintptr_t>(self) && state().enabled.load(std::memory_order_acquire)) {
+    if (result && processing && processing->core.load(std::memory_order_acquire) == reinterpret_cast<uintptr_t>(self) && (state().enabled.load(std::memory_order_acquire) & ~AZEXIT_PASSIVE_STATUS)) {
         unsigned deck = unsigned(processing - state().decks);
         execute(deck, *processing);
     }
@@ -1342,6 +1674,16 @@ __attribute__((unused)) void process_hook(void *self, const void *frames) {
         try {
             /* Original includes preProcess, rendering, all manager executions
              * and postprocessing. Teardown waits until the entire frame ends. */
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+            if (s.enabled.load(std::memory_order_acquire) & AZEXIT_PASSIVE_STATUS) {
+                status_settings_frame(d, slot);
+                transport_observe(d, slot, TransportSeed);
+                rate_capture(d, slot);
+                status_stationary_seed(d, slot);
+                status_loop_capture(d, slot, 0, nullptr);
+                status_hot_capture(d, slot, 0, nullptr);
+            }
+#endif
             original(self, frames);
             /* Check the postcondition on the owner after an action, descendant
              * execution/disposal, load change, or a durable stop request. */
@@ -1384,7 +1726,7 @@ static bool install_hot_countdown(State &s, azexit_install_fn install) {
     }
     return true;
 }
-unsigned deck_mask() { return state().enabled.load(std::memory_order_acquire) ? state().mask.load(std::memory_order_acquire) : 0; }
+unsigned deck_mask() { return (state().enabled.load(std::memory_order_acquire) & ~AZEXIT_PASSIVE_STATUS) ? state().mask.load(std::memory_order_acquire) : 0; }
 bool delivery_bound() noexcept {
     return azsdk_delivery::transport.bound.load(std::memory_order_acquire);
 }
@@ -1459,6 +1801,10 @@ int submit_loop(const azexit_loop_request *r) {
         !std::isfinite(r->position_s) || !std::isfinite(r->end_s) || !std::isfinite(r->beats)) return AZ_INVALID;
     bool valid = false;
     uint32_t beat = 0;
+    /* These zero checks validate the request shape before source admission.
+     * Unused fields must be zero; a relative-offset request must contain a
+     * finite nonzero payload. shifted() later validates its actual integer
+     * movement with the admitted source rate and one committed sample. */
     switch (r->operation) {
     case AZ_CMD_LOOP_LENGTH: valid = r->position_s == 0 && r->end_s == 0 && azexit_pack_beat(r->beats, &beat); break;
     case AZ_CMD_LOOP_MOVE:
@@ -1503,17 +1849,17 @@ int target_cue(unsigned deck, azexit_cue_target *out) {
 }
 int submit_cue(const azexit_cue_request *r) {
     if (!r || r->size < sizeof *r) return AZ_INVALID;
+    if (hot_edit(r->operation) || hot_install(r->operation) || recall_operation(r->operation) || !cue_operation(r->operation)) {
 #ifndef AZSDK_EXIT_TESTING
-    if (hot_edit(r->operation) || recall_operation(r->operation) || !cue_operation(r->operation)) {
         if (r->identity.deck >= 4) return AZ_INVALID;
         if (!delivery_bound() || r->operation >= 64 || !(commands() & (UINT64_C(1) << r->operation)))
             return AZ_UNSUPPORTED;
         int rc = attach_delivery(r->identity);
         return rc == AZ_OK ? azsdk_cue_commands_submit(r) : rc;
-    }
 #else
-    if (!cue_operation(r->operation)) return AZ_INVALID;
+        return azsdk_exit_test_persistent_cue_submit(r);
 #endif
+    }
     const auto &identity = r->identity;
     if (identity.deck >= 4 || !identity.token || !identity.load_generation || !identity.deadline_ns || identity.reserved ||
         r->expected_revision || r->flags != AZ_COMMAND_NATIVE_LOAD || r->rgb || r->comment[0] ||
@@ -1700,7 +2046,10 @@ extern "C" int azsdk_exit_configure(int on, int build, azexit_install_fn install
 #endif
         return 0;
     }
-    if (build < 1 || build > 2 || !install || (unsigned(on) & ~(AZEXIT_ENABLE_EXIT | AZEXIT_ENABLE_RELOOP | AZEXIT_ENABLE_LOOP | AZEXIT_ENABLE_CUE))) return 0;
+#ifndef AZ_STATUS_NATIVE_PRODUCER
+    if (unsigned(on) & AZEXIT_PASSIVE_STATUS) return 0;
+#endif
+    if (build < 1 || build > 2 || !install || (unsigned(on) & ~(AZEXIT_ENABLE_EXIT | AZEXIT_ENABLE_RELOOP | AZEXIT_ENABLE_LOOP | AZEXIT_ENABLE_CUE | AZEXIT_PASSIVE_STATUS))) return 0;
 #if !(defined(__linux__) && defined(__aarch64__)) && !defined(AZSDK_EXIT_TESTING)
     return 0;
 #else
@@ -1762,9 +2111,35 @@ extern "C" int azsdk_exit_configure(int on, int build, azexit_install_fn install
                 word(command.table) != command.destroy || word(command.table + 8) != command.deleting ||
                 word(command.table + 16) != command.execute) return 0;
         }
+#ifndef AZSDK_EXIT_TESTING
+        if (on & AZEXIT_ENABLE_CUE) {
+            // Passive status also observes CueProperty::update. Validate and
+            // cache its immutable cue profile BEFORE our writer hooks replace
+            // those bytes; later cue setup reuses only this verified binding.
+            azcue_profile verified {};
+            (void) azsdk_cue_main_profile(build, &verified);
+        }
+#endif
         s.configured = true; /* Never try to patch a process that already reached this hook. */
         if (!install(s.profile.process, reinterpret_cast<void *>(process_hook), &s.original) || !s.original ||
-            !install(s.profile.preprocess, reinterpret_cast<void *>(preprocess_hook), &s.pre_original) || !s.pre_original ||
+            !install(s.profile.preprocess, reinterpret_cast<void *>(preprocess_hook), &s.pre_original) || !s.pre_original) return 0;
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+        if ((on & AZEXIT_PASSIVE_STATUS) && !status_install_writers(s, build, install))
+            on &= ~AZEXIT_PASSIVE_STATUS;
+        if (on & AZEXIT_PASSIVE_STATUS)
+            s.motion_hooked = status_install_motion(s, build, install);
+        if (s.motion_hooked) status_install_noqua(s, build, install);
+#endif
+        if (!(on & ~AZEXIT_PASSIVE_STATUS)) {
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+            if (s.motion_hooked)
+                s.motion_actions = patch(s.profile.commands[0].table + 16, s.profile.commands[0].execute, reinterpret_cast<void *>(command_hook)) &&
+                                   patch(s.profile.jump_table + 16, s.profile.jump_request, reinterpret_cast<void *>(jump_hook));
+#endif
+            s.enabled.store(unsigned(on), std::memory_order_release);
+            return on ? 1 : 0;
+        }
+        if (
             !install(s.profile.manager_submit.address, reinterpret_cast<void *>(manager_hook), &s.manager_original) || !s.manager_original ||
             !install(s.profile.quantize_submit.address, reinterpret_cast<void *>(quantize_hook), &s.quantize_original) || !s.quantize_original ||
             !install(s.profile.quantize_cancel.address, reinterpret_cast<void *>(quantize_cancel_hook), &s.cancel_original) || !s.cancel_original) return 0;
@@ -1777,6 +2152,9 @@ extern "C" int azsdk_exit_configure(int on, int build, azexit_install_fn install
         if (!patch(s.profile.jump_table + 32, s.profile.jump_schedule, reinterpret_cast<void *>(loop_schedule_hook))) return 0;
         if (!patch(s.profile.jump_table + 40, s.profile.jump_cancel, reinterpret_cast<void *>(jump_cancel_hook))) return 0;
         if ((unsigned(on) & AZEXIT_ENABLE_CUE) &&
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+            !s.core_jump_original &&
+#endif
             (!install(s.profile.core_jump.address, reinterpret_cast<void *>(core_jump_hook), &s.core_jump_original) || !s.core_jump_original))
             return 0;
         if (on & AZEXIT_ENABLE_CUE) {
@@ -1787,11 +2165,38 @@ extern "C" int azsdk_exit_configure(int on, int build, azexit_install_fn install
 #ifndef AZSDK_EXIT_TESTING
         if (on & AZEXIT_ENABLE_CUE) azsdk_cue_commands_configure(1, build, install);
 #endif
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+        s.motion_actions = s.motion_hooked;
+#endif
         s.enabled.store(unsigned(on), std::memory_order_release);
         return 1;
     } catch (...) { return 0; }
 #endif
 }
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+extern "C" uint64_t azn_map_begin_mask(unsigned mask) { return begin_map_mask(mask); }
+extern "C" void azn_map_end_mask(uint64_t ticket) { end_map_mask(ticket); }
+extern "C" int azn_offer_map_cut(azstatus_native_receipt *r) { return offer_map_cut(r); }
+extern "C" int azn_install_terminal(int build, azn_setting_patch_fn patch) {
+    State &s = state();
+    std::lock_guard<std::mutex> lock(s.management);
+    if (!patch || build < 1 || build > 2 || s.build != build ||
+        !(s.enabled.load(std::memory_order_acquire) & AZEXIT_PASSIVE_STATUS)) return 0;
+    end_install(s, build, patch);
+    return end_enabled.load(std::memory_order_acquire);
+}
+extern "C" int azn_install_settings(int build, azn_setting_patch_fn patch) {
+    State &s = state();
+    std::lock_guard<std::mutex> lock(s.management);
+    if (!patch || build < 1 || build > 2 || build != s.build ||
+        !(s.enabled.load(std::memory_order_acquire) & AZEXIT_PASSIVE_STATUS)) return 0;
+    reloop_install(s, build, patch);
+    rate_install(s, build, patch);
+    transport_install(s, build, patch);
+    azn_maps_install(build, s.bias, patch);
+    return status_settings_install(s, build, patch);
+}
+#endif
 extern "C" int azsdk_exit_register(int deck, void *unit) noexcept {
     if (deck < 0 || deck >= 4 || !state().enabled.load(std::memory_order_acquire)) return 0;
     State &s = state();
@@ -1816,6 +2221,10 @@ extern "C" int azsdk_exit_register(int deck, void *unit) noexcept {
             slot.core.store(0, std::memory_order_release);
             return 0;
         }
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+        if (s.enabled.load(std::memory_order_acquire) & AZEXIT_PASSIVE_STATUS)
+            azn_capability(unsigned(deck), AZN_CAP_LOOP | AZN_CAP_LOOP_MODE | AZN_CAP_RELOOP | (rate_hooks.load() == 15 && rate_generator_hooked.load() ? AZN_CAP_RATE : 0) | (transport_installed.load() == 15 ? AZN_CAP_TRANSPORT_STATE : 0) | (s.motion_hooked ? AZN_CAP_MOTION : 0), 1);
+#endif
         s.mask.fetch_or(1u << unsigned(deck), std::memory_order_release);
         azsdk_delivery::notify(unsigned(deck));
         return 1;
@@ -1827,11 +2236,27 @@ extern "C" void azsdk_exit_retire(int deck) noexcept {
     Slot &slot = s.decks[deck];
     if (slot.gate.held_by_current_thread()) std::terminate();
     std::lock_guard<std::mutex> lock(s.management);
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    if (s.enabled.load(std::memory_order_acquire) & AZEXIT_PASSIVE_STATUS)
+        azn_capability(unsigned(deck), AZN_CAP_LOOP | AZN_CAP_LOOP_MODE | AZN_CAP_RELOOP | AZN_CAP_MOTION | AZN_CAP_HOT | AZN_CAP_HOT_LINK | AZN_CAP_RATE | AZN_CAP_TRANSPORT_STATE | AZN_CAP_DURATION, 0);
+#endif
     s.mask.fetch_and(~(1u << unsigned(deck)), std::memory_order_acq_rel);
     uint64_t generation = slot.gate.generation();
     /* A native destructor must never free storage admitted by an in-flight owner
      * frame. Self-destruction is a violated native lifecycle, not permission to free. */
     if (generation && slot.gate.retire(generation) != AZ_OK) std::terminate();
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    status_settings_retire(unsigned(deck), slot);
+    duration_retire(unsigned(deck));
+    slot.hot.ready = false;
+    slot.working_origin = {};
+    status_working_file(slot, 0);
+    slot.status_epoch = 0;
+    reloop_state[deck].retained.store(0, std::memory_order_release);
+    rate_state[deck].bound_engine.store(0, std::memory_order_release);
+    transport_state[deck].pause.store(0, std::memory_order_release);
+    transport_state[deck].cue.store(0, std::memory_order_release);
+#endif
     slot.core.store(0, std::memory_order_release);
     unsigned expected = QUEUED;
     if (slot.phase.compare_exchange_strong(expected, WRITING, std::memory_order_acq_rel))
@@ -1872,7 +2297,8 @@ extern "C" void azsdk_exit_test_profile(const azexit_profile *profile) noexcept 
 
 #if !defined(AZSDK_EXIT_TESTING) || defined(AZSDK_CUE_STAGE_TESTING)
 extern "C" int azsdk_exit_recall_submit(const azexit_cue_request *r) noexcept {
-    if (!r || r->identity.deck >= 4 || !(recall_operation(r->operation) || hot_edit(r->operation))) return AZ_INVALID;
+    if (!r || r->identity.deck >= 4 || !(recall_operation(r->operation) || hot_edit(r->operation) ||
+        (hot_install(r->operation) && r->classification == AZ_CUE_HOT && r->entry_id >= 1 && r->entry_id <= 8))) return AZ_INVALID;
     Slot &slot = state().decks[r->identity.deck];
     unsigned expected = IDLE;
     if (!slot.phase.compare_exchange_strong(expected, WRITING, std::memory_order_acq_rel)) return AZ_BUSY;

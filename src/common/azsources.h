@@ -91,6 +91,10 @@ __attribute__((visibility("hidden"))) int azsdk_sources_observe_owned_message(
  * UNKNOWN/BUSY/INVALID leave output unchanged. No native pointer is followed or locked. */
 __attribute__((visibility("hidden"))) int azsdk_sources_read(uint64_t owner_epoch, void *out,
                                                              size_t out_size) AZS_NOTHROW;
+/* Status-specific scoped connection generation. A concurrent open on an unrelated
+ * SQLite object does not retire an established loaded source. */
+__attribute__((visibility("hidden"))) int azsdk_sources_status_read(uint64_t owner_epoch, void *out,
+                                                                    size_t out_size) AZS_NOTHROW;
 /* Diagnostic only: a media number never establishes source/load association. Once a
  * second owner is seen for a media number, AMBIGUOUS is permanent for this process,
  * including after reclamation. AMBIGUOUS copies a record with owner_epoch=0. */
@@ -101,6 +105,13 @@ __attribute__((visibility("hidden"))) int azsdk_sources_candidate(uint16_t nativ
 __attribute__((visibility("hidden"))) unsigned azsdk_sources_sweep(void) AZS_NOTHROW;
 /* Exact native physical profile was prepared successfully; not runtime certification. */
 __attribute__((visibility("hidden"))) int azsdk_sources_physical_ready(void) AZS_NOTHROW;
+/* Borrowed original descriptor. Does not duplicate or close it. */
+__attribute__((visibility("hidden"))) int azsdk_sources_descriptor_identity(
+    int descriptor, uint64_t mount_id, uint64_t device, uint64_t inode) AZS_NOTHROW;
+/* Borrowed read-only connection owned by the status worker. Verify its actual
+ * VFS fd against the captured source, without acquiring or closing that fd. */
+__attribute__((visibility("hidden"))) int azsdk_sources_reader_fd(
+    void *connection, uint64_t mount_id, uint64_t device, uint64_t inode) AZS_NOTHROW;
 /* Startup-only internal dependency. Prepares/reuses the exact module proof;
  * binds real forwarding to the one process-lifetime SourceState. The installer
  * publishes each genuine original before redirecting its entry. It must return

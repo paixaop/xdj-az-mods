@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
+#include "../common/aztimestamp.h"
 /**
  * @file mod_menu_overlay.c
  * @brief Mod Menu overlay thread: X11 windows, painting, input, Sys Info readouts and screen detection
@@ -613,6 +614,9 @@ static void install_static_hooks(void) {
     install_jogstems();        /* stem state on the jog display (off: azmod-jogstems.off) */
     install_qrlogin_guard();   /* stock EP147 crash: null deref in the QR cloud login path */
     install_bpmstate_hook();   /* per-deck live BPM for the drum roll */
+    ds_tempo_install();        /* passive BpmState commit and owner retirement */
+    ds_models_install();
+    ds_pad_install();
     install_master_hook();     /* master deck: Phase Meter and the drum roll; before either */
     install_link_members();    /* PRO DJ LINK players 3/4 own CH3/CH4: Stem Volume stands down */
     install_stemsmark();     /* stems mark in browse rows (off: azmod-stemsmark.off) */
@@ -2857,9 +2861,11 @@ enum {
 };
 static unsigned ov_wait(struct overlay_ctx *c, useconds_t us, long start_ms) {
     const long deadline = start_ms + (long) (us / 1000);
-    struct pollfd p[2] = {
+    struct pollfd p[4] = {
         {.fd = ConnectionNumber(c->dpy), .events = POLLIN},
-        {.fd = sdk_command_ui_fd(), .events = POLLIN}};
+        {.fd = sdk_command_ui_fd(), .events = POLLIN},
+        {.fd = ds_event_fd, .events = POLLIN},
+        {.fd = ds_timer_fd, .events = POLLIN}};
     for (;;) {
         long now = now_ms();
         int deadline_order = compare_timestamps(now, deadline, 1000, 1000, 1);
@@ -2867,13 +2873,14 @@ static unsigned ov_wait(struct overlay_ctx *c, useconds_t us, long start_ms) {
         int before_deadline = deadline_order == AZ_TIME_BEFORE;
         long left = before_deadline ? deadline - now : 0;
         int pending_x = XEventsQueued(c->dpy, QueuedAlready) > 0;
-        int ready = poll(p, 2, before_deadline && !pending_x ? (int) left : 0);
+        int ready = poll(p, 4, before_deadline && !pending_x ? (int) left : 0);
         if (ready < 0 && errno == EINTR) continue;
         if (ready <= 0) return OV_WAKE_FRAME;
         unsigned wake = p[1].revents & POLLIN ? OV_WAKE_COMMAND : 0;
+        if ((p[2].revents | p[3].revents) & POLLIN) sdk_status_ui_drain();
         int order = compare_timestamps(now_ms(), deadline, 1000, 1000, 1);
         if (pending_x || p[0].revents || order == AZ_TIME_EQUAL || order == AZ_TIME_AFTER || order == AZ_TIME_INVALID ||
-            (p[1].revents & (POLLERR | POLLHUP | POLLNVAL))) wake |= OV_WAKE_FRAME;
+            ((p[1].revents | p[2].revents | p[3].revents) & (POLLERR | POLLHUP | POLLNVAL))) wake |= OV_WAKE_FRAME;
         if (wake) return wake;
     }
 }
@@ -2898,7 +2905,8 @@ static void *overlay_thread(void *arg) {
             tick_start = now_ms();
             bus_cfg_publish(); /* this tick's Mod Menu settings -> the bus threads */
             vs_save_flush(); /* a Vinyl Speed Adjust value posted by EP147's message thread */
-            if (!ov_reload_banner(c)) {
+            if (ov_reload_banner(c)) sdk_status_ui_drain();
+            else {
                 ov_poll_inputs(c);
                 ov_update_state(c);
                 ov_place_windows(c);

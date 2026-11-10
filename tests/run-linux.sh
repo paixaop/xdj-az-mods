@@ -84,6 +84,17 @@ exec docker run --rm --platform=linux/arm64 --security-opt seccomp=unconfined \
                     sum+=("$entry_suite ($((SECONDS - entry_t0)) s, exit $entry_status)")
                 done
             fi
+            case "$p" in
+                plain) status_suites=(sdk-status sdk-status-ui sdk-status-gui sdk-status-loader sdk-status-native sdk-status-maps sdk-status-map-source sdk-status-source sdk-status-store);;
+                asan) status_suites=(sdk-status-ui sdk-status-native sdk-status-maps sdk-status-map-source sdk-status-source sdk-status-store);;
+                tsan) status_suites=(sdk-status-source sdk-status-store);;
+            esac
+            for status_suite in "${status_suites[@]}"; do
+                status_t0=$SECONDS
+                SAN=$s bash "tests/$status_suite.sh"
+                status_rc=$?; [ "$status_rc" -eq 0 ] || rc=1
+                sum+=("$status_suite $p ($((SECONDS - status_t0)) s, exit $status_rc)")
+            done
             for cue_suite in sdk-cue sdk-cue-public sdk-cue-export sdk-cue-events sdk-deck-listeners sdk-data-lifecycle sdk-slip sdk-exit; do
                 cue_t0=$SECONDS
                 SAN=$s bash "tests/$cue_suite.sh"

@@ -314,6 +314,30 @@ void concurrent_overlap_and_reads() {
     }
     done.store(true, std::memory_order_release); reader.join();
 }
+#if EPOCH_IMPLEMENTATION_PRESENT
+void status_two_sources() {
+    State<> state;
+    Connection a{1}, b{2}, unrelated{3}, *one=nullptr, *two=nullptr;
+    state.forward_open(&one, [&] {
+        state.forward_open(&two, [&] { two=&b; return 0; });
+        one=&a; return 0;
+    });
+    const auto first=state.status_generation(&a), second=state.status_generation(&b);
+    REQUIRE(first && second && first!=second, "distinct opened status connections can overlap");
+    state.forward_close(&b, [&] {
+        REQUIRE(!state.status_generation(&b) && state.status_generation(&a)==first,
+                "retire closing connection at entry, preserve other source");
+        return 0;
+    });
+    state.forward_open(&two, [&] {
+        state.forward_close(&unrelated, [] { return 0; });
+        two=&b; return 0;
+    });
+    REQUIRE(!state.status_generation(&b), "an intervening close refuses a new overlapping status birth");
+    state.forward_open(&two, [&] { two=&b; return 0; });
+    REQUIRE(state.status_generation(&b) && state.status_generation(&b)!=second, "new status generation after close");
+}
+#endif
 }
 
 int main(int argc, char **argv) {
@@ -325,6 +349,9 @@ int main(int argc, char **argv) {
     nesting_and_exceptions();
     quota_and_saturation();
     concurrent_overlap_and_reads();
+#if EPOCH_IMPLEMENTATION_PRESENT
+    status_two_sources();
+#endif
     std::printf("PASS connection-epoch build=%u: four GNU owner contexts, native-operation forwarding, retirement, reuse and overlap\n", profile);
     return 0;
 }

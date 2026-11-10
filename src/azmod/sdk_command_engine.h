@@ -18,14 +18,14 @@
 #define SCMD_SLOTS 32
 #define SCMD_PER_OWNER 4
 #define SCMD_EVENTS 64
-#define SCMD_ALL_COMMANDS ((UINT64_C(1) << (AZ_CMD_CUE_COLOR + 1)) - 2)
+#define SCMD_ALL_COMMANDS ((UINT64_C(1) << (AZ_CMD_CUE_LOOP_SET + 1)) - 2)
 #define SCMD_TARGET_LOAD 1u
 #define SCMD_TARGET_REVISION 2u
 #ifdef __cplusplus
-static_assert(AZ_CMD_CUE_COLOR < 63, "command IDs must fit the capability mask");
+static_assert(AZ_CMD_CUE_LOOP_SET < 63, "command IDs must fit the capability mask");
 static_assert(offsetof(az_command_request, comment) + sizeof(((az_command_request *) 0)->comment) == sizeof(az_command_request), "command request grew: update validation and retry comparison");
 #else
-_Static_assert(AZ_CMD_CUE_COLOR < 63, "command IDs must fit the capability mask");
+_Static_assert(AZ_CMD_CUE_LOOP_SET < 63, "command IDs must fit the capability mask");
 _Static_assert(offsetof(az_command_request, comment) + sizeof(((az_command_request *) 0)->comment) == sizeof(az_command_request), "command request grew: update validation and retry comparison");
 #endif
 
@@ -156,7 +156,7 @@ static inline void scmd_copy_result(az_command_result *out, const az_command_res
 }
 static inline int scmd_request_valid(const az_command_request *r) {
     return r && scmd_size(r) >= sizeof *r && r->version == AZ_DATA_VERSION &&
-           r->operation >= AZ_CMD_LOOP_IN && r->operation <= AZ_CMD_CUE_COLOR && r->deck < SCMD_DECKS &&
+           r->operation >= AZ_CMD_LOOP_IN && r->operation <= AZ_CMD_CUE_LOOP_SET && r->deck < SCMD_DECKS &&
            r->request_id && r->expected_load_generation && r->deadline_ns && r->quantization <= AZ_QUANTIZE_ON &&
            !(r->flags & ~(AZ_COMMAND_PERSIST | AZ_COMMAND_NATIVE_LOAD | AZ_COMMAND_NATIVE_CUE_IDS)) &&
            (!(r->flags & AZ_COMMAND_NATIVE_CUE_IDS) || ((r->flags & AZ_COMMAND_NATIVE_LOAD) && r->operation > AZ_CMD_LOOP_ADJUST_OUT && r->expected_revision)) &&
@@ -173,14 +173,26 @@ static inline void scmd_canonical_request(az_command_request *out, const az_comm
     size_t n = strlen(out->comment);
     memset(out->comment + n, 0, sizeof out->comment - n);
 }
-/* Compare fields, not C padding or a future caller's unknown tail. Signed zeros
- * and the unused bytes after a comment's NUL have the same argument meaning. */
+/* Request IDs bind canonical encoded arguments before a source clock exists.
+ * Preserve finite binary64 inputs and normalize the two zero encodings. The
+ * native adapter separately checks temporal effects using its actual clock. */
+static inline uint64_t scmd_argument_encoding(double value) {
+    uint64_t encoded;
+    memcpy(&encoded, &value, sizeof encoded);
+    if (!(encoded & UINT64_C(0x7fffffffffffffff))) encoded = 0;
+    return encoded;
+}
+/* Compare the declared request fields, excluding padding and unknown tails. */
 static inline int scmd_request_equal(const az_command_request *a, const az_command_request *b) {
+    int deadline_order = compare_timestamps(a->deadline_ns, b->deadline_ns, 1000000000, 1000000000, 1);
+    if (deadline_order == AZ_TIME_INVALID) return 0;
     return a->operation == b->operation && a->deck == b->deck && a->request_id == b->request_id &&
            a->expected_load_generation == b->expected_load_generation && a->expected_revision == b->expected_revision &&
-           a->deadline_ns == b->deadline_ns && a->quantization == b->quantization && a->flags == b->flags &&
-           a->classification == b->classification && a->entry_id == b->entry_id && a->position_s == b->position_s &&
-           a->end_s == b->end_s && a->beats == b->beats && a->rgb == b->rgb && !strcmp(a->comment, b->comment);
+           deadline_order == AZ_TIME_EQUAL && a->quantization == b->quantization && a->flags == b->flags &&
+           a->classification == b->classification && a->entry_id == b->entry_id &&
+           scmd_argument_encoding(a->position_s) == scmd_argument_encoding(b->position_s) &&
+           scmd_argument_encoding(a->end_s) == scmd_argument_encoding(b->end_s) &&
+           a->beats == b->beats && a->rgb == b->rgb && !strcmp(a->comment, b->comment);
 }
 static inline struct scmd_record *scmd_find_id(struct scmd_engine *e, int owner, uint64_t id) {
     for (unsigned i = 0; i < SCMD_SLOTS; i++)
@@ -651,7 +663,12 @@ static inline int scmd_step(struct scmd_engine *e, unsigned deck, const struct s
         pthread_mutex_unlock(&e->mu);
         return AZ_FAILED;
     }
-    if (compare_timestamps(r->request.deadline_ns, now, 1000000000, 1000000000, 1) <= AZ_TIME_EQUAL) {
+    int deadline_order = compare_timestamps(r->request.deadline_ns, now, 1000000000, 1000000000, 1);
+    if (deadline_order == AZ_TIME_INVALID) {
+        pthread_mutex_unlock(&e->mu);
+        return AZ_FAILED;
+    }
+    if (deadline_order == AZ_TIME_BEFORE || deadline_order == AZ_TIME_EQUAL) {
         scmd_finish(e, r, AZ_COMMAND_CANCELLED, AZ_STALE, 0, SCMD_DETAIL_DEADLINE, now, 0);
         pthread_mutex_unlock(&e->mu);
         return AZ_OK;
@@ -675,11 +692,12 @@ static inline int scmd_step(struct scmd_engine *e, unsigned deck, const struct s
             enum scmd_detail detail;
             rc = scmd_target_valid(&request, &target, adapter, &detail);
             now = scmd_now(e); /* Recheck after owner-thread validation, not before it. */
-            if (!now) {
+            deadline_order = compare_timestamps(request.deadline_ns, now, 1000000000, 1000000000, 1);
+            if (!now || deadline_order == AZ_TIME_INVALID) {
                 rc = AZ_FAILED;
                 detail = SCMD_DETAIL_CLOCK;
             }
-            if (now && compare_timestamps(request.deadline_ns, now, 1000000000, 1000000000, 1) <= AZ_TIME_EQUAL) scmd_finish(e, r, AZ_COMMAND_CANCELLED, AZ_STALE, 0, SCMD_DETAIL_DEADLINE, now, 0);
+            if (now && (deadline_order == AZ_TIME_BEFORE || deadline_order == AZ_TIME_EQUAL)) scmd_finish(e, r, AZ_COMMAND_CANCELLED, AZ_STALE, 0, SCMD_DETAIL_DEADLINE, now, 0);
             else if (rc != AZ_OK) scmd_finish(e, r, AZ_COMMAND_REJECTED, rc, 0, detail, now, 0);
             else {
                 r->phase = SCMD_DISPATCHED;
@@ -721,7 +739,13 @@ static inline int scmd_expire(struct scmd_engine *e) {
     }
     for (unsigned i = 0; i < SCMD_SLOTS; i++) {
         struct scmd_record *r = &e->records[i];
-        if (r->phase == SCMD_FREE || r->phase == SCMD_FINAL || compare_timestamps(r->request.deadline_ns, now, 1000000000, 1000000000, 1) == AZ_TIME_AFTER) continue;
+        if (r->phase == SCMD_FREE || r->phase == SCMD_FINAL) continue;
+        int order = compare_timestamps(r->request.deadline_ns, now, 1000000000, 1000000000, 1);
+        if (order == AZ_TIME_INVALID) {
+            pthread_mutex_unlock(&e->mu);
+            return AZ_FAILED;
+        }
+        if (order == AZ_TIME_AFTER) continue;
         int dispatched = r->phase == SCMD_DISPATCHED;
         scmd_finish(e, r, dispatched ? AZ_COMMAND_UNCERTAIN : AZ_COMMAND_CANCELLED, AZ_STALE, 0, SCMD_DETAIL_DEADLINE, now, dispatched);
     }

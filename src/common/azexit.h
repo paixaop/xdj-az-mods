@@ -138,6 +138,7 @@ struct azexit_service {
 #define AZEXIT_ENABLE_RELOOP 2u
 #define AZEXIT_ENABLE_LOOP 4u
 #define AZEXIT_ENABLE_CUE 8u
+#define AZEXIT_PASSIVE_STATUS 16u /* owner frame and read-only property hooks */
 typedef const struct azexit_service *(*azexit_service_fn)(void);
 /* Obtained once on the management thread. Functions are process-lifetime. */
 __attribute__((visibility("default"))) const struct azexit_service *azstem_exit_service_v1(void) AZEXIT_NOEXCEPT;

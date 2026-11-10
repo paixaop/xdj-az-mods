@@ -8,6 +8,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -17,6 +18,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include "menu.h"
+#include "../../../common/aztimestamp.h"
 
 #define AZMOD_STEM_DECKS 4
 #define BPMSTATE_LIVE 0xa0
@@ -29,6 +31,11 @@ static void dbg(const char *fmt, ...) {
 }
 static _Atomic long g_fake_now = 0; /* advanced by main, read by the mods' threads */
 static long now_ms(void) { return g_fake_now; }
+static int fake_time_within(long deadline) {
+    int order = compare_timestamps(now_ms(), deadline, 1000, 1000, 1);
+    if (order == AZ_TIME_INVALID) abort();
+    return order == AZ_TIME_BEFORE || order == AZ_TIME_EQUAL;
+}
 static int g_four_deck = 0;
 static int g_cr_fd = -1; /* crash reporter not armed: community installs its own blame handler */
 static int (*g_deck_has_track_fn)(int) = NULL;
@@ -39,6 +46,7 @@ static int bpmstate_sample(int d, double *live, double *track, uint64_t *generat
     *generation = 0;
     return 0;
 }
+static int bpmstate_current(int deck, uint64_t generation) { (void)deck; (void)generation; return 0; }
 static int deck_for_ds(long ds) { return ds == 0x1000 ? 2 : -1; }
 static int deck_for_modeobj(long p) {
     (void) p;
@@ -122,6 +130,7 @@ static int crash_peek8(uintptr_t a, uintptr_t *out) {
 static struct azconf *g_conf;
 static int g_conf_readonly;
 static long g_rtick_n; /* pad_leds.c's repaint tick count (the quarantine's heartbeat): none here */
+static __thread int g_cm_on_ui;
 #define SDK_SURFACE_IMPL "test/community/sdk_surface_stub.c" /* no overlay thread here */
 #define SDK_DECKUI_IMPL "test/community/sdk_deckui_stub.c"  /* no azstem, no EP147 here */
 #define SDK_PROC_IMPL "test/community/sdk_proc_stub.c"      /* no audio, systemd or stick here */
@@ -173,6 +182,35 @@ static int anyloaded_cmd(int argc, char **argv) {
  * "tag moved"). It is a dedicated page: page-aligned, a page long (64 KB
  * covers every page size), never called. */
 __attribute__((noinline, aligned(65536))) static void tagmp_victim(void) { __asm__ volatile(".skip 65536"); }
+
+static int status_cadence_cmd(void) {
+    if (ds_publish(2,1,DS_BOUNDARY,ds_now(),NULL,0,NULL,NULL,0,0)!=AZ_OK) return 2;
+    az_status_coord_v1 head={0,0,44100,0};
+    const struct ds_time_axis clock={44100, NULL, 64, 44100, NULL};
+    struct ds_field f={AZ_STATUS_POSITION,AZ_STATUS_POSITION_HEAD,
+        {.info={AZ_AVAIL_READY,AZ_PROV_NATIVE,1,ds_now()},.scope=AZ_STATUS_LOAD_SCOPE,
+         .scope_id=1,.provider_id=1,.count=1},&head,&clock};
+    if (ds_publish(2,1,0,ds_now(),&f,1,NULL,NULL,0,0)!=AZ_OK) return 3;
+    sdk_status_ui_drain();
+    head.seconds=1; head.samples=44100;
+    if (ds_publish(2,1,DS_MOTION,ds_now(),&f,1,NULL,NULL,0,0)!=AZ_OK) return 4;
+    sdk_status_ui_drain();
+    /* Producers stop. The two actual timerfd expirations each drive a new UI
+     * drain without a tick, sleep loop, further sample or mod getter. */
+    struct pollfd timer={.fd=ds_timer_fd,.events=POLLIN};
+    for (unsigned i=0;i<2;i++) {
+        if (poll(&timer,1,1500)!=1 || !(timer.revents&POLLIN)) return 5;
+        sdk_status_ui_drain();
+    }
+    head.seconds=9; head.samples=9*44100;
+    if (ds_publish(2,1,DS_MOTION,ds_now(),&f,1,NULL,NULL,0,0)!=AZ_OK) return 6;
+    head.seconds=20; head.samples=20*44100;
+    az_status_occurrence_v1 seek={.size=sizeof seek,.version=AZ_DATA_VERSION,.kind=AZ_STATUS_SEEK,
+                                   .endpoints=AZ_STATUS_OCCURRENCE_TO,.ordinal=1,.to=head};
+    if (ds_publish(2,1,0,ds_now(),&f,1,&seek,NULL,0,0)!=AZ_OK) return 7;
+    sdk_status_ui_drain();
+    return poll(&timer,1,80)==0 ? 0 : 8;
+}
 
 int main(int argc, char **argv) {
     if (argc < 2) {
@@ -233,6 +271,7 @@ int main(int argc, char **argv) {
         void *o;
         azm_install_hook(m + 64, NULL, &o);
     }
+    g_cm_on_ui=1;
     community_init();
     for (int i = 0; i < azcm_count(); i++) {
         azcm_info_t in;
@@ -250,6 +289,23 @@ int main(int argc, char **argv) {
         }
     }
     printf("SUSPENDED %d\nLIVE %d\nNEW %d\n", azcm_suspended(), g_cm_live, azcm_new_count());
+    if (argc>2 && !strcmp(argv[2],"cadence")) return status_cadence_cmd();
+    if (argc>2 && !strcmp(argv[2],"status")) {
+        /* Same UI path used by the overlay, with no community_tick call. */
+        int loaded=ds_publish(1,1,DS_BOUNDARY,ds_now(),NULL,0,NULL,NULL,0,0);
+        if (loaded!=AZ_OK) return 3;
+        for (int i=0;i<3;i++) {
+            int engaged=i%2;
+            struct ds_field field={AZ_STATUS_LOOP,AZ_STATUS_LOOP_ENGAGED,
+                {.info={AZ_AVAIL_READY,AZ_PROV_NATIVE,i+1,ds_now()},.scope=AZ_STATUS_LOAD_SCOPE,
+                 .scope_id=1,.provider_id=1,.count=1},&engaged, NULL};
+            if (ds_publish(1,1,0,ds_now(),&field,1,NULL,NULL,0,0)!=AZ_OK) return 4;
+        }
+        struct pollfd wake={ds_event_fd,POLLIN,0};
+        if (poll(&wake,1,0)!=1) return 5;
+        sdk_status_ui_drain();
+        return 0;
+    }
     if (argc > 4 && !strcmp(argv[2], "allowx")) {         /* another writer (az-community) adds a line after this start read the list */
         FILE *f = fopen(CM_APPROVED, "a");
         if (f) {
@@ -285,7 +341,7 @@ int main(int argc, char **argv) {
             painted++;
         }
         int in_paint = g_headers;
-        for (g_fake_now = 1; g_fake_now <= 1000; g_fake_now += 10) community_tick();
+        for (g_fake_now = 1; fake_time_within(1000); g_fake_now += 10) community_tick();
         printf("PAINT painted=%d in_paint=%d after_ticks=%d\n", painted, in_paint, g_headers - in_paint);
         return 0;
     }
@@ -295,12 +351,12 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (argc > 2 && !strcmp(argv[2], "crash")) {          /* tick until the crash mod faults */
-        for (g_fake_now = 1; g_fake_now <= 5000; g_fake_now += 10) community_tick();
+        for (g_fake_now = 1; fake_time_within(5000); g_fake_now += 10) community_tick();
         printf("NO CRASH\n");
         return 0;
     }
     if (argc > 2 && !strcmp(argv[2], "run")) {            /* simulate 95 s of ticks */
-        for (g_fake_now = 1; g_fake_now <= 95000; g_fake_now += 10) community_tick();
+        for (g_fake_now = 1; fake_time_within(95000); g_fake_now += 10) community_tick();
         printf("CFGWRITES %ld\n", g_cm_cfg_writes);
         printf("STARTING_EXISTS %d\n", access(CM_STARTING, F_OK) == 0);
         unsigned char fr[128] = {0};

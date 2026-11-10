@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 [ "$(uname -s)" = Linux ] || exit 77
 task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/az-message-hook.XXXXXX")
 trap 'rm -rf "$task_tmp"' EXIT
-flags=(-std=c++11 -O1 -g -Wall -Wextra -Werror -pthread -Isrc/common)
+flags=(-std=c++11 -O1 -g -ffunction-sections -Wl,--gc-sections -Wall -Wextra -Werror -pthread -Isrc/common)
 case ${SAN:-plain} in plain|'') ;;asan)flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer);;tsan)flags+=(-fsanitize=thread -fno-omit-frame-pointer);;*)exit 2;;esac
 python3 - src/azmod/playlist_editor.c tests/unit/sdkcachemessagehook_fixture.cpp "$task_tmp/test.cpp" <<'PY'
 from pathlib import Path

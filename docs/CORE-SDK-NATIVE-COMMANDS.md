@@ -157,6 +157,67 @@ reload/restart tests must check persistence. Active-loop switching may require
 two writes; partial application cannot count as full success. Validate these paths
 with runtime behavioral tests appropriate to each operation/profile.
 
+### Explicit-position cue creation
+
+Commands 27/28 use the same actor and persistence queues. A fresh stored-Cue
+value carries source-rate sample coordinates, cached microseconds, empty seek
+variants and bundled color/comment. The existing native converter constructs
+source-qualified properties and compressed-format seek accessors. The rate
+comes from the owned PlayerState source-position clock at +0x18. Native
+getPositionTime at 1.30 `0x1493688` and 2.00 `0x154ebc8` uses that value to convert
+its selected sample position into microseconds. UnitStateServer publishes it
+through the same Core sampling-rate getter used by stock point construction:
+`0x135e1d0` on 1.30 and `0x1419538` on 2.00 return Core+0x68. No constant rate,
+file metadata or musical key word supplies this clock. No playhead or working
+cue supplies the target position.
+The builder selects the nearest actual source frame, with half-frame ties
+rounded forward. Its microsecond cache uses integer ceiling of that frame's
+time because the native serializer floors cached microseconds back to samples;
+truncating both representations can move a target more than one frame early.
+The optional native-cue snapshot tail publishes this same creator clock,
+including on an empty cue bank. Original-prefix callers remain supported;
+bounded copies preserve unknown tails. A changed source clock refreshes a
+cached snapshot even when its cue collection revision is unchanged. The
+POSITION engine clock is reported separately; equality is never assumed.
+
+The native point serializer can leave an arbitrary unused OUT sample cache
+when OUT microseconds carries the absence marker. Typed comparison first
+checks endpoint presence and ignores that absent endpoint's sample cache;
+valid loop endpoints still require their declared rate and timestamp checks.
+
+Creation requires the exact native cue revision. Both owner admission and the
+repository helper reject occupied Hot slots, duplicate Memory positions and
+the ten-Memory limit. Confirmation checks the correlated receipt and a typed
+comparison of both pinned baseline collections, allowing exactly the added cue.
+The stock Property-to-Cue serializer drops labels. Creation restores the request's
+UTF-8 comment and RGB on its fresh native handler value before the single PUT,
+using the existing native metadata constructors. Confirmation checks the request
+metadata explicitly and accepts only the native Memory palette index for that
+RGB. Inactive tag-zero seek storage is not a value; active seek variants and all
+other baseline cue fields retain their typed checks. Live Hot hydration keeps
+the original labelled Property after checking its canonical source coordinates.
+
+Hot creation then uses the existing owned-property DSP handoff to update its
+playable slot. It invokes the native property-update method, vtable slot 7, of
+the validated CueProperty / CuePropertyWithBufferLock types. The two entries
+are byte-verified by the cue profile: 1.30 `0x13e6340` / `0x13edcd8`, 2.00
+`0x14a1780` / `0x14a9118`. Cue profiles are validated and cached before passive
+status installs its observation hook on the same update entry. This copies the property, updates its revision/dirty
+state and refreshes buffer locks. It does not call CueLoadFacade::call, which
+also cancels unrelated control state. DSP completion requires the requested
+slot and color, unchanged main/working cue bounds, loop engagement and
+transport, with no correlated seek. Storage success followed by failed Hot
+hydration is UNCERTAIN rather than a full application result.
+
+New Hot preparation retains the manager-scoped owned property without borrowing
+CueLoader's optional lazy recall cache. Dispatch remains inside the registered
+unit's DSP lifetime lease: the unit/Core/ControlFacade bindings, native load
+generation, property source ID, owner affinity and typed target method must
+match. MEMORY_RECALL and SAVED_RECALL retain their separate CueLoadFacade checks.
+
+HOT_CLEAR accepts an optional exact native-cue-ID revision fence before its
+first DSP stage. Existing callers without that optional fence remain valid.
+
 ## Retired generic adapter
 
 `azsdk_native_commands_adapter` is an unsupported fixture stub, and its separate
