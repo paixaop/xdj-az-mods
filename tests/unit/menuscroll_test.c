@@ -194,7 +194,7 @@ static void open_full(azmod_state *s) {
     azmod_menu_reset(s);
 }
 
-static const az_screen_v1 PAGE = {sizeof PAGE, NULL, NULL, NULL, NULL};
+static const az_screen_v1 PAGE = {.size = sizeof PAGE};
 static unsigned char g_icon[AZ_ROW_ICON_N * AZ_ROW_ICON_N];
 
 int main(void) {

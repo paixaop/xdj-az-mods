@@ -67,7 +67,8 @@ enum {
     CMC_SHOTZ,   /* the large screenshot: idx 0 closes it, 1 the previous, 2 the next */
     CMC_UPDALL,  /* Updates: Update all */
     CMC_UPDROW,  /* Updates: a row's Update: idx = catalog index */
-    CMC_CHK      /* Installed: a row's checkbox (cm_chk) */
+    CMC_CHK,     /* Installed: a row's checkbox (cm_chk) */
+    CMC_SETTINGS /* open this mod's full-screen settings */
 };
 enum {
     CMA_INSTALL = 1,
@@ -82,7 +83,8 @@ enum {
     CMV_CAT,
     CMV_TRUST,
     CMV_KBD,
-    CMV_RELOAD
+    CMV_RELOAD,
+    CMV_SETTINGS
 };
 typedef struct {
     int kind, idx, x, y, w, h;
@@ -126,6 +128,7 @@ static struct {
     long done, total;
 } g_cs;
 static int g_cm_view, g_cm_page = -1, g_cm_cat = -1, g_cm_tab;
+static int g_cm_settings_from = CMV_MOD;
 static int g_cm_sel;                /* knob focus: index into the current page's controls */
 static int g_cm_knob;               /* the knob moved focus last: show it (a touch hides it) */
 static int g_cm_hfoc = -1;          /* the Installed / Updates tab: the knob's control (cm_code), or -1 */
@@ -147,9 +150,8 @@ static int g_cm_zoom = -1;          /* the mod page's screenshot shown large, or
 /* The Installed tab is split as the Mod Menu is: the list on the left, the selected mod's page on
  * the right. g_cm_isel: the selected row (CMC_MOD or CMC_INSTCAT << 16 | idx; -1 = the first);
  * g_cm_in: the knob is in the right half (a press on a row went in, BACK comes out), where it
- * drives the mod's own screen, or steps through the page's buttons (g_cm_rsel, a control index)
- * when the mod has none. g_cm_ient: the row whose screen was last entered (azcm_screen_enter). */
-static int g_cm_isel = -1, g_cm_in, g_cm_rsel = -1, g_cm_ient = -1;
+ * steps through the preview's buttons (g_cm_rsel, a control index). */
+static int g_cm_isel = -1, g_cm_in, g_cm_rsel = -1;
 /* the open mod page's screenshots: which are on disk, checked when the page or g_cm_gen changes
  * (never per frame), and whether `shots` was asked for them on this visit */
 static struct {
@@ -689,6 +691,7 @@ static void cm_crumbs(char *t, size_t n, int w, int px) {
     azcm_info_t m;
     int tab = g_cm_tab >= 0 && g_cm_tab < 4 ? g_cm_tab : 0;
     switch (g_cm_view) {
+    case CMV_SETTINGS: sub = "Settings"; /* fall through */
     case CMV_MOD: page = !azcm_info(g_cm_page, &m) ? m.name : 0; break;
     case CMV_CAT: page = g_cm_cat >= 0 && g_cm_cat < g_ncc ? g_cc[g_cm_cat].name : 0; break;
     case CMV_TRUST:
@@ -1698,7 +1701,13 @@ static int cm_layout_mod(struct cm_lay *lay) {
         if (draw && cm_status_shown() && g_cs.id[0] && !strcmp(g_cs.id, m.id)) cm_progress(fb, bx + pad, y, bw - 2 * pad, lh, dpx);
         if (cm_status_shown() && g_cs.id[0] && !strcmp(g_cs.id, m.id)) y += lh + pad / 2;
     }
-    if (m.state == AZCM_LOADED && m.has_screen) {   /* the mod's own screen, under its info */
+    if (m.state == AZCM_LOADED && m.has_screen &&
+        (g_cm_view == CMV_HOME || (m.screen_flags & AZ_SCREEN_DEDICATED))) {
+        int sw = fb->w * 200 / 1280, sh = c_rrowh(fb);
+        if (draw) cm_button(fb, bx + pad, y, sw, sh, "Settings", 1, 1, CM_FOC);
+        CM_CTL(CMC_SETTINGS, g_cm_page, bx + pad, y, sw, sh);
+        y += sh + pad;
+    } else if (m.state == AZCM_LOADED && m.has_screen) {   /* simple controls on the standard full-width page */
         if (draw) fill_rect(fb, bx, y, bw, 1, C_DIVIDER);
         y += pad / 2;
         az_rect a = {bx, y, bw, by + bh - y};
@@ -1987,10 +1996,8 @@ static int cm_layout_cat(struct cm_lay *lay) {
 
 /* the Installed tab, full screen, with something installed: the list and the page side by side */
 static int cm_isplit(void) { return g_cm_full && g_cm_view == CMV_HOME && g_cm_tab == 0; }
-/* the right half of the split: the selected row's page, at the top of the box (it does not scroll
- * with the list), as the Mod Menu shows a row's page beside its list. A loaded mod gets its page
- * (cm_layout_mod: info, buttons, its own screen), a mod installed since this start its catalog
- * page. Entering a mod's screen happens here, once per selection. */
+/* The right half previews the selected mod's details and Settings button. Custom
+ * screens are entered only when opened, never as a side effect of browsing the list. */
 static void cm_layout_split(struct cm_lay *lay) {
     if (g_cm_isel < 0) return;
     const azmod_fb *fb = lay->fb;
@@ -2007,10 +2014,6 @@ static void cm_layout_split(struct cm_lay *lay) {
             if (lay->draw) cm_textw(fb, r.bx + r.pad, r.y, r.bw - 2 * r.pad, r.rh, m.name, r.px * 13 / 10, C_TEXT);
             r.y += r.rh;
         }
-        if (g_cm_ient != g_cm_isel && !azcm_info(idx, &m) && m.state == AZCM_LOADED && m.has_screen) {
-            g_cm_ient = g_cm_isel;
-            azcm_screen_enter(idx);
-        }
         cm_layout_mod(&r);
         g_cm_view = CMV_HOME;   /* cm_layout_mod returns to home when its mod is gone; this view stays home */
     } else if (kind == CMC_INSTCAT) {
@@ -2019,12 +2022,6 @@ static void cm_layout_split(struct cm_lay *lay) {
         g_cm_view = CMV_HOME;
     }
     lay->n = r.n;
-}
-/* the selected mod has its own screen: the knob and taps in its area go to it */
-static int cm_split_screen(void) {
-    azcm_info_t m;
-    return cm_isplit() && g_cm_isel >= 0 && (g_cm_isel >> 16) == CMC_MOD && !azcm_info(g_cm_isel & 0xffff, &m) &&
-           m.state == AZCM_LOADED && m.has_screen;
 }
 /* a row chosen (a tap, or the knob moving onto it): its page on the right; the page it leaves
  * keeps its settings (written now, as leaving a mod's page does) */
@@ -2386,6 +2383,7 @@ static int cm_scroll_clamp(int v, int max) {
     return v < 0 ? 0 : v;
 }
 static int cm_layout(azmod_state *s, const azmod_fb *fb, cm_ctl *ctl, int draw) {
+    g_cm_area = (az_rect) {0};
     int bx, by, bw, bh;
     cm_box(fb, &bx, &by, &bw, &bh);
     int rh = c_rrowh(fb), lh = fb->h * 26 / 800, px = rh * 44 / 100, dpx = fb->h * 17 / 800, pad = fb->w / 80;
@@ -2402,6 +2400,13 @@ static int cm_layout(azmod_state *s, const azmod_fb *fb, cm_ctl *ctl, int draw) 
     } else if (g_cm_view == CMV_MOD) {
         if (!cm_layout_mod(&lay))
             return 0;
+    } else if (g_cm_view == CMV_SETTINGS) {
+        g_cm_area = (az_rect) {bx, by, bw, bh};
+        if (draw) {
+            az_draw d;
+            azcm_draw_init(&d, fb, g_cm_area);
+            azcm_screen_draw(g_cm_page, &d, g_cm_area);
+        }
     } else if (g_cm_view == CMV_CAT) {
         if (!cm_layout_cat(&lay))
             return 0;
@@ -2531,6 +2536,8 @@ static void cm_draw(azmod_state *s, const azmod_fb *fb) {
 #define CM_SLIDE_SLOW 40      /* ms one slide frame may take to draw */
 static long g_cm_t0, g_cm_last;
 static int g_cm_dir;      /* +1 opening, -1 closing, 0 idle */
+static int g_cm_slide_base = -1; /* -1: Mod Menu; otherwise the Community page beneath the slide */
+static void cm_open(int view);
 static uint8_t *g_cm_off;
 static int g_cm_offsz;           /* the full view, rendered once */
 static int g_cm_nfr, g_cm_cut;
@@ -2565,15 +2572,18 @@ static void cm_full_open(azmod_state *s) {
     /* a row's own screen ends with its page: opened here, the split shows the mod's own page
      * (cm_open_row sets the row's screen again after this, when that is what opens) */
     azcm_page_screen(-1, NULL);
-    g_cm_ient = -1;
     if (g_cm_full && !g_cm_dir) return;
     if (!g_cm_full) cm_reset();
     g_cm_full = 1;
+    g_cm_slide_base = -1;
     cm_auto_refresh();
     cm_slide_start(s, 1);
 }
 static void cm_full_close(azmod_state *s) {
-    if (g_cm_full) cm_slide_start(s, -1);
+    if (g_cm_full) {
+        g_cm_slide_base = -1;
+        cm_slide_start(s, -1);
+    }
 }
 static void cm_slide_end(azmod_state *s) {
     if (access("/home/root/settings/azmod-logs.on", F_OK) == 0) {
@@ -2585,7 +2595,9 @@ static void cm_slide_end(azmod_state *s) {
             fclose(f);
         }
     }
-    if (g_cm_dir < 0 && g_cm_row >= 0) {   /* back on the Mod Menu, on the SCREEN row that opened the page */
+    if (g_cm_dir < 0 && g_cm_slide_base >= 0) {
+        cm_open(g_cm_slide_base);
+    } else if (g_cm_dir < 0 && g_cm_row >= 0) {   /* back on the Mod Menu, on the SCREEN row that opened the page */
         g_cm_full = 0;
         c_select(s, s->left_sel);
         s->pane = g_cm_row_pane;
@@ -2618,11 +2630,20 @@ static void cm_slide_draw(azmod_state *s, const azmod_fb *fb) {
     float shown = g_cm_dir > 0 ? e : 1.f - e;           /* share of the full view on screen */
     int off = (int) ((1.f - shown) * fb->w);
     if (off > 0) {
-        g_cm_full = 0;
-        c_draw_left(s, fb);
-        if (g_cm_row >= 0) c_draw_right(s, fb);
-        else cm_draw_card(s, fb);
-        g_cm_full = 1;
+        if (g_cm_slide_base >= 0) {
+            int view = g_cm_view, page = g_cm_page, cat = g_cm_cat;
+            g_cm_view = g_cm_slide_base;
+            cm_draw(s, fb);
+            g_cm_view = view;
+            g_cm_page = page;
+            g_cm_cat = cat;
+        } else {
+            g_cm_full = 0;
+            c_draw_left(s, fb);
+            if (g_cm_row >= 0) c_draw_right(s, fb);
+            else cm_draw_card(s, fb);
+            g_cm_full = 1;
+        }
     }
     if (off < fb->w && g_cm_off)
         for (int y = dock_y(fb); y < dock_y(fb) + dock_h(fb) && y < fb->h; y++)
@@ -2640,10 +2661,12 @@ static void cm_slide_draw(azmod_state *s, const azmod_fb *fb) {
 /* the page's mod screen takes the input while it is open (when it has one) */
 static int cm_page_screen(void) {
     azcm_info_t m;
-    return g_cm_view == CMV_MOD && !azcm_info(g_cm_page, &m) && m.state == AZCM_LOADED && m.has_screen;
+    return (g_cm_view == CMV_SETTINGS || g_cm_view == CMV_MOD) &&
+           !azcm_info(g_cm_page, &m) && m.state == AZCM_LOADED && m.has_screen &&
+           (g_cm_view == CMV_SETTINGS || !(m.screen_flags & AZ_SCREEN_DEDICATED));
 }
 static void cm_open(int view) {
-    if (view != CMV_MOD) azcm_page_screen(-1, NULL);   /* a row's own screen lasts for its page only */
+    if (view != CMV_MOD && view != CMV_SETTINGS) azcm_page_screen(-1, NULL);   /* a row's own screen lasts for its page only */
     if (g_cm_view == CMV_HOME && view != CMV_HOME) {
         g_cm_home_sel = g_cm_sel;
         g_cm_home_scroll = g_cm_scroll;
@@ -2654,9 +2677,22 @@ static void cm_open(int view) {
         g_cm_home_sel = -1;
     } else g_cm_sel = 0;   /* the first control of a page is its main action, never the back square */
     g_cm_zoom = -1;
-    g_cm_ient = -1;   /* back on the split, its mod's screen is entered again */
     if (view != CMV_CAT && view != CMV_TRUST) g_cm_sh.cat = -1;   /* a new visit asks for its screenshots again */
     g_cm_view = view;
+}
+/* Open from the Installed preview or a standard mod page. Both directions reuse
+ * the menu's bounded slide; the list selection and scroll survive the round trip. */
+static void cm_settings_open(azmod_state *s, int idx) {
+    azcm_info_t m;
+    if (!s || azcm_info(idx, &m) || m.state != AZCM_LOADED || !m.has_screen) return;
+    int from = g_cm_view;
+    if (from == CMV_HOME) azcm_page_screen(-1, NULL);
+    g_cm_page = idx;
+    g_cm_settings_from = from;
+    cm_open(m.screen_flags & AZ_SCREEN_DEDICATED ? CMV_SETTINGS : CMV_MOD);
+    azcm_screen_enter(idx);
+    g_cm_slide_base = from;
+    cm_slide_start(s, 1);
 }
 /* The row's checkbox: written at once (the core reads it at its next start, whatever restarts
  * it), and shown pending until then; Reload is offered, never sent from here. */
@@ -2688,14 +2724,22 @@ static void cm_fire(const cm_ctl *c) {
     case CMC_RESUME:  azcm_resume(); g_cm_resumed = 1; g_cm_sel = 0; break;
     case CMC_KEEPOFF: azcm_set_all_off(1); g_cm_pending_off = 1; g_cm_keptoff = 1; g_cm_sel = 0; break;
     case CMC_BACK:    if (g_cm_s && !cm_back()) cm_full_close(g_cm_s); break;
+    case CMC_SETTINGS: cm_settings_open(g_cm_s, c->idx); break;
     case CMC_MOD:     if (cm_isplit() && !g_cm_row_opening) { cm_split_select(CMC_MOD << 16 | c->idx); break; }   /* the split: its page on the right */
                       if (!g_cm_row_opening) azcm_page_screen(-1, NULL);   /* from the list: the mod's own page */
-                      g_cm_page = c->idx; cm_open(CMV_MOD); if (cm_page_screen()) azcm_screen_enter(g_cm_page); break;
+                      g_cm_page = c->idx; cm_open(CMV_MOD);
+                      if (g_cm_row_opening) {
+                          azcm_info_t m;
+                          if (!azcm_info(g_cm_page, &m) && (m.screen_flags & AZ_SCREEN_DEDICATED))
+                              cm_open(CMV_SETTINGS);
+                      }
+                      if (cm_page_screen()) azcm_screen_enter(g_cm_page);
+                      break;
     case CMC_UNSUSPEND: { azcm_info_t m; if (!azcm_info(c->idx, &m)) { azcm_unsuspend(m.id); cm_pend_set(m.id, 1); }
                           if (c->idx < 16) g_cm_unsusp[c->idx] = 1;
                           g_cm_sel = 0; } break;
     case CMC_TAB:     if (g_cm_tab == 0 && c->idx != 0) azcm_flush_settings();   /* leaving the split's page */
-                      g_cm_in = 0; g_cm_ient = -1;
+                      g_cm_in = 0;
                       g_cm_tab = c->idx; g_cm_hfoc = -1; g_cm_scroll = 0; g_cm_sortpop = 0; if (c->idx && !g_ncc && !g_ncr && !cm_busy()) cm_req("refresh", 0, 0); break;
     case CMC_TILE:    g_cm_cat = c->idx; cm_open(CMV_CAT); break;
     case CMC_REFRESH: if (!cm_busy()) cm_req("refresh", 0, 0); break;
@@ -2831,11 +2875,7 @@ static bool cm_back(void) {
         g_cm_sortpop = 0;
         return true;
     }
-    if (cm_isplit() && g_cm_in) {   /* in the split's page: the mod's screen may take BACK, else out to the list */
-        if (cm_split_screen()) {
-            az_event ev = {AZ_EV_BACK, 0, 0, 0};
-            if (azcm_screen_input(g_cm_page, &ev)) return true;
-        }
+    if (cm_isplit() && g_cm_in) {   /* out of the preview's buttons, back to the list */
         g_cm_in = 0;
         g_cm_rsel = -1;
         return true;
@@ -2852,7 +2892,11 @@ static bool cm_back(void) {
     }   /* leaving a mod's page: its settings are saved now */
     if (g_cm_view == CMV_TRUST) cm_open(CMV_CAT);
     else if (g_cm_view == CMV_RELOAD) cm_open(g_cm_reload_from);
-    else if (g_cm_row >= 0 && g_cm_view == CMV_MOD) return false;   /* opened from its row: out to the row */
+    else if (g_cm_row >= 0 && (g_cm_view == CMV_MOD || g_cm_view == CMV_SETTINGS)) return false;
+    else if (g_cm_s && (g_cm_view == CMV_MOD || g_cm_view == CMV_SETTINGS)) {
+        g_cm_slide_base = g_cm_view == CMV_SETTINGS ? g_cm_settings_from : CMV_HOME;
+        cm_slide_start(g_cm_s, -1);
+    }
     else cm_open(CMV_HOME);
     return true;
 }
@@ -2889,18 +2933,6 @@ static bool cm_input(azmod_state *s, const azmod_fb *fb, int tx, int ty, bool to
         } else if (click) ev.kind = AZ_EV_CLICK;
         if (ev.kind) azcm_screen_input(g_cm_page, &ev);
         return true;
-    }
-    if (touched && cm_split_screen() && g_cm_area.w > 0 && in_rect(tx, ty, g_cm_area.x, g_cm_area.y, g_cm_area.w, g_cm_area.h)) {
-        int hit = 0;   /* the page's own buttons first, as on the full page */
-        for (int k = 0; k < n && !hit; k++) hit = in_rect(tx, ty, ctl[k].x, ctl[k].y, ctl[k].w, ctl[k].h);
-        if (!hit) {
-            az_event ev = {0, 0, 0, 0};
-            ev.kind = AZ_EV_TAP;
-            ev.x = tx;
-            ev.y = ty;
-            azcm_screen_input(g_cm_page, &ev);
-            return true;
-        }
     }
     if (g_cm_view == CMV_HOME) {
         /* The home page works by touch: a press is decided on its release (azmod_pane_drag, as in
@@ -2983,9 +3015,8 @@ static int cm_code(const cm_ctl *c) { return c->kind << 16 | (c->idx & 0xffff); 
  * list does; its press fires the focused control (a row opens its page). After a touch, the first
  * detent or press only shows the focus. false: not one of these tabs, or nothing to focus (the
  * knob then scrolls the page). */
-/* the knob on the split, as on the Mod Menu: in the list a turn moves the selection (its page
- * follows) and a press goes into the page; there a turn and a press go to the mod's own screen, or
- * step through and press the page's buttons when it has none. BACK comes out (cm_back). */
+/* A turn selects a preview. Press opens the mod's settings full screen when available,
+ * otherwise it enters the preview's action buttons. BACK returns to the list. */
 static bool cm_split_knob(azmod_state *s, const azmod_fb *fb, int d, bool click) {
     cm_ctl ctl[CM_MAXCTL];
     int n = cm_layout(s, fb, ctl, 0), nb = g_cm_nbody < n ? g_cm_nbody : n, list[CM_MAXCTL], nl = 0, cur = -1;
@@ -2993,15 +3024,6 @@ static bool cm_split_knob(azmod_state *s, const azmod_fb *fb, int d, bool click)
     cm_box(fb, &bx, &by, &bw, &bh);
     int rx = bx + bw / 2;
     if (g_cm_in) {
-        if (cm_split_screen()) {
-            az_event ev = {0, 0, 0, 0};
-            if (d) {
-                ev.kind = AZ_EV_KNOB;
-                ev.dir = d > 0 ? 1 : -1;
-            } else if (click) ev.kind = AZ_EV_CLICK;
-            if (ev.kind) azcm_screen_input(g_cm_page, &ev);
-            return true;
-        }
         for (int k = 0; k < nb; k++)
             if (ctl[k].x >= rx && ctl[k].kind != CMC_CHK) {
                 if (k == g_cm_rsel) cur = nl;
@@ -3035,12 +3057,18 @@ static bool cm_split_knob(azmod_state *s, const azmod_fb *fb, int d, bool click)
             if (c->kind == CMC_MOD || c->kind == CMC_INSTCAT) {   /* into the page */
                 g_cm_in = 1;
                 g_cm_rsel = -1;
-                if (!cm_split_screen())
-                    for (int k = 0; k < nb; k++)
-                        if (ctl[k].x >= rx && ctl[k].kind != CMC_CHK) {
-                            g_cm_rsel = k;
-                            break;
-                        }
+                azcm_info_t m;
+                if (c->kind == CMC_MOD && !azcm_info(c->idx, &m) && m.state == AZCM_LOADED && m.has_screen) {
+                    g_cm_in = 0;
+                    g_cm_s = s;
+                    cm_settings_open(s, c->idx);
+                    return true;
+                }
+                for (int k = 0; k < nb; k++)
+                    if (ctl[k].x >= rx && ctl[k].kind != CMC_CHK) {
+                        g_cm_rsel = k;
+                        break;
+                    }
             } else {
                 g_cm_s = s;
                 cm_fire(c);
@@ -3119,7 +3147,7 @@ static bool cm_home_scroll_to(const azmod_fb *fb, int v, int phase) {
 static bool cm_home_nav(int ctl) {
     int k = ctl >> 16;
     return k == CMC_TAB || k == CMC_TILE || k == CMC_STILE || k == CMC_SEEALL || k == CMC_MOD || k == CMC_INSTCAT || k == CMC_BACK ||
-           k == CMC_SORTBTN || k == CMC_SORT || k == CMC_SORTOFF;
+           k == CMC_SORTBTN || k == CMC_SORT || k == CMC_SORTOFF || k == CMC_SETTINGS;
 }
 /* Reload (the not-loaded notice's, the header's Reload now): a press under 1 s restarts */
 static bool cm_home_reload(int ctl) { return (ctl >> 16) == CMC_APPLY; }

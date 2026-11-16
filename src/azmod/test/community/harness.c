@@ -279,6 +279,7 @@ int main(int argc, char **argv) {
         printf("MOD %s state=%d screen=%d hooks=%d name=%s| reason=%s\n", in.id, in.state, in.has_screen, in.hooks, in.name, in.reason);
         printf("NAME %s %s\n", in.id, in.name);
         printf("FROM %s %s\n", in.id, in.from[0] ? in.from : "-");
+        printf("SCREEN_FLAGS %s %u\n", in.id, in.screen_flags);
         if (g_cm[i].sha[0]) printf("SHA %s %s\n", in.id, g_cm[i].sha);
         for (int k = 0; k < 4; k++) {
             char kr[4] = {'r', (char) ('0' + k), 0, 0};

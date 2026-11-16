@@ -2439,6 +2439,7 @@ static void msg_tick(void) {
 #include "browse_columns.c" /* PREVIEW and the sub column remembered; Column Edit's columns */
 #include "clock_native.c" /* the Clock in the place of EP147's status bar readout */
 static void bf_tick(void); /* browse_fields.c */
+static void sdk_beatport_msg_tick(void); /* sdk_beatport.c */
 static void calltimers_hook(void *self) {
     msg_tick();
     bt_mods_tick();
@@ -2448,6 +2449,7 @@ static void calltimers_hook(void *self) {
     sk_tick();
     mp_anim_tick();
     cm_icons_tick();
+    sdk_beatport_msg_tick();
     /* installed at run time from any thread: never branch to an original not yet visible */
     void (*o)(void *) = __atomic_load_n(&g_orig_calltimers, __ATOMIC_ACQUIRE);
     if (o)
@@ -2966,6 +2968,7 @@ __attribute__((constructor)) static void azmod_init(void) {
     pngpatch_apply();
     /* Every remaining hook, still before EP147's main (mod_menu_overlay.c). */
     install_static_hooks();
+    sdk_beatport_install();
     /* EP147 starts its threads once this constructor returns: from here an inline hook must be
      * the one-store island B, and a 16-byte patch is refused (inline_hooks.c). */
     azm_hooks_go_late();

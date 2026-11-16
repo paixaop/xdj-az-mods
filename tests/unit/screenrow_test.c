@@ -55,7 +55,9 @@ static int seen(const char *s) {
 
 /* ---- the community core's stand-in: "testmod" (a screen of its own) and "nopagemod" (none),
  * both loaded; a page shows a SCREEN row's own screen when the row named one (community.c cm_scr) */
-static int g_enter, g_back_heard, g_drawn, g_row_enter;
+static int g_enter, g_back_heard, g_drawn, g_row_enter, g_consume_back, g_input;
+static unsigned g_screen_flags;
+static az_rect g_draw_area;
 static const az_screen_v1 *g_page_scr;
 static int g_page_mod = -1;
 int azcm_count(void) { return 2; }
@@ -66,6 +68,7 @@ int azcm_info(int i, azcm_info_t *out) {
     snprintf(out->name, sizeof out->name, i ? "No Page Mod" : "Test Mod");
     out->state = AZCM_LOADED;
     out->has_screen = i == 0 || (g_page_mod == i && g_page_scr);
+    out->screen_flags = g_page_mod == i && g_page_scr ? g_page_scr->flags : g_screen_flags;
     return 0;
 }
 void azcm_page_screen(int i, const az_screen_v1 *scr) {
@@ -78,6 +81,7 @@ int azcm_row_target(const char *owner, const az_screen_v1 *row_scr) {
     return 0;
 }
 void azcm_screen_draw(int i, az_draw *d, az_rect area) {
+    g_draw_area = area;
     if (i == g_page_mod && g_page_scr) {
         g_page_scr->on_draw(d, area, g_page_scr->user);
         return;
@@ -88,7 +92,8 @@ void azcm_screen_draw(int i, az_draw *d, az_rect area) {
 }
 int azcm_screen_input(int i, const az_event *ev) {
     if ((i == 0 || i == g_page_mod) && ev->kind == AZ_EV_BACK) g_back_heard++;
-    return 0; /* the core decides: BACK leaves the page */
+    g_input++;
+    return ev->kind == AZ_EV_BACK && g_consume_back;
 }
 void azcm_screen_enter(int i) {
     if (i == g_page_mod && g_page_scr) {
@@ -148,9 +153,9 @@ static int select_row(azmod_state *s, int item) {
     return 0;
 }
 static int on_page(azmod_state *s) { return s->mode == AZ_COMMUNITY && g_cm_full && g_cm_view == CMV_MOD && seen("TESTMOD SCREEN"); }
-/* the Installed tab's split: the mod selected in the list, its own page (not the row's screen) beside it */
+/* The Installed preview shows the Settings button, without drawing either screen. */
 static int on_split_page(azmod_state *s) {
-    return s->mode == AZ_COMMUNITY && g_cm_full && g_cm_view == CMV_HOME && g_cm_isel == (CMC_MOD << 16 | 0) && seen("TESTMOD SCREEN") && !seen("ROW SCREEN");
+    return s->mode == AZ_COMMUNITY && g_cm_full && g_cm_view == CMV_HOME && g_cm_isel == (CMC_MOD << 16 | 0) && seen("Settings") && !seen("TESTMOD SCREEN") && !seen("ROW SCREEN");
 }
 static int on_row_page(azmod_state *s) { return s->mode == AZ_COMMUNITY && g_cm_full && g_cm_view == CMV_MOD && seen("ROW SCREEN") && !seen("TESTMOD SCREEN"); }
 static int count_seen(const char *t) {
@@ -176,7 +181,9 @@ static void row_enter(void *u) {
     (void) u;
     g_row_enter++;
 }
-static const az_screen_v1 ROWSCR = {sizeof ROWSCR, row_draw, row_input, row_enter, NULL};
+static const az_screen_v1 ROWSCR = {
+    .size = sizeof ROWSCR, .on_draw = row_draw, .on_input = row_input, .on_enter = row_enter,
+};
 
 int main(void) {
     ut_suite = "screen row";
@@ -266,7 +273,7 @@ int main(void) {
     cm_ctl c = {CMC_MOD, 0, 0, 0, 0, 0};
     cm_fire(&c);
     settle(&s);
-    CHECK("from the Mod Index afterwards: the mod's own page beside the list, not the row's", on_split_page(&s));
+    CHECK("from the Mod Index afterwards: its Settings preview, without entering either screen", on_split_page(&s) && g_enter == e);
     azmod_back(&s);
     settle(&s);
 
@@ -282,5 +289,77 @@ int main(void) {
     knob(&s, 0, true);
     settle(&s);
     CHECK("a mod with no page: the row's own screen opens", on_row_page(&s) && g_row_enter == re + 1);
+    azmod_back(&s);
+    settle(&s);
+
+    /* Installed Settings: simple pages expand, dedicated editors use all the content height. */
+    cm_full_open(&s);
+    settle(&s);
+    cm_split_select(CMC_MOD << 16);
+    draw(&s);
+    int before = g_enter;
+    n = cm_layout(&s, &g_fb, ctl, 0);
+    k = 0;
+    while (k < n && ctl[k].kind != CMC_SETTINGS) k++;
+    CHECK("Installed offers a Settings button without entering the screen", k < n && !g_cm_area.w && g_enter == before);
+    CHECK("Settings has a full row touch target", k < n && ctl[k].h >= 44);
+    if (k < n) tap(&s, ctl[k].x + ctl[k].w / 2, ctl[k].y + ctl[k].h / 2);
+    CHECK("Settings starts the slide and enters once", cm_animating() && g_cm_view == CMV_MOD && g_enter == before + 1);
+    int heard = g_input;
+    knob(&s, 1, false);
+    CHECK("input is held during the slide", g_input == heard);
+    settle(&s);
+    CHECK("simple settings use the standard full-width page", on_page(&s) && g_draw_area.x < W / 10 && g_draw_area.w > W * 9 / 10);
+    knob(&s, 1, false);
+    CHECK("the open page gets knob input", g_input == heard + 1);
+    azmod_back(&s);
+    settle(&s);
+    CHECK("BACK restores the same Installed selection", on_split_page(&s) && g_enter == before + 1);
+
+    g_screen_flags = AZ_SCREEN_DEDICATED;
+    g_cm_knob = 1;
+    g_cm_hfoc = CMC_MOD << 16;
+    knob(&s, 0, true);
+    CHECK("knob opens the dedicated editor with a slide", cm_animating() && g_cm_view == CMV_SETTINGS);
+    settle(&s);
+    int bx, by, bw, bh;
+    cm_box(&g_fb, &bx, &by, &bw, &bh);
+    CHECK("dedicated editor gets the whole content rectangle", g_draw_area.x == bx && g_draw_area.y == by && g_draw_area.w == bw && g_draw_area.h == bh);
+    CHECK("dedicated editor has no management buttons", !seen("Disable") && !seen("Remove from USB") && seen("TESTMOD SCREEN"));
+    heard = g_input;
+    tap(&s, bx + bw / 2, by + bh / 2);
+    CHECK("content taps reach the editor", g_input == heard + 1);
+    heard = g_input;
+    tap(&s, W - 5, dock_y(&g_fb) + 3);
+    CHECK("header gaps never reach the editor", g_input == heard);
+    g_consume_back = 1;
+    azmod_back(&s);
+    CHECK("the editor can consume BACK for its own subpage", !cm_animating() && g_cm_view == CMV_SETTINGS);
+    g_consume_back = 0;
+    n = cm_layout(&s, &g_fb, ctl, 0);
+    tap(&s, ctl[n - 1].x + ctl[n - 1].w / 2, ctl[n - 1].y + ctl[n - 1].h / 2);
+    settle(&s);
+    CHECK("header BACK slides to the Installed preview", on_split_page(&s));
+
+    /* A complex screen can also be opened from its full standard details page. */
+    cm_open(CMV_MOD);
+    draw(&s);
+    CHECK("complex standard page offers Settings instead of embedding the editor", seen("Settings") && !seen("TESTMOD SCREEN"));
+    cm_settings_open(&s, 0);
+    settle(&s);
+    azmod_back(&s);
+    settle(&s);
+    CHECK("nested editor BACK restores its standard details page", g_cm_view == CMV_MOD && seen("Settings") && !seen("TESTMOD SCREEN"));
+    azmod_back(&s);
+    settle(&s);
+    azmod_back(&s);
+    settle(&s);
+    CHECK("dedicated mod menu shortcut is reachable", select_left(&s, "Page"));
+    knob(&s, 0, true);
+    settle(&s);
+    CHECK("dedicated menu shortcut opens the editor directly", g_cm_view == CMV_SETTINGS && seen("TESTMOD SCREEN") && !seen("Disable"));
+    azmod_back(&s);
+    settle(&s);
+    CHECK("dedicated shortcut BACK returns to the same menu row", !g_cm_full && s.left_sel == scr);
     return ut_summary();
 }

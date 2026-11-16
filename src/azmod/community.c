@@ -1524,6 +1524,7 @@ static void sdk_ui_tick(void);
 #endif
 #ifndef SDK_PROC_IMPL
 #include "sdk_data_callbacks.c"
+#include "sdk_beatport.c"
 #endif
 
 static const az_library_v1 g_sdk_library = {
@@ -1654,6 +1655,9 @@ static const az_core_v1 g_cm_core = {
     .waveform_acquire = sdk_waveform_acquire,
 #endif
     .library_service = sdk_library_service,
+#ifndef SDK_PROC_IMPL
+    .beatport_login_service = sdk_beatport_login_service,
+#endif
 };
 
 /* ---- loading ------------------------------------------------------------------------ */
@@ -2264,6 +2268,9 @@ static void community_init(void) {
 static void sdk_confirm_tick(void);
 static void community_tick(void) {
     sdk_confirm_tick(); /* the dialog: also the core's own questions, with no mod loaded */
+#ifndef SDK_PROC_IMPL
+    sdk_beatport_owner_tick();
+#endif
     if (!g_cm_n) return;
     sdk_rows_tick();    /* rows of mods that stopped leave the menu, also when none runs */
     long now = now_ms();
@@ -2361,7 +2368,10 @@ int azcm_info(int i, azcm_info_t *out) {
     snprintf(out->summary, sizeof out->summary, "%s", c->summary);
     snprintf(out->reason, sizeof out->reason, "%s", c->reason);
     out->state = c->state;
-    out->has_screen = cm_scr(i) != NULL;
+    const az_screen_v1 *screen = cm_scr(i);
+    out->has_screen = screen != NULL;
+    out->screen_flags = screen && screen->size >= (int) (offsetof(az_screen_v1, flags) + sizeof screen->flags)
+                            ? screen->flags : 0;
     out->hooks = c->nhooks;
     out->allowed = c->allowed;
     /* where it came from, short: owner/repo for a GitHub repository, else the address without

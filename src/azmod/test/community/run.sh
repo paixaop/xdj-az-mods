@@ -54,6 +54,13 @@ ok "quarantine counter cleared at 90s" 'grep -q "STARTING_EXISTS 0" $W/out'
 ok "on_frame edits the LED frame"  'grep -q "FRAME 0 byte0=42" $W/out'
 ok "cfg flushed to the settings file"           'grep -q "^ticked=1" $W/cv/good-any.cfg'
 ok "load line logged without logs on" 'grep -q "loaded 1.0.0" $W/log/good-any.log'
+ok "default screen uses the standard mod page" 'grep -q "^SCREEN_FLAGS good-any 0$" $W/out'
+reset; mod dedicated -DMOD_DEDICATED_SCREEN; manifest dedicated '["any"]' false; enable dedicated
+$W/harness init > $W/out
+ok "dedicated screen requests the full content area" 'grep -q "^SCREEN_FLAGS dedicated 1$" $W/out'
+reset; mod legacy-screen -DMOD_LEGACY_SCREEN; manifest legacy-screen '["any"]' false; enable legacy-screen
+$W/harness init > $W/out
+ok "old screen descriptors ignore bytes beyond their declared size" 'grep -q "^SCREEN_FLAGS legacy-screen 0$" $W/out'
 # the per-mod log cap holds across EP147 restarts: a log left by earlier starts past half the
 # cap moves to <id>.log.1 at this start's first line (it would otherwise grow 256 KB per start)
 reset; mod good-any; manifest good-any '["any"]' false; enable good-any
@@ -70,21 +77,21 @@ ok "no update for the same version"                          '[ "$($W/harness ve
 ok "no update for a malformed version"                       '[ "$($W/harness vernewer 1.1 1.0.1)" = 0 ]'
 ok "CONTROL: the old test (versions differ) offers 0.9.0 under 1.0.1" '[ "$($W/harness verdiffer 0.9.0 1.0.1)" = 1 ]'
 
-# 1a. min_core against the core's AZ_CORE_VERSION (1.2.6): equal / older / absent load; newer and
+# 1a. min_core against the core's AZ_CORE_VERSION (1.2.8): equal / older / absent load; newer and
 # malformed are refused with the reason on the Mod Menu
 reset
 for m in mc-eq mc-old mc-none mc-new mc-bad; do mod $m; done
-manifest mc-eq '["any"]' false ',"min_core":"1.2.6"'
-manifest mc-old '["any"]' false ',"min_core":"1.2.5"'
+manifest mc-eq '["any"]' false ',"min_core":"1.2.8"'
+manifest mc-old '["any"]' false ',"min_core":"1.2.6"'
 manifest mc-none '["any"]' false
-manifest mc-new '["any"]' false ',"min_core":"1.2.10"'
+manifest mc-new '["any"]' false ',"min_core":"1.2.9"'
 manifest mc-bad '["any"]' false ',"min_core":"1.3"'
 enable mc-eq mc-old mc-none mc-new mc-bad
 $W/harness init > $W/out
 ok "min_core equal loads"          '[ "$(st mc-eq)" = 1 ]'
 ok "min_core older loads"          '[ "$(st mc-old)" = 1 ]'
 ok "no min_core loads"             '[ "$(st mc-none)" = 1 ]'
-ok "min_core newer refused (1.2.10 > 1.2.6, numeric not text)" '[ "$(st mc-new)" = 3 ] && rs mc-new | grep -q "Needs AZ-MODS 1.2.10 or newer"'
+ok "min_core newer refused (1.2.9 > 1.2.8)" '[ "$(st mc-new)" = 3 ] && rs mc-new | grep -q "Needs AZ-MODS 1.2.9 or newer"'
 ok "min_core malformed refused"    '[ "$(st mc-bad)" = 3 ] && rs mc-bad | grep -q "MAJOR.MINOR.PATCH"'
 
 # 1c. core 1.2.3 services: text settings round-trip (control bytes dropped, default when unset),

@@ -12,7 +12,7 @@ enum { AZCM_LOADED = 1, AZCM_DISABLED, AZCM_REFUSED, AZCM_FAILED, AZCM_SUSPENDED
 /* from: where the installed copy came from (the owner/repo of its .origin), "" = copied by hand;
  * allowed: an AZCM_NEW mod the DJ allowed during this start (it loads after the reload) */
 typedef struct { char id[33], name[48], version[24], author[48], summary[120], reason[112], from[96];
-                 int state, has_screen, hooks, allowed; } azcm_info_t;
+                 int state, has_screen, hooks, allowed; unsigned screen_flags; } azcm_info_t;
 int  azcm_count(void);
 int  azcm_info(int i, azcm_info_t *out);
 int  azcm_suspended(void);

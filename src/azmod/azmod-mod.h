@@ -33,7 +33,7 @@ extern "C" {
  * version and is bumped with every release, whether or not the mod interface changed. A mod
  * whose azmod.json "min_core" is above it is refused with "Needs AZ-MODS <min_core> or newer",
  * so set "min_core" to the first release that has everything your mod relies on. */
-#define AZ_CORE_VERSION "1.2.6"
+#define AZ_CORE_VERSION "1.2.8"
 
 /* ---- on_frame ---------------------------------------------------------------------
  * A mod that only reads a frame returns AZ_FRAME_OK. A mod that wants later mods not to
@@ -63,12 +63,18 @@ typedef struct { int kind; int dir; int x, y; } az_event;   /* dir: knob -1/+1; 
 /* theme color roles: the active theme's palette, so a mod matches Day and the dark themes */
 enum { AZ_COL_TEXT = 0, AZ_COL_TEXT_DIM, AZ_COL_HI, AZ_COL_HI_TEXT, AZ_COL_BG };
 
+/* Core 1.2.8: open a complex editor from the standard page's Settings button.
+ * The editor gets the full content area below the core's header. Zero keeps
+ * simple controls directly on the standard mod page. Older descriptors use zero. */
+#define AZ_SCREEN_DEDICATED 0x1u
+
 typedef struct az_screen_v1 {
     int   size;                                              /* = sizeof(az_screen_v1) */
     void (*on_draw)(az_draw *d, az_rect area, void *user);   /* paint inside area only */
     int  (*on_input)(const az_event *ev, void *user);        /* 1 = handled, 0 = core decides */
     void (*on_enter)(void *user);                            /* became active; may be NULL */
     void  *user;                                             /* handed back to every callback */
+    unsigned flags;                                         /* core 1.2.8: AZ_SCREEN_* */
 } az_screen_v1;
 
 /* Reserved for overlay windows in a later ABI; nothing in ABI 1 uses it. */
@@ -882,6 +888,40 @@ typedef struct az_library_v1 {
     ((service) && (service)->abi == AZ_LIBRARY_ABI && \
      (service)->size >= offsetof(az_library_v1, field) + sizeof((service)->field) && (service)->field)
 
+/* Beatport's native login screen and credential persistence, core 1.2.8+.
+ * No native object or password is exposed to the mod. The core performs native
+ * UI work on EP147's message thread and storage I/O on its own worker. */
+#define AZ_BEATPORT_LOGIN_ABI 1u
+typedef struct az_beatport_login_options {
+    uint32_t size;           /* sizeof(az_beatport_login_options) */
+    int auto_login;          /* 0/1: fill an empty login screen and submit it */
+    int remember;            /* 0/1: capture a manual LOG IN in the login state */
+    int delay_sec;           /* 0..600: delay before automatic submission */
+    int max_attempts;        /* 1..4: automatic attempts per login screen */
+} az_beatport_login_options;
+typedef struct az_beatport_login_status {
+    uint32_t size;           /* set to sizeof(az_beatport_login_status) */
+    int have_credentials;   /* a complete pair has been committed to storage */
+    int save_pending;       /* initial load, save or forget is still pending */
+    int storage_error;      /* 0, or the last storage operation's errno value */
+    char username[128];      /* committed username, NUL-terminated; never a password */
+} az_beatport_login_status;
+typedef struct az_beatport_login_v1 {
+    uint32_t abi, size;
+    /* First configure is init-only and claims the service for this mod ID.
+     * Later calls from its UI callbacks replace the copied options. Values
+     * outside the documented ranges are refused. No file I/O in these calls.
+     * All three entries return 0 on success, -1 if invalid/unavailable/refused. */
+    int (*configure)(const char *id, const az_beatport_login_options *options);
+    int (*status)(const char *id, az_beatport_login_status *out);
+    /* Queues deletion; 0 means accepted, not durably removed. Read status for
+     * completion or storage_error. Cancels pending autofill/submission. */
+    int (*forget)(const char *id);
+} az_beatport_login_v1;
+#define AZ_BEATPORT_LOGIN_HAS(service, field) \
+    ((service) && (service)->abi == AZ_BEATPORT_LOGIN_ABI && \
+     (service)->size >= offsetof(az_beatport_login_v1, field) + sizeof((service)->field) && (service)->field)
+
 typedef struct az_core_v1 {
     int abi;
     int size;          /* sizeof(az_core_v1) at the core's build */
@@ -1052,8 +1092,10 @@ typedef struct az_core_v1 {
     int  (*deck_grid)(int deck, double *beat_phase, double *bar_phase);
     int  (*on_deck_event)(const char *id, void (*fn)(int deck, int what, void *user), void *user);
 
-    /* Feedback and threads. "The UI thread" is the core's thread that runs tick, screens,
-     *    surfaces and row callbacks. banner shows text (up to 111 bytes) in EP147's own
+    /* Feedback and threads. "The UI thread" is the core's overlay thread that runs tick,
+     *    screens, surfaces and row callbacks, not EP147's JUCE message thread. post_ui
+     *    also targets the overlay thread; it cannot make direct native UI calls safe.
+     *    banner shows text (up to 111 bytes) in EP147's own
      *    caution box for ms milliseconds. confirm asks a yes/no question in a dialog over
      *    whatever is on screen, Cancel focused first, BACK = no; fn runs on the UI thread with
      *    the answer. It returns 0 when shown, -1 when refused (another question is open).
@@ -1161,6 +1203,11 @@ typedef struct az_core_v1 {
      * The individual development data entries above remain compatibility aliases. */
     const az_library_v1 *(*library_service)(uint32_t abi);
 
+    /* Core-owned Beatport login, core 1.2.8+. Unsupported ABI or firmware -> NULL.
+     * Initially supports EP147 2.00 (ep147-9e9454e357389ece). Check AZ_HAS first,
+     * then AZ_BEATPORT_LOGIN_HAS for each member. All entries are init/UI-only. */
+    const az_beatport_login_v1 *(*beatport_login_service)(uint32_t abi);
+
 } az_core_v1;
 
 #define AZ_HAS(core, field) \
@@ -1186,8 +1233,8 @@ typedef struct az_mod_v1 {
     int  (*init)(const az_core_v1 *core);
 
     /* Periodically, up to about 30 times a second (the rate varies; time things with a clock),
-     * on the core's UI thread. Bookkeeping only: no blocking, no file or network I/O, no big
-     * allocations. May be NULL. */
+     * on the core's overlay UI thread, not EP147's JUCE message thread. Bookkeeping only:
+     * no blocking, no file or network I/O, no big allocations. May be NULL. */
     void (*tick)(void);
 
     /* The pad / mode-button LED frame (AZ_BUS_ERP_LED, the only bus on_frame receives; see

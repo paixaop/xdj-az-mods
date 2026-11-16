@@ -64,7 +64,17 @@ static int input(const az_event *e, void *u) {
     (void) u;
     return 0;
 }
-static const az_screen_v1 SCR = {sizeof(az_screen_v1), draw, input, NULL, NULL};
+static const az_screen_v1 SCR = {
+#ifdef MOD_LEGACY_SCREEN
+    .size = offsetof(az_screen_v1, flags),
+#else
+    .size = sizeof(az_screen_v1),
+#endif
+    .on_draw = draw, .on_input = input,
+#if defined(MOD_DEDICATED_SCREEN) || defined(MOD_LEGACY_SCREEN)
+    .flags = AZ_SCREEN_DEDICATED,
+#endif
+};
 #if defined(MOD_STREDGE) || defined(MOD_DECKS)
 static int utf8_whole(const char *s) { /* 1 = well-formed UTF-8 to the end (no cut sequence) */
     for (const unsigned char *p = (const unsigned char *) s; *p;) {
