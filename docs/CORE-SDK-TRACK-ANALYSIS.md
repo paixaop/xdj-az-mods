@@ -129,3 +129,28 @@ counts 388/424 and revision 1 were preserved. Two USB loads recognized existing
 analysis and preserved their cue banks. SDK Play activated Anchor on both sources.
 Physical USB generation on an empty bank was not repeated in this run. Retained
 evidence is in the parent workspace's `temp/physical-auto-20261116/` directory.
+
+## Vocal analysis extension
+
+The append-only `analysis_open_v2` and `analysis_open_loaded_v2` independently
+request missing phrases and `AZ_ANALYSIS_VOCALS`. Legacy opens remain phrase-only.
+New opens use TA02 with optional PQTZ/PSSI/PVDI payloads, actual PCM rate and source
+frame count. The SDK's `docs/18-track-analysis.md` specifies every field and bound.
+The core validates the needed mask and PVDI coverage, saves `.2EX`, and records the
+heuristic method/exact duration in a hash-bound `AZVD` tag. It never replaces a
+populated PVDI, including valid all-zero instrumental analysis. A vocal-only commit
+writes neither DAT nor EXT and calls no native phrase publisher. Refreshing cached
+phrases before vocal work captures the new native map edition before retaining it.
+
+`sdk_vocals.h` derives half-open intervals from confidence >=3 using the PVDI header
+clock. `sdk_vocal_service.c` exposes copied worker reads through `vocal_intervals`
+and `vocal_intervals_loaded`, reusing OneLibrary resolution, owner checks, native
+load identity and source/file freshness checks. There is no new per-mod backend or
+native hook. Loaded Beatport reads check the audio-keyed per-deck cache without
+creating or evicting it. Cache replacement clears DAT, EXT and 2EX together.
+
+The worker runs the existing spectral heuristic on uniformly spaced windows for
+vocal-only work; it does not require the phrase classifier or beat model. Read-side
+provenance distinguishes existing PVDI from generated heuristic scores. Detection
+accuracy and native firmware rendering of generated PVDI are not established by
+format, timing or service tests. The feature exposes SDK data, not a new overlay.

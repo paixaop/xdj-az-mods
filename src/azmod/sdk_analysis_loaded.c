@@ -72,27 +72,35 @@ static int sa_grid_snapshot(struct sa_job *j) {
 }
 /* Four bounded per-deck caches. A new native audio fingerprint replaces that
  * deck's old cache; neither audio nor credentials are copied into settings. */
-static int sa_stream_paths(struct sa_job *j, const unsigned char track[12]) {
+static int sa_stream_paths(struct sa_job *j, const unsigned char track[12], int read_only) {
     char base[1024], key[96], old[96] = {0}, identity[1024];
     if (snprintf(base, sizeof base, "%s/analysis", CM_STATE) >= (int) sizeof base ||
-        (mkdir(base, 0700) && errno != EEXIST)) return AZ_FAILED;
+        (!read_only && mkdir(base, 0700) && errno != EEXIST)) return AZ_FAILED;
     if (snprintf(j->source.mount, sizeof j->source.mount, "%s/beatport-%d", base, j->deck) >= (int) sizeof j->source.mount ||
-        (mkdir(j->source.mount, 0700) && errno != EEXIST)) return AZ_FAILED;
+        (!read_only && mkdir(j->source.mount, 0700) && errno != EEXIST)) return AZ_FAILED;
+    if (read_only) {
+        struct stat directory;
+        if (lstat(j->source.mount, &directory)) return errno == ENOENT ? AZ_NOT_FOUND : AZ_FAILED;
+        if (!S_ISDIR(directory.st_mode)) return AZ_FAILED;
+    }
     if (!st_source_path(j->source.mount, "/analysis.DAT", j->dat) ||
         !st_source_path(j->source.mount, "/analysis.EXT", j->ext) ||
+        !st_source_path(j->source.mount, "/analysis.2EX", j->ex2) ||
         !st_source_path(j->source.mount, "/identity", identity)) return AZ_FAILED;
     for (unsigned i = 0; i < 12; i++) snprintf(key + i * 2, 3, "%02x", track[i]);
     snprintf(key + 24, sizeof key - 24, "-%016llx", (unsigned long long) j->signatures[1]);
     int fd = open(identity, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd >= 0) { ssize_t n = read(fd, old, sizeof old - 1); if (n < 0) old[0] = 0; close(fd); }
     if (strcmp(key, old)) {
-        if ((unlink(j->dat) && errno != ENOENT) || (unlink(j->ext) && errno != ENOENT)) return AZ_FAILED;
+        if (read_only) return AZ_NOT_FOUND;
+        if ((unlink(j->dat) && errno != ENOENT) || (unlink(j->ext) && errno != ENOENT) || (unlink(j->ex2) && errno != ENOENT)) return AZ_FAILED;
         struct sa_staged staged = {.dir = -1};
         int ok = sa_stage(j, identity, (const uint8_t *) key, strlen(key), &staged) && sa_publish(&staged);
         sa_stage_drop(&staged);
         if (!ok) return AZ_FAILED;
     }
     j->signatures[2] = st_disk_sig(j->dat); j->signatures[3] = st_disk_sig(j->ext);
+    j->signatures[4] = st_disk_sig(j->ex2);
     return AZ_OK;
 }
 static const uint8_t *sa_find_tag(const uint8_t *data, size_t n, const char tag[4], uint32_t *length) {
@@ -142,8 +150,32 @@ static int sa_refresh_saved(struct sa_job *j) {
     free(dat); free(ext);
     return rc;
 }
-static int sdk_analysis_open_loaded(const char *id, int deck, uint64_t load, az_analysis_job_v1 *out) {
-    int owner = sa_owner(id, "analysis_open_loaded", CM_RA());
+/* Phrase and vocal presence are independent. Refreshing saved phrases retires
+ * the old packet; capture the new edition before retaining a vocal-only lease. */
+static int sa_loaded_needs(struct sa_job *j, uint32_t native_phrases) {
+    j->needed = native_phrases ? 0 : AZ_DATA_PHRASES;
+    if (!native_phrases) {
+        int rc = sa_refresh_saved(j);
+        if (rc == AZ_NOT_FOUND) {
+            j->needed = 0;
+            if (j->vocals) {
+                j->maps->release(&j->native_map);
+                memset(&j->native_map, 0, sizeof j->native_map);
+                rc = j->maps->capture((unsigned) j->deck, j->load, &j->native_map);
+                if (rc) { j->maps = NULL; return rc; }
+            }
+        } else if (rc) return rc;
+    }
+    if (j->vocals) {
+        int failed = 0; size_t n = 0;
+        uint8_t *file = sa_read(j->ex2, &n, &failed);
+        int count = sa_tag_count(file, n, "PVDI"); free(file);
+        if (failed || count < 0) return AZ_FAILED;
+        if (!count) j->needed |= AZ_ANALYSIS_VOCALS;
+    }
+    return j->needed ? AZ_OK : AZ_NOT_FOUND;
+}
+static int sa_open_loaded(int owner, int deck, uint64_t load, az_analysis_job_v1 *out, int vocals) {
     if (owner < 0 || deck < 0 || deck >= 4 || !load || !out || st_record_size(out) < sizeof *out) return AZ_INVALID;
     const struct azstatus_native_v1 *api = sa_native();
     const struct azn_maps_api *maps = api && api->maps ? api->maps() : NULL;
@@ -151,23 +183,23 @@ static int sdk_analysis_open_loaded(const char *id, int deck, uint64_t load, az_
         !maps->capture || !maps->current || !maps->publish_phrases) return AZ_UNSUPPORTED;
     struct azstatus_native_receipt receipt = {.size = sizeof receipt, .version = 1};
     if (!api->load_seed || !api->load_seed((unsigned) deck, &receipt) || receipt.load_generation != load) return AZ_STALE;
-    struct sa_job j = {.owner = owner, .loaded = 1, .deck = deck, .load = load, .native_epoch = receipt.epoch, .maps = maps};
+    struct sa_job j = {.owner = owner, .loaded = 1, .deck = deck, .load = load, .native_epoch = receipt.epoch, .maps = maps, .vocals = vocals};
     int rc = maps->capture((unsigned) deck, load, &j.native_map);
     if (rc) { j.maps = NULL; return rc; }
     uint32_t phrases = 0;
     rc = maps->read(&j.native_map.phrases, AZNM_PHRASES, NULL, 0, &phrases);
     if (rc) { sa_job_drop(&j); return rc; }
-    if (phrases) {
+    if (phrases && !vocals) {
         az_analysis_job_v1 existing = {.size = out->size, .version = AZ_DATA_VERSION, .flags = AZ_ANALYSIS_LOADED};
         memcpy(out, &existing, sizeof existing); sa_job_drop(&j); return AZ_NOT_FOUND;
     }
-    if ((rc = sa_grid_snapshot(&j))) { sa_job_drop(&j); return rc; }
+    if (!phrases && (rc = sa_grid_snapshot(&j))) { sa_job_drop(&j); return rc; }
     az_analysis_job_v1 result = {.size = out->size, .version = AZ_DATA_VERSION, .needed = AZ_DATA_PHRASES, .flags = AZ_ANALYSIS_LOADED};
     if (receipt.original_bpm_state == AZN_BPM_READY) result.original_bpm = receipt.original_bpm;
     if (receipt.source_kind == AZ_STATUS_SOURCE_USB1 || receipt.source_kind == AZ_STATUS_SOURCE_USB2) {
         az_track_ref track = {0};
         rc = sa_loaded_ref((unsigned) deck, load, &track);
-        if (!rc) rc = sa_open(owner, &track, &result, 1);
+        if (!rc) rc = sa_open(owner, &track, &result, 1, vocals);
         if (rc) { sa_job_drop(&j); return rc; }
         if (pthread_mutex_lock(&sa_mutex)) { sa_job_drop(&j); return AZ_FAILED; }
         struct sa_job *found = NULL;
@@ -179,7 +211,8 @@ static int sdk_analysis_open_loaded(const char *id, int deck, uint64_t load, az_
         saved.native_grid = j.native_grid; saved.native_grid_bytes = j.native_grid_bytes;
         memcpy(saved.grid_snapshot, j.grid_snapshot, sizeof saved.grid_snapshot);
         *found = saved;
-        rc = sa_loaded_current(found) ? sa_refresh_saved(found) : AZ_STALE;
+        rc = sa_loaded_current(found) ? sa_loaded_needs(found, phrases) : AZ_STALE;
+        result.needed = found->needed;
         if (rc) sa_job_drop(found);
         else memcpy(result.analysis_path, found->grid_snapshot, sizeof result.analysis_path);
         pthread_mutex_unlock(&sa_mutex);
@@ -203,8 +236,9 @@ static int sdk_analysis_open_loaded(const char *id, int deck, uint64_t load, az_
             if (!sa_jobs[i].id && slot == 8) slot = i;
         }
         if (!rc && (slot == 8 || owned >= 4 || sa_serial == UINT64_MAX)) rc = AZ_LIMIT;
-        if (!rc) { j.id = ++sa_serial; rc = sa_stream_paths(&j, source.track_id); }
-        if (!rc) rc = sa_refresh_saved(&j);
+        if (!rc) { j.id = ++sa_serial; rc = sa_stream_paths(&j, source.track_id, 0); }
+        if (!rc) rc = sa_loaded_needs(&j, phrases);
+        result.needed = j.needed;
         if (!rc && !sa_current(&j)) rc = AZ_STALE;
         if (!rc) {
             sa_jobs[slot] = j; result.job = j.id; result.flags |= AZ_ANALYSIS_STREAMING;
@@ -213,7 +247,14 @@ static int sdk_analysis_open_loaded(const char *id, int deck, uint64_t load, az_
         } else sa_job_drop(&j);
         pthread_mutex_unlock(&sa_mutex);
     }
-    if (!rc) { result.flags |= AZ_ANALYSIS_LOADED; result.needed = AZ_DATA_PHRASES; memcpy(out, &result, sizeof result); }
+    if (!rc) { result.flags |= AZ_ANALYSIS_LOADED; memcpy(out, &result, sizeof result); }
     else if (rc == AZ_NOT_FOUND) { result.job = 0; memcpy(out, &result, sizeof result); }
     return rc;
+}
+
+static int sdk_analysis_open_loaded(const char *id, int deck, uint64_t load, az_analysis_job_v1 *out) {
+    return sa_open_loaded(sa_owner(id, "analysis_open_loaded", CM_RA()), deck, load, out, 0);
+}
+static int sdk_analysis_open_loaded_v2(const char *id, int deck, uint64_t load, az_analysis_job_v1 *out) {
+    return sa_open_loaded(sa_owner(id, "analysis_open_loaded_v2", CM_RA()), deck, load, out, 1);
 }

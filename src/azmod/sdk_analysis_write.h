@@ -33,7 +33,8 @@ static inline int sa_framed(const uint8_t *b, size_t n) {
 /* Only absent or explicitly empty PQTZ/PSSI may be replaced. Unknown versions,
  * malformed records and duplicate tags refuse the edit. Returns -1 on refusal. */
 static inline int sa_tag_count(const uint8_t *b, size_t n, const char *tag) {
-    if (!tag || (memcmp(tag, "PQTZ", 4) && memcmp(tag, "PSSI", 4))) return -1;
+    if (!tag || (memcmp(tag, "PQTZ", 4) && memcmp(tag, "PSSI", 4) &&
+                 memcmp(tag, "PVDI", 4) && memcmp(tag, "AZVD", 4))) return -1;
     if (!sa_framed(b, n)) return -1;
     int result = 0, found = 0;
     if (!b) return 0;
@@ -49,6 +50,16 @@ static inline int sa_tag_count(const uint8_t *b, size_t n, const char *tag) {
             if (h < 32 || sa_u16(b + at + 12) > 1 || sa_u16(b + at + 14) != 24) return -1;
             result = (int) sa_u16(b + at + 16);
             if (result > 1024 || (unsigned) result > (len - h) / 24) return -1;
+        } else if (!memcmp(tag, "PVDI", 4)) {
+            if (h != 24 || len < 24 || sa_u16(b + at + 18) != 1 ||
+                !sa_u32(b + at + 12) || !sa_u16(b + at + 16) ||
+                sa_u32(b + at + 12) > sa_u16(b + at + 16)) return -1;
+            result = (int) sa_u32(b + at + 20);
+            if (result < 0 || result > 262144 || (size_t) result != len - h) return -1;
+            for (int i = 0; i < result; i++) if (b[at + h + i] > 4) return -1;
+        } else if (!memcmp(tag, "AZVD", 4)) {
+            if (h != 32 || len != 32) return -1;
+            result = 0; /* provenance can be refreshed only alongside new PVDI */
         } else return -1;
     }
     return result;

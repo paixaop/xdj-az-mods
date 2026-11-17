@@ -1573,6 +1573,10 @@ static const az_library_v1 g_sdk_library = {
     .analysis_commit = sdk_analysis_commit,
     .analysis_close = sdk_analysis_close,
     .analysis_open_loaded = sdk_analysis_open_loaded,
+    .analysis_open_v2 = sdk_analysis_open_v2,
+    .analysis_open_loaded_v2 = sdk_analysis_open_loaded_v2,
+    .vocal_intervals = sdk_vocal_intervals,
+    .vocal_intervals_loaded = sdk_vocal_intervals_loaded,
 #endif
     .on_deck_status = sdk_on_deck_status,
     .deck_status_release = sdk_deck_status_release,

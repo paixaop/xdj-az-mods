@@ -12,6 +12,8 @@ case ${SAN:-plain} in
 esac
 ${HOST_CC:-cc} "${flags[@]}" -Isrc/azmod tests/unit/sdkanalysis_write_test.c -o "$task_tmp/write"
 "$task_tmp/write"
+${HOST_CC:-cc} "${flags[@]}" -Isrc/azmod tests/unit/sdkvocal_test.c -lm -o "$task_tmp/vocals"
+"$task_tmp/vocals"
 if [ "$(uname -s)" = Linux ]; then
     ${HOST_CC:-cc} "${flags[@]}" -Wno-unused-function -Wno-missing-field-initializers -rdynamic \
         -DLIB_INC='"sdk_lib.c"' -Itests/unit -Isrc/azmod tests/unit/sdkanalysis_service_test.c \

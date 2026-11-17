@@ -806,6 +806,17 @@ typedef struct az_analysis_job_v1 {
 #define AZ_ANALYSIS_NEEDS_LINK 1u /* new ANLZ locator needs native spool application */
 #define AZ_ANALYSIS_LOADED 2u /* lease pins this native load and grid; commit refreshes native phrases */
 #define AZ_ANALYSIS_STREAMING 4u /* completed Beatport download; track ref is intentionally empty */
+#define AZ_ANALYSIS_VOCALS 32u /* analysis job needed bit; use vocal_intervals to read */
+/* Half-open intervals in original-track seconds, independent of tempo/playback rate. */
+typedef struct az_vocal_interval { double start_s, stop_s; } az_vocal_interval;
+enum { AZ_VOCAL_PVDI = 0, AZ_VOCAL_SPECTRAL = 1 };
+typedef struct az_vocal_snapshot_v1 {
+    uint32_t size, version;
+    az_component_info info;
+    uint32_t interval_count, frame_count, hop_samples, sample_rate;
+    uint32_t threshold, method; /* confidence >= threshold; method identifies generated heuristic */
+    double analyzed_s; /* coverage, not library duration rounded to seconds */
+} az_vocal_snapshot_v1;
 
 /* One shared library service. All consumers use the same source identities, bounded cache,
  * snapshots, event journal and native command policy. No per-mod data backend is created. */
@@ -893,6 +904,23 @@ typedef struct az_library_v1 {
      * Close/commit uses the same job API. Stale loads/maps cannot be published. */
     int (*analysis_open_loaded)(const char *id, int deck, uint64_t load_epoch,
                                 az_analysis_job_v1 *out);
+    /* Worker-only extension: independently fills missing phrases and vocals.
+     * needed may contain AZ_DATA_GRID, AZ_DATA_PHRASES, AZ_ANALYSIS_VOCALS.
+     * TA02 publication; existing populated components are never replaced. */
+    int (*analysis_open_v2)(const char *id, const az_track_ref *track, az_analysis_job_v1 *out);
+    int (*analysis_open_loaded_v2)(const char *id, int deck, uint64_t load_epoch,
+                                  az_analysis_job_v1 *out);
+    /* Worker-only copied reads; no ticket or native pointer. Initialize out->size.
+     * AZ_OK includes a valid instrumental analysis (interval_count=0).
+     * AZ_NOT_FOUND means no populated PVDI. AZ_LIMIT fills out with the required
+     * interval_count and copies no intervals; NULL/0 is a valid sizing request.
+     * Retry a sizing read if the revision changes. Unknown PVDI versions return
+     * AZ_UNSUPPORTED, malformed data AZ_FAILED. No partial output on other errors.
+     * Loaded reads support qualified USB and completed Beatport resources. */
+    int (*vocal_intervals)(const char *id, const az_track_ref *track,
+                           az_vocal_snapshot_v1 *out, az_vocal_interval *intervals, uint32_t capacity);
+    int (*vocal_intervals_loaded)(const char *id, int deck, uint64_t load_epoch,
+                                  az_vocal_snapshot_v1 *out, az_vocal_interval *intervals, uint32_t capacity);
 } az_library_v1;
 #define AZ_LIB_HAS(service, field) \
     ((service) && (service)->abi == AZ_LIBRARY_ABI && \

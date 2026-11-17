@@ -45,7 +45,7 @@ static void fixture_source_close(uint64_t token) { assert(token == 7); fixture_s
 static const struct azn_analysis_source_api *fixture_source(void) {
     static const struct azn_analysis_source_api api = {.size=sizeof api,.version=1,.open=fixture_source_open,.current=fixture_source_current,.close=fixture_source_close}; return &api;
 }
-static int fixture_current = 1, fixture_published, fixture_released;
+static int fixture_current = 1, fixture_published, fixture_released, fixture_native_phrases;
 static int sa_loaded_ref(unsigned deck, uint64_t load, az_track_ref *out) {
     if (deck || load != 44) return AZ_STALE;
     *out = fixture_loaded_ref; return AZ_OK;
@@ -59,7 +59,7 @@ static int fixture_valid(unsigned deck, uint64_t load, const struct aznm_packet 
     return !deck && load == 44 && map->owner == 1 && fixture_current ? AZ_OK : AZ_STALE;
 }
 static int fixture_read(const struct aznm_component *c, unsigned kind, void *rows, uint32_t cap, uint32_t *count) {
-    (void)c; *count = kind == AZNM_GRID ? 2 : 0;
+    (void)c; *count = kind == AZNM_GRID ? 2 : (uint32_t) fixture_native_phrases;
     if (rows && kind == AZNM_GRID) { assert(cap >= 2); az_beat beats[2] = {{0,120,1,0},{0.5,120,2,0}}; memcpy(rows, beats, sizeof beats); }
     return AZ_OK;
 }
@@ -186,7 +186,7 @@ int main(void) {
         assert(f);
         assert(!fseek(f, 0, SEEK_END));
         long size = ftell(f);
-        assert(size > 16 && size < 300000);
+        assert(size > 16 && size < 600000);
         rewind(f);
         uint8_t *generated = malloc((size_t) size);
         assert(generated);
@@ -195,7 +195,9 @@ int main(void) {
         assert(!unlink(path));
         snprintf(path, sizeof path, "%s/sdb1/analysis.EXT", g_media);
         assert(!unlink(path));
-        assert(sdk_analysis_open("mod-a", &ref, &job) == AZ_OK);
+        int opened = !memcmp(generated, "TA02", 4) ? sdk_analysis_open_v2("mod-a", &ref, &job) :
+            sdk_analysis_open("mod-a", &ref, &job);
+        assert(opened == AZ_OK);
         assert(sdk_analysis_commit("mod-a", job.job, generated, (uint32_t) size) == AZ_OK);
         free(generated);
         puts("Actual whole-audio worker output persisted through the production core service");
@@ -300,5 +302,79 @@ int main(void) {
     puts("Loaded analysis: native grid snapshot, stale-load refusal, refresh and cache reuse passed");
     puts("Missing ANLZ location allocated and linked; conditional spool preserves later DJ edits");
     puts("Analysis leases, source mutation refusal, saved grid/phrases and existing-map refusal passed");
+    /* New clients independently request missing vocals even with native phrases. */
+    fixture_source_kind = AZ_STATUS_SOURCE_USB1; fixture_native_phrases = 1;
+    az_vocal_snapshot_v1 vocals = {.size = sizeof vocals}; az_vocal_interval intervals[4];
+    assert(sdk_vocal_intervals("mod-a", &ref, &vocals, intervals, 4) == AZ_NOT_FOUND);
+    assert(sdk_analysis_open_loaded_v2("mod-a", 0, 44, &job) == AZ_OK);
+    assert(job.needed == AZ_ANALYSIS_VOCALS && !job.analysis_path[0]);
+    uint8_t vocal_bundle[70] = {0}; memcpy(vocal_bundle, "TA02", 4);
+    sa_put32(vocal_bundle + 12, 46); sa_put32(vocal_bundle + 16, 44100); sa_put32(vocal_bundle + 20, 44100);
+    uint8_t *pvdi = vocal_bundle + 24; memcpy(pvdi, "PVDI", 4);
+    sa_put32(pvdi + 4, 24); sa_put32(pvdi + 8, 46); sa_put32(pvdi + 12, 1024);
+    sa_put16(pvdi + 16, 22050); sa_put16(pvdi + 18, 1); sa_put32(pvdi + 20, 22);
+    memset(pvdi + 24 + 3, 4, 8); memset(pvdi + 24 + 20, 4, 2);
+    char vocals_path[1024], saved_dat[1024], saved_ext[1024];
+    snprintf(vocals_path, sizeof vocals_path, "%s/sdb1/DJ.2EX", g_media);
+    snprintf(saved_dat, sizeof saved_dat, "%s/sdb1/DJ.DAT", g_media);
+    snprintf(saved_ext, sizeof saved_ext, "%s/sdb1/DJ.EXT", g_media);
+    uint64_t before_dat = st_disk_sig(saved_dat), before_ext = st_disk_sig(saved_ext);
+    int published_before = fixture_published;
+    assert(sdk_analysis_commit("mod-a", job.job, vocal_bundle, sizeof vocal_bundle) == AZ_OK);
+    assert(st_disk_sig(saved_dat) == before_dat && st_disk_sig(saved_ext) == before_ext && fixture_published == published_before);
+    assert(sdk_analysis_open_loaded_v2("mod-a", 0, 44, &job) == AZ_NOT_FOUND && !job.job && !job.needed);
+    assert(sdk_vocal_intervals("mod-b", &ref, &vocals, intervals, 4) == AZ_INVALID);
+    g_cm_on_ui = 1;
+    assert(sdk_vocal_intervals("mod-a", &ref, &vocals, intervals, 4) == AZ_INVALID);
+    g_cm_on_ui = 0;
+    assert(sdk_vocal_intervals("mod-a", &ref, &vocals, NULL, 0) == AZ_LIMIT && vocals.interval_count == 2);
+    assert(sdk_vocal_intervals_loaded("mod-a", 0, 43, &vocals, intervals, 4) == AZ_STALE);
+    assert(sdk_vocal_intervals_loaded("mod-a", 0, 44, &vocals, intervals, 4) == AZ_OK);
+    assert(vocals.method == AZ_VOCAL_SPECTRAL && vocals.interval_count == 2);
+    assert(compare_timestamps(intervals[0].start_s, 3072.0 / 22050, 1, 22050, 1) == AZ_TIME_EQUAL);
+    assert(compare_timestamps(intervals[1].stop_s, 1.0, 1, 44100, 1) == AZ_TIME_EQUAL);
+    /* Existing PVDI is preserved when phrases and the DAT are absent. */
+    uint64_t before_vocals = st_disk_sig(vocals_path);
+    assert(!unlink(saved_dat) && !unlink(saved_ext)); fixture_native_phrases = 0;
+    assert(sdk_analysis_open_loaded_v2("mod-a", 0, 44, &job) == AZ_OK && job.needed == AZ_DATA_PHRASES);
+    uint8_t phrase_v2[80] = {0}; memcpy(phrase_v2, "TA02", 4); sa_put32(phrase_v2 + 8, 56);
+    sa_put32(phrase_v2 + 16, 44100); sa_put32(phrase_v2 + 20, 44100); memcpy(phrase_v2 + 24, phrase, 56);
+    assert(sdk_analysis_commit("mod-a", job.job, phrase_v2, sizeof phrase_v2) == AZ_OK);
+    assert(st_disk_sig(vocals_path) == before_vocals);
+    /* No ANLZ at all: one loaded job publishes grid, phrases and vocals. */
+    assert(!unlink(saved_dat) && !unlink(saved_ext) && !unlink(vocals_path));
+    assert(sdk_analysis_open_loaded_v2("mod-a", 0, 44, &job) == AZ_OK && job.needed == (AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS));
+    uint8_t combined[126] = {0}; memcpy(combined, vocal_bundle, 24); sa_put32(combined + 8, 56);
+    memcpy(combined + 24, phrase, 56); memcpy(combined + 80, pvdi, 46);
+    /* Malformed and stale publications leave all target files untouched. */
+    combined[80 + 24] = 5;
+    assert(sdk_analysis_commit("mod-a", job.job, combined, sizeof combined) == AZ_INVALID);
+    combined[80 + 24] = 0; fixture_current = 0;
+    assert(sdk_analysis_commit("mod-a", job.job, combined, sizeof combined) == AZ_STALE);
+    fixture_current = 1;
+    assert(!st_disk_sig(saved_dat) && !st_disk_sig(saved_ext) && !st_disk_sig(vocals_path));
+    assert(sdk_analysis_commit("mod-a", job.job, combined, sizeof combined) == AZ_OK);
+    /* Saved phrases can refresh, then a vocal-only job retains the new map. */
+    assert(!unlink(vocals_path));
+    assert(sdk_analysis_open_loaded_v2("mod-a", 0, 44, &job) == AZ_OK && job.needed == AZ_ANALYSIS_VOCALS);
+    memset(vocal_bundle + 24 + 24, 0, 22);
+    assert(sdk_analysis_commit("mod-a", job.job, vocal_bundle, sizeof vocal_bundle) == AZ_OK);
+    assert(sdk_vocal_intervals("mod-a", &ref, &vocals, NULL, 0) == AZ_OK && !vocals.interval_count && vocals.frame_count == 22);
+    assert(sdk_analysis_open_v2("mod-a", &ref, &job) == AZ_NOT_FOUND);
+    /* A PVDI created while a job is running invalidates the lease. */
+    assert(!unlink(vocals_path)); fixture_native_phrases = 1;
+    assert(sdk_analysis_open_loaded_v2("mod-a", 0, 44, &job) == AZ_OK);
+    size_t direct_n = 0; uint8_t *direct = sa_merge(NULL, 0, pvdi, 46, &direct_n); assert(direct);
+    analysis_write(vocals_path, direct, direct_n); free(direct);
+    assert(sdk_analysis_commit("mod-a", job.job, vocal_bundle, sizeof vocal_bundle) == AZ_STALE);
+    assert(sdk_analysis_close("mod-a", job.job) == AZ_OK);
+    assert(sdk_vocal_intervals("mod-a", &ref, &vocals, intervals, 4) == AZ_OK && vocals.method == AZ_VOCAL_PVDI);
+    /* Streaming vocal-only output is readable through the loaded API. */
+    fixture_source_kind = AZ_STATUS_SOURCE_STREAMING;
+    snprintf(path, sizeof path, "%s/analysis/beatport-0/analysis.EXT", st_test_state); assert(!unlink(path));
+    assert(sdk_analysis_open_loaded_v2("mod-a", 0, 44, &job) == AZ_OK && job.needed == AZ_ANALYSIS_VOCALS);
+    assert(sdk_analysis_commit("mod-a", job.job, vocal_bundle, sizeof vocal_bundle) == AZ_OK);
+    assert(sdk_vocal_intervals_loaded("mod-a", 0, 44, &vocals, NULL, 0) == AZ_OK && !vocals.interval_count);
+    puts("Vocal SDK: PVDI preference, vocal-only/combined publication, instrumentals, stale races and Beatport reads passed");
     return 0;
 }

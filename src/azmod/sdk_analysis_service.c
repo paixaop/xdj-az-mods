@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* Public worker-only source leases and ANLZ publication. Included by community.c. */
 #include "sdk_analysis_write.h"
+#include "sdk_vocals.h"
 #include "../common/azstatus_maps.h"
 #include "../common/azstatus_native.h"
 #include "../common/azanalysis_native.h"
@@ -8,9 +9,11 @@ struct sa_job {
     uint64_t id;
     int owner, needs_link;
     struct st_source source;
-    char database[1024], audio[1024], dat[1024], ext[1024];
+    char database[1024], audio[1024], dat[1024], ext[1024], ex2[1024];
     char relative_audio[2048], relative_dat[1024];
-    uint64_t signatures[4];
+    uint64_t signatures[5];
+    uint32_t needed;
+    int vocals;
     int loaded, deck, streaming;
     uint64_t load, native_epoch, audio_token;
     const struct azn_analysis_source_api *audio_api;
@@ -33,6 +36,7 @@ static int sa_owner(const char *id, const char *name, uintptr_t caller) {
     return (g_cm_on_ui || g_sdk_on_tap_thread) ? -1 : st_mod_owner(id, caller, name);
 }
 static int sa_current(const struct sa_job *j) {
+    if (j->vocals && st_disk_sig(j->ex2) != j->signatures[4]) return 0;
     if (j->loaded && !sa_loaded_current(j)) return 0;
     if (j->streaming) return st_disk_sig(j->audio) == j->signatures[1] &&
         st_disk_sig(j->dat) == j->signatures[2] && st_disk_sig(j->ext) == j->signatures[3];
@@ -47,6 +51,11 @@ static int sa_current(const struct sa_job *j) {
     if (!st_source_path(source.mount, j->relative_audio, audio) || strcmp(audio, j->audio) ||
         !st_source_path(source.mount, j->relative_dat, dat) || strcmp(dat, j->dat) ||
         !st_source_path(source.mount, relative, ext) || strcmp(ext, j->ext)) return 0;
+    if (j->vocals) {
+        memcpy(relative + len - 4, ".2EX", 5);
+        char ex2[1024];
+        if (!st_source_path(source.mount, relative, ex2) || strcmp(ex2, j->ex2)) return 0;
+    }
     return st_resolution_source_equal(&source, &j->source) && st_database_quiet(j->database) &&
            st_disk_sig(j->database) == j->signatures[0] && st_disk_sig(j->audio) == j->signatures[1] &&
            st_disk_sig(j->dat) == j->signatures[2] && st_disk_sig(j->ext) == j->signatures[3];
@@ -67,7 +76,7 @@ static uint8_t *sa_read(const char *path, size_t *size, int *failed) {
     }
     return bytes;
 }
-static int sa_open(int owner, const az_track_ref *track, az_analysis_job_v1 *out, int loaded) {
+static int sa_open(int owner, const az_track_ref *track, az_analysis_job_v1 *out, int loaded, int vocals) {
     if (owner < 0 || !track || !out || st_record_size(out) < sizeof *out ||
         st_record_size(track) < sizeof *track || track->version != AZ_DATA_VERSION ||
         !track->track_id || track->source_id < 1 || track->source_id > 2) return AZ_INVALID;
@@ -78,7 +87,7 @@ static int sa_open(int owner, const az_track_ref *track, az_analysis_job_v1 *out
     while (slot < 8 && sa_jobs[slot].id) slot++;
     int rc = AZ_LIMIT;
     if (slot == 8 || owned >= 4 || sa_serial == UINT64_MAX) goto done;
-    struct sa_job j = {.owner = owner};
+    struct sa_job j = {.owner = owner, .vocals = vocals};
     struct st_resolution row = {0};
     rc = AZ_STALE;
     if (st_source_read((int) track->source_id - 1, &j.source)) goto done;
@@ -108,6 +117,9 @@ static int sa_open(int owner, const az_track_ref *track, az_analysis_job_v1 *out
     snprintf(relative, sizeof relative, "%s", row.analysis);
     memcpy(relative + strlen(relative) - 4, ".EXT", 5);
     if (!st_source_path(j.source.mount, relative, j.ext)) goto done;
+    memcpy(relative + strlen(relative) - 4, ".2EX", 5);
+    if (!st_source_path(j.source.mount, relative, j.ex2)) goto done;
+    j.signatures[4] = st_disk_sig(j.ex2);
     j.signatures[1] = st_disk_sig(j.audio);
     j.signatures[2] = st_disk_sig(j.dat);
     j.signatures[3] = st_disk_sig(j.ext);
@@ -120,11 +132,18 @@ static int sa_open(int owner, const az_track_ref *track, az_analysis_job_v1 *out
     uint8_t *dat = sa_read(j.dat, &sizes[0], &failed), *ext = sa_read(j.ext, &sizes[1], &failed);
     int beats = sa_tag_count(dat, sizes[0], "PQTZ"), phrases = sa_tag_count(ext, sizes[1], "PSSI");
     int dat_phrases = sa_tag_count(dat, sizes[0], "PSSI");
+    size_t vn = 0;
+    uint8_t *vocal = vocals ? sa_read(j.ex2, &vn, &failed) : NULL;
+    int vocal_count = vocals ? sa_tag_count(vocal, vn, "PVDI") : 1;
+    free(vocal);
     free(dat);
     free(ext);
     rc = AZ_FAILED;
-    if (failed || beats < 0 || phrases < 0 || dat_phrases < 0) goto done;
-    if (!loaded && (phrases || dat_phrases)) {
+    if (failed || beats < 0 || phrases < 0 || dat_phrases < 0 || vocal_count < 0 || (phrases && dat_phrases)) goto done;
+    j.needed = (phrases || dat_phrases ? 0 : AZ_DATA_PHRASES) |
+        (vocal_count ? 0 : AZ_ANALYSIS_VOCALS);
+    if ((j.needed & AZ_DATA_PHRASES) && !beats) j.needed |= AZ_DATA_GRID;
+    if (!loaded && !j.needed) {
         if (j.needs_link) {
             if (!sa_current(&j) || !sa_link_analysis(&j)) goto done;
         }
@@ -139,7 +158,7 @@ static int sa_open(int owner, const az_track_ref *track, az_analysis_job_v1 *out
     }
     j.id = ++sa_serial;
     sa_jobs[slot] = j;
-    az_analysis_job_v1 result = {.size = out->size, .version = AZ_DATA_VERSION, .needed = (phrases || dat_phrases ? 0 : AZ_DATA_PHRASES) | (beats ? 0 : AZ_DATA_GRID), .job = j.id, .flags = j.needs_link ? AZ_ANALYSIS_NEEDS_LINK : 0, .track = *track, .original_bpm = row.metadata.original_bpm};
+    az_analysis_job_v1 result = {.size = out->size, .version = AZ_DATA_VERSION, .needed = j.needed, .job = j.id, .flags = j.needs_link ? AZ_ANALYSIS_NEEDS_LINK : 0, .track = *track, .original_bpm = row.metadata.original_bpm};
     memcpy(result.audio_path, j.audio, sizeof result.audio_path);
     memcpy(result.analysis_path, j.dat, sizeof result.analysis_path);
     memcpy(out, &result, sizeof result);
@@ -149,7 +168,10 @@ done:
     return rc;
 }
 static int sdk_analysis_open(const char *id, const az_track_ref *track, az_analysis_job_v1 *out) {
-    return sa_open(sa_owner(id, "analysis_open", CM_RA()), track, out, 0);
+    return sa_open(sa_owner(id, "analysis_open", CM_RA()), track, out, 0, 0);
+}
+static int sdk_analysis_open_v2(const char *id, const az_track_ref *track, az_analysis_job_v1 *out) {
+    return sa_open(sa_owner(id, "analysis_open_v2", CM_RA()), track, out, 0, 1);
 }
 /* Directory descriptors bind staging/publication to the validated USB tree.
  * Create missing ANLZ directories without following any link component. */
@@ -247,108 +269,100 @@ static int sa_link_analysis(const struct sa_job *job) {
 }
 static int sdk_analysis_commit(const char *id, uint64_t job, const void *data, uint32_t size) {
     int owner = sa_owner(id, "analysis_commit", CM_RA());
-    if (owner < 0 || !job || !data || size < 16 || size > 16 + 24 + 32768 * 8 + 32 + 1024 * 24) return AZ_INVALID;
+    if (owner < 0 || !job || !data || size < 16 || size > 24 + 24 + 32768 * 8 + 32 + 1024 * 24 + 24 + SV_FRAMES_MAX) return AZ_INVALID;
     const uint8_t *bytes = data;
-    uint32_t gn = sa_u32(bytes + 4), pn = sa_u32(bytes + 8), rate = sa_u32(bytes + 12);
-    if (memcmp(bytes, "TA01", 4) || gn > size - 16 || pn != size - 16 - gn ||
-        pn < 32 || (rate != 44100 && rate != 48000)) return AZ_INVALID;
-    const uint8_t *grid = bytes + 16, *phrase = grid + gn;
-    if (memcmp(phrase, "PSSI", 4) || sa_u32(phrase + 4) != 32 || sa_u32(phrase + 8) != pn ||
-        sa_u16(phrase + 12) != 0 || sa_u16(phrase + 14) != 24 || !sa_u16(phrase + 16) ||
+    int v2 = !memcmp(bytes, "TA02", 4);
+    uint32_t header = v2 ? 24 : 16;
+    if (size < header || (!v2 && memcmp(bytes, "TA01", 4))) return AZ_INVALID;
+    uint32_t gn = sa_u32(bytes + 4), pn = sa_u32(bytes + 8), vn = v2 ? sa_u32(bytes + 12) : 0;
+    uint32_t rate = sa_u32(bytes + (v2 ? 16 : 12)), frames = v2 ? sa_u32(bytes + 20) : 0;
+    if (gn > size - header || pn > size - header - gn || vn != size - header - gn - pn ||
+        (rate != 44100 && rate != 48000) || (v2 && (!frames || frames > rate * 1200u)) || (!pn && !vn)) return AZ_INVALID;
+    const uint8_t *grid = bytes + header, *phrase = grid + gn, *vocal = phrase + pn;
+    if ((pn && (pn < 32 || memcmp(phrase, "PSSI", 4) || sa_u32(phrase + 4) != 32 || sa_u32(phrase + 8) != pn ||
+                sa_u16(phrase + 12) != 0 || sa_u16(phrase + 14) != 24 || !sa_u16(phrase + 16))) ||
         (gn && (gn < 24 || memcmp(grid, "PQTZ", 4) || sa_u32(grid + 4) != 24 || sa_u32(grid + 8) != gn))) return AZ_INVALID;
+    if (vn) {
+        az_vocal_snapshot_v1 v = {0};
+        if (sv_tag(vocal, vn, &v) || v.frame_count !=
+            ((uint64_t) frames * v.sample_rate + (uint64_t) rate * v.hop_samples - 1) / ((uint64_t) rate * v.hop_samples)) return AZ_INVALID;
+    }
     if (pthread_mutex_trylock(&sa_mutex)) return AZ_BUSY;
     struct sa_job *j = NULL;
-    for (unsigned i = 0; i < 8; i++)
-        if (sa_jobs[i].id == job && sa_jobs[i].owner == owner) j = &sa_jobs[i];
+    for (unsigned i = 0; i < 8; i++) if (sa_jobs[i].id == job && sa_jobs[i].owner == owner) j = &sa_jobs[i];
     int rc = AZ_STALE;
-    uint8_t *dat = NULL, *ext = NULL, *newdat = NULL, *newext = NULL;
-    struct sa_staged td = {.dir = -1}, te = {.dir = -1};
+    uint8_t *dat = NULL, *ext = NULL, *ex2 = NULL, *newdat = NULL, *newext = NULL, *newex2 = NULL;
+    struct sa_staged td = {.dir = -1}, te = {.dir = -1}, tv = {.dir = -1};
     if (!j || !sa_current(j)) goto done;
-    size_t dn = 0, en = 0, ndn = 0, nen = 0;
+    if (v2 != j->vocals || !!pn != !!(j->needed & AZ_DATA_PHRASES) ||
+        !!vn != !!(j->needed & AZ_ANALYSIS_VOCALS) || (gn && !(j->needed & AZ_DATA_GRID))) { rc = AZ_INVALID; goto done; }
+    size_t dn = 0, en = 0, vfn = 0, ndn = 0, nen = 0, nvn = 0;
     int failed = 0;
-    dat = sa_read(j->dat, &dn, &failed);
-    ext = sa_read(j->ext, &en, &failed);
-    if (failed) {
-        rc = AZ_FAILED;
-        goto done;
-    }
-    int existing = sa_tag_count(dat, dn, "PQTZ");
-    if (j->loaded) {
-        if (gn || !j->native_grid || !j->native_grid_bytes) { rc = AZ_INVALID; goto done; }
-        if (!existing) { grid = j->native_grid; gn = (uint32_t) j->native_grid_bytes; }
+    dat = sa_read(j->dat, &dn, &failed); ext = sa_read(j->ext, &en, &failed);
+    if (vn) ex2 = sa_read(j->ex2, &vfn, &failed);
+    if (failed) { rc = AZ_FAILED; goto done; }
+    if (pn) {
+        int existing = sa_tag_count(dat, dn, "PQTZ");
+        if (j->loaded) {
+            if (gn || !j->native_grid || !j->native_grid_bytes) { rc = AZ_INVALID; goto done; }
+            if (!existing) { grid = j->native_grid; gn = (uint32_t) j->native_grid_bytes; }
+            else {
+                uint32_t saved_size = 0;
+                const uint8_t *saved_grid = sa_find_tag(dat, dn, "PQTZ", &saved_size);
+                if (!sa_grid_same(j, saved_grid, saved_size)) goto done;
+            }
+        }
+        if (existing < 0 || sa_tag_count(ext, en, "PSSI") != 0 || sa_tag_count(dat, dn, "PSSI") != 0 ||
+            (gn && existing) || (!gn && !existing)) goto done;
+        struct st_data *parsed = calloc(1, sizeof *parsed);
+        if (!parsed) { rc = AZ_FAILED; goto done; }
+        if (gn) rc = st_section(parsed, grid, 24, gn, AZ_DATA_GRID);
         else {
             uint32_t saved_size = 0;
-            const uint8_t *saved_grid = sa_find_tag(dat, dn, "PQTZ", &saved_size);
-            if (!sa_grid_same(j, saved_grid, saved_size)) goto done;
+            const uint8_t *saved = sa_find_tag(dat, dn, "PQTZ", &saved_size);
+            rc = saved ? st_section(parsed, saved, sa_u32(saved + 4), saved_size, AZ_DATA_GRID) : AZ_FAILED;
         }
+        if (!rc) rc = st_section(parsed, phrase, 32, pn, AZ_DATA_PHRASES);
+        if (!rc && (!parsed->view.beat_count || !parsed->view.phrase_count ||
+                    sa_u16(phrase + 26) > parsed->view.beat_count || pn != 32 + parsed->view.phrase_count * 24 ||
+                    (gn && gn != 24 + parsed->view.beat_count * 8))) rc = AZ_INVALID;
+        for (unsigned i = 0; !rc && i < parsed->view.beat_count; i++)
+            if (parsed->beats[i].beat_in_bar < 1 || parsed->beats[i].beat_in_bar > 4 ||
+                !isfinite(parsed->beats[i].bpm) || parsed->beats[i].bpm <= 0) rc = AZ_INVALID;
+        free(parsed);
+        if (rc) goto done;
+        newext = sa_merge(ext, en, phrase, pn, &nen);
+        if (gn) newdat = sa_merge(dat, dn, grid, gn, &ndn);
+        if (!newext || (gn && !newdat)) { rc = AZ_FAILED; goto done; }
+    } else if (gn) { rc = AZ_INVALID; goto done; }
+    if (vn) {
+        if (sa_tag_count(ex2, vfn, "PVDI") != 0) { rc = AZ_STALE; goto done; }
+        newex2 = sa_merge(ex2, vfn, vocal, vn, &nvn);
+        uint8_t marker[32] = {0};
+        memcpy(marker, "AZVD", 4); sa_put32(marker + 4, 32); sa_put32(marker + 8, 32);
+        sa_put32(marker + 12, 1); sa_put32(marker + 16, AZ_VOCAL_SPECTRAL); sa_put32(marker + 20, sv_hash(vocal, vn));
+        sa_put32(marker + 24, frames); sa_put32(marker + 28, rate);
+        size_t marked_n = 0;
+        uint8_t *marked = newex2 ? sa_merge(newex2, nvn, marker, sizeof marker, &marked_n) : NULL;
+        free(newex2); newex2 = marked; nvn = marked_n;
+        if (!newex2) { rc = AZ_FAILED; goto done; }
     }
-    if (existing < 0 || sa_tag_count(ext, en, "PSSI") != 0 || (gn && existing) || (!gn && !existing)) goto done;
-    struct st_data *parsed = calloc(1, sizeof *parsed);
-    if (!parsed) {
-        rc = AZ_FAILED;
-        goto done;
-    }
-    if (gn) rc = st_section(parsed, grid, 24, gn, AZ_DATA_GRID);
-    else {
-        rc = AZ_FAILED;
-        for (size_t at = sa_u32(dat + 4); at < dn; at += sa_u32(dat + at + 8))
-            if (!memcmp(dat + at, "PQTZ", 4)) rc = st_section(parsed, dat + at, sa_u32(dat + at + 4), sa_u32(dat + at + 8), AZ_DATA_GRID);
-    }
-    if (!rc) rc = st_section(parsed, phrase, 32, pn, AZ_DATA_PHRASES);
-    if (!rc && (!parsed->view.beat_count || !parsed->view.phrase_count ||
-                sa_u16(phrase + 26) > parsed->view.beat_count ||
-                pn != 32 + parsed->view.phrase_count * 24 || (gn && gn != 24 + parsed->view.beat_count * 8))) rc = AZ_INVALID;
-    /* Validate grid positions and tempos as well as increasing timestamp rows. */
-    for (unsigned i = 0; !rc && i < parsed->view.beat_count; i++)
-        if (parsed->beats[i].beat_in_bar < 1 || parsed->beats[i].beat_in_bar > 4 ||
-            !isfinite(parsed->beats[i].bpm) || parsed->beats[i].bpm <= 0) rc = AZ_INVALID;
-    free(parsed);
-    if (rc) goto done;
-    newext = sa_merge(ext, en, phrase, pn, &nen);
-    if (gn) newdat = sa_merge(dat, dn, grid, gn, &ndn);
-    if (!newext || (gn && !newdat)) {
-        rc = AZ_FAILED;
-        goto done;
-    }
-    if ((gn && !sa_stage(j, j->dat, newdat, ndn, &td)) || !sa_stage(j, j->ext, newext, nen, &te)) {
-        rc = AZ_FAILED;
-        goto done;
-    }
-    if (!sa_current(j)) {
-        rc = AZ_STALE;
-        goto done;
-    }
-    /* Grid is durable before any phrases reference it. If the second rename fails,
-     * the valid generated grid remains and a subsequent job can fill PSSI only. */
-    if (gn && !sa_publish(&td)) {
-        rc = AZ_FAILED;
-        goto done;
-    }
-    if (!sa_publish(&te)) {
-        rc = AZ_FAILED;
-        goto done;
-    }
-    /* Saving changes fingerprints even if the native edition retires immediately
-     * afterwards. A retry opens the durable map and refreshes a new valid load. */
-    j->signatures[2] = st_disk_sig(j->dat);
-    j->signatures[3] = st_disk_sig(j->ext);
-    if (j->loaded) {
+    if ((gn && !sa_stage(j, j->dat, newdat, ndn, &td)) || (pn && !sa_stage(j, j->ext, newext, nen, &te)) ||
+        (vn && !sa_stage(j, j->ex2, newex2, nvn, &tv))) { rc = AZ_FAILED; goto done; }
+    if (!sa_current(j)) { rc = AZ_STALE; goto done; }
+    /* Publish independently reusable components. A partial failure leaves valid
+     * files; the next lease requests only the components still missing. */
+    if ((gn && !sa_publish(&td)) || (pn && !sa_publish(&te)) || (vn && !sa_publish(&tv))) { rc = AZ_FAILED; goto done; }
+    j->signatures[2] = st_disk_sig(j->dat); j->signatures[3] = st_disk_sig(j->ext); j->signatures[4] = st_disk_sig(j->ex2);
+    if (j->loaded && pn) {
         rc = j->maps->publish_phrases((unsigned) j->deck, j->load, &j->native_map, phrase, pn);
         if (rc) goto done;
     }
-    if (j->needs_link && !sa_link_analysis(j)) {
-        rc = AZ_FAILED;
-        goto done;
-    }
-    sa_job_drop(j);
-    rc = AZ_OK;
+    if (j->needs_link && !sa_link_analysis(j)) { rc = AZ_FAILED; goto done; }
+    sa_job_drop(j); rc = AZ_OK;
 done:
-    sa_stage_drop(&td);
-    sa_stage_drop(&te);
-    free(dat);
-    free(ext);
-    free(newdat);
-    free(newext);
+    sa_stage_drop(&td); sa_stage_drop(&te); sa_stage_drop(&tv);
+    free(dat); free(ext); free(ex2); free(newdat); free(newext); free(newex2);
     pthread_mutex_unlock(&sa_mutex);
     return rc;
 }
@@ -368,3 +382,4 @@ static int sdk_analysis_close(const char *id, uint64_t job) {
 }
 
 #include "sdk_analysis_loaded.c"
+#include "sdk_vocal_service.c"
