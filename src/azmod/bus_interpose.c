@@ -74,6 +74,7 @@ static uint16_t crc16_x25(const uint8_t *data, size_t len) {
     }
     return crc ^ 0xFFFF;
 }
+#include "sdk_panel_bus.h"
 /* ---- FD tracking ------------------------------------------------------------
  * open() records the bus descriptors by number, and read() and ioctl() act on any
  * descriptor with that number: decode the mixer frame, swallow bits, re-stamp CRCs,
@@ -97,6 +98,7 @@ static void bus_fd_drop(int *slot, int fd) {
 static void bus_fd_forget(int fd) {
     if (fd < 0)
         return;
+    panel_forget(fd);
     bus_fd_drop(&g_mixer_fd, fd);
     bus_fd_drop(&g_erp_fd, fd);
     for (int i = 0; i < g_gpiodrv_fd_count; i++)
@@ -116,10 +118,12 @@ static void bus_fd_note(int fd, const char *path) {
     tg_note(fd, path);
     if (strcmp(path, "/dev/subucom_spi3.0") == 0) {
         g_mixer_fd = fd; /* panel-input bus: knob position @34, click @31 */
+        if (g_ep147_build == EPB_V200) panel_note(fd, 0);
         dbg("[%ld] open(%s) -> fd=%d (g_mixer_fd set)\n", (long) time(NULL), path, fd);
     }
     if (strcmp(path, "/dev/subucom_spi1.0") == 0) {
         g_erp_fd = fd; /* ErP bus: deck buttons, including the pads */
+        if (g_ep147_build == EPB_V200) panel_note(fd, 1);
         dbg("[%ld] open(%s) -> fd=%d (g_erp_fd set)\n", (long) time(NULL), path, fd);
     }
     if (strcmp(path, "/dev/gpiodrv") == 0)
@@ -1441,11 +1445,32 @@ static void bus_erp_frame(uint8_t *eb, ssize_t r) {
         frame_crc_stamp(eb, 28);
 }
 
+static int (*next_epoll_ctl)(int, int, int, struct epoll_event *);
+int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event) {
+    NEXT(next_epoll_ctl, "epoll_ctl");
+    int rc = next_epoll_ctl(epfd, op, fd, event);
+    if (!rc && !g_azm_inert && g_ep147_build == EPB_V200)
+        panel_registration(epfd, op, fd, event);
+    return rc;
+}
+static int (*next_epoll_wait)(int, struct epoll_event *, int, int);
+int epoll_wait(int epfd, struct epoll_event *events, int count, int timeout) {
+    NEXT(next_epoll_wait, "epoll_wait");
+    int rc = next_epoll_wait(epfd, events, count, timeout);
+    if (!g_azm_inert && g_ep147_build == EPB_V200)
+        rc = panel_epoll(epfd, events, count, rc, timeout);
+    return rc;
+}
+
 ssize_t read(int fd, void *buf, size_t n) {
     NEXT(next_read, "read");
     if (g_azm_inert)
         return next_read(fd, buf, n);
-    ssize_t r = next_read(fd, buf, n);
+    ssize_t r = panel_read(fd, buf, n);
+    if (r == -2) {
+        r = next_read(fd, buf, n);
+        if (fd == g_mixer_fd || fd == g_erp_fd) panel_observe(fd, buf, r);
+    }
     /* The Mod Menu settings for this frame, all from one published word (bus_cfg.h): the
      * overlay thread may change them at any moment, and this thread must not see half of a
      * change or wait for one. */

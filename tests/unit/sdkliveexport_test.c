@@ -32,8 +32,8 @@ void azsdk_live_configure(int on, int build) {
 void azsdk_cue_configure(int on, int build) { assert(on == 1 && build == 2); ++cue_configure_calls; }
 static int flag_access(const char *path, int mode) {
     assert(mode == F_OK);
-    if (!strcmp(path, "/home/root/settings/azmod.track-data.on")) return track_flag ? 0 : -1;
-    assert(!strcmp(path, "/home/root/settings/azmod.native-live.on"));
+    if (!strcmp(path, "/home/root/settings/azmod.track-data.off")) return track_flag ? 0 : -1;
+    assert(!strcmp(path, "/home/root/settings/azmod.native-live.off"));
     return live_flag ? 0 : -1;
 }
 #define access flag_access
@@ -49,7 +49,7 @@ static void configuration(void) {
                     live_flag = native;
                     g_sdk_live_on = g_sdk_cue_on = configure_calls = cue_configure_calls = 0;
                     live_configuration(td);
-                    int expected = td && native && track && original;
+                    int expected = td && !native && !track && original;
                     assert(configure_calls == expected && cue_configure_calls == expected && g_sdk_live_on == expected);
                     assert(g_sdk_cue_on == expected);
                 }

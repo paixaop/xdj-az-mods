@@ -36,6 +36,8 @@ static cm_mod *cm_self(const char *id, const void *ra, const char *op) {
 static int message_thread = 1;
 static long fake_now;
 static int on_msg_thread(void) { return message_thread; }
+static int widget_showing = 1;
+static int lb_showing(uintptr_t widget) { return message_thread && widget && widget_showing; }
 static long now_ms(void) { return fake_now; }
 static uintptr_t wref_get(_Atomic uintptr_t *slot) { return atomic_load(slot); }
 static int wref_set(_Atomic uintptr_t *slot, uintptr_t value) {
@@ -227,6 +229,7 @@ static void reset_state(void) {
     wref_set(&bpl_widget, 0);
     bpl_reset_attempt();
     fake_now = 1000;
+    widget_showing = 1;
     open_screen();
 }
 static void seed_saved(void) {
@@ -238,6 +241,32 @@ static void fill_fields(void) {
     sdk_beatport_msg_tick();
 }
 static void test_native_state(void) {
+    /* A controller can be constructed minutes before its screen is opened.
+     * Hidden widgets must not be filled or consume an automatic attempt. */
+    reset_state();
+    seed_saved();
+    widget_showing = 0;
+    sdk_beatport_msg_tick();
+    fake_now += 120000;
+    sdk_beatport_msg_tick();
+    assert(!writes && !dispatches && !bpl_filled && !bpl_presses);
+    widget_showing = 1;
+    sdk_beatport_msg_tick();
+    fake_now += 399;
+    sdk_beatport_msg_tick();
+    assert(!writes);
+    fake_now += 1;
+    sdk_beatport_msg_tick();
+    assert(writes == 2 && !dispatches);
+    widget_showing = 0;
+    sdk_beatport_msg_tick();
+    user_editor[0] = pass_editor[0] = 0; /* native screen reopening resets fields */
+    widget_showing = 1;
+    sdk_beatport_msg_tick();
+    fake_now += 400;
+    sdk_beatport_msg_tick();
+    assert(writes == 4 && !bpl_cancelled && !dispatches);
+
     reset_state();
     seed_saved();
     message_thread = 0;

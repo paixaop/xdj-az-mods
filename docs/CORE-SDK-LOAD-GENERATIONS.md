@@ -45,9 +45,10 @@ entry profile only under `AZSDK_LOAD_TESTING`.
 
 The C lifecycle is wired in `deck_track_map.c` and `azstem.c`. Startup enables the
 private tap only when the normal DjPlayerUnit constructor hook and destructor
-hook both installed, the constructor address is the verified default, and both
-`/home/root/settings/azmod.track-data.on` and
-`/home/root/settings/azmod.native-load.on` exist. Configuration receives the same
+hook both installed and the constructor address is the verified default.
+Command load tracking starts by default unless `azmod.track-data.off` or
+`azmod.native-load.off` exists. Independently enabled passive deck status also
+starts the shared load tap. Configuration receives the same
 identified EP147 build ID and `sdk_patch_slot` from `sdk_vtable_patch.h`.
 
 The atomic `g_sdk_load_on` flag gates registration from the existing verified

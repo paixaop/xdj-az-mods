@@ -2,6 +2,7 @@
 /* Included after the status reducer in the host translation unit. */
 #include "../common/azstatus_native.h"
 #include "../common/azstatus_memory.h"
+#include "../common/azanalysis_native.h"
 #include <poll.h>
 #include <errno.h>
 #include <dlfcn.h>
@@ -1357,6 +1358,11 @@ static void ds_native_start(void) {
                 api->install_settings) (void) api->install_settings(g_ep147_build, azm_install_island_hook_at);
             if (api->size >= offsetof(struct azstatus_native_v1, install_terminal) + sizeof api->install_terminal &&
                 api->install_terminal) (void) api->install_terminal(g_ep147_build, azm_install_island_hook_at);
+            if (api->size >= offsetof(struct azstatus_native_v1, analysis_source) + sizeof api->analysis_source && api->analysis_source) {
+                const struct azn_analysis_source_api *analysis = api->analysis_source();
+                if (analysis && analysis->version == 1 && analysis->size >= sizeof *analysis && analysis->install)
+                    (void) analysis->install(g_ep147_build, azm_install_island_hook_at);
+            }
             pthread_t thread;
             if (azfile_status_callbacks && azfile_status_ref && api->size >= offsetof(struct azstatus_native_v1, file_cues) + sizeof api->file_cues && api->file_cues) {
                 const struct azn_file_cue_api *file = api->file_cues();

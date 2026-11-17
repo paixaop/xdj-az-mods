@@ -804,6 +804,8 @@ typedef struct az_analysis_job_v1 {
     char audio_path[1024], analysis_path[1024];
 } az_analysis_job_v1;
 #define AZ_ANALYSIS_NEEDS_LINK 1u /* new ANLZ locator needs native spool application */
+#define AZ_ANALYSIS_LOADED 2u /* lease pins this native load and grid; commit refreshes native phrases */
+#define AZ_ANALYSIS_STREAMING 4u /* completed Beatport download; track ref is intentionally empty */
 
 /* One shared library service. All consumers use the same source identities, bounded cache,
  * snapshots, event journal and native command policy. No per-mod data backend is created. */
@@ -883,6 +885,14 @@ typedef struct az_library_v1 {
     int (*analysis_open)(const char *id, const az_track_ref *track, az_analysis_job_v1 *out);
     int (*analysis_commit)(const char *id, uint64_t job, const void *data, uint32_t size);
     int (*analysis_close)(const char *id, uint64_t job);
+    /* Worker-only, deck 0..3 and the accepted LOAD event's load_epoch. Requires
+     * a ready native grid. USB and completed Beatport downloads are supported
+     * by qualified core profiles. AZ_BUSY means source/maps are still arriving.
+     * The core owns source identity; streaming jobs have an empty track ref.
+     * analysis_path is a read-only snapshot of the pinned current native grid.
+     * Close/commit uses the same job API. Stale loads/maps cannot be published. */
+    int (*analysis_open_loaded)(const char *id, int deck, uint64_t load_epoch,
+                                az_analysis_job_v1 *out);
 } az_library_v1;
 #define AZ_LIB_HAS(service, field) \
     ((service) && (service)->abi == AZ_LIBRARY_ABI && \
@@ -921,6 +931,16 @@ typedef struct az_beatport_login_v1 {
 #define AZ_BEATPORT_LOGIN_HAS(service, field) \
     ((service) && (service)->abi == AZ_BEATPORT_LOGIN_ABI && \
      (service)->size >= offsetof(az_beatport_login_v1, field) + sizeof((service)->field) && (service)->field)
+
+/* Physical panel buttons. LEFT/RIGHT act on that side's selected deck; select a
+ * logical deck explicitly with DECK_1..4 first. No raw bus bytes are exposed. */
+enum az_panel_button {
+    AZ_PANEL_SOURCE = 1, AZ_PANEL_BROWSE, AZ_PANEL_BACK, AZ_PANEL_MENU,
+    AZ_PANEL_SEARCH, AZ_PANEL_SELECT,
+    AZ_PANEL_LOAD_1, AZ_PANEL_LOAD_2, AZ_PANEL_LOAD_3, AZ_PANEL_LOAD_4,
+    AZ_PANEL_DECK_1, AZ_PANEL_DECK_2, AZ_PANEL_DECK_3, AZ_PANEL_DECK_4,
+    AZ_PANEL_PLAY_LEFT, AZ_PANEL_PLAY_RIGHT, AZ_PANEL_CUE_LEFT, AZ_PANEL_CUE_RIGHT
+};
 
 typedef struct az_core_v1 {
     int abi;
@@ -1207,6 +1227,18 @@ typedef struct az_core_v1 {
      * Initially supports EP147 2.00 (ep147-9e9454e357389ece). Check AZ_HAS first,
      * then AZ_BEATPORT_LOGIN_HAS for each member. All entries are init/UI-only. */
     const az_beatport_login_v1 *(*beatport_login_service)(uint32_t abi);
+
+    /* Core-owned panel input, qualified EP147 2.00 profile only. UI/worker calls,
+     * never frame/audio callbacks. One request globally; hold_ms is 40..3000.
+     * AZ_OK queues a press and automatic release; it does not confirm a UI action.
+     * AZ_BUSY means another press, physical button, or unavailable input baseline.
+     * poll returns AZ_PENDING until release was delivered, AZ_OK after delivery,
+     * AZ_FAILED on delivery timeout, AZ_STALE on a foreign/expired token or device
+     * replacement. The most recent result remains until another press is accepted.
+     * Real control values are preserved. No hardware event is needed to deliver.
+     * Check AZ_HAS for both entries before use. */
+    int (*button_press)(const char *id, uint32_t button, uint32_t hold_ms, uint64_t *token);
+    int (*button_poll)(const char *id, uint64_t token);
 
 } az_core_v1;
 

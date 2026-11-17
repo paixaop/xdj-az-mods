@@ -50,6 +50,14 @@ static int g_gpiodrv_last_level[MAX_GPIODRV_FDS];
 static int g_gpiodrv_fd_count = 0;
 static void tg_note(int fd, const char *path) { (void) fd, (void) path; } /* touch_read_guard.h has its own suite */
 static void tg_forget(int fd) { (void) fd; }
+/* Button delivery has its own real epoll/CRC suite (tests/sdk-panel.sh). */
+#define EPB_V200 200
+static int g_ep147_build = EPB_V200;
+static void panel_forget(int fd) { (void) fd; }
+static void panel_note(int fd, unsigned bus) {
+    (void) fd;
+    (void) bus;
+}
 static int (*next_open)(const char *, int, ...);
 
 #include FD_TRACK_INC /* gpiodrv_slot, bus_fd_drop, bus_fd_forget, bus_fd_note */

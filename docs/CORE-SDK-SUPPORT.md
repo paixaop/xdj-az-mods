@@ -103,10 +103,11 @@ never performs file reads, allocation or parser work for these services.
 ## Commands
 
 Transient loop operations 1–12 use the shared asynchronous native backend for
-both firmware profiles. Enable `azmod.track-data.on` and `azmod.native-load.on`
-before startup. `azmod.native-loop-commands.on` enables the ten control/adjustment
-operations below; EXIT and RELOOP retain their separate `azmod.native-exit.on`
-and `azmod.native-reloop.on` flags. Check each operation's capability bit.
+both firmware profiles and start by default. Explicit `azmod.track-data.off` or
+`azmod.native-load.off` disables the command backend at startup.
+`azmod.native-loop-commands.off` disables the ten control/adjustment operations;
+EXIT and RELOOP have separate `azmod.native-exit.off` and
+`azmod.native-reloop.off` diagnostic switches. Check each operation's capability bit.
 
 Use `AZ_COMMAND_NATIVE_LOAD`, a valid snapshot `native_load_generation`, zero
 `expected_revision`, and `AZ_QUANTIZE_NATIVE`. Unused numbers, cue selectors,

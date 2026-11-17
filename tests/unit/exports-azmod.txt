@@ -94,6 +94,8 @@ azsdk_exit_command_wake
 close
 dup2
 dup3
+epoll_ctl
+epoll_wait
 ioctl
 lseek
 lseek64

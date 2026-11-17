@@ -20,6 +20,12 @@ Only the message-thread timer callback reads or fills the editors or submits
 LOG IN. A screen generation is checked after callbacks, so destruction and
 reconstruction at the same address cannot continue an old autofill operation.
 
+The controller may be constructed while its login screen is hidden. Autofill,
+capture and submission require a visible widget and visible parent chain.
+Opening or hiding the screen advances its generation; opening starts a fresh
+delay. This prevents a hidden startup fill from consuming the attempt before
+the native screen clears its editors and becomes visible.
+
 The EP147 2.00 adapter uses these verified entry points:
 
 | Address | Role |
@@ -76,7 +82,7 @@ Attached segments and other sizes/modes are left alone.
 `tests/unit/beatport_credentials_run.sh` tests legacy round trips, malformed
 files, bounds, permissions, partial writes and commit failures with plain and
 ASan/UBSan builds. `tests/unit/sdk_beatport_run.sh` exercises native-thread
-ownership, lifecycle and cancellation, capture selection, and worker
+ownership, lifecycle and cancellation, hidden startup and reopening, capture selection, and worker
 persistence with synthetic credentials. The SDK and community-mod repositories
 also test the public service contract and the mod's page callbacks.
 

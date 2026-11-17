@@ -16,7 +16,7 @@ native=Path('tests/unit/sdkcue_test.cpp').read_text()
 native=native[:native.index('int main(int argc, char **argv)')]
 (out/'native.inc').write_text(native+'\n#endif\n')
 PY
-flags=(-O1 -g -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable -Isrc -Isrc/azmod -Isrc/common -pthread)
+flags=(-DAZSDK_CUE_TESTING -O1 -g -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable -Isrc -Isrc/azmod -Isrc/common -pthread)
 case ${SAN:-plain} in plain|'') ;; asan)flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer);;tsan)flags+=(-fsanitize=thread -fno-omit-frame-pointer);;*)exit 2;;esac
 "${HOST_CC:-gcc}" -std=c11 "${flags[@]}" "-DSDKCUEEVENTS_INC=\"$work/deck.inc\"" -c tests/unit/sdkcuepublic_test.c -o "$work/public.o"
 "${HOST_CXX:-g++}" -std=c++11 -rdynamic "${flags[@]}" "-DSDKCUE_NATIVE_FIXTURE=\"$work/native.inc\"" tests/unit/sdkcuepublic_test.cpp src/azstem/sdk_cue_observer.cpp "$work/public.o" -o "$work/test"

@@ -1,9 +1,24 @@
 # Core library service development contract
 
-This shared core service implements the portable foundation of the Core SDK implementation plan.
-The legacy snapshot, ticket and command providers use a development switch. To enable them on a development deck, create
-`/home/root/settings/azmod.track-data.on` before restarting EP147. Removing the flag and
-restarting disables those providers. Passive deck-status subscriptions have separate firmware and source checks.
+SDK data, live/loop readers, load tracking, and all implemented cue/loop command
+adapters start by default on supported firmware. No development `.on` files are
+required. These are runtime startup defaults, not SDK-header or compile-time
+options; the standard core build includes the producers.
+
+For diagnosis, an explicit `/home/root/settings/azmod.<service>.off` file disables
+that service after restarting EP147. Services are `track-data`, `native-load`,
+`native-live`, `native-loop`, `native-cue-commands`, `native-exit`,
+`native-reloop`, and `native-loop-commands`. `track-data.off` disables the legacy
+snapshot/data and command services; `native-load.off` disables their native
+command backend. Passive deck-status subscriptions remain independently enabled
+unless `azmod.deck-status.off` exists. Source/connection observers already start
+by default with passive status. Diagnostic logging and experimental probes keep
+their separate switches.
+
+Startup still validates the firmware profile, hook installation and ownership.
+Mods must query capabilities and field availability, and preserve generation and
+revision fences. Enabling a service does not make an unsupported source or
+operation available, or enable a mod's own automation preference.
 
 The current milestone is completing the existing native loop/cue commands through
 behavioral tests. All 28 IDs have development paths. See CORE-SDK-NATIVE-SOURCES.md for the passive status fields qualified on each firmware and media source.
@@ -223,9 +238,9 @@ collision yields no valid fields and can be retried. A capture revision is **not
 generation. The new API does not expose a playhead without a load association, or treat the
 legacy forward-movement heuristic as paused/playing state.
 
-A separate experimental listener is enabled only when both the track-data flag and
-`/home/root/settings/azmod.native-loop.on` exist before startup and the existing player
-constructor/destructor hooks both installed at their expected entries. It registers through
+The native loop listener starts by default unless `azmod.track-data.off` or
+`azmod.native-loop.off` exists at startup. The existing player constructor/destructor
+hooks must both install at their expected entries. It registers through
 the owned native notification server's virtual interface, with both-build layout/RTTI guards
 and GNU `std::weak_ptr` ownership. No additional absolute hook address is introduced.
 The isolated C++ translation unit requires GNU libstdc++, which EP147 already uses.
@@ -261,12 +276,11 @@ unavailable with an older experimental azstem rather than trusting its supersede
 `loop_revision` counts core publications and `loop_unit_generation` identifies a player-unit
 registration. Neither is a track-load generation. Loaded and loop observations are separate
 streams; the loop notification does not establish a source-qualified track association.
-Native callbacks from retired units cannot publish into a replacement generation. The new
-listener's runtime validation is still in progress; the flag is for controlled development,
-not a claim of completed native firmware/hardware acceptance.
+Native callbacks from retired units cannot publish into a replacement generation. The listener's validation limits are recorded separately; default startup does not
+establish acceptance on physical hardware.
 
-A separate development listener requires both the track-data flag and
-`/home/root/settings/azmod.native-live.on` before startup. It publishes raw play notification
+The native live listener starts by default unless `azmod.track-data.off` or
+`azmod.native-live.off` exists at startup. It publishes raw play notification
 flags (`AZ_LIVE_PLAY_FLAGS`), quantize (`AZ_LIVE_QUANTIZE`) and raw key lock
 (`AZ_LIVE_KEY_LOCK`) through checked weak native interfaces. Inspect each validity bit
 before reading its values. `live_unit_generation` names the player registration;
@@ -290,8 +304,9 @@ coalesce history by dropping old entries. There are no callbacks, guaranteed bea
 loop-iteration events. Deck observation and command events are reserved in the contract but
 are not emitted yet. Poll deck state directly.
 
-Native cue commands now have development implementations under
-`azmod.native-cue-commands.on`. MAIN_SET/RECALL and HOT_TRIGGER use the native
+Native cue commands start by default unless `azmod.native-cue-commands.off` is
+present before startup. The former `.on` flag is no longer needed.
+MAIN_SET/RECALL and HOT_TRIGGER use the native
 control path; saved/hot/memory writes and metadata changes use the native cue
 actor and persistence queues. Read `native_cues` for revision-scoped native IDs.
 Selected operations require `AZ_COMMAND_NATIVE_CUE_IDS`; saved writes require
@@ -342,10 +357,11 @@ policy belong to the mod; the SDK does not silently replace occupied pads.
 
 
 Transient loop operations 1–12 use the shared asynchronous native backend for
-both firmware profiles. Enable `azmod.track-data.on` and `azmod.native-load.on`
-before startup. `azmod.native-loop-commands.on` enables the ten control/adjustment
-operations below; EXIT and RELOOP retain their separate `azmod.native-exit.on`
-and `azmod.native-reloop.on` flags. Check each operation's capability bit.
+both firmware profiles and start by default. Explicit `azmod.track-data.off` or
+`azmod.native-load.off` disables the command backend at startup.
+`azmod.native-loop-commands.off` disables the ten control/adjustment operations;
+EXIT and RELOOP have separate `azmod.native-exit.off` and
+`azmod.native-reloop.off` diagnostic switches. Check each operation's capability bit.
 
 Use `AZ_COMMAND_NATIVE_LOAD`, a valid snapshot `native_load_generation`, zero
 `expected_revision`, and `AZ_QUANTIZE_NATIVE`. Unused numbers, cue selectors,

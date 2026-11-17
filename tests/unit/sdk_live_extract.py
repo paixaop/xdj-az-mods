@@ -54,13 +54,13 @@ control(lifetime, 'live-lifetime-register', legacy_register.group(), '(void) 0;'
 control(lifetime, 'live-lifetime-retire', 'if (g_sdk_live_on) azsdk_live_retire(d);', '(void) 0;')
 
 s = (root / 'src/azstem/azstem.c').read_text()
-needle = s.index('access("/home/root/settings/azmod.native-live.on", F_OK)')
+needle = s.index('access("/home/root/settings/azmod.native-live.off", F_OK)')
 a = s.rfind('            if (td &&', 0, needle)
 assert a >= 0
 b = s.index('\n            }', needle) + len('\n            }')
 config = 'static void live_configuration(int td) {\n' + s[a:b] + '\n}\n'
 (out / 'live-config.inc').write_text(config)
-control(config, 'live-config-required', 'access("/home/root/settings/azmod.track-data.on", F_OK) == 0', '1')
+control(config, 'live-config-required', 'access("/home/root/settings/azmod.track-data.off", F_OK) != 0', '1')
 
 s = (root / 'tests/integration/sdk-loop-probe.c').read_text()
 probe = fn(s, r'static int live_probe_log\(')

@@ -1446,6 +1446,20 @@ static int cm_register_screen(const char *id, const az_screen_v1 *scr) {
 static int cm_frame_filter(const char *id, unsigned bus_mask, az_frame_fn fn, void *user);
 static int cm_touch_filter(const char *id, az_touch_fn fn, void *user);
 static void sdk_timing_init(void);
+#ifndef SDK_PROC_IMPL
+static int cm_button_press(const char *id, uint32_t button, uint32_t hold_ms, uint64_t *token) {
+    cm_mod *c = cm_self(id, CM_RA(), "button_press");
+    if (!c || c->state != AZCM_LOADED) return AZ_INVALID;
+    if (g_ep147_build != EPB_V200) return AZ_UNSUPPORTED;
+    return panel_submit(c, button, hold_ms, token);
+}
+static int cm_button_poll(const char *id, uint64_t token) {
+    cm_mod *c = cm_self(id, CM_RA(), "button_poll");
+    if (!c || c->state != AZCM_LOADED) return AZ_INVALID;
+    if (g_ep147_build != EPB_V200) return AZ_UNSUPPORTED;
+    return panel_poll(c, token);
+}
+#endif
 /* A paint context (az_draw) is live only inside the on_draw / on_paint call that received it: the
  * core marks it for the call and clears it after (cm_paint_begin / cm_paint_end). A context a mod
  * kept and used later, or used from another thread, points at memory the core has moved on from:
@@ -1558,6 +1572,7 @@ static const az_library_v1 g_sdk_library = {
     .analysis_open = sdk_analysis_open,
     .analysis_commit = sdk_analysis_commit,
     .analysis_close = sdk_analysis_close,
+    .analysis_open_loaded = sdk_analysis_open_loaded,
 #endif
     .on_deck_status = sdk_on_deck_status,
     .deck_status_release = sdk_deck_status_release,
@@ -1657,6 +1672,8 @@ static const az_core_v1 g_cm_core = {
     .library_service = sdk_library_service,
 #ifndef SDK_PROC_IMPL
     .beatport_login_service = sdk_beatport_login_service,
+    .button_press = cm_button_press,
+    .button_poll = cm_button_poll,
 #endif
 };
 
@@ -2060,7 +2077,8 @@ static void community_init(void) {
     sdk_status_start();
 #ifndef SDK_PROC_IMPL
     /* Resolve the shared SQL table before any community worker can read it. */
-    g_st_enabled = access("/home/root/settings/azmod.track-data.on", F_OK) == 0;
+    /* Public SDK data and command services are available on a normal install. */
+    g_st_enabled = access("/home/root/settings/azmod.track-data.off", F_OK) != 0;
     if (g_st_enabled || ds.enabled) sdk_sq_resolve();
     if (g_st_enabled) {
         azexit_service_fn get_exit;

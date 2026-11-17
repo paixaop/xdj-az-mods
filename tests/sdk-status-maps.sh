@@ -11,3 +11,4 @@ if [[ ${SAN:-plain} = asan ]]; then flags+=(-fsanitize=address,undefined -fno-om
 "$dir/maps" 2
 "$dir/maps" 1 browse-retain
 "$dir/maps" 2 browse-retain
+"$dir/maps" 2 analysis

@@ -105,6 +105,7 @@ struct azn_file_cue_api {
     int (*map_origins)(const struct aznm_packet *packet,uint64_t tokens[3]);
     void (*map_hold)(const uint64_t *tokens,size_t count,int acquire);
 };
+struct azn_analysis_source_api;
 struct azstatus_native_v1 {
     uint32_t size, version;
     int (*wake_fd)(void); /* process-lifetime nonblocking eventfd, single core reader */
@@ -122,6 +123,7 @@ struct azstatus_native_v1 {
     int (*install_terminal)(int build,azn_setting_patch_fn patch);
     const struct azn_file_cue_api *(*file_cues)(void);
     int (*track_matches)(unsigned deck,uint64_t epoch,uint64_t load,const unsigned char source_id[12]);
+    const struct azn_analysis_source_api *(*analysis_source)(void);
 };
 typedef const struct azstatus_native_v1 *(*azstatus_native_fn)(void);
 #ifdef AZ_STATUS_NATIVE_PRODUCER

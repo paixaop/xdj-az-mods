@@ -95,7 +95,7 @@ exec docker run --rm --platform=linux/arm64 --security-opt seccomp=unconfined \
                 status_rc=$?; [ "$status_rc" -eq 0 ] || rc=1
                 sum+=("$status_suite $p ($((SECONDS - status_t0)) s, exit $status_rc)")
             done
-            for cue_suite in sdk-cue sdk-cue-public sdk-cue-export sdk-cue-events sdk-deck-listeners sdk-data-lifecycle sdk-slip sdk-exit; do
+            for cue_suite in sdk-cue sdk-cue-public sdk-cue-export sdk-cue-events sdk-deck-listeners sdk-data-lifecycle sdk-slip sdk-exit sdk-panel; do
                 cue_t0=$SECONDS
                 SAN=$s bash "tests/$cue_suite.sh"
                 cue_status=$?; [ "$cue_status" -eq 0 ] || rc=1

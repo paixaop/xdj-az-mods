@@ -54,6 +54,7 @@ struct HolderEdit {
 static void *map_writer_original[4];
 static unsigned map_writer_installed;
 static uintptr_t grid_assign(uintptr_t dst,uintptr_t source) {
+    std::lock_guard<std::recursive_mutex> mutation(map_mutation);
     HolderEdit edit(0,dst>=0x28 ? dst-0x28:0);
     uintptr_t incoming=edit.mask && source ? read_value<uintptr_t>(source):0;
     uint64_t pin=incoming && typed(incoming,profile->grid_content) ? azn_owned_pin(incoming):0;
@@ -63,6 +64,7 @@ static uintptr_t grid_assign(uintptr_t dst,uintptr_t source) {
     return result;
 }
 static uintptr_t grid_retime(uintptr_t dst,int64_t offset) {
+    std::lock_guard<std::recursive_mutex> mutation(map_mutation);
     HolderEdit edit(0,dst>=0x28 ? dst-0x28:0);
     uintptr_t result=reinterpret_cast<uintptr_t(*)(uintptr_t,int64_t)>(map_writer_original[1])(dst,offset);
     if(result && edit.mask)edit.finish(0,true);
@@ -70,12 +72,14 @@ static uintptr_t grid_retime(uintptr_t dst,int64_t offset) {
 }
 static thread_local uintptr_t phrase_argument;
 static uintptr_t phrase_registry(uintptr_t registry,uintptr_t context,uintptr_t id,uintptr_t source,uintptr_t flags,uintptr_t version) {
+    std::lock_guard<std::recursive_mutex> mutation(map_mutation);
     struct Restore {uintptr_t previous;~Restore(){phrase_argument=previous;}} restore{phrase_argument};
     phrase_argument=source; /* native reference lives through the registry call */
     return reinterpret_cast<uintptr_t(*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t,uintptr_t,uintptr_t)>(
         map_writer_original[2])(registry,context,id,source,flags,version);
 }
 static uintptr_t phrase_broadcast(uintptr_t holder,unsigned reason) {
+    std::lock_guard<std::recursive_mutex> mutation(map_mutation);
     if(phrase_argument) {
         HolderEdit edit(1,holder);
         if(edit.mask)edit.finish(read_value<uintptr_t>(phrase_argument));

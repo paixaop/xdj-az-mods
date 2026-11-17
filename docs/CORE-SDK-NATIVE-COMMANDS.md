@@ -6,10 +6,11 @@ No evidence ledger/dossier is a deliverable. Historical research below records
 how paths were discovered; it does not reopen superseded implementation tasks.
 
 Transient loop operations 1–12 use the shared asynchronous native backend for
-both firmware profiles. Enable `azmod.track-data.on` and `azmod.native-load.on`
-before startup. `azmod.native-loop-commands.on` enables the ten control/adjustment
-operations below; EXIT and RELOOP retain their separate `azmod.native-exit.on`
-and `azmod.native-reloop.on` flags. Check each operation's capability bit.
+both firmware profiles and start by default. Explicit `azmod.track-data.off` or
+`azmod.native-load.off` disables the command backend at startup.
+`azmod.native-loop-commands.off` disables the ten control/adjustment operations;
+EXIT and RELOOP have separate `azmod.native-exit.off` and
+`azmod.native-reloop.off` diagnostic switches. Check each operation's capability bit.
 
 Use `AZ_COMMAND_NATIVE_LOAD`, a valid snapshot `native_load_generation`, zero
 `expected_revision`, and `AZ_QUANTIZE_NATIVE`. Unused numbers, cue selectors,
@@ -111,8 +112,11 @@ hardware acceptance requires separate deployment and testing on a deck.
 
 ## Native cue operations
 
-Enable `azmod.native-cue-commands.on` with track data and native-load support for
-the development cue adapters. MAIN_SET, MAIN_RECALL and HOT_TRIGGER use the native
+Cue adapters and their required native-load/snapshot services start by default on
+supported firmware. `azmod.native-cue-commands.off`, checked before startup,
+disables cue commands even if the old `.on` flag remains. Firmware identity,
+constructor/destructor admission and per-operation capability checks still apply.
+MAIN_SET, MAIN_RECALL and HOT_TRIGGER use the native
 control facade. HOT_SET/CLEAR, MEMORY_SET/DELETE, SAVED_SAVE/DELETE/AUTO and cue
 comment/color updates use `sdk_cue_commands.cpp` and `sdk_cue_persist.cpp`;
 saved/memory recall uses `sdk_cue_recall.cpp`. The public bridge dispatches these

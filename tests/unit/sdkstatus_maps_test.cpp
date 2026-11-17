@@ -2,6 +2,7 @@
 #include "../../src/azstem/sdk_status_maps.cpp"
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 namespace {
 struct Ref {
@@ -14,6 +15,7 @@ azn_pack_observer observer;
 uintptr_t playing;
 uint64_t epoch = 7;
 unsigned gaps;
+bool analysis_refs, shared_second;
 void (*during_current)();
 uintptr_t replacement_holder, replacement_content;
 template <size_t N>
@@ -30,6 +32,7 @@ void drain(const azn_maps_api *api) {
 } // namespace
 extern "C" uint64_t azn_owned_pin(uintptr_t p) {
     if (!p) return 0;
+    if (analysis_refs) analysis_ops.grant(p);
     refs.push_back({p, 1});
     return refs.size();
 }
@@ -43,11 +46,12 @@ extern "C" void azn_pin_drop(uint64_t t) {
     if (t) {
         assert(t <= refs.size() && refs[t - 1].count);
         refs[t - 1].count--;
+        if (analysis_refs && !refs[t - 1].count) analysis_drop(refs[t - 1].object);
     }
 }
 extern "C" int azn_pack_acquire(unsigned d, azn_pack_view *v) {
-    if (d || !playing) return 0;
-    *v = {azn_owned_pin(playing), 5, 13, epoch, playing};
+    if ((d && !(d == 1 && shared_second)) || !playing) return 0;
+    *v = {azn_owned_pin(playing), 5, 13, epoch + d, playing};
     return 1;
 }
 extern "C" int azn_pack_current(unsigned d, const azn_pack_view *v) {
@@ -56,7 +60,7 @@ extern "C" int azn_pack_current(unsigned d, const azn_pack_view *v) {
         during_current = nullptr;
         interleave();
     }
-    return !d && v->load == epoch && v->object == playing;
+    return (!d || (d == 1 && shared_second)) && v->load == epoch + d && v->object == playing;
 }
 extern "C" int azn_pack_retains(uintptr_t pack) { return pack && playing == pack; }
 extern "C" int azn_pack_observe(azn_pack_observer o) {
@@ -70,14 +74,16 @@ extern "C" int azn_offer(azstatus_native_receipt *r) {
     return 1;
 }
 extern "C" uint64_t azn_map_begin_mask(unsigned mask) { return mask; }
-extern "C" void azn_map_end_mask(uint64_t ticket) { assert(ticket <= 1); }
+extern "C" void azn_map_end_mask(uint64_t ticket) { assert(ticket <= (shared_second ? 3u : 1u)); }
 extern "C" int azn_offer_map_cut(azstatus_native_receipt *r) { return azn_offer(r); }
+#include "sdkstatus_map_analysis_test.inc"
 int main(int argc, char **argv) {
-    assert(argc == 2 || (argc == 3 && std::strcmp(argv[2], "browse-retain") == 0));
+    assert(argc == 2 || (argc == 3 && (!std::strcmp(argv[2], "browse-retain") || !std::strcmp(argv[2], "analysis"))));
     const int build = argv[1][0] - '0';
     assert(azn_maps_configure(build));
     const azn_maps_api *api = azn_maps_service();
     assert(api && observer);
+    if (argc == 3 && !std::strcmp(argv[2], "analysis")) return test_analysis(api);
     Buf<0x150> pack;
     Buf<0x80> gh, ph, gc, pc, wrong;
     const Profile &pr = profiles[build - 1];
@@ -104,7 +110,7 @@ int main(int argc, char **argv) {
     put(gc.addr() + 0x30, int32_t(4));
     put(pc.addr() + 0x40, reinterpret_cast<uintptr_t>(sections));
     put(pc.addr() + 0x48, int32_t(2));
-    put(pc.addr() + 0x3c, uint32_t(1));
+    put(pc.addr() + 0x3c, uint32_t(0));
     auto prove = [&](uintptr_t p) { return api->prove_pair(138, p, gh.addr(), gc.addr(), ph.addr(), pc.addr()); };
     assert(!prove(wrong.addr()));
     assert(prove(pack.addr()) && observed.empty()); // authenticated GUI pair before deck completion
@@ -155,6 +161,14 @@ int main(int argc, char **argv) {
     assert(b[0].beat_in_bar == 1 && b[1].beat_in_bar == 2 && b[2].beat_in_bar == 3 && b[3].beat_in_bar == 1);
     assert(api->read(&snap.phrases, AZNM_PHRASES, row, 2, &n) == AZ_OK && n == 2 &&
            row[0].start_beat == 0 && row[0].end_beat == 1 && row[1].raw_kind == 2 && row[1].end_beat == 3);
+    assert(row[0].raw_mood == 1 && row[1].raw_mood == 1);
+    const uint32_t moods[][2] = {{1, 2}, {2, 3}, {3, 0}, {UINT32_MAX, 0}};
+    for (const auto &mood : moods) {
+        put(pc.addr() + 0x3c, mood[0]);
+        assert(api->read(&snap.phrases, AZNM_PHRASES, row, 2, &n) == AZ_OK && n == 2);
+        assert(row[0].raw_mood == mood[1] && row[1].raw_mood == mood[1]);
+    }
+    put(pc.addr() + 0x3c, uint32_t(0));
     assert(prove(pack.addr()) && observed.size() == 1);
     assert(api->prove_pair(239, pack.addr(), gh.addr(), gc.addr(), ph.addr(), pc.addr()));
     assert(observed.size() == 1 && azn_maps_current(0, epoch, &snap));

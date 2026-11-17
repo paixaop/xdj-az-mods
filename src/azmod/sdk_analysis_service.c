@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* Public worker-only source leases and ANLZ publication. Included by community.c. */
 #include "sdk_analysis_write.h"
+#include "../common/azstatus_maps.h"
+#include "../common/azstatus_native.h"
+#include "../common/azanalysis_native.h"
 struct sa_job {
     uint64_t id;
     int owner, needs_link;
@@ -8,15 +11,31 @@ struct sa_job {
     char database[1024], audio[1024], dat[1024], ext[1024];
     char relative_audio[2048], relative_dat[1024];
     uint64_t signatures[4];
+    int loaded, deck, streaming;
+    uint64_t load, native_epoch, audio_token;
+    const struct azn_analysis_source_api *audio_api;
+    const struct azn_maps_api *maps;
+    struct aznm_packet native_map;
+    char grid_snapshot[1024];
+    uint8_t *native_grid;
+    size_t native_grid_bytes;
+
 };
 static struct sa_job sa_jobs[8];
 static uint64_t sa_serial;
 static pthread_mutex_t sa_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int sa_link_analysis(const struct sa_job *job);
+static int sa_loaded_current(const struct sa_job *job);
+static void sa_job_drop(struct sa_job *job);
+static int sa_grid_same(const struct sa_job *, const uint8_t *, uint32_t);
+static const uint8_t *sa_find_tag(const uint8_t *, size_t, const char [4], uint32_t *);
 static int sa_owner(const char *id, const char *name, uintptr_t caller) {
     return (g_cm_on_ui || g_sdk_on_tap_thread) ? -1 : st_mod_owner(id, caller, name);
 }
 static int sa_current(const struct sa_job *j) {
+    if (j->loaded && !sa_loaded_current(j)) return 0;
+    if (j->streaming) return st_disk_sig(j->audio) == j->signatures[1] &&
+        st_disk_sig(j->dat) == j->signatures[2] && st_disk_sig(j->ext) == j->signatures[3];
     struct st_source source;
     if (st_source_read((int) j->source.ref.source_id - 1, &source)) return 0;
     source.ref.track_id = j->source.ref.track_id;
@@ -48,8 +67,7 @@ static uint8_t *sa_read(const char *path, size_t *size, int *failed) {
     }
     return bytes;
 }
-static int sdk_analysis_open(const char *id, const az_track_ref *track, az_analysis_job_v1 *out) {
-    int owner = sa_owner(id, "analysis_open", CM_RA());
+static int sa_open(int owner, const az_track_ref *track, az_analysis_job_v1 *out, int loaded) {
     if (owner < 0 || !track || !out || st_record_size(out) < sizeof *out ||
         st_record_size(track) < sizeof *track || track->version != AZ_DATA_VERSION ||
         !track->track_id || track->source_id < 1 || track->source_id > 2) return AZ_INVALID;
@@ -106,7 +124,7 @@ static int sdk_analysis_open(const char *id, const az_track_ref *track, az_analy
     free(ext);
     rc = AZ_FAILED;
     if (failed || beats < 0 || phrases < 0 || dat_phrases < 0) goto done;
-    if (phrases || dat_phrases) {
+    if (!loaded && (phrases || dat_phrases)) {
         if (j.needs_link) {
             if (!sa_current(&j) || !sa_link_analysis(&j)) goto done;
         }
@@ -121,7 +139,7 @@ static int sdk_analysis_open(const char *id, const az_track_ref *track, az_analy
     }
     j.id = ++sa_serial;
     sa_jobs[slot] = j;
-    az_analysis_job_v1 result = {.size = out->size, .version = AZ_DATA_VERSION, .needed = AZ_DATA_PHRASES | (beats ? 0 : AZ_DATA_GRID), .job = j.id, .flags = j.needs_link ? AZ_ANALYSIS_NEEDS_LINK : 0, .track = *track, .original_bpm = row.metadata.original_bpm};
+    az_analysis_job_v1 result = {.size = out->size, .version = AZ_DATA_VERSION, .needed = (phrases || dat_phrases ? 0 : AZ_DATA_PHRASES) | (beats ? 0 : AZ_DATA_GRID), .job = j.id, .flags = j.needs_link ? AZ_ANALYSIS_NEEDS_LINK : 0, .track = *track, .original_bpm = row.metadata.original_bpm};
     memcpy(result.audio_path, j.audio, sizeof result.audio_path);
     memcpy(result.analysis_path, j.dat, sizeof result.analysis_path);
     memcpy(out, &result, sizeof result);
@@ -129,6 +147,9 @@ static int sdk_analysis_open(const char *id, const az_track_ref *track, az_analy
 done:
     pthread_mutex_unlock(&sa_mutex);
     return rc;
+}
+static int sdk_analysis_open(const char *id, const az_track_ref *track, az_analysis_job_v1 *out) {
+    return sa_open(sa_owner(id, "analysis_open", CM_RA()), track, out, 0);
 }
 /* Directory descriptors bind staging/publication to the validated USB tree.
  * Create missing ANLZ directories without following any link component. */
@@ -252,6 +273,15 @@ static int sdk_analysis_commit(const char *id, uint64_t job, const void *data, u
         goto done;
     }
     int existing = sa_tag_count(dat, dn, "PQTZ");
+    if (j->loaded) {
+        if (gn || !j->native_grid || !j->native_grid_bytes) { rc = AZ_INVALID; goto done; }
+        if (!existing) { grid = j->native_grid; gn = (uint32_t) j->native_grid_bytes; }
+        else {
+            uint32_t saved_size = 0;
+            const uint8_t *saved_grid = sa_find_tag(dat, dn, "PQTZ", &saved_size);
+            if (!sa_grid_same(j, saved_grid, saved_size)) goto done;
+        }
+    }
     if (existing < 0 || sa_tag_count(ext, en, "PSSI") != 0 || (gn && existing) || (!gn && !existing)) goto done;
     struct st_data *parsed = calloc(1, sizeof *parsed);
     if (!parsed) {
@@ -298,11 +328,19 @@ static int sdk_analysis_commit(const char *id, uint64_t job, const void *data, u
         rc = AZ_FAILED;
         goto done;
     }
+    /* Saving changes fingerprints even if the native edition retires immediately
+     * afterwards. A retry opens the durable map and refreshes a new valid load. */
+    j->signatures[2] = st_disk_sig(j->dat);
+    j->signatures[3] = st_disk_sig(j->ext);
+    if (j->loaded) {
+        rc = j->maps->publish_phrases((unsigned) j->deck, j->load, &j->native_map, phrase, pn);
+        if (rc) goto done;
+    }
     if (j->needs_link && !sa_link_analysis(j)) {
         rc = AZ_FAILED;
         goto done;
     }
-    memset(j, 0, sizeof *j);
+    sa_job_drop(j);
     rc = AZ_OK;
 done:
     sa_stage_drop(&td);
@@ -321,10 +359,12 @@ static int sdk_analysis_close(const char *id, uint64_t job) {
     int rc = AZ_STALE;
     for (unsigned i = 0; i < 8; i++)
         if (sa_jobs[i].id == job && sa_jobs[i].owner == owner) {
-            memset(&sa_jobs[i], 0, sizeof sa_jobs[i]);
+            sa_job_drop(&sa_jobs[i]);
             rc = AZ_OK;
             break;
         }
     pthread_mutex_unlock(&sa_mutex);
     return rc;
 }
+
+#include "sdk_analysis_loaded.c"

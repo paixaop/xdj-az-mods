@@ -355,6 +355,7 @@ static int azn_load_seed(unsigned deck, struct azstatus_native_receipt *out) {
     return azn_copy_receipt(out,&seed);
 }
 #include "sdk_status_stems.inc"
+#include "../common/azanalysis_native.h"
 __attribute__((visibility("default"))) const struct azstatus_native_v1 *azstem_status_service_v1(void) {
     static const struct azstatus_native_v1 api = {sizeof api, 1, azn_eventfd, azn_take, azn_load_seed, azn_set_interest, azn_capabilities, azn_metadata_seed, azn_register_source_capture, azn_stem_bind, azn_stems_seed, azn_install_settings,
 #ifdef AZ_STATUS_MEMORY_PRODUCER
@@ -373,7 +374,8 @@ __attribute__((visibility("default"))) const struct azstatus_native_v1 *azstem_s
 #else
         NULL,
 #endif
-        azn_load_track_matches
+        azn_load_track_matches,
+        azn_analysis_sources
     };
     return &api;
 }

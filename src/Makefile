@@ -91,7 +91,7 @@ $(AZMOD): $(AZMOD_SRCS) $(AZMOD_HDRS) | $(OUT)
 	$(CC) $(AZ_UNWIND) -fPIC -c -o $(OUT)/sdk_cache_entry_asm.o azmod/sdk_cache_entry.S
 	$(CC) $(AZ_UNWIND) -fPIC -c -o $(OUT)/sdk_slip_entry_asm.o azmod/sdk_slip_entry.S
 	$(CC) $(AZ_UNWIND) -fPIC -c -o $(OUT)/sdk_slip_getter_entry.o azmod/sdk_slip_getter_entry.S
-	$(CC) $(AZMOD_CFLAGS) -Wl,--version-script=azstem/sdk_native_cpp.map -o $@.full $(AZMOD_SRCS) $(OUT)/sdk_native_sources.o $(OUT)/sdk_connection_hooks.o $(OUT)/sdk_cache_message.o $(OUT)/sdk_native_slip.o $(OUT)/sdk_slip_hooks.o $(OUT)/sdk_cache_entry.o $(OUT)/sdk_cache_entry_asm.o $(OUT)/sdk_slip_entry_asm.o $(OUT)/sdk_slip_getters.o $(OUT)/sdk_slip_getter_entry.o -ldl -lpthread -lX11 -lXext -lfreetype -lm -lstdc++
+	$(CC) $(AZMOD_CFLAGS) -Wl,--version-script=azstem/sdk_native_cpp.map -o $@.full $(AZMOD_SRCS) $(OUT)/sdk_native_sources.o $(OUT)/sdk_connection_hooks.o $(OUT)/sdk_cache_message.o $(OUT)/sdk_native_slip.o $(OUT)/sdk_slip_hooks.o $(OUT)/sdk_cache_entry.o $(OUT)/sdk_cache_entry_asm.o $(OUT)/sdk_slip_entry_asm.o $(OUT)/sdk_slip_getters.o $(OUT)/sdk_slip_getter_entry.o -ldl -lpthread -Wl,-Bstatic -lXtst -Wl,-Bdynamic -Wl,--exclude-libs,libXtst.a -lX11 -lXext -lfreetype -lm -lstdc++
 	$(call az_strip_keep_assets,$@)
 	@echo "Built: $@"
 
@@ -115,8 +115,9 @@ $(AZSTEM): $(wildcard azstem/*.c azstem/*.h azstem/*.cpp azstem/*.map azstem/*.i
 	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_cue_commands.o azstem/sdk_cue_commands.cpp
 	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_cue_recall.o azstem/sdk_cue_recall.cpp
 	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_load_observer.o azstem/sdk_load_observer.cpp
+	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_analysis_source.o azstem/sdk_analysis_source.cpp
 	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_cue_observer.o azstem/sdk_cue_observer.cpp
-	$(CC) $(AZSTEM_CFLAGS) -Wl,--version-script=azstem/sdk_native_cpp.map -o $@.full azstem/azstem.c azstem/overview_lease.c azstem/sdk_status_capture.c $(OUT)/stb_vorbis.o $(OUT)/sdk_loop_observer.o $(OUT)/sdk_status_memory.o $(OUT)/sdk_status_maps.o $(OUT)/sdk_live_observer.o $(OUT)/sdk_native_commands.o $(OUT)/sdk_exit.o $(OUT)/sdk_cue_actor.o $(OUT)/sdk_cue_store.o $(OUT)/sdk_cue_persist.o $(OUT)/sdk_cue_lifecycle.o $(OUT)/sdk_cue_commands.o $(OUT)/sdk_cue_recall.o $(OUT)/sdk_load_observer.o $(OUT)/sdk_cue_observer.o -lm -ldl -lpthread -lstdc++
+	$(CC) $(AZSTEM_CFLAGS) -Wl,--version-script=azstem/sdk_native_cpp.map -o $@.full azstem/azstem.c azstem/overview_lease.c azstem/sdk_status_capture.c $(OUT)/stb_vorbis.o $(OUT)/sdk_loop_observer.o $(OUT)/sdk_status_memory.o $(OUT)/sdk_status_maps.o $(OUT)/sdk_live_observer.o $(OUT)/sdk_native_commands.o $(OUT)/sdk_exit.o $(OUT)/sdk_cue_actor.o $(OUT)/sdk_cue_store.o $(OUT)/sdk_cue_persist.o $(OUT)/sdk_cue_lifecycle.o $(OUT)/sdk_cue_commands.o $(OUT)/sdk_cue_recall.o $(OUT)/sdk_load_observer.o $(OUT)/sdk_analysis_source.o $(OUT)/sdk_cue_observer.o -lm -ldl -lpthread -lstdc++
 	$(call az_strip,$@)
 	@echo "Built: $@"
 

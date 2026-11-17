@@ -7,8 +7,8 @@ static int sdk_slip_patch(uintptr_t entry,void *replacement,void **original,void
 }
 static void sdk_slip_at_start(void) {
     if(atomic_load_explicit(&g_azm_late,memory_order_acquire) ||
-       access("/home/root/settings/azmod.track-data.on",F_OK) ||
-       access("/home/root/settings/azmod.native-live.on",F_OK))return;
+       access("/home/root/settings/azmod.track-data.off",F_OK)==0 ||
+       access("/home/root/settings/azmod.native-live.off",F_OK)==0)return;
     struct azsdk_slip_native_profile profile;
     if(!sdk_slip_target_profile(g_ep147_build,&profile))return;
     for(unsigned i=0;i<AZSLIP_TARGET_COUNT;i++)

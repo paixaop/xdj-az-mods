@@ -51,7 +51,7 @@ static void *bpl_ctrl;
 static uint64_t bpl_seen_control;
 static uint64_t bpl_screen;
 static long bpl_opened_ms, bpl_press_ms;
-static int bpl_filled, bpl_cancelled, bpl_presses;
+static int bpl_filled, bpl_cancelled, bpl_presses, bpl_visible;
 static struct bp_credentials bpl_filled_with;
 static void (*bpl_orig_ctor)(void *, void *);
 static void (*bpl_orig_dispatch)(void *, void *);
@@ -270,12 +270,14 @@ static void bpl_ctor_hook(void *self, void *widget) {
     ++bpl_screen;
     wref_set(&bpl_widget, (uintptr_t) widget);
     bpl_opened_ms = now_ms();
+    bpl_visible = lb_showing((uintptr_t) widget);
     bpl_reset_attempt();
 }
 static void bpl_retire(void *self) {
     if (self == bpl_ctrl) {
         ++bpl_screen;
         bpl_ctrl = NULL;
+        bpl_visible = 0;
         wref_set(&bpl_widget, 0);
         bpl_reset_attempt();
     }
@@ -310,7 +312,7 @@ static void bpl_dispatch_hook(void *self, void *name) {
         name && *(uintptr_t *) name == *(uintptr_t *) BPL_LOGIN_NAME) {
         bpl_cancelled = 1; /* a manual press cancels pending automatic retries */
         void *w = bpl_live_widget();
-        if (self == bpl_ctrl && w && bpl_is_login(w)) {
+        if (self == bpl_ctrl && w && lb_showing((uintptr_t) w) && bpl_is_login(w)) {
             pthread_mutex_lock(&bpl_mu);
             uint64_t control = bpl_control;
             int capture = bpl_options.remember &&
@@ -338,7 +340,8 @@ static int bpl_auto_current(uint64_t control, uint64_t screen) {
              !bpl_error && bpl_serial == bpl_done &&
              atomic_load_explicit(&bpl_active, memory_order_acquire);
     pthread_mutex_unlock(&bpl_mu);
-    return ok && screen == bpl_screen && !bpl_cancelled && bpl_live_widget();
+    void *w = bpl_live_widget();
+    return ok && screen == bpl_screen && !bpl_cancelled && w && lb_showing((uintptr_t) w);
 }
 
 static void bpl_submit(uint64_t control, uint64_t screen) {
@@ -355,8 +358,21 @@ static void sdk_beatport_msg_tick(void) {
     if (!bpl_ready || !on_msg_thread()) return;
     if (!atomic_load_explicit(&bpl_active, memory_order_acquire)) {
         bpl_reset_attempt();
+        bpl_visible = 0;
         return;
     }
+    /* EP147 constructs this widget during startup, while detached from the
+     * visible tree, and clears its fields when the user opens it. Construction
+     * is not a login attempt. Start the delay on each visible screen entry. */
+    void *w = bpl_live_widget();
+    int showing = w && lb_showing((uintptr_t) w);
+    if (showing != bpl_visible) {
+        bpl_visible = showing;
+        ++bpl_screen;
+        bpl_reset_attempt();
+        bpl_opened_ms = now_ms();
+    }
+    if (!showing) return;
     struct bp_credentials saved, current = {0};
     az_beatport_login_options options;
     pthread_mutex_lock(&bpl_mu);
@@ -369,7 +385,6 @@ static void sdk_beatport_msg_tick(void) {
     options = bpl_options;
     uint64_t control = bpl_control, screen = bpl_screen;
     pthread_mutex_unlock(&bpl_mu);
-    void *w = bpl_live_widget();
     if (!eligible || !options.auto_login || bpl_cancelled || !w || !bpl_is_login(w))
         goto done;
     long now = now_ms();

@@ -102,3 +102,20 @@ static int sdk_on_deck_status(const char *id, const az_deck_watch_v1 *watch, az_
 static int sdk_deck_status_release(const char *id, az_deck_subscription handle) {
     return ds_release(sdk_status_owner(id, CM_RA()), handle);
 }
+
+#ifndef SDK_PROC_IMPL
+/* Copy only the reducer's qualified identity for this exact accepted load. */
+static int sa_loaded_ref(unsigned deck, uint64_t load, az_track_ref *out) {
+    if (deck >= 4 || !load || !out) return AZ_INVALID;
+    int rc = AZ_BUSY;
+    pthread_mutex_lock(&ds.mu);
+    const struct ds_image *image = &ds.deck[deck].current;
+    const struct ds_cell *cell = image->field[AZ_STATUS_LOAD][AZ_STATUS_LOAD_TRACK];
+    if (image->epoch != load) rc = AZ_STALE;
+    else if (cell && cell->info.info.availability == AZ_AVAIL_READY &&
+             cell->info.scope == AZ_STATUS_LOAD_SCOPE && cell->info.scope_id == load &&
+             cell->bytes == sizeof *out) { memcpy(out, cell->data, sizeof *out); rc = AZ_OK; }
+    pthread_mutex_unlock(&ds.mu);
+    return rc;
+}
+#endif

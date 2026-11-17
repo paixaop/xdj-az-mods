@@ -3,8 +3,9 @@
 The private `sdk_live_observer.cpp` bridge captures four native change notifications: raw
 play-state flags, quantize, key lock and Sync mode. It is not a completed public live-state service.
 The source uses the GNU C++ build and existing owned unit constructor/destructor hooks.
-An independent `azmod.native-live.on` opt-in also requires `azmod.track-data.on`, the default
-constructor hook address and a successfully installed destructor hook. No new firmware
+It starts by default unless `azmod.native-live.off` or `azmod.track-data.off` exists
+at startup, and requires the default constructor hook address and a successfully
+installed destructor hook. No new firmware
 address from this ledger is installed as a hook. Native commands remain separate.
 
 ## Target and analysis coverage

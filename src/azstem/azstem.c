@@ -1093,33 +1093,34 @@ __attribute__((constructor)) static void azstem_init(void) {
             unsigned passive_status = access("/home/root/settings/azmod.deck-status.off", F_OK) == 0
                                           ? 0
                                           : AZEXIT_PASSIVE_STATUS;
+            int sdk_cues_enabled = access("/home/root/settings/azmod.native-cue-commands.off", F_OK) != 0;
+            int sdk_commands_enabled = access("/home/root/settings/azmod.track-data.off", F_OK) != 0 &&
+                                       access("/home/root/settings/azmod.native-load.off", F_OK) != 0;
             if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT &&
-                access("/home/root/settings/azmod.track-data.on", F_OK) == 0 &&
-                access("/home/root/settings/azmod.native-loop.on", F_OK) == 0) {
+                access("/home/root/settings/azmod.track-data.off", F_OK) != 0 &&
+                access("/home/root/settings/azmod.native-loop.off", F_OK) != 0) {
                 azsdk_loop_configure(1, sdk_loop_build);
                 g_sdk_loop_on = 1;
             }
             if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT &&
-                access("/home/root/settings/azmod.track-data.on", F_OK) == 0 &&
-                access("/home/root/settings/azmod.native-live.on", F_OK) == 0) {
+                access("/home/root/settings/azmod.track-data.off", F_OK) != 0 &&
+                access("/home/root/settings/azmod.native-live.off", F_OK) != 0) {
                 azsdk_live_configure(1, sdk_loop_build);
                 azsdk_cue_configure(1, sdk_loop_build);
                 g_sdk_live_on = 1;
                 g_sdk_cue_on = 1;
             }
-            if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT &&
-                access("/home/root/settings/azmod.track-data.on", F_OK) == 0 &&
-                access("/home/root/settings/azmod.native-load.on", F_OK) == 0) {
+            if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT && sdk_commands_enabled) {
                 azsdk_load_configure(1, sdk_loop_build, sdk_patch_slot);
                 atomic_store_explicit(&g_sdk_load_on, 1, memory_order_release);
                 unsigned sdk_commands = 0;
-                if (access("/home/root/settings/azmod.native-exit.on", F_OK) == 0)
+                if (access("/home/root/settings/azmod.native-exit.off", F_OK) != 0)
                     sdk_commands |= AZEXIT_ENABLE_EXIT;
-                if (access("/home/root/settings/azmod.native-reloop.on", F_OK) == 0)
+                if (access("/home/root/settings/azmod.native-reloop.off", F_OK) != 0)
                     sdk_commands |= AZEXIT_ENABLE_RELOOP;
-                if (access("/home/root/settings/azmod.native-loop-commands.on", F_OK) == 0)
+                if (access("/home/root/settings/azmod.native-loop-commands.off", F_OK) != 0)
                     sdk_commands |= AZEXIT_ENABLE_LOOP;
-                if (access("/home/root/settings/azmod.native-cue-commands.on", F_OK) == 0) {
+                if (sdk_cues_enabled) {
                     sdk_commands |= AZEXIT_ENABLE_CUE;
                     if (!g_sdk_cue_on) {
                         azsdk_cue_configure(1, sdk_loop_build);
@@ -1133,8 +1134,8 @@ __attribute__((constructor)) static void azstem_init(void) {
                 azsdk_live_status_start(sdk_loop_build, g_sdk_live_on);
                 g_status_play_on = 1;
 #endif
-                /* Independent passive status startup. Command capability still checks
-                 * its original, individual gates; the owner hooks are shared. */
+                /* Passive status shares owner hooks, but remains available when
+                 * legacy snapshot/command services are explicitly disabled. */
                 if (!atomic_load_explicit(&g_sdk_load_on, memory_order_acquire)) {
                     azsdk_load_configure(1, sdk_loop_build, sdk_patch_slot);
                     atomic_store_explicit(&g_sdk_load_on, 1, memory_order_release);

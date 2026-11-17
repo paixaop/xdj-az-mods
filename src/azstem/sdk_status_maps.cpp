@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <mutex>
 
 namespace {
 struct Profile {
@@ -81,6 +82,9 @@ struct Slot {
 Slot cache[slots];
 std::atomic<uint64_t> identities {0};
 std::atomic<bool> enabled {false};
+/* Serialize analysis publication with the verified native holder writers.
+ * Nested native registry/broadcast calls use the same gate recursively. */
+std::recursive_mutex map_mutation;
 enum {
     PROOF_ENTER,
     PROOF_TYPE,
@@ -192,7 +196,10 @@ bool current_identity(unsigned d, const azn_pack_view &view, const aznm_packet &
             in.revisions[i].load(std::memory_order_relaxed) != part.revision) return false;
     }
     Pair held;
-    struct Drop { Pair &pair; ~Drop() { discard(pair); } } drop {held};
+    struct Drop {
+        Pair &pair;
+        ~Drop() { discard(pair); }
+    } drop {held};
     Object *objects[] = {&held.pack, &held.holder[0], &held.holder[1], &held.content[0], &held.content[1]};
     for (unsigned i = 0; i < 5; ++i) {
         uint64_t token = in.tokens[i].load(std::memory_order_relaxed);
@@ -490,7 +497,11 @@ int read_rows_impl(const aznm_component *component, unsigned kind, void *rows, u
         }
     } else {
         auto *dst = static_cast<az_phrase *>(rows);
-        uint32_t mood = read_value<uint32_t>(content, 0x3c);
+        /* TrackPhrase::fromAtom maps PSSI moods 1/2/3 to native enum
+         * values 0/1/2 (1.30 table 0x2797e98, 2.00 table 0x2ae4968).
+         * The public raw_mood field uses the PSSI domain, like file readers. */
+        uint32_t native_mood = read_value<uint32_t>(content, 0x3c);
+        uint32_t mood = native_mood < 3 ? native_mood + 1 : 0;
         uint32_t prior = 0;
         for (int i = 0; i < n; i++) {
             uintptr_t row = base + 20u * i;
@@ -514,6 +525,7 @@ int read_samples(const aznm_component *component, int64_t *ticks, uint32_t capac
     return result;
 }
 #include "sdk_status_map_writers.inc"
+#include "sdk_status_map_analysis.inc"
 } // namespace
 extern "C" int azn_maps_current(unsigned d, uint64_t load, const aznm_packet *stamp) {
     if (!stamp || d >= 4 || !stamp->owner) return 0;
@@ -525,6 +537,7 @@ extern "C" int azn_maps_current(unsigned d, uint64_t load, const aznm_packet *st
 }
 extern "C" unsigned azn_maps_install(int build, uintptr_t bias, azn_setting_patch_fn patch) {
     if (!patch || build < 1 || build > 2) return 0;
+    configure_analysis(build, bias);
     constexpr uintptr_t sites[][4] = {{0xd295b0, 0xd29b20, 0x176e748, 0x176fbe0}, {0xdb34d0, 0xdb3a40, 0x18c9d30, 0x18cb1e8}};
     constexpr uint32_t words[][4] = {{0xc8dffc03, 0xf9400802, 0xa9b17bfd, 0xa9b67bfd}, {0xc8dffc03, 0xf9400802, 0xa9b17bfd, 0xa9b67bfd}};
     void *hooks[] = {reinterpret_cast<void *>(grid_assign), reinterpret_cast<void *>(grid_retime),
@@ -545,6 +558,7 @@ extern "C" int azn_maps_configure(int build) {
     return 0;
 }
 extern "C" const azn_maps_api *azn_maps_service(void) {
-    static const azn_maps_api api = {sizeof api, 1, prove_pair, retire_pair, read_rows, release_packet, request_seed, refresh_pair, begin_pair, azn_map_end_mask, read_samples};
+    static const azn_maps_api api = {sizeof api, 1, prove_pair, retire_pair, read_rows, release_packet, request_seed, refresh_pair, begin_pair, azn_map_end_mask, read_samples,
+                                     analysis_capture, analysis_current, analysis_publish};
     return enabled.load(std::memory_order_acquire) ? &api : nullptr;
 }

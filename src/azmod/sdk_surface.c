@@ -24,6 +24,7 @@
  * passes everything else to the handler that was there before (EP147's).
  */
 #include <X11/Xatom.h>
+#include <X11/extensions/XTest.h>
 #include "sdk_surface_logic.h"
 
 /* the overlay thread and its context (set by sdk_overlay_attach) */
@@ -265,18 +266,20 @@ static void sdk_draw_line(az_draw *d, int x0, int y0, int x1, int y1, int width,
 
 static int (*p_xtest_motion)(Display *, int, int, int, unsigned long);
 static int (*p_xtest_button)(Display *, unsigned int, int, unsigned long);
-static int sdk_xtest_load(void) {
+static int sdk_xtest_load(Display *dpy) {
     static int tried;
     if (p_xtest_motion && p_xtest_button)
         return 1;
     if (tried)
         return 0;
     tried = 1;
-    void *h = dlopen("libXtst.so.6", RTLD_NOW | RTLD_LOCAL);
-    if (!h)
-        return 0;
-    *(void **) &p_xtest_motion = dlsym(h, "XTestFakeMotionEvent");
-    *(void **) &p_xtest_button = dlsym(h, "XTestFakeButtonEvent");
+    int event, error, major, minor;
+    if (!XTestQueryExtension(dpy, &event, &error, &major, &minor)) return 0;
+    /* Linked statically: stock decks provide XTEST in Xorg but no libXtst.so.
+     * Keep the client implementation in the core so every supported deployment
+     * has the same public pointer service. */
+    p_xtest_motion = XTestFakeMotionEvent;
+    p_xtest_button = XTestFakeButtonEvent;
     return p_xtest_motion && p_xtest_button;
 }
 /* Any thread (a touch filter runs on the bus thread): only a queue post, no system call. */
@@ -308,8 +311,7 @@ static void sdk_cursor_apply(Display *dpy) {
     (want ? show_fn : hide_fn)(dpy, DefaultRootWindow(dpy));
     hidden = !want;
 }
-/* Overlay thread: deliver the queued pointer events. The queue only opens once XTest has
- * loaded (sdk_overlay_attach), so pointer_inject refuses on a deck without libXtst. */
+/* Overlay thread: deliver the queued pointer events. */
 static void sdk_pointer_drain(Display *dpy) {
     if (!__atomic_load_n(&g_sdk_pq_ready, __ATOMIC_ACQUIRE))
         return;
@@ -472,7 +474,7 @@ static void sdk_overlay_attach(struct overlay_ctx *c) {
     g_sdk_ov_tid_set = 1;
     g_sdk_ovc = c;
     sdk_pq_init(&g_sdk_pq);
-    __atomic_store_n(&g_sdk_pq_ready, sdk_xtest_load(), __ATOMIC_RELEASE);
+    __atomic_store_n(&g_sdk_pq_ready, sdk_xtest_load(c->dpy), __ATOMIC_RELEASE);
 }
 
 /* Every tick: publish the view, and send long presses. */

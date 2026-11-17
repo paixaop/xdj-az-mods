@@ -138,6 +138,25 @@ def prepare_jog_output(work):
     return path
 
 
+def configure_emulator_dns(ssh):
+    """Keep the emulator's explicit resolver across DHCP renewals."""
+    body = """set -e
+mkdir -p /usr/share/udhcpc/default.script.d
+cat >/usr/share/udhcpc/default.script.d/99-emulator-dns <<'DNS_HOOK'
+#!/bin/sh
+[ "$interface" = eth0 ] || exit 0
+case "$1" in
+    bound|renew) printf 'nameserver 4.2.2.2\\n' >/etc/resolv.conf ;;
+esac
+DNS_HOOK
+chmod 755 /usr/share/udhcpc/default.script.d/99-emulator-dns
+interface=eth0 /usr/share/udhcpc/default.script.d/99-emulator-dns renew
+"""
+    result = subprocess.run(ssh + [body], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+    if result.returncode:
+        raise RuntimeError("emulator DNS setup failed")
+
+
 def boot_arguments(base, work, name, token, port, qmp, available_kib, vcpus=4, memory_bytes=2147483648,jog_output=False):
     if type(jog_output) is not bool:raise ValueError('jog output must be an explicit boolean')
     if not re.fullmatch(r"az-sdk-automation-[a-z0-9-]+", name) or not re.fullmatch(r"[0-9a-f]{32}", token):
@@ -309,6 +328,8 @@ def run(base, archive, output, profile, port, qmp, vcpus=4, memory_bytes=2147483
         if actual != FIRMWARE[profile]:
             raise RuntimeError("unexpected emulator firmware identity")
         report["firmware_sha256"] = actual
+        configure_emulator_dns(ssh)
+        report["dns_server"] = "4.2.2.2"
         if native_tests:
             print("Emulator%s: native packet starting" % profile, flush=True)
             report["kernel_tests"] = execute(archive, native_root, "127.0.0.1", port,

@@ -38,6 +38,15 @@ struct azn_maps_api {
     /* Exact immutable grid coordinates in the holder's declared clock. */
     int (*read_samples)(const struct aznm_component *, int64_t *ticks, uint32_t capacity,
                         uint32_t *count, uint32_t *rate);
+    /* Worker-only loaded-analysis support (AZ_* result codes). capture owns
+     * both content tokens until release; current validates the exact edition.
+     * publish_phrases accepts plain, bounded PSSI for that unchanged grid and
+     * an empty native phrase content. It never installs or retimes a grid.
+     * Only verified firmware profiles expose successful publication. */
+    int (*capture)(unsigned deck, uint64_t load, struct aznm_packet *out);
+    int (*current)(unsigned deck, uint64_t load, const struct aznm_packet *expected);
+    int (*publish_phrases)(unsigned deck, uint64_t load, const struct aznm_packet *expected,
+                           const void *pssi, uint32_t size);
 };
 #ifdef AZ_STATUS_MAPS_PRODUCER
 __attribute__((visibility("hidden"))) const struct azn_maps_api *azn_maps_service(void);

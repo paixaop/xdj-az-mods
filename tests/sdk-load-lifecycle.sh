@@ -63,7 +63,8 @@ config = '''#include "azexit.h"
 #define DJPUDTOR_DEFAULT ((uintptr_t)0x20000)
 #define logln(...) ((void)0)
 typedef int (*patch_fn)(uintptr_t,void*,void**);
-static int track_on, load_on, status_off, ctor_ok, dtor_ok, configured, configured_build, bad_patch, ctor_calls, dtor_calls;
+static int track_off, load_off, status_off, cues_off, loop_flags, ctor_ok, dtor_ok, configured, configured_build, bad_patch, ctor_calls, dtor_calls;
+static unsigned command_options;
 static int sdk_loop_build, g_sdk_loop_on, g_sdk_live_on, g_sdk_cue_on;
 static _Atomic int g_sdk_load_on;
 static uintptr_t g_djpuctor_addr;
@@ -74,8 +75,12 @@ static void djpudtor_hook(void) { different=2; }
 static int access(const char *path,int mode) {
     CHECK(mode==F_OK);
     if (!strcmp(path,"/home/root/settings/azmod.deck-status.off")) return status_off?0:-1;
-    if (!strcmp(path,"/home/root/settings/azmod.track-data.on")) return track_on?0:-1;
-    if (!strcmp(path,"/home/root/settings/azmod.native-load.on")) return load_on?0:-1;
+    if (!strcmp(path,"/home/root/settings/azmod.native-cue-commands.off")) return cues_off?0:-1;
+    if (!strcmp(path,"/home/root/settings/azmod.track-data.off")) return track_off?0:-1;
+    if (!strcmp(path,"/home/root/settings/azmod.native-load.off")) return load_off?0:-1;
+    if (!strcmp(path,"/home/root/settings/azmod.native-exit.off")) return loop_flags&16?0:-1;
+    if (!strcmp(path,"/home/root/settings/azmod.native-reloop.off")) return loop_flags&32?0:-1;
+    if (!strcmp(path,"/home/root/settings/azmod.native-loop-commands.off")) return loop_flags&64?0:-1;
     return -1;
 }
 static void *install_hook_at(uintptr_t address,void *hook,void **original) {
@@ -88,30 +93,36 @@ static void azsdk_load_configure(int on,int build,patch_fn patch) { CHECK(on==1)
 static void azsdk_loop_configure(int on,int build) { (void)on;(void)build; }
 static void azsdk_live_configure(int on,int build) { (void)on;(void)build; }
 static void azsdk_cue_configure(int on,int build) { (void)on;(void)build; }
-int azsdk_exit_configure(int on,int build,void *(*install)(uintptr_t,void*,void**)) { (void)on;(void)build;(void)install;return 0; }
+int azsdk_exit_configure(int on,int build,void *(*install)(uintptr_t,void*,void**)) { command_options|=(unsigned)on;(void)build;(void)install;return 0; }
 static void configure(unsigned long long v) {
 ''' + body + '''
 }
 int main(void) {
-    for (int build=1;build<=2;++build) for(int flags=0;flags<8;++flags)
+    for (int build=1;build<=2;++build) for(int flags=0;flags<128;++flags)
       for(int ctor=0;ctor<2;++ctor) for(int dtor=0;dtor<2;++dtor) for(int def=0;def<2;++def) {
-        sdk_loop_build=build;status_off=flags&4;track_on=flags&1;load_on=flags&2;ctor_ok=ctor;dtor_ok=dtor;
-        configured=bad_patch=ctor_calls=dtor_calls=0;g_sdk_load_on=0;
+        sdk_loop_build=build;status_off=flags&4;cues_off=flags&8;loop_flags=flags&112;track_off=flags&1;load_off=flags&2;ctor_ok=ctor;dtor_ok=dtor;
+        configured=bad_patch=ctor_calls=dtor_calls=0;g_sdk_load_on=0;g_sdk_cue_on=0;command_options=0;
         configure(def?DJPUCTOR_DEFAULT:0x30000);
-        int expected=(!(flags&4) || (flags&3)==3) && ctor && dtor && def;
+        int expected=(!status_off || (!track_off && !load_off)) && ctor && dtor && def;
         CHECK(configured==expected && atomic_load(&g_sdk_load_on)==expected);
         CHECK(ctor_calls==1 && dtor_calls==ctor);
         CHECK(!expected || (configured_build==build && !bad_patch));
+        CHECK(!!(command_options&AZEXIT_ENABLE_CUE)==(!cues_off && !track_off && !load_off && ctor && dtor && def));
+        unsigned loops=(flags&16?0:AZEXIT_ENABLE_EXIT)|(flags&32?0:AZEXIT_ENABLE_RELOOP)|(flags&64?0:AZEXIT_ENABLE_LOOP);
+        if (!(ctor && dtor && def && !track_off && !load_off)) loops=0;
+        CHECK((command_options&(AZEXIT_ENABLE_EXIT|AZEXIT_ENABLE_RELOOP|AZEXIT_ENABLE_LOOP))==loops);
     }
     puts("PASS load lifecycle config: flags, constructor/destructor success, default address and build");
 }
 '''
 (out / 'config.c').write_text(config)
 controls = [
-    ('master-flag', 'access("/home/root/settings/azmod.track-data.on", F_OK) == 0 &&\n                access("/home/root/settings/azmod.native-load.on", F_OK) == 0', 'access("/home/root/settings/azmod.native-load.on", F_OK) == 0'),
-    ('load-flag', 'access("/home/root/settings/azmod.native-load.on", F_OK) == 0', '1'),
-    ('default-address', 'if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT &&\n                access("/home/root/settings/azmod.track-data.on", F_OK) == 0 &&\n                access("/home/root/settings/azmod.native-load.on", F_OK) == 0)', 'if (td && access("/home/root/settings/azmod.track-data.on", F_OK) == 0 && access("/home/root/settings/azmod.native-load.on", F_OK) == 0)'),
-    ('dtor-required', 'if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT &&\n                access("/home/root/settings/azmod.track-data.on", F_OK) == 0 &&\n                access("/home/root/settings/azmod.native-load.on", F_OK) == 0)', 'if (g_djpuctor_addr == DJPUCTOR_DEFAULT && access("/home/root/settings/azmod.track-data.on", F_OK) == 0 && access("/home/root/settings/azmod.native-load.on", F_OK) == 0)'),
+    ('master-flag', 'access("/home/root/settings/azmod.track-data.off", F_OK) != 0 &&\n                                       access("/home/root/settings/azmod.native-load.off", F_OK) != 0', 'access("/home/root/settings/azmod.native-load.off", F_OK) != 0'),
+    ('load-flag', 'access("/home/root/settings/azmod.native-load.off", F_OK) != 0', '1'),
+    ('default-address', 'if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT && sdk_commands_enabled)', 'if (td && sdk_commands_enabled)'),
+    ('dtor-required', 'if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT && sdk_commands_enabled)', 'if (g_djpuctor_addr == DJPUCTOR_DEFAULT && sdk_commands_enabled)'),
+    ('cue-off-switch', 'access("/home/root/settings/azmod.native-cue-commands.off", F_OK) != 0', '1'),
+    ('exit-off-switch', 'access("/home/root/settings/azmod.native-exit.off", F_OK) != 0', '1'),
     ('build', 'azsdk_load_configure(1, sdk_loop_build, sdk_patch_slot);\n                atomic_store_explicit', 'azsdk_load_configure(1, 1, sdk_patch_slot);\n                atomic_store_explicit'),
 ]
 for name, old, new in controls:
@@ -137,7 +148,7 @@ for control in register retire owner disabled unit-vtable ctor-order cue-registe
     grep -q 'FAIL  lifetime:' "$task_tmp/$control.log" || { cat "$task_tmp/$control.log" >&2; exit 1; }
     echo "CONTROL caught: load lifecycle $control"
 done
-for control in master-flag load-flag default-address dtor-required build; do
+for control in master-flag load-flag default-address dtor-required cue-off-switch exit-off-switch build; do
     "$compiler" "${flags[@]}" "$task_tmp/config-$control.c" -o "$task_tmp/config-$control"
     if (ulimit -c 0; "$task_tmp/config-$control" >"$task_tmp/config-$control.log" 2>&1) 2>/dev/null; then
         echo "FAIL: load lifecycle config $control control passed" >&2; exit 1
