@@ -114,6 +114,11 @@ python3 - "$W/compile_commands.json" > "$W/cpp.args" <<'EOF'
 import json, sys
 for e in json.load(open(sys.argv[1])):
     keep = [a for a in e["arguments"] if a.startswith("-D") or (a.startswith("-I") and not a.startswith("-I/usr/"))]
+    # GCC defines this in C when unwind cleanup is enabled. Cppcheck does not
+    # infer compiler predefined macros from code-generation flags.
+    unwind = [a for a in e["arguments"] if a in ("-fexceptions", "-fno-exceptions")]
+    if unwind and unwind[-1] == "-fexceptions":
+        keep.append("-D__EXCEPTIONS=1")
     print("\t".join(keep + [e["file"]]))
 EOF
 : > "$W/cpp.all"
