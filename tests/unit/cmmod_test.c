@@ -12,7 +12,18 @@
 #include <string.h>
 #include <unistd.h>
 #include "check.h"
+#include <time.h>
+/* Layout digests draw thousands of frames between assertions. Keep the pending
+ * toggle's clock fixed; the timeout case explicitly ages g_cm_flip.at below. */
+static int cmmod_clock_gettime(clockid_t clock_id, struct timespec *ts) {
+    (void) clock_id;
+    ts->tv_sec = 1000;
+    ts->tv_nsec = 0;
+    return 0;
+}
+#define clock_gettime cmmod_clock_gettime
 #include MENU_C
+#undef clock_gettime
 
 static char g_seen[1 << 14];
 static size_t g_seen_n;

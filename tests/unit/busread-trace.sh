@@ -10,7 +10,7 @@ O=${2:-$(mktemp -d)}
 mkdir -p "$O"
 f="$G/azmod/bus_interpose.c"
 awk '/^\/\* ---- read\(\): the panel input buses/ {p=1} p' "$f" > "$O/read_path.inc"
-awk '/^static uint16_t crc16_x25\(/ {p=1} /^static void bus_fd_drop\(/ {p=0} p' "$f" > "$O/crc.inc"
+awk '/^static uint16_t crc16_x25\(/ {p=1} p {print} p && /^}/ {exit}' "$f" > "$O/crc.inc"
 [ -s "$O/read_path.inc" ] && [ -s "$O/crc.inc" ] || { echo "busread-trace: regions not found in $f"; exit 2; }
 ${CC:-cc} -O1 -w -I"$G/azmod" -I"$O" -DBI_INC='"read_path.inc"' -DCRC_INC='"crc.inc"' \
     -o "$O/busread_trace" "${BUSTRACE_HARNESS:-$here/busread_trace_test.c}"

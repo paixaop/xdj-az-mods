@@ -62,7 +62,7 @@ fz_prepare() {
         mkdir -p "$dir/azmod"
         cp guest/azmod/*.h "$dir/azmod/"
         awk '/^\/\* ---- read\(\): the panel input buses/ {p=1} p' guest/azmod/bus_interpose.c > "$dir/read_path.inc"
-        awk '/^static uint16_t crc16_x25\(/ {p=1} /^static void bus_fd_drop\(/ {p=0} p' guest/azmod/bus_interpose.c > "$dir/crc.inc"
+        awk '/^static uint16_t crc16_x25\(/ {p=1} p {print} p && /^}/ {exit}' guest/azmod/bus_interpose.c > "$dir/crc.inc"
         cp $FZ_UT/busread_trace_test.c "$dir/"
         [ -s "$dir/read_path.inc" ] && grep -q 'crc16_x25' "$dir/crc.inc" ;;
     cmjson)

@@ -172,6 +172,38 @@ static ssize_t fake_read(int fd, void *buf, size_t n) {
 }
 static ssize_t (*next_read)(int, void *, size_t) = fake_read;
 
+/* Synthetic button delivery is exercised by tests/sdk-panel.sh. This trace has
+ * no pending button command, so physical reads pass through unchanged. */
+struct epoll_event;
+enum {
+    EPB_V200 = 200
+};
+static int g_ep147_build;
+static void panel_registration(int epfd, int op, int fd, struct epoll_event *event) {
+    (void) epfd;
+    (void) op;
+    (void) fd;
+    (void) event;
+}
+static int panel_epoll(int epfd, struct epoll_event *events, int count, int rc, int timeout) {
+    (void) epfd;
+    (void) events;
+    (void) count;
+    (void) timeout;
+    return rc;
+}
+static ssize_t panel_read(int fd, void *buf, size_t n) {
+    (void) fd;
+    (void) buf;
+    (void) n;
+    return -2;
+}
+static void panel_observe(int fd, const void *buf, ssize_t n) {
+    (void) fd;
+    (void) buf;
+    (void) n;
+}
+
 #include CRC_INC
 #define read bus_read
 #include BI_INC

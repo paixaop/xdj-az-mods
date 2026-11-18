@@ -4046,8 +4046,9 @@ sdk_linux() {
         else
             docker run --rm --platform=linux/arm64 -v "$ROOT:$ROOT" -v "$dd:$dd" -w "$ROOT" azmod-build:18.04 \
                 gcc "${flags[@]}" -D$mac="\"$dd/$v.c\"" -o "$dd/$v.bin" $src -ldl
-            printf '#!/bin/sh\nexec docker run --rm --platform=linux/arm64 -v "%s:%s" -e TMPDIR=%s azmod-build:18.04 "%s" "$@"\n' \
-                "$dd" "$dd" "$dd" "$dd/$v.bin" > "$dd/$v"
+            # Keep permission-sensitive fixtures on the container's Linux filesystem.
+            printf '#!/bin/sh\nexec docker run --rm --platform=linux/arm64 -v "%s:%s" -e TMPDIR=/tmp azmod-build:18.04 "%s" "$@"\n' \
+                "$dd" "$dd" "$dd/$v.bin" > "$dd/$v"
             chmod +x "$dd/$v"
         fi
     done

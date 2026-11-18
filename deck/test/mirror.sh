@@ -165,7 +165,10 @@ echo "== w6 community-mods.off removed -> mirrored back, marker gone, staged"
 st 'rm -f MODS/community-mods.off'; boot
 chk "w6 back" '[ "$(cat $CS/x-mod/x-mod.so)" = m2 ] && [ ! -e $P7/community-mods.off ] && staged'
 echo "== w7 p7 reserve would be breached -> NOT mirrored, the old stage copy stays"
-st 'echo m3 > MODS/community-mods/x-mod/x-mod.so'; AZ_COMMUNITY_P7_RESERVE_KB=999999999 boot
+st 'echo m3 > MODS/community-mods/x-mod/x-mod.so'
+# Docker's filesystem can exceed a terabyte; derive a reserve that cannot fit.
+reserve_kb=$(df -k "$P7" | awk 'NR==2{print $4}')
+AZ_COMMUNITY_P7_RESERVE_KB=$((reserve_kb + 1024)) boot
 chk "w7 old copy kept, logged" '[ "$(cat $CS/x-mod/x-mod.so)" = m2 ] && grep -q "FAILED community/: needs" /tmp/az-usbload.log && [ ! -e $P7/community.new ]'
 boot; chk "w7b CONTROL: with the default reserve it mirrors" '[ "$(cat $CS/x-mod/x-mod.so)" = m3 ] && staged'
 echo "== w8 community/ removed from the stick -> removed from the stage, staged"
