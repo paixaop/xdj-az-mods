@@ -267,25 +267,31 @@ static int sa_link_analysis(const struct sa_job *job) {
     sa_stage_drop(&spool);
     return ok;
 }
-static int sdk_analysis_commit(const char *id, uint64_t job, const void *data, uint32_t size) {
-    int owner = sa_owner(id, "analysis_commit", CM_RA());
-    if (owner < 0 || !job || !data || size < 16 || size > 24 + 24 + 32768 * 8 + 32 + 1024 * 24 + 24 + SV_FRAMES_MAX) return AZ_INVALID;
+static uint32_t sdk_analysis_formats(void) {
+    return AZ_ANALYSIS_FORMAT_TA01 | AZ_ANALYSIS_FORMAT_TA02 | AZ_ANALYSIS_FORMAT_TA03;
+}
+static int sa_commit(int owner, uint64_t job, const void *data, uint32_t size) {
+    if (owner < 0 || !job || !data || size < 16 || size > 28 + 24 + 32768 * 8 + 32 + 1024 * 24 + 24 + SV_FRAMES_MAX) return AZ_INVALID;
     const uint8_t *bytes = data;
-    int v2 = !memcmp(bytes, "TA02", 4);
-    uint32_t header = v2 ? 24 : 16;
+    int v3 = !memcmp(bytes, "TA03", 4);
+    int v2 = v3 || !memcmp(bytes, "TA02", 4);
+    uint32_t header = v3 ? 28 : v2 ? 24 : 16;
     if (size < header || (!v2 && memcmp(bytes, "TA01", 4))) return AZ_INVALID;
     uint32_t gn = sa_u32(bytes + 4), pn = sa_u32(bytes + 8), vn = v2 ? sa_u32(bytes + 12) : 0;
     uint32_t rate = sa_u32(bytes + (v2 ? 16 : 12)), frames = v2 ? sa_u32(bytes + 20) : 0;
     if (gn > size - header || pn > size - header - gn || vn != size - header - gn - pn ||
         (rate != 44100 && rate != 48000) || (v2 && (!frames || frames > rate * 1200u)) || (!pn && !vn)) return AZ_INVALID;
+    uint32_t method = v3 ? sa_u32(bytes + 24) : AZ_VOCAL_SPECTRAL;
+    if (v3 && (vn ? method != AZ_VOCAL_LSTM : method != AZ_VOCAL_PVDI)) return AZ_INVALID;
     const uint8_t *grid = bytes + header, *phrase = grid + gn, *vocal = phrase + pn;
     if ((pn && (pn < 32 || memcmp(phrase, "PSSI", 4) || sa_u32(phrase + 4) != 32 || sa_u32(phrase + 8) != pn ||
                 sa_u16(phrase + 12) != 0 || sa_u16(phrase + 14) != 24 || !sa_u16(phrase + 16))) ||
         (gn && (gn < 24 || memcmp(grid, "PQTZ", 4) || sa_u32(grid + 4) != 24 || sa_u32(grid + 8) != gn))) return AZ_INVALID;
     if (vn) {
         az_vocal_snapshot_v1 v = {0};
-        if (sv_tag(vocal, vn, &v) || v.frame_count !=
-            ((uint64_t) frames * v.sample_rate + (uint64_t) rate * v.hop_samples - 1) / ((uint64_t) rate * v.hop_samples)) return AZ_INVALID;
+        if (sv_tag(vocal, vn, &v) ||
+            (method == AZ_VOCAL_LSTM && (v.sample_rate != 22050 || v.hop_samples != 1024 || v.frame_count < 9)) ||
+            v.frame_count != sv_expected_count(frames, rate, v.sample_rate, v.hop_samples, method)) return AZ_INVALID;
     }
     if (pthread_mutex_trylock(&sa_mutex)) return AZ_BUSY;
     struct sa_job *j = NULL;
@@ -340,7 +346,7 @@ static int sdk_analysis_commit(const char *id, uint64_t job, const void *data, u
         newex2 = sa_merge(ex2, vfn, vocal, vn, &nvn);
         uint8_t marker[32] = {0};
         memcpy(marker, "AZVD", 4); sa_put32(marker + 4, 32); sa_put32(marker + 8, 32);
-        sa_put32(marker + 12, 1); sa_put32(marker + 16, AZ_VOCAL_SPECTRAL); sa_put32(marker + 20, sv_hash(vocal, vn));
+        sa_put32(marker + 12, 1); sa_put32(marker + 16, method); sa_put32(marker + 20, sv_hash(vocal, vn));
         sa_put32(marker + 24, frames); sa_put32(marker + 28, rate);
         size_t marked_n = 0;
         uint8_t *marked = newex2 ? sa_merge(newex2, nvn, marker, sizeof marker, &marked_n) : NULL;
@@ -366,6 +372,10 @@ done:
     pthread_mutex_unlock(&sa_mutex);
     return rc;
 }
+static int sdk_analysis_commit(const char *id, uint64_t job, const void *data, uint32_t size) {
+    return sa_commit(sa_owner(id, "analysis_commit", CM_RA()), job, data, size);
+}
+#include "sdk_analysis_typed.c"
 static int sdk_analysis_close(const char *id, uint64_t job) {
     int owner = sa_owner(id, "analysis_close", CM_RA());
     if (owner < 0 || !job) return AZ_INVALID;

@@ -10,12 +10,18 @@ static inline uint32_t sv_hash(const uint8_t *p, size_t n) {
     for (size_t i = 0; i < n; i++) h = (h ^ p[i]) * 16777619u;
     return h;
 }
-/* PVDI v1: hop:u32, rate:u16, version:u16, count:u32, confidence[count].
+static inline uint64_t sv_expected_count(uint32_t frames, uint32_t source_rate,
+                                          uint32_t rate, uint32_t hop, uint32_t method) {
+    if (!source_rate || !rate || !hop) return 0;
+    if (method == AZ_VOCAL_LSTM) return (((uint64_t) frames * rate / source_rate) + hop - 1) / hop;
+    return ((uint64_t) frames * rate + (uint64_t) source_rate * hop - 1) / ((uint64_t) source_rate * hop);
+}
+/* PVDI: version/flags:u16, hop:u16, rate:u16, stride:u16, count:u32, confidence[count].
  * This is a quantized detector score, not a probability or waveform. */
 static inline int sv_tag(const uint8_t *p, size_t n, az_vocal_snapshot_v1 *v) {
     if (!p || n < 24 || memcmp(p, "PVDI", 4) || sa_u32(p + 4) != 24 || sa_u32(p + 8) != n) return AZ_FAILED;
-    if (sa_u16(p + 18) != 1) return AZ_UNSUPPORTED;
-    uint32_t hop = sa_u32(p + 12), rate = sa_u16(p + 16), count = sa_u32(p + 20);
+    if (sa_u16(p + 12) != 0 || sa_u16(p + 18) != 1) return AZ_UNSUPPORTED;
+    uint32_t hop = sa_u16(p + 14), rate = sa_u16(p + 16), count = sa_u32(p + 20);
     if (!hop || !rate || hop > rate || count > SV_FRAMES_MAX || count != n - 24) return AZ_FAILED;
     for (uint32_t i = 0; i < count; i++) if (p[24 + i] > 4) return AZ_FAILED;
     v->frame_count = count; v->hop_samples = hop; v->sample_rate = rate; v->threshold = 3;
@@ -44,18 +50,14 @@ static inline int sv_file(const uint8_t *file, size_t n, az_vocal_snapshot_v1 *v
     int rc = sv_tag(tag, length, v);
     if (rc) return rc;
     v->method = AZ_VOCAL_PVDI;
-    if (marker && sa_u32(marker + 12) == 1 && sa_u32(marker + 16) == AZ_VOCAL_SPECTRAL &&
+    if (marker && sa_u32(marker + 12) == 1 && (sa_u32(marker + 16) == AZ_VOCAL_SPECTRAL || sa_u32(marker + 16) == AZ_VOCAL_LSTM) &&
         sa_u32(marker + 20) == sv_hash(tag, length)) {
         uint32_t frames = sa_u32(marker + 24), rate = sa_u32(marker + 28);
+        uint32_t method = sa_u32(marker + 16);
         if (!frames || !rate || v->frame_count !=
-            ((uint64_t) frames * v->sample_rate + (uint64_t) rate * v->hop_samples - 1) /
-            ((uint64_t) rate * v->hop_samples)) return AZ_FAILED;
-        double duration = (double) frames / rate;
-        int order = compare_timestamps(duration, v->analyzed_s, 1, rate, 1);
-        /* Generated coverage is rounded up by at most one PVDI frame. */
-        if (order == AZ_TIME_INVALID || order == AZ_TIME_AFTER ||
-            v->analyzed_s - duration > (double) v->hop_samples / v->sample_rate) return AZ_FAILED;
-        v->analyzed_s = duration; v->method = AZ_VOCAL_SPECTRAL;
+            sv_expected_count(frames, rate, v->sample_rate, v->hop_samples, method) ||
+            (method == AZ_VOCAL_LSTM && (v->sample_rate != 22050 || v->hop_samples != 1024 || v->frame_count < 9))) return AZ_FAILED;
+        v->analyzed_s = (double) frames / rate; v->method = method;
     }
     uint32_t count = 0;
     for (uint32_t i = 0; i < v->frame_count; i++)

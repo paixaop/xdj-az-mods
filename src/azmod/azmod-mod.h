@@ -809,7 +809,10 @@ typedef struct az_analysis_job_v1 {
 #define AZ_ANALYSIS_VOCALS 32u /* analysis job needed bit; use vocal_intervals to read */
 /* Half-open intervals in original-track seconds, independent of tempo/playback rate. */
 typedef struct az_vocal_interval { double start_s, stop_s; } az_vocal_interval;
-enum { AZ_VOCAL_PVDI = 0, AZ_VOCAL_SPECTRAL = 1 };
+enum { AZ_VOCAL_PVDI = 0, AZ_VOCAL_SPECTRAL = 1, AZ_VOCAL_LSTM = 2 };
+#define AZ_ANALYSIS_FORMAT_TA01 1u
+#define AZ_ANALYSIS_FORMAT_TA02 2u
+#define AZ_ANALYSIS_FORMAT_TA03 4u
 typedef struct az_vocal_snapshot_v1 {
     uint32_t size, version;
     az_component_info info;
@@ -817,6 +820,38 @@ typedef struct az_vocal_snapshot_v1 {
     uint32_t threshold, method; /* confidence >= threshold; method identifies generated heuristic */
     double analyzed_s; /* coverage, not library duration rounded to seconds */
 } az_vocal_snapshot_v1;
+
+/* Typed analysis publication. Arrays are borrowed only until the call returns;
+ * the core validates and serializes them. No ANLZ or TAxx buffers cross this API.
+ * Phrase beat numbers are one-based native grid ordinals; zero means absent
+ * for optional subphrase/fill positions. Values are never timestamps. */
+typedef struct az_analysis_phrase_v1 {
+    uint32_t start_beat, kind;
+    uint32_t variant1, variant2, variant3, structure;
+    uint32_t beat2, beat3, beat4, fill, fill_start_beat;
+} az_analysis_phrase_v1;
+typedef struct az_analysis_phrase_map_v1 {
+    uint32_t mood, end_beat, count, reserved; /* mood: 1 high, 2 mid, 3 low */
+    const az_analysis_phrase_v1 *entries;
+} az_analysis_phrase_map_v1;
+typedef struct az_vocal_frame_v1 {
+    uint32_t activity; /* quantized model activity, 0..4; >=3 is vocal */
+} az_vocal_frame_v1;
+typedef struct az_analysis_vocal_map_v1 {
+    uint32_t sample_rate, hop_samples, method, count;
+    const az_vocal_frame_v1 *frames;
+} az_analysis_vocal_map_v1;
+typedef struct az_analysis_result_v1 {
+    uint32_t size, version, source_rate, reserved;
+    uint64_t source_frames;
+    uint32_t beat_count, reserved2;
+    const az_beat *beats; /* omitted for loaded jobs; the lease owns their grid */
+    az_analysis_phrase_map_v1 phrases;
+    az_analysis_vocal_map_v1 vocals;
+} az_analysis_result_v1;
+typedef struct az_analysis_grid_v1 {
+    uint32_t size, version, beat_count, reserved;
+} az_analysis_grid_v1;
 
 /* One shared library service. All consumers use the same source identities, bounded cache,
  * snapshots, event journal and native command policy. No per-mod data backend is created. */
@@ -921,6 +956,20 @@ typedef struct az_library_v1 {
                            az_vocal_snapshot_v1 *out, az_vocal_interval *intervals, uint32_t capacity);
     int (*vocal_intervals_loaded)(const char *id, int deck, uint64_t load_epoch,
                                   az_vocal_snapshot_v1 *out, az_vocal_interval *intervals, uint32_t capacity);
+    /* Pure capability query. TA03 adds a u32 vocal method at offset 24; tags
+     * start at 28. AZ_VOCAL_LSTM uses ceil(floor(frames*22050/rate)/1024).
+     * Check AZ_LIB_HAS before calling; older cores only accept TA01/TA02. */
+    uint32_t (*analysis_formats)(void);
+    /* Worker-only typed interfaces. Initialize out->size. grid copies the
+     * lease's pinned grid; NULL/0 returns AZ_LIMIT and its required beat_count.
+     * No partial copy on error. The lease and source must still be current.
+     * commit_result accepts v2 leases, consumes only on AZ_OK, and keeps the
+     * same source/load/file fences and preserve-existing policy as commit.
+     * Empty components have zero fields and NULL arrays. Check each member. */
+    int (*analysis_grid)(const char *id, uint64_t job, az_analysis_grid_v1 *out,
+                          az_beat *beats, uint32_t capacity);
+    int (*analysis_commit_result)(const char *id, uint64_t job,
+                                  const az_analysis_result_v1 *result);
 } az_library_v1;
 #define AZ_LIB_HAS(service, field) \
     ((service) && (service)->abi == AZ_LIBRARY_ABI && \
