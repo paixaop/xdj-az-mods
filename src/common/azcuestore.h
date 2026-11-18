@@ -34,7 +34,7 @@ typedef struct {
     void (*copy_property)(void *, const void *);
     azcs_native_cue (*serialize_property)(unsigned, const void *, bool);
     /* Native functions return their one-word counted value through hidden X8.
-     * Invoke through az_native_result, never a C small-aggregate return. */
+     * Invoke through az_native_result_word, never a C small-aggregate return. */
     void *where_from;
     void *string_allocate;
     void (*string_destroy)(void *);

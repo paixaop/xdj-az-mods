@@ -31,7 +31,7 @@ esac
         if [ -f "$input" ]; then sha256sum "$input"; else echo "MISSING $input"; fi
     done
 } >"$task_tmp/inputs.txt"
-"${HOST_CC:-cc}" "${flags[@]}" "${sources[@]}" src/common/aznative_guard.S -lstdc++ -ldl -o "$task_tmp/connection-hooks"
+"${HOST_CC:-cc}" "${flags[@]}" "${sources[@]}" src/common/aznative_guard.c -lstdc++ -ldl -o "$task_tmp/connection-hooks"
 failures=0
 scenarios=(ordinary close-fails open-fails empty-close empty-open failures)
 if [ "${EXPECT_RED:-0}" = 1 ]; then scenarios=(ordinary); fi

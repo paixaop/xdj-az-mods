@@ -30,7 +30,7 @@ tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 esac
 # The test includes the actual current source implementation unchanged. There
 # is no extract/replacement engine and no weak accessor existence assertion.
-"${HOST_CC:-gcc}" "${flags[@]}" tests/unit/sdkcachebirth_test.c src/azmod/sdk_connection_hooks.c tests/unit/sdkcachebirth_return.S src/common/aznative_guard.S src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/cache-birth"
+"${HOST_CC:-gcc}" "${flags[@]}" tests/unit/sdkcachebirth_test.c src/azmod/sdk_connection_hooks.c tests/unit/sdkcachebirth_return.S src/common/aznative_guard.c src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/cache-birth"
 failures=0
 for profile in 1 2; do
     status=0

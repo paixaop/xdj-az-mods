@@ -28,7 +28,7 @@ if [ -n "${EPOCH_HEADER:-}" ]; then flags+=("-DAZCONNECTION_EPOCH_HEADER=\"${EPO
     sha256sum tests/unit/sdkconnectionepoch_test.c tests/sdk-connection-epoch.sh
     if [ -e src/common/azconnectionepoch.h ]; then sha256sum src/common/azconnectionepoch.h; else echo 'PRODUCTION_HEADER_MISSING'; fi
 } >"$task_tmp/inputs.txt"
-"${HOST_CC:-cc}" "${flags[@]}" tests/unit/sdkconnectionepoch_test.c src/common/aznative_guard.S -lstdc++ -o "$task_tmp/connection-epoch"
+"${HOST_CC:-cc}" "${flags[@]}" tests/unit/sdkconnectionepoch_test.c src/common/aznative_guard.c -lstdc++ -ldl -o "$task_tmp/connection-epoch"
 failures=0
 for profile in 1 2; do
     status=0

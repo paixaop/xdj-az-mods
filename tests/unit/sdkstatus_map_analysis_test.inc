@@ -41,7 +41,8 @@ void test_trash(uintptr_t unused __attribute__((unused)), uintptr_t p) {
             return;
         }
 }
-void test_make_body(uintptr_t *result, const struct AnalysisAtomRef *ref) {
+void test_make_body(void *result, const void *argument) {
+    const struct AnalysisAtomRef *ref = argument;
     const struct AnalysisAtom *atom = &(*ref->value);
     assert(!ref->control && atom->header == 32 && atom->prefix == 18 && atom->stride == 24 &&
            atom->rows.size == atom->count * 24 && atom->raw.size == 32 + atom->rows.size);
@@ -70,7 +71,7 @@ void test_make_body(uintptr_t *result, const struct AnalysisAtomRef *ref) {
         during_make = NULL;
         callback();
     }
-    *result = p;
+    memcpy(result, &p, sizeof p);
 }
 extern void test_make(void);
 static void test_memory(struct AnalysisMemory *memory, const void *data, size_t size) {

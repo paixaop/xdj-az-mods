@@ -80,8 +80,8 @@ endif
 AZMOD_SRCS := azmod/azmod.c azmod/menu.c azmod/text.c azmod/azconf.c
 AZMOD_HDRS := $(wildcard azmod/*.h azmod/*.c azmod/*.inc azmod/*.S azmod/*.def) $(wildcard common/*.h common/*.c common/*.S) azstem/sdk_native.map
 AZSDK_NATIVE_CFLAGS := $(AZ_UNWIND) -std=gnu11 -O2 $(AZ_WARN) -fPIC $(NO_OUTLINE_ATOMICS) -fvisibility=hidden
-$(AZNATIVE_GUARD): common/aznative_guard.S | $(OUT)
-	$(CC) $(AZ_UNWIND) -fPIC -c -o $@ $<
+$(AZNATIVE_GUARD): common/aznative_guard.c | $(OUT)
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $@ $<
 
 $(AZMOD): $(AZMOD_SRCS) $(AZMOD_HDRS) $(AZNATIVE_GUARD) | $(OUT)
 	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/azcache_scopes.o common/azcache_scopes.c

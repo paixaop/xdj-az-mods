@@ -41,7 +41,7 @@ tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 esac
 compiler=${HOST_CC:-gcc}
 "${HOST_CC:-cc}" -std=c11 -Wall -Wextra -Werror -Isrc/common -x c -fsyntax-only src/common/azloadobserver.h
-"$compiler" "${flags[@]}" -Wl,--version-script=src/azstem/sdk_native.map src/azstem/sdk_load_observer.c tests/unit/sdkloadobserver_test.c src/common/aznative_guard.S -lstdc++ -ldl -o "$task_tmp/real"
+"$compiler" "${flags[@]}" -Wl,--version-script=src/azstem/sdk_native.map src/azstem/sdk_load_observer.c tests/unit/sdkloadobserver_test.c src/common/aznative_guard.c -lstdc++ -ldl -o "$task_tmp/real"
 for build in 1 2; do
     for mode in happy decline1 decline2 decline3 decline4 partial1 partial2 partial3 partial4 mismatch1 mismatch2 mismatch3 mismatch4 shared shared-concurrent unknown unknown-unload configure capacity wrong1 wrong2 wrong3 wrong4; do "$task_tmp/real" "$build" "$mode"; done
 done
@@ -80,7 +80,7 @@ for name, old, new in variants:
     (Path(sys.argv[1]) / (name + '.c')).write_text(changed)
 PY
 for control in listener-offset request-id failure monotonic late-consume unload-epoch retire-epoch partial-ack original-order native-entry configure-order unknown-load unknown-unload shared-listener; do
-    "$compiler" "${control_flags[@]}" "$task_tmp/$control.c" tests/unit/sdkloadobserver_test.c src/common/aznative_guard.S -lstdc++ -ldl -o "$task_tmp/$control"
+    "$compiler" "${control_flags[@]}" "$task_tmp/$control.c" tests/unit/sdkloadobserver_test.c src/common/aznative_guard.c -lstdc++ -ldl -o "$task_tmp/$control"
     mode=happy
     [ "$control" != partial-ack ] || mode=partial2
     [ "$control" != native-entry ] || mode=wrong1
@@ -96,7 +96,7 @@ for control in listener-offset request-id failure monotonic late-consume unload-
 done
 # A raw memcmp crosses the short RTTI object's ASan global redzone; use ASan to
 # distinguish that error from a normal bounded nominal-name rejection.
-"$compiler" "${control_flags[@]}" -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer "$task_tmp/short-name.c" tests/unit/sdkloadobserver_test.c src/common/aznative_guard.S -lstdc++ -ldl -o "$task_tmp/short-name"
+"$compiler" "${control_flags[@]}" -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer "$task_tmp/short-name.c" tests/unit/sdkloadobserver_test.c src/common/aznative_guard.c -lstdc++ -ldl -o "$task_tmp/short-name"
 if ( ulimit -c 0; ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" "$task_tmp/short-name" 2 happy >"$task_tmp/short-name.log" 2>&1 ) 2>/dev/null; then
     echo 'FAIL: load short-name control was not caught' >&2; exit 1
 fi

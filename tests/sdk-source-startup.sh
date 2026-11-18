@@ -57,7 +57,7 @@ record={'azmod_source':str(src),'azmod_sha256':hashlib.sha256(text.encode()).hex
 PY
     "${HOST_CC:-gcc}" -std=c11 -O1 -g -Wall -Wextra -Werror -pthread -c "$task_out/config-caller.c" -o "$task_out/config-caller.o"
     "${HOST_CC:-gcc}" -std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread tests/unit/sdksourcestartup_test.c \
-        src/azmod/sdk_connection_hooks.c "$task_out/config-caller.o" "$ISLAND_OBJECT" src/common/aznative_guard.S src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_out/source-startup"
+        src/azmod/sdk_connection_hooks.c "$task_out/config-caller.o" "$ISLAND_OBJECT" src/common/aznative_guard.c src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_out/source-startup"
     {
         "${HOST_CC:-gcc}" --version
         sha256sum tests/unit/sdksourcestartup_test.c tests/sdk-source-startup.sh src/azmod/azmod.c \

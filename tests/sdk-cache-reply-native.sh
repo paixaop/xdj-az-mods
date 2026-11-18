@@ -18,7 +18,7 @@ C
 "${HOST_CC:-gcc}" -std=gnu11 "${flags[@]}" -pthread -Isrc/common -rdynamic -DAZSDK_CACHE_BIRTH_TESTING \
     "-DSOURCES_INC=\"$source_c\"" \
     tests/unit/sdkcachereplynative_test.c src/azmod/sdk_cache_message.c src/azmod/sdk_connection_hooks.c \
-    "$task_tmp/hash.o" tests/unit/sdkcachebirth_return.S src/common/aznative_guard.S src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/test"
+    "$task_tmp/hash.o" tests/unit/sdkcachebirth_return.S src/common/aznative_guard.c src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/test"
 failures=0
 for profile in 1 2; do
     status=0

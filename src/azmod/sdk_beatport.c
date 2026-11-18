@@ -66,19 +66,13 @@ typedef struct {
     const char *text;
 } bpl_string;
 #ifndef BPL_TEST
-/* Nontrivial C++ return value: AAPCS64 places String's destination in x8.
- * Keep the complete unwind frame: EP147 can throw through this call. */
-__asm__(".pushsection .text\n.hidden bpl_get_text\n.type bpl_get_text, %function\n"
-        "bpl_get_text:\n.cfi_startproc\n"
-        "stp x29, x30, [sp, #-16]!\n.cfi_def_cfa_offset 16\n"
-        ".cfi_offset 29, -16\n.cfi_offset 30, -8\n"
-        "mov x29, sp\nmov x8, x0\nmov x0, x1\n"
-        "movz x16, #0xf4e0\nmovk x16, #0x263, lsl #16\nblr x16\n"
-        "ldp x29, x30, [sp], #16\n.cfi_def_cfa_offset 0\n"
-        ".cfi_restore 29\n.cfi_restore 30\nret\n.cfi_endproc\n"
-        ".size bpl_get_text, .-bpl_get_text\n.popsection\n");
-#endif
+#include "../common/aznative_c.h"
+static void bpl_get_text(bpl_string *out, void *editor) {
+    az_native_result_word((void *) (uintptr_t) 0x263f4e0, out, editor);
+}
+#else
 extern void bpl_get_text(bpl_string *, void *);
+#endif
 
 static void bpl_unlock_action(pthread_mutex_t **mutex) { pthread_mutex_unlock(*mutex); }
 static int bpl_caller_live(cm_mod *c) {

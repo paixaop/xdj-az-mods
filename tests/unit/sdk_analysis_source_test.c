@@ -39,9 +39,10 @@ int azn_load_track_matches(unsigned deck, uint64_t epoch, uint64_t load, const u
 static Track fake_state;
 void fixture_get_state(void);
 static bool fail_state;
-void fixture_get_state_body(Track *out) {
+void fixture_get_state_body(void *out) {
     if (fail_state) fixture_raise();
-    *out = fixture_copy(fake_state);
+    Track value = fixture_copy(fake_state);
+    memcpy(out, &value, sizeof value);
 }
 static int native_result;
 static int wait_result(uintptr_t owner, const WeakTrack *weak, int generation) {

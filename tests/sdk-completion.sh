@@ -20,12 +20,12 @@ else
 fi
 output=$(cd "$output" && pwd)
 printf 'SDK completion logs: %s\n' "$output"
-suites=(records automation time command command-delivery exit cue-actor cue-store cue-lifecycle cue-persist cue-recall cue-stage cue-commands stored live sources native-commands load load-lifecycle vtable hook-install source-probe load-probe wave-overview wave-report)
+suites=(native-c records automation time command command-delivery exit cue-actor cue-store cue-lifecycle cue-persist cue-recall cue-stage cue-commands stored live sources native-commands load load-lifecycle vtable hook-install source-probe load-probe wave-overview wave-report)
 [ "$extensions_only" -eq 1 ] || suites=(data "${suites[@]}")
 failures=0; incomplete=0
 for name in "${suites[@]}"; do
     script=tests/sdk-$name.sh
-    case "$name" in wave-*) script=tests/$name.sh ;; esac
+    case "$name" in native-c|wave-*) script=tests/$name.sh ;; esac
     if [ ! -f "$script" ]; then
         echo "SDK FAIL: required suite $script is missing"
         failures=$((failures + 1)); continue

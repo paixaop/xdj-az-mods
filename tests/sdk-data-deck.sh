@@ -112,7 +112,7 @@ docker run --rm --platform=linux/arm64 -v "$PWD:/src:ro" -v "$tmp:/work" "$image
         gcc "${flags[@]}" "${san[@]}" -DOBS_INC=\"/work/observation.inc\" /src/tests/unit/sdkobservation_test.c -o /work/bin/observation-$pass
         gcc "${flags[@]}" "${san[@]}" -DLOOP_EXPORT_INC=\"/work/loop-export.inc\" /src/tests/unit/sdkloopexport_test.c -o /work/bin/loop-export-$pass
         gcc "${observer_flags[@]}" "${san[@]}" "$nativemap" /src/src/azstem/sdk_loop_observer.c \
-            /src/tests/unit/sdkloopobserver_test.c /src/src/common/aznative_guard.S -lstdc++ -lm -ldl -o /work/bin/loop-$pass
+            /src/tests/unit/sdkloopobserver_test.c /src/src/common/aznative_guard.c -lstdc++ -ldl -lm -ldl -o /work/bin/loop-$pass
     done
     for control in observation-size observation-padding; do
         gcc "${flags[@]}" -DOBS_INC=\"/work/$control.inc\" /src/tests/unit/sdkobservation_test.c -o /work/bin/$control-control
@@ -131,7 +131,7 @@ docker run --rm --platform=linux/arm64 -v "$PWD:/src:ro" -v "$tmp:/work" "$image
     done
     gcc "${flags[@]}" -DDECK_DATA_INC=\"/work/deck-control.inc\" /src/tests/unit/sdkdeckdata_test.c -o /work/bin/prefix-control
     for control in player generation byte-zero zero-time reason numeric; do
-        gcc "${observer_flags[@]}" "$nativemap" /work/loop-$control.c /src/tests/unit/sdkloopobserver_test.c /src/src/common/aznative_guard.S -lstdc++ -lm -ldl -o /work/bin/loop-$control-control
+        gcc "${observer_flags[@]}" "$nativemap" /work/loop-$control.c /src/tests/unit/sdkloopobserver_test.c /src/src/common/aznative_guard.c -lstdc++ -ldl -lm -ldl -o /work/bin/loop-$control-control
     done
     for control in first count; do
         gcc "${flags[@]}" -DST_ENGINE_HEADER=\"wave-$control.h\" /src/tests/unit/sdkdata_test.c -lm -o /work/bin/wave-$control-control

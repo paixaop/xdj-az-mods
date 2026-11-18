@@ -36,7 +36,7 @@ with tempfile.TemporaryDirectory(prefix='az-sdk-public-load-') as tmp:
         command = [cc, '-std=gnu11', '-fexceptions', '-fasynchronous-unwind-tables'] + common + [
             '-DAZSDK_LOAD_TESTING', '-DAZSDK_LOAD_PUBLIC_TEST',
             str(root / 'src/azstem/sdk_load_observer.c'), str(root / 'tests/unit/sdkloadobserver_test.c'),
-            str(out / 'public.o'), str(out / 'export.o'), str(root / 'src/common/aznative_guard.S'), '-lstdc++', '-ldl', '-o', str(out / 'native')]
+            str(out / 'public.o'), str(out / 'export.o'), str(root / 'src/common/aznative_guard.c'), '-lstdc++', '-ldl', '-o', str(out / 'native')]
         subprocess.run(command, check=True)
         for build in (1, 2):
             subprocess.run([str(out / 'native'), str(build), 'public'], check=True, timeout=15)

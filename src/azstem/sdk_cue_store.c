@@ -255,7 +255,7 @@ bool azcs_snapshot_open(azcs_snapshot *self, const azcs_profile *p, void *manage
         return false;
     }
     azcs_native_ref owned = {0};
-    az_native_result((void *) word(word(player_interface) + 2 * sizeof(uintptr_t)), &owned, (void *) player_interface);
+    az_native_result_word((void *) word(word(player_interface) + 2 * sizeof(uintptr_t)), &owned, (void *) player_interface);
     self->player_ = owned.value;
     if (!self->player_) {
         diagnostic("player", 0, 0, 0);
@@ -276,7 +276,7 @@ bool azcs_snapshot_open(azcs_snapshot *self, const azcs_profile *p, void *manage
         return false;
     }
     azcs_native_ref where = {0};
-    az_native_result(p->where_from, &where, (const void *) self->player_);
+    az_native_result_word(p->where_from, &where, (const void *) self->player_);
     self->where_from_ = where.value;
     if (!self->where_from_ || self->where_from_ != word(self->source_ + 0x58)) {
         diagnostic("where-from", position, self->source_, 0);
@@ -421,7 +421,7 @@ static bool timed_property_impl(const azcs_snapshot *self, unsigned kind, double
     while (length_bytes < 128 && comment[length_bytes]) ++length_bytes;
     if (length_bytes == 128) return false;
     azcs_native_string text = {0};
-    az_native_result(self->p_.string_allocate, &text, (const void *) (uintptr_t) (length_bytes + 1));
+    az_native_result_word(self->p_.string_allocate, &text, (const void *) (uintptr_t) (length_bytes + 1));
     if (!text.data) return false;
     struct string_release release __attribute__((cleanup(string_release_drop))) = {&text, self->p_.string_destroy};
     memcpy(text.data, comment, length_bytes + 1);

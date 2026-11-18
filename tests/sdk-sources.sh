@@ -59,10 +59,10 @@ initial=source[a:b].split(' = ',1)[1][:-1]
 reset='\n__attribute__((constructor(200))) static void late_state_reset(void) {sources=(SourceState)'+initial+';}\n'
 (out/'constructor-order.c').write_text(instrument(source[:b]+reset+source[b:]))
 PY
-${HOST_CC:-gcc} "${flags[@]}" -Isrc/common -DSOURCES_INC="\"$task_tmp/sample-boundary.c\"" tests/unit/sdknativesources_test.c src/azmod/sdk_connection_hooks.c src/common/azcache_scopes.c src/common/aznative_guard.S -lstdc++ -ldl -o "$task_tmp/real"
+${HOST_CC:-gcc} "${flags[@]}" -Isrc/common -DSOURCES_INC="\"$task_tmp/sample-boundary.c\"" tests/unit/sdknativesources_test.c src/azmod/sdk_connection_hooks.c src/common/azcache_scopes.c src/common/aznative_guard.c -lstdc++ -ldl -o "$task_tmp/real"
 "$task_tmp/real" 1
 "$task_tmp/real" 2
-${HOST_CC:-gcc} "${flags[@]}" -Isrc/common -DAZS_CONSTRUCTOR_REGRESSION -DSOURCES_INC="\"$task_tmp/sample-boundary.c\"" tests/unit/sdknativesources_test.c src/azmod/sdk_connection_hooks.c src/common/azcache_scopes.c src/common/aznative_guard.S -lstdc++ -ldl -o "$task_tmp/constructor"
+${HOST_CC:-gcc} "${flags[@]}" -Isrc/common -DAZS_CONSTRUCTOR_REGRESSION -DSOURCES_INC="\"$task_tmp/sample-boundary.c\"" tests/unit/sdknativesources_test.c src/azmod/sdk_connection_hooks.c src/common/azcache_scopes.c src/common/aznative_guard.c -lstdc++ -ldl -o "$task_tmp/constructor"
 "$task_tmp/constructor" 1
 # Compile the production TU independently too: fixtures must not supply missing definitions.
 ${HOST_CC:-gcc} "${flags[@]}" -Isrc/common -c src/azmod/sdk_native_sources.c -o "$task_tmp/production.o"
@@ -76,7 +76,7 @@ require_fixture_diagnostic() {
 for control in worker-marker worker-present worker-affinity raw-owner-reuse expired-owner candidate-result forgotten-ambiguity physical-profile fdinfo-bound descriptor-recheck native-fd-dup-close vfs-short-name rtti-short-name; do
     extra=()
     [ "$control" != worker-affinity ] || extra+=(-Wno-unused-local-typedefs)
-    ${HOST_CC:-gcc} "${flags[@]}" "${extra[@]}" -Isrc/common -DSOURCES_INC="\"$task_tmp/$control.c\"" tests/unit/sdknativesources_test.c src/azmod/sdk_connection_hooks.c src/common/azcache_scopes.c src/common/aznative_guard.S -lstdc++ -ldl -o "$task_tmp/$control"
+    ${HOST_CC:-gcc} "${flags[@]}" "${extra[@]}" -Isrc/common -DSOURCES_INC="\"$task_tmp/$control.c\"" tests/unit/sdknativesources_test.c src/azmod/sdk_connection_hooks.c src/common/azcache_scopes.c src/common/aznative_guard.c -lstdc++ -ldl -o "$task_tmp/$control"
     if ( ulimit -c 0; "$task_tmp/$control" 1 >"$task_tmp/$control.log" 2>&1 ) 2>/dev/null; then
         echo "FAIL: $control control was not caught" >&2; exit 1
     fi
@@ -93,7 +93,7 @@ for control in worker-marker worker-present worker-affinity raw-owner-reuse expi
     fi
     echo "CONTROL caught: $control"
 done
-${HOST_CC:-gcc} "${flags[@]}" -Isrc/common -DAZS_CONSTRUCTOR_REGRESSION -DSOURCES_INC="\"$task_tmp/constructor-order.c\"" tests/unit/sdknativesources_test.c src/azmod/sdk_connection_hooks.c src/common/azcache_scopes.c src/common/aznative_guard.S -lstdc++ -ldl -o "$task_tmp/constructor-order"
+${HOST_CC:-gcc} "${flags[@]}" -Isrc/common -DAZS_CONSTRUCTOR_REGRESSION -DSOURCES_INC="\"$task_tmp/constructor-order.c\"" tests/unit/sdknativesources_test.c src/azmod/sdk_connection_hooks.c src/common/azcache_scopes.c src/common/aznative_guard.c -lstdc++ -ldl -o "$task_tmp/constructor-order"
 if ( ulimit -c 0; "$task_tmp/constructor-order" 1 >"$task_tmp/constructor-order.log" 2>&1 ) 2>/dev/null; then
     echo 'FAIL: constructor-order control was not caught' >&2; exit 1
 fi

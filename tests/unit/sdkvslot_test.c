@@ -79,8 +79,7 @@ static int text_cb(struct dl_phdr_info *info, size_t sz, void *data) {
 /* what the slot holds now: g_vt is const, and GCC folds even a volatile read of a const object
  * to its initializer, so the address is hidden from the optimizer first */
 static void *slot_now(int i) {
-    uintptr_t a = (uintptr_t) &g_vt[i];
-    __asm__ volatile("" : "+r"(a));
+    volatile uintptr_t a = (uintptr_t) &g_vt[i];
     return *(void *volatile *) a;
 }
 

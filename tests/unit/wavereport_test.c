@@ -50,9 +50,6 @@ static FILE *azlog_open(const char *path, const char *mode) {
     CHECK(out != NULL);
     return out;
 }
-#define WAVE_REPORT_STRING_INNER(value) #value
-#define WAVE_REPORT_STRING(value) WAVE_REPORT_STRING_INNER(value)
-#define WAVE_REPORT_LABEL(name) WAVE_REPORT_STRING(__USER_LABEL_PREFIX__) name
 static void wave_report_expect_probe(uintptr_t, const char *, unsigned, const void *, const void *)
     __attribute__((unused));
 #if defined(__GNUC__) && !defined(__clang__)

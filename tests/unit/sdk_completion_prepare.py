@@ -182,12 +182,12 @@ class Build:
             for service in ("live", "loop"):
                 self.compile("ext-" + service + "-observer-" + mode,
                              [self.root / ("src/azstem/sdk_" + service + "_observer.c"), self.fixture("sdk" + service + "observer_test.c")],
-                             mode, extra=live_flags + (["-DAZ_NATIVE_LISTENER_TESTING"] if service == "live" else []), links=[str(common / "aznative_guard.S"), "-lstdc++", "-ldl", "-lm"])
-            binary = self.compile("ext-sources-" + mode, [self.fixture("sdknativesources_test.c"), self.root / "src/azmod/sdk_connection_hooks.c", common / "azcache_scopes.c", common / "aznative_guard.S"], mode,
+                             mode, extra=live_flags + (["-DAZ_NATIVE_LISTENER_TESTING"] if service == "live" else []), links=[str(common / "aznative_guard.c"), "-lstdc++", "-ldl", "-lm"])
+            binary = self.compile("ext-sources-" + mode, [self.fixture("sdknativesources_test.c"), self.root / "src/azmod/sdk_connection_hooks.c", common / "azcache_scopes.c", common / "aznative_guard.c"], mode,
                                   extra=common_inc + ["-DAZS_SAMPLE_BOUNDARY", self.macro("SOURCES_INC", sources / "sample-boundary.c")], links=["-ldl", "-lstdc++"], run=False)
             for profile in ("1", "2"):
                 self.runs.append(("ext-sources-profile" + profile + "-" + mode, binary, profile))
-            self.compile("ext-sources-constructor-" + mode, [self.fixture("sdknativesources_test.c"), self.root / "src/azmod/sdk_connection_hooks.c", common / "azcache_scopes.c", common / "aznative_guard.S"], mode,
+            self.compile("ext-sources-constructor-" + mode, [self.fixture("sdknativesources_test.c"), self.root / "src/azmod/sdk_connection_hooks.c", common / "azcache_scopes.c", common / "aznative_guard.c"], mode,
                          extra=common_inc + ["-DAZS_CONSTRUCTOR_REGRESSION", "-DAZS_SAMPLE_BOUNDARY", self.macro("SOURCES_INC", sources / "sample-boundary.c")], links=["-ldl", "-lstdc++"], argument="1")
             self.compile("ext-sources-bridge-" + mode, [sources / "bridge.c", self.root / "src/azmod/sdk_cache_message.c", common / "azcache_scopes.c"], mode, extra=common_inc)
             self.compile("sources-production-" + mode + ".o", [self.root / "src/azmod/sdk_native_sources.c"], mode,
@@ -195,7 +195,7 @@ class Build:
             for testing in (False, True):
                 self.compile("ext-native-commands-" + ("testing-" if testing else "production-") + mode,
                              [self.root / "src/azstem/sdk_native_commands.c", self.fixture("sdknativecommands_test.c")], mode,
-                             extra=common_inc + mod_inc + ["-fexceptions", "-fasynchronous-unwind-tables", "-fvisibility=hidden"] + (["-DAZSDK_NATIVE_COMMANDS_TESTING"] if testing else []), links=[str(common / "aznative_guard.S"), "-lstdc++", "-lm"])
+                             extra=common_inc + mod_inc + ["-fexceptions", "-fasynchronous-unwind-tables", "-fvisibility=hidden"] + (["-DAZSDK_NATIVE_COMMANDS_TESTING"] if testing else []), links=[str(common / "aznative_guard.c"), "-lstdc++", "-ldl", "-lm"])
         for name in TIME_SAMPLES:
             self.compile("ext-time-" + name + "-control", [self.fixture("sdksampletime_test.c")],
                          extra=common_inc + [self.macro("SAMPLE_TIME_IMPL", timing / (name + ".inc"))], links=["-lm"], diagnostic=ASSERTION)
@@ -206,7 +206,7 @@ class Build:
                          links=["-lm"], diagnostic=ASSERTION, argument=name.replace("input-", ""))
         for name in LOOP_DECK:
             self.compile("ext-" + name + "-control", [live / (name + ".c"), self.fixture("sdkloopobserver_test.c")],
-                         extra=live_flags, links=[str(common / "aznative_guard.S"), "-lstdc++", "-ldl", "-lm"], diagnostic=ASSERTION)
+                         extra=live_flags, links=[str(common / "aznative_guard.c"), "-lstdc++", "-ldl", "-lm"], diagnostic=ASSERTION)
         for name in COMMAND:
             self.compile("ext-command-" + name + "-control", [self.fixture("sdkcommand_test.c")],
                          extra=["-I" + str(command / name)] + mod_inc, links=["-lm"], diagnostic=ASSERTION)
@@ -233,12 +233,12 @@ class Build:
                          diagnostic=ASSERTION + "|FAIL  lifetime")
         for name in LIVE_NATIVE:
             self.compile("ext-live-" + name + "-control", [live / (name + ".c"), self.fixture("sdkliveobserver_test.c")],
-                         extra=live_flags + ["-DAZ_NATIVE_LISTENER_TESTING"], links=[str(common / "aznative_guard.S"), "-lstdc++", "-ldl", "-lm"], diagnostic="FAIL live:")
+                         extra=live_flags + ["-DAZ_NATIVE_LISTENER_TESTING"], links=[str(common / "aznative_guard.c"), "-lstdc++", "-ldl", "-lm"], diagnostic="FAIL live:")
         self.controls.append(("ext-live-sync-payload-short-control", "ext-live-observer-asan",
                               "AddressSanitizer: heap-buffer-overflow", "--sync-payload-short"))
         self.compile("ext-live-allocator-bypass-control",
                      [self.root / "src/azstem/sdk_live_observer.c", live / "allocator-bypass.c"],
-                     extra=live_flags + ["-DAZ_NATIVE_LISTENER_TESTING"], links=[str(common / "aznative_guard.S"), "-lstdc++", "-ldl", "-lm"], diagnostic="FAIL live:")
+                     extra=live_flags + ["-DAZ_NATIVE_LISTENER_TESTING"], links=[str(common / "aznative_guard.c"), "-lstdc++", "-ldl", "-lm"], diagnostic="FAIL live:")
         for name in LIVE_FLAGS:
             self.compile("ext-" + name + "-control", [self.fixture("sdkobserverflags_test.c")], "tsan",
                          extra=c_live_flags + [self.macro("OBSERVER_FLAGS_INC", live / (name + ".inc"))],
@@ -247,21 +247,21 @@ class Build:
             fixture = "sdkloopobserver_test.c" if name.startswith("loop-") else "sdkliveobserver_test.c"
             diagnostic = "AddressSanitizer: " + ("heap" if name == "payload-overread" else "global") + "-buffer-overflow"
             self.compile("ext-live-" + name + "-control", [live / (name + ".c"), self.fixture(fixture)], "asan",
-                         extra=live_flags + ([] if name.startswith("loop-") else ["-DAZ_NATIVE_LISTENER_TESTING"]), links=[str(common / "aznative_guard.S"), "-lstdc++", "-ldl", "-lm"], diagnostic=diagnostic)
+                         extra=live_flags + ([] if name.startswith("loop-") else ["-DAZ_NATIVE_LISTENER_TESTING"]), links=[str(common / "aznative_guard.c"), "-lstdc++", "-ldl", "-lm"], diagnostic=diagnostic)
         for name in SOURCES + ["constructor-order"]:
             extra = common_inc + ["-DAZS_SAMPLE_BOUNDARY", self.macro("SOURCES_INC", sources / (name + ".c"))]
             if name == "worker-affinity":
                 extra.append("-Wno-unused-local-typedefs")
             if name == "constructor-order":
                 extra.append("-DAZS_CONSTRUCTOR_REGRESSION")
-            self.compile("ext-sources-" + name + "-control", [self.fixture("sdknativesources_test.c"), self.root / "src/azmod/sdk_connection_hooks.c", common / "azcache_scopes.c", common / "aznative_guard.S"],
+            self.compile("ext-sources-" + name + "-control", [self.fixture("sdknativesources_test.c"), self.root / "src/azmod/sdk_connection_hooks.c", common / "azcache_scopes.c", common / "aznative_guard.c"],
                          extra=extra, links=["-ldl", "-lstdc++"], diagnostic=("Assertion.*vfs_name_child_status.*failed" if name == "vfs-short-name" else
                                                                "Assertion.*rtti_name_child_status.*failed" if name == "rtti-short-name" else ASSERTION), argument="1")
         self.compile("ext-sources-bridge-control", [sources / "bridge-control.c", self.root / "src/azmod/sdk_cache_message.c", common / "azcache_scopes.c"],
                      extra=common_inc, diagnostic=ASSERTION)
         for name in NATIVE_COMMANDS:
             self.compile("ext-native-commands-" + name + "-control", [native / (name + ".c"), self.fixture("sdknativecommands_test.c")],
-                         extra=common_inc + mod_inc + ["-DAZSDK_NATIVE_COMMANDS_TESTING", "-fexceptions", "-fasynchronous-unwind-tables", "-fvisibility=hidden"], links=[str(common / "aznative_guard.S"), "-lstdc++", "-lm"], diagnostic="FAIL nativecommands:")
+                         extra=common_inc + mod_inc + ["-DAZSDK_NATIVE_COMMANDS_TESTING", "-fexceptions", "-fasynchronous-unwind-tables", "-fvisibility=hidden"], links=[str(common / "aznative_guard.c"), "-lstdc++", "-ldl", "-lm"], diagnostic="FAIL nativecommands:")
         for name, mode, macro, extra, diagnostic in [
                 ("heap", "asan", "SCMD_TEST_HEAP", "-fno-sanitize=undefined", "AddressSanitizer: heap-buffer-overflow"),
                 ("signed", "asan", "SCMD_TEST_SIGNED", "-fno-sanitize=address", "runtime error: signed integer overflow"),

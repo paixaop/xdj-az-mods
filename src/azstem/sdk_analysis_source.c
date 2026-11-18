@@ -68,7 +68,7 @@ static bool completed(const Track *track) {
     Track state __attribute__((cleanup(az_native_owner_reset))) = {0};
     /* Firmware returns a nontrivial owner through x8, even though its two-word
      * representation would be returned in x0/x1 by an ordinary C function. */
-    az_native_result((void *) (bias + 0x178d760), &state, track->object);
+    az_native_result_pair((void *) (bias + 0x178d760), &state, track->object);
     if (!state.object) return false;
     uintptr_t p = (uintptr_t) state.object;
     return scalar(uintptr_t, p) == bias + 0x2c5b0b8 && scalar(int, p + 0xc) == 0 &&

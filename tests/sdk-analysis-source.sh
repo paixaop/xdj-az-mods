@@ -22,7 +22,7 @@ case ${SAN:-plain} in
 esac
 "${HOST_CC:-gcc}" "${san[@]}" -std=gnu11 -O1 -g -Wall -Wextra -Werror -pthread -fexceptions -fasynchronous-unwind-tables \
     -DAZ_STATUS_NATIVE_PRODUCER -DAZ_ANALYSIS_SOURCE_TESTING -c src/azstem/sdk_analysis_source.c -o "$task_tmp/source.o"
-"${HOST_CC:-gcc}" -c src/common/aznative_guard.S -o "$task_tmp/guard.o"
+"${HOST_CC:-gcc}" "${san[@]}" -std=gnu11 -O1 -g -Wall -Wextra -Werror -fexceptions -fasynchronous-unwind-tables -c src/common/aznative_guard.c -o "$task_tmp/guard.o"
 "${HOST_CC:-gcc}" "${san[@]}" -std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread \
-    tests/unit/sdk_analysis_source_test.c tests/unit/sdk_analysis_source_return.S "$task_tmp/source.o" "$task_tmp/guard.o" -ldl -lstdc++ -o "$task_tmp/test"
+    tests/unit/sdk_analysis_source_test.c tests/unit/sdk_analysis_source_return.c "$task_tmp/source.o" "$task_tmp/guard.o" -ldl -lstdc++ -ldl -o "$task_tmp/test"
 "$task_tmp/test"

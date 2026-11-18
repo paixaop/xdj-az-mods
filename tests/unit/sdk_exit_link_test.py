@@ -25,7 +25,7 @@ class ExitPrivateLinkTests(unittest.TestCase):
             for name in ("actor", "store", "lifecycle", "persist", "recall", "commands", "observer"):
                 source = root / ("src/azstem/sdk_cue_" + name + ".c")
                 sources.append(source)
-            sources += [stub, root / "src/common/aznative_guard.S"]
+            sources += [stub, root / "src/common/aznative_guard.c"]
             objects = []
             for index, source in enumerate(sources):
                 obj = folder / (str(index) + ".o")
@@ -33,7 +33,7 @@ class ExitPrivateLinkTests(unittest.TestCase):
                 command = [compiler, "-std=gnu11"] + shared
                 subprocess.run(command + ["-c", str(source), "-o", str(obj)], check=True, capture_output=True, text=True)
                 objects.append(str(obj))
-            command = [os.environ.get("HOST_CC", "cc"), "-shared", "-pthread"] + objects + ["-lstdc++", "-lm", "-o", str(library)]
+            command = [os.environ.get("HOST_CC", "cc"), "-shared", "-pthread"] + objects + ["-lstdc++", "-ldl", "-lm", "-o", str(library)]
             if sys.platform.startswith("linux"):
                 command.append("-ldl")
             subprocess.run(command, check=True, capture_output=True, text=True)

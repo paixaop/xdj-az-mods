@@ -31,9 +31,10 @@ uint64_t get(const void *p, size_t off) {
     memcpy(&value, ((const unsigned char *) (p)) + off, 8);
     return value;
 }
-void capture_body(azcs_native_ref *out, void *p) {
+void capture_body(void *out, const void *p) {
     (void) p;
-    out->value = (uintptr_t) player;
+    uintptr_t value = (uintptr_t) player;
+    memcpy(out, &value, sizeof value);
     ++players;
 }
 extern void capture(void);
@@ -61,9 +62,10 @@ void release(uintptr_t *p) {
     }
     *p = 0;
 }
-void capture_where_body(azcs_native_ref *out, const void *p) {
+void capture_where_body(void *out, const void *p) {
     assert(p == player);
-    out->value = (uintptr_t) where_from;
+    uintptr_t value = (uintptr_t) where_from;
+    memcpy(out, &value, sizeof value);
     ++where_refs;
 }
 extern void capture_where(void);
@@ -133,9 +135,10 @@ void copy_property(void *out, const void *in) {
     memcpy(out, in, sizeof(azcs_native_property));
     ++properties;
 }
-void allocate_body(azcs_native_string *out, uint64_t count) {
-    out->data = malloc(count);
-    if (out->data) ++strings;
+void allocate_body(void *out, const void *count) {
+    void *data = malloc((uintptr_t) count);
+    if (data) ++strings;
+    memcpy(out, &data, sizeof data);
 }
 extern void allocate(void);
 void destroy_string(void *p) {

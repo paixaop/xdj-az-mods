@@ -222,10 +222,11 @@ typedef struct {
     void *data;
 } NativeString;
 extern void allocate(void);
-void allocate_body(NativeString *out, uint64_t size) {
+void allocate_body(void *out, const void *size) {
     ++allocations;
-    out->data = malloc(size);
-    assert(out->data);
+    void *data = malloc((uintptr_t) size);
+    assert(data);
+    memcpy(out, &data, sizeof data);
 }
 void assign(void *dest, const void *source) {
     void *pointer;

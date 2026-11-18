@@ -217,7 +217,7 @@ static bool mutate_row(Slot *slot, uintptr_t row) {
         size_t length = 0;
         if (!utf8(slot->request.comment, &(length))) return false;
         NativeString text = {0};
-        az_native_result((void *) profile->string_allocate, &text, (const void *) (uintptr_t) (length + 1));
+        az_native_result_word((void *) profile->string_allocate, &text, (const void *) (uintptr_t) (length + 1));
         if (!text.data) return false;
         struct StringRelease release __attribute__((cleanup(string_release_drop))) = {&text, profile->string_destroy};
         memcpy(text.data, slot->request.comment, length + 1);

@@ -2321,9 +2321,9 @@ struct ov_lease_scope {
 static void ov_lease_cleanup(struct ov_lease_scope *scope) {
     if (scope->held) {
         scope->held = 0;
-        int released = g_ovlease.finish(scope->token); /* Restore while pinned, then release. */
+        volatile int released = g_ovlease.finish(scope->token); /* Restore while pinned, then release. */
         /* Caller authentication must see an azmod return PC on normal returns too. */
-        __asm__ volatile("" : "+r"(released) : : "memory");
+        (void) released;
     }
 }
 static void ov_hook_owned(long self, uintptr_t held, uintptr_t native_return, uintptr_t native_stack)

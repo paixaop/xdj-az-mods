@@ -10,7 +10,7 @@ case ${SAN:-plain} in plain|'') ;; asan) flags+=(-fsanitize=address,undefined -f
 "${HOST_CC:-cc}" -std=c11 "${flags[@]}" -Isrc/common -c src/azmod/sdk_cache_entry.c -o "$task_tmp/entry.o"
 "${HOST_CC:-gcc}" -std=gnu11 "${flags[@]}" -pthread -Isrc/common -rdynamic -DAZSDK_CACHE_BIRTH_TESTING \
     tests/unit/sdkcachequerynative_test.c src/azmod/sdk_cache_message.c src/azmod/sdk_connection_hooks.c \
-    "$task_tmp/entry.o" tests/unit/sdkcachebirth_return.S src/common/aznative_guard.S src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/test"
+    "$task_tmp/entry.o" tests/unit/sdkcachebirth_return.S src/common/aznative_guard.c src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/test"
 failures=0
 for profile in 1 2; do
     result=0

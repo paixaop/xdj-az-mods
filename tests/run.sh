@@ -35,6 +35,9 @@ for d in azmod azstem common azhandoff; do
     mkdir -p "$V/guest/$d"
     cp -R "src/$d/." "$V/guest/$d/"
 done
+# Fixtures also include the published ../../src paths. Keep this relative alias
+# inside the staged tree, so it resolves within the same container mount.
+ln -s guest "$V/src"
 cp src/azmod/test/lanetest.c "$V/guest/azmod/lanetest.c"
 cp tests/unit/common/*.c "$V/guest/common/"
 mkdir -p "$V/guest/azrs" && cp deck/azrs/azrs.sh "$V/guest/azrs/azrs.sh"

@@ -58,7 +58,7 @@ static void analysis_make(void *opaque) {
     analysis_ops.memory(&atom.rows, call->pssi + 32, call->size - 32);
     analysis_ops.memory(&atom.raw, call->pssi, call->size);
     const struct AnalysisAtomRef ref = {&atom, 0};
-    az_native_result(analysis_ops.make, &call->content, &ref);
+    az_native_result_word(analysis_ops.make, &call->content, &ref);
 }
 static void configure_analysis(int build, uintptr_t bias) {
     if (atomic_load_explicit(&(analysis_ready), memory_order_acquire) || build != 2 || bias) return;

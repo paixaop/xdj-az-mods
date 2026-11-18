@@ -15,7 +15,7 @@ ubsan) flags+=(-fsanitize=undefined -fno-sanitize-recover=all -fno-omit-frame-po
 tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 *) echo 'SAN must be plain, asan, ubsan or tsan' >&2; exit 2 ;;
 esac
-"${HOST_CC:-gcc}" "${flags[@]}" tests/unit/sdkcacheselection_test.c src/common/aznative_guard.S -lstdc++ -o "$task_tmp/test"
+"${HOST_CC:-gcc}" "${flags[@]}" tests/unit/sdkcacheselection_test.c src/common/aznative_guard.c -lstdc++ -ldl -o "$task_tmp/test"
 failures=0
 for profile in 1 2; do
     status=0

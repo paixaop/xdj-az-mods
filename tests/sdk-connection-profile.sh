@@ -46,7 +46,7 @@ const void *EVP_sha256(void) { ++profile_forbidden_calls; return 0; }
 int EVP_Digest(const void *p, size_t n, unsigned char *o, unsigned *l, const void *m, void *e) { (void)p;(void)n;(void)o;(void)l;(void)m;(void)e; ++profile_forbidden_calls; return 0; }
 C
     "${HOST_CC:-cc}" -std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread \
-        tests/unit/sdkconnectionprofile_test.c src/azmod/sdk_connection_hooks.c src/common/aznative_guard.S -lstdc++ -ldl -o "$task_out/connection-profile"
+        tests/unit/sdkconnectionprofile_test.c src/azmod/sdk_connection_hooks.c src/common/aznative_guard.c -lstdc++ -ldl -o "$task_out/connection-profile"
     "${HOST_CC:-cc}" -std=c11 -O1 -g -Wall -Wextra -Werror -shared -fPIC \
         -Wl,-soname,libsqlcipher.so.0 "$task_out/wrong-profile.c" -o "$task_out/wrong-profile.so"
     {

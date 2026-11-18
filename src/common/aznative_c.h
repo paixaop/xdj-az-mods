@@ -69,11 +69,11 @@ static inline void az_native_weak_copy(struct az_native_owner *dst, const struct
     az_native_weak_reset(dst);
     *dst = next;
 }
-/* The assembly landing pad catches a native C++ exception only at an explicitly
- * guarded call. All intervening C cleanup handlers run during native unwind.
- * Unguarded forwarding retains the original exception and native errno. */
+/* Guarded firmware failures finish native unwinding, then return a C status:
+ * one on success, zero on failure. Unguarded calls propagate to their caller. */
 __attribute__((visibility("hidden"))) int az_native_try(void (*call)(void *), void *context);
-__attribute__((visibility("hidden"))) void az_native_result(void *function, void *result, const void *argument);
+__attribute__((visibility("hidden"))) void az_native_result_word(void *function, void *result, const void *argument);
+__attribute__((visibility("hidden"))) void az_native_result_pair(void *function, void *result, const void *argument);
 static inline void az_native_errno_restore(int *saved) { errno = *saved; }
 #define AZ_NATIVE_ERRNO(name) int name __attribute__((cleanup(az_native_errno_restore))) = errno
 #endif

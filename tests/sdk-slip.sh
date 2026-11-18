@@ -14,9 +14,9 @@ for name in sdk_native_slip sdk_slip_hooks sdk_slip_getters; do
     ${CC:-gcc} -std=gnu11 -O1 -g -Wall -Wextra -Werror -fexceptions -fasynchronous-unwind-tables -fno-omit-frame-pointer ${CFLAGS:-} \
         "$@" -c "src/azmod/$name.c" -o "$work/$name.o"
 done
-${CC:-gcc} -c src/common/aznative_guard.S -o "$work/guard.o"
+${CC:-gcc} -std=gnu11 -O1 -g -Wall -Wextra -Werror -fexceptions -fasynchronous-unwind-tables -fno-omit-frame-pointer ${CFLAGS:-} "$@" -c src/common/aznative_guard.c -o "$work/guard.o"
 ${CC:-gcc} -std=gnu11 -O1 -g -Wall -Wextra -Werror -fexceptions -fno-omit-frame-pointer ${CFLAGS:-} \
-    "$@" "$work/sdk_native_slip.o" "$work/guard.o" tests/unit/sdkslip_test.c -pthread -lstdc++ -o "$work/slip"
+    "$@" "$work/sdk_native_slip.o" "$work/guard.o" tests/unit/sdkslip_test.c -pthread -lstdc++ -ldl -o "$work/slip"
 "$work/slip" raw
 entry=
 if [ "$(uname -s):$(uname -m)" = Linux:aarch64 ]; then
@@ -26,7 +26,7 @@ if [ "$(uname -s):$(uname -m)" = Linux:aarch64 ]; then
 fi
 ${CC:-gcc} -std=gnu11 -O1 -g -Wall -Wextra -Werror -fexceptions -fno-omit-frame-pointer ${CFLAGS:-} \
     "$@" "$work/sdk_native_slip.o" "$work/guard.o" "$work/sdk_slip_hooks.o" tests/unit/sdkslip_hooks_test.c \
-    $entry -pthread -lstdc++ -o "$work/hooks"
+    $entry -pthread -lstdc++ -ldl -o "$work/hooks"
 for mode in success prefix body owner partial duplicate unaligned;do "$work/hooks" "$mode";done
 getter_entry=
 if [ "$(uname -s):$(uname -m)" = Linux:aarch64 ]; then
@@ -36,6 +36,6 @@ if [ "$(uname -s):$(uname -m)" = Linux:aarch64 ]; then
     getter_entry="$work/getter-entry.o $work/getter-native.o $work/getter-patch.o"
 fi
 ${CC:-gcc} -std=gnu11 -O1 -g -Wall -Wextra -Werror -fexceptions -fno-omit-frame-pointer ${CFLAGS:-} \
-    "$@" "$work/sdk_slip_getters.o" tests/unit/sdkslip_getter_test.c "$work/guard.o" $getter_entry -pthread -lstdc++ -o "$work/getters"
+    "$@" "$work/sdk_slip_getters.o" tests/unit/sdkslip_getter_test.c "$work/guard.o" $getter_entry -pthread -lstdc++ -ldl -o "$work/getters"
 for mode in success body site partial;do "$work/getters" "$mode";done
 if [ -n "$getter_entry" ];then "$work/getters" arm;fi

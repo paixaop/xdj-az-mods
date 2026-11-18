@@ -14,7 +14,7 @@ tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 esac
 sources=(tests/unit/sdkcue_test.c)
 [ ! -f src/azstem/sdk_cue_observer.c ] || sources+=(src/azstem/sdk_cue_observer.c)
-"${HOST_CC:-gcc}" "${flags[@]}" "${sources[@]}" src/common/aznative_guard.S -lstdc++ -o "$task_tmp/test"
+"${HOST_CC:-gcc}" "${flags[@]}" "${sources[@]}" src/common/aznative_guard.c -lstdc++ -ldl -o "$task_tmp/test"
 failures=0
 for profile in 1 2; do
     modes=(ordinary capacity)

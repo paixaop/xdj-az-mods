@@ -12,7 +12,7 @@ asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-f
 tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 *) echo 'SAN must be plain, asan or tsan' >&2; exit 2 ;;
 esac
-"${HOST_CC:-gcc}" "${flags[@]}" -Isrc/common tests/unit/sdkcacheentrycaller_test.c src/azmod/sdk_cache_entry.c src/azmod/sdk_cache_entry.S src/common/aznative_guard.S -lstdc++ -o "$work/test"
+"${HOST_CC:-gcc}" "${flags[@]}" -Isrc/common tests/unit/sdkcacheentrycaller_test.c src/azmod/sdk_cache_entry.c src/azmod/sdk_cache_entry.S src/common/aznative_guard.c -lstdc++ -ldl -o "$work/test"
 status=0
 (ulimit -c 0;"$work/test") >"$work/run.log" 2>&1 || status=$?
 cat "$work/run.log"

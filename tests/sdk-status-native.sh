@@ -18,7 +18,7 @@ esac
 "${HOST_CC:-cc}" -std=gnu11 "${flags[@]}" -D_GNU_SOURCE -Wno-unused-function \
     -c tests/unit/sdkstatus_map_alias_bridge.c -o "$dir/map-alias.o"
 "${HOST_CC:-cc}" -std=gnu11 -fexceptions -fasynchronous-unwind-tables "${flags[@]}" -c src/azstem/sdk_native_commands.c -o "$dir/native-commands.o"
-"${HOST_CC:-cc}" -fexceptions -fasynchronous-unwind-tables -c src/common/aznative_guard.S -o "$dir/native-guard.o"
+"${HOST_CC:-cc}" -std=gnu11 "${flags[@]}" -fexceptions -fasynchronous-unwind-tables -c src/common/aznative_guard.c -o "$dir/native-guard.o"
 "${HOST_CC:-cc}" -std=gnu11 "${flags[@]}" -DAZSDK_EXIT_TESTING -DAZSDK_MAP_ALIAS_TESTING \
     tests/unit/sdkstatus_native_test.c "$dir/native-commands.o" "$dir/native-guard.o" "$dir/lane.o" "$dir/map-alias.o" -lstdc++ -ldl -o "$dir/test"
 "$dir/test" transport-retirement
@@ -44,6 +44,6 @@ esac
 "$dir/reducer" cue-storage-flags
 "$dir/reducer"
 "${HOST_CC:-gcc}" -std=gnu11 -fexceptions -fasynchronous-unwind-tables "${flags[@]}" -DAZSDK_LOAD_TESTING \
-    tests/unit/sdkstatus_native_load_test.c src/azstem/sdk_load_observer.c "$dir/lane.o" src/common/aznative_guard.S -lstdc++ -ldl -o "$dir/load"
+    tests/unit/sdkstatus_native_load_test.c src/azstem/sdk_load_observer.c "$dir/lane.o" src/common/aznative_guard.c -lstdc++ -ldl -o "$dir/load"
 "$dir/load" 1
 "$dir/load" 2

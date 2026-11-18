@@ -10,12 +10,6 @@ else
     trap 'rm -rf "$task_tmp"' EXIT
 fi
 flags=(-std=c11 -O2 -g -Wall -Wextra -Werror -pthread -fexceptions -fasynchronous-unwind-tables)
-if [[ $(uname -s) == Darwin ]]; then
-    # Apple Clang rejects the fixture's deliberately placed inline-assembly
-    # labels when it emits asynchronous CFI. The control validates the exact
-    # fault PC itself, so keep the same probe without malformed unwind tables.
-    flags+=(-fno-asynchronous-unwind-tables)
-fi
 case ${SAN:-plain} in
 plain|'') ;;
 asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer) ;;
@@ -42,11 +36,10 @@ assert body.count(needle)==1
 probe=r'''    for (int i=0;i<__atomic_load_n(&g_ovi_n,__ATOMIC_RELAXED);++i) {
         long key=g_ovi[i].self;
         if (key) {
-            extern char wave_report_probe_begin[], wave_report_probe_end[];
-            wave_report_expect_probe((uintptr_t)(key+0x80), __FILE__, __LINE__+2, wave_report_probe_begin, wave_report_probe_end);
-            __asm__ volatile(".globl " WAVE_REPORT_LABEL("wave_report_probe_begin") "\n" WAVE_REPORT_LABEL("wave_report_probe_begin") ":\n" ::: "memory");
+            wave_report_expect_probe((uintptr_t)(key+0x80), __FILE__, __LINE__+2, &&wave_report_probe_begin, &&wave_report_probe_end);
+            wave_report_probe_begin: ;
             volatile int old_value=*(volatile int *)(key+0x80);
-            __asm__ volatile(".globl " WAVE_REPORT_LABEL("wave_report_probe_end") "\n" WAVE_REPORT_LABEL("wave_report_probe_end") ":\n" ::: "memory");
+            wave_report_probe_end: ;
             fprintf(f,"old probe=%d\n",old_value);
         }
     }
@@ -55,7 +48,7 @@ probe=r'''    for (int i=0;i<__atomic_load_n(&g_ovi_n,__ATOMIC_RELAXED);++i) {
 PY
 for variant in real old-probe; do
     variant_flags=()
-    # Keep the control's two machine labels in source order. Sanitizers remain enabled;
+    # Keep the control's two C labels in source order. Sanitizers remain enabled;
     # the real production body above is still checked with the release optimization.
     if [[ $variant == old-probe ]]; then variant_flags+=(-O0); fi
     ${HOST_CC:-cc} "${flags[@]}" "${variant_flags[@]}" -DWAVE_REPORT_INC="\"$task_tmp/$variant.inc\"" \

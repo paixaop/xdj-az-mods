@@ -50,9 +50,9 @@ PY
         -c "$task_out/island-wrapper.c" -o "$task_out/island-wrapper.o"
     flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread)
     "${HOST_CC:-cc}" "${flags[@]}" tests/unit/sdkconnectionnative_test.c \
-        src/azmod/sdk_connection_hooks.c "$task_out/island-wrapper.o" src/common/aznative_guard.S -lstdc++ -ldl -o "$task_out/connection-native"
+        src/azmod/sdk_connection_hooks.c "$task_out/island-wrapper.o" src/common/aznative_guard.c -lstdc++ -ldl -o "$task_out/connection-native"
     "${HOST_CC:-cc}" "${flags[@]}" -DAZSDK_NATIVE_UNREDIRECTED_CONTROL tests/unit/sdkconnectionnative_test.c \
-        src/azmod/sdk_connection_hooks.c "$task_out/island-wrapper.o" src/common/aznative_guard.S -lstdc++ -ldl -o "$task_out/connection-native-unredirected"
+        src/azmod/sdk_connection_hooks.c "$task_out/island-wrapper.o" src/common/aznative_guard.c -lstdc++ -ldl -o "$task_out/connection-native-unredirected"
     {
         "${HOST_CC:-cc}" --version
         sha256sum tests/unit/sdkconnectionnative_test.c tests/sdk-connection-native.sh \

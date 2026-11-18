@@ -61,7 +61,7 @@ compile() {
     ${HOST_CC:-cc} -std=c11 "${flags[@]}" -DAZOV_LEASE_UNIT -Isrc/azstem \
         -c "$task_broker" -o "$task_target-broker.o"
     ${HOST_CC:-cc} -std=gnu11 "${flags[@]}" tests/unit/waveoverview_unwind_test.c \
-        "$task_target-c.o" "$task_target-broker.o" src/common/aznative_guard.S -lstdc++ -o "$task_target"
+        "$task_target-c.o" "$task_target-broker.o" src/common/aznative_guard.c -lstdc++ -ldl -o "$task_target"
 }
 python3 - "$task_tmp" <<'PY'
 from pathlib import Path
