@@ -243,8 +243,8 @@ The native loop listener starts by default unless `azmod.track-data.off` or
 hooks must both install at their expected entries. It registers through
 the owned native notification server's virtual interface, with both-build layout/RTTI guards
 and explicit C strong/weak ownership matching the native ABI. No additional absolute hook address is introduced.
-The C implementation translates guarded firmware failures into status returns after native cleanup.
-Its C unwind boundary uses the firmware's existing ABI runtime; register-sensitive hook entries remain assembly.
+The C implementation returns explicit statuses for ordinary failures. Firmware exceptions propagate
+through C cleanup to EP147's handlers, following upstream; register-sensitive hook entries remain assembly.
 See [C/native boundary](C-NATIVE-BOUNDARY.md) for the calling and error-handling contracts.
 
 When available, `AZ_LIVE_LOOP_ENGAGED` and `loop.valid & AZ_LOOP_ENGAGED` describe the

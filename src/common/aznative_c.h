@@ -69,11 +69,26 @@ static inline void az_native_weak_copy(struct az_native_owner *dst, const struct
     az_native_weak_reset(dst);
     *dst = next;
 }
-/* Guarded firmware failures finish native unwinding, then return a C status:
- * one on success, zero on failure. Unguarded calls propagate to their caller. */
-__attribute__((visibility("hidden"))) int az_native_try(void (*call)(void *), void *context);
-__attribute__((visibility("hidden"))) void az_native_result_word(void *function, void *result, const void *argument);
-__attribute__((visibility("hidden"))) void az_native_result_pair(void *function, void *result, const void *argument);
+/* A C aggregate larger than two words uses the native indirect-result register
+ * (x8 on AAPCS64; the first argument on SysV x86-64). The firmware writes only
+ * its documented one- or two-word prefix. Never read the unused carrier bytes.
+ * These are caller adapters, not native entry points: returning this carrier
+ * to an eight-byte firmware destination would overwrite that destination. */
+struct native_result_storage {
+    uintptr_t first;
+    uintptr_t second;
+    unsigned char unused[8];
+};
+_Static_assert(sizeof(struct native_result_storage) == 24, "indirect native result ABI");
+static inline void az_native_result_word(void *function, void *result, const void *argument) {
+    struct native_result_storage value = ((struct native_result_storage (*)(const void *)) function)(argument);
+    __builtin_memcpy(result, &value.first, sizeof value.first);
+}
+static inline void az_native_result_pair(void *function, void *result, const void *argument) {
+    struct native_result_storage value = ((struct native_result_storage (*)(const void *)) function)(argument);
+    __builtin_memcpy(result, &value, 2 * sizeof(uintptr_t));
+}
+
 static inline void az_native_errno_restore(int *saved) { errno = *saved; }
 #define AZ_NATIVE_ERRNO(name) int name __attribute__((cleanup(az_native_errno_restore))) = errno
 #endif

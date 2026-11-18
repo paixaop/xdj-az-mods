@@ -57,10 +57,29 @@ static struct Pair scalar(ARGS) {
     }
 KIND(0)
 KIND(1)
-KIND(2) KIND(3) KIND(4) KIND(5) KIND(6) KIND(7) KIND(8) KIND(9) KIND(10) KIND(11)
-    KIND(12) KIND(13) KIND(14) KIND(15) KIND(16) KIND(17) KIND(18) KIND(19) KIND(20) KIND(21) KIND(22)
+KIND(2)
+KIND(3)
+KIND(4)
+KIND(5)
+KIND(6)
+KIND(7)
+KIND(8)
+KIND(9)
+KIND(10)
+KIND(11)
+KIND(12)
+KIND(13)
+KIND(14)
+KIND(15)
+KIND(16)
+KIND(17)
+KIND(18)
+KIND(19)
+KIND(20)
+KIND(21)
+KIND(22)
 #undef KIND
-        static const Scalar kind_originals[] = {kind_scalar_0, kind_scalar_1, kind_scalar_2, kind_scalar_3, kind_scalar_4, kind_scalar_5, kind_scalar_6, kind_scalar_7, kind_scalar_8, kind_scalar_9, kind_scalar_10, kind_scalar_11, kind_scalar_12, kind_scalar_13, kind_scalar_14, kind_scalar_15, kind_scalar_16, kind_scalar_17, kind_scalar_18, kind_scalar_19, kind_scalar_20, kind_scalar_21, kind_scalar_22};
+static const Scalar kind_originals[] = {kind_scalar_0, kind_scalar_1, kind_scalar_2, kind_scalar_3, kind_scalar_4, kind_scalar_5, kind_scalar_6, kind_scalar_7, kind_scalar_8, kind_scalar_9, kind_scalar_10, kind_scalar_11, kind_scalar_12, kind_scalar_13, kind_scalar_14, kind_scalar_15, kind_scalar_16, kind_scalar_17, kind_scalar_18, kind_scalar_19, kind_scalar_20, kind_scalar_21, kind_scalar_22};
 uintptr_t cache_entry_owner_destination, cache_entry_rows_destination;
 static unsigned rows_alive, rows_destroyed, owner_destroyed;
 struct Rows {
@@ -127,7 +146,7 @@ int main(void) {
         throw_original = true;
         clear_counts();
         unsigned deletions = fixture_exception_deletions;
-        bool caught = !az_native_try(scalar_unwind, fn);
+        bool caught = !fixture_native_try(scalar_unwind, fn);
         throw_original = false;
         assert(caught && fixture_exception_deletions == deletions + 1 && originals == 1 && entered == 1 && !completed && !active);
     }

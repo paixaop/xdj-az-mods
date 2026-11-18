@@ -334,6 +334,13 @@ void azsdk_loop_configure(int on, int build) {
 #endif
     }
 }
+/* A provisional listener must not survive an interrupted registration. The
+ * caller still owns registration_mutex while this cleanup runs. */
+static void registration_drop(int *deck) {
+    if (*deck < 0) return;
+    invalidate((unsigned) *deck);
+    az_native_owner_reset(&owners[*deck]);
+}
 int azsdk_loop_register(int deck, void *owned_unit) {
     if (!deck_ok(deck) || !owned_unit || !atomic_load_explicit(&(enabled), memory_order_acquire)) return 0;
     {
@@ -359,11 +366,9 @@ int azsdk_loop_register(int deck, void *owned_unit) {
         object->generation = generation;
         az_native_owner_copy(&owners[deck], &listener);
         atomic_store_explicit(&(published[deck].active_generation), generation, memory_order_release);
-        if (!az_listener_register(entry, server, &listener)) {
-            invalidate((unsigned) deck);
-            az_native_owner_reset(&owners[deck]);
-            return 0;
-        }
+        int pending_deck __attribute__((cleanup(registration_drop))) = deck;
+        az_listener_register(entry, server, &listener);
+        pending_deck = -1;
         atomic_fetch_or_explicit(&(submitted), 1u << deck, memory_order_release);
         return 1;
     }

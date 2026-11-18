@@ -175,7 +175,7 @@ static void registration_reentry(unsigned build) {
         struct reentry_context context = {&replacement, &fresh};
         outer.server.on_register = reenter_registration;
         outer.server.context = &context;
-        CHECK(!submit(0, &outer) && fresh.object, "old register does not acknowledge its reentrant replacement");
+        CHECK((throwing ? fixture_registration_unwind(azsdk_cue_register, 0, &outer.unit) : !submit(0, &outer)) && fresh.object, "old register does not acknowledge its reentrant replacement");
         CHECK(sample(0, true).changed_index_mask == 16 && azsdk_cue_capabilities() == 1,
               "old normal/throwing completion cannot invalidate replacement slot or pending callbacks");
         retire(0);
@@ -247,7 +247,7 @@ static void races_and_failures(unsigned build) {
     struct reentry_context escape_context = {&fixture, &escaped};
     fixture.server.on_register = escape_registration;
     fixture.server.context = &escape_context;
-    CHECK(!submit(0, &fixture) && escaped.object, "failed native registration keeps only its escaped callback lease");
+    CHECK(fixture_registration_unwind(azsdk_cue_register, 0, &fixture.unit) && escaped.object, "failed native registration keeps only its escaped callback lease");
     emit(escaped, record(4, 0), fixture.server.native_routing_tag, true);
     unchanged(0, true);
     fixture.server.fail_after = false;

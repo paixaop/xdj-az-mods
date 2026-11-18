@@ -25,7 +25,7 @@ class ExitPrivateLinkTests(unittest.TestCase):
             for name in ("actor", "store", "lifecycle", "persist", "recall", "commands", "observer"):
                 source = root / ("src/azstem/sdk_cue_" + name + ".c")
                 sources.append(source)
-            sources += [stub, root / "src/common/aznative_guard.c"]
+            sources += [stub, root / "tests/unit/native_unwind.c"]
             objects = []
             for index, source in enumerate(sources):
                 obj = folder / (str(index) + ".o")

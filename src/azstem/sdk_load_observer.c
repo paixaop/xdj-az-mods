@@ -239,7 +239,7 @@ static bool install(uintptr_t slot, void *hook, void **original, _Atomic(unsigne
     if (!patch) return false;
     int rc = 0;
     struct patch_call call = {patch, slot, hook, original, 0};
-    if (!az_native_try(invoke_patch, &call)) return false;
+    invoke_patch(&call);
     rc = call.result;
     bool ok = rc == 1 && __atomic_load_n(original, __ATOMIC_ACQUIRE) == expected &&
               __atomic_load_n(((void **) (slot)), __ATOMIC_ACQUIRE) == hook;

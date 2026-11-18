@@ -19,6 +19,15 @@ static int open_source(unsigned d, uint64_t e, uint64_t l, struct azn_analysis_s
 static int current_source(uint64_t token) { return azn_analysis_sources()->current(token); }
 static void close_source(uint64_t token) { azn_analysis_sources()->close(token); }
 static int install_source(int build, azn_analysis_patch_fn patch) { return azn_analysis_sources()->install(build, patch); }
+struct wait_call {
+    uintptr_t owner;
+    const WeakTrack *weak;
+    int generation;
+};
+static void wait_raising(void *opaque) {
+    const struct wait_call *call = opaque;
+    (void) azn_analysis_test_wait(call->owner, call->weak, call->generation);
+}
 static int wait_decrypt(uintptr_t owner, const WeakTrack *weak, int generation) {
     return azn_analysis_test_wait(owner, weak, generation);
 }
@@ -118,7 +127,8 @@ int main() {
     assert(open_source(0, 7, 8, &out) == AZ_NOT_FOUND);
     native_result = 0;
     fail_state = true;
-    assert(wait_decrypt((uintptr_t) &owner, &weak, generation) == 0);
+    struct wait_call call = {(uintptr_t) &owner, &weak, generation};
+    assert(!fixture_native_try(wait_raising, &call));
     assert(track.control->strong == 1 && fixture_exception_deletions == 1);
     fail_state = false;
     put(*(struct Native *) state.object, 0x18, (unsigned char) 0);

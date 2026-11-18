@@ -35,7 +35,7 @@ ubsan) flags+=(-fsanitize=undefined -fno-sanitize-recover=all -fno-omit-frame-po
 tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 *) echo 'SAN must be plain, asan, ubsan or tsan' >&2; exit 2 ;;
 esac
-command=("${HOST_CC:-gcc}" "${flags[@]}" "-DSOURCES_INC=\"$task_tmp/src/azmod/sdk_native_sources.c\"" tests/unit/sdksourcereuse_test.c src/azmod/sdk_connection_hooks.c tests/unit/sdkcachebirth_return.S src/common/aznative_guard.c src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/source-reuse")
+command=("${HOST_CC:-gcc}" "${flags[@]}" "-DSOURCES_INC=\"$task_tmp/src/azmod/sdk_native_sources.c\"" tests/unit/sdksourcereuse_test.c src/azmod/sdk_connection_hooks.c tests/unit/sdkcachebirth_return.S tests/unit/native_unwind.c src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/source-reuse")
 python3 - "$result_root/compile-command.json" "${command[@]}" <<'PY'
 from pathlib import Path
 import json,sys

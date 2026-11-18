@@ -1740,11 +1740,10 @@ static void execute_move_tail(unsigned deck, Slot *slot) {
             finish(slot, AZ_COMMAND_UNCERTAIN, time ? AZ_STALE : AZ_FAILED, 0);
         return;
     }
+    FailureScope failure __attribute__((cleanup(failure_drop))) = {slot, token, false};
     execute_move_tail_call call = {deck, slot, token};
-    if (!az_native_try(execute_move_tail_body, &call)) {
-        atomic_store_explicit(&(slot->failed), token, memory_order_release);
-        slot->move_stage = 3;
-    }
+    execute_move_tail_body(&call);
+    failure.completed = true;
 }
 typedef struct execute_call {
     unsigned deck;
@@ -1839,10 +1838,10 @@ static void execute(unsigned deck, Slot *slot) {
         finish(slot, AZ_COMMAND_REJECTED, AZ_STALE, 0);
         return;
     }
+    FailureScope failure __attribute__((cleanup(failure_drop))) = {slot, slot->request.token, false};
     execute_call call = {deck, slot, time};
-    if (!az_native_try(execute_body, &call)) {
-        atomic_store_explicit(&(slot->failed), slot->request.token, memory_order_release);
-    }
+    execute_body(&call);
+    failure.completed = true;
 }
 static void settle(unsigned deck, Slot *slot) {
     if (atomic_load_explicit(&(slot->phase), memory_order_acquire) != RUNNING) return;
@@ -2537,7 +2536,7 @@ int azsdk_exit_configure(int on, int build, azexit_install_fn install) {
     return 0;
 #else
     azsdk_exit_configure_call call = {on, build, install, 0};
-    if (!az_native_try(azsdk_exit_configure_body, &call)) return 0;
+    azsdk_exit_configure_body(&call);
     return call.result;
 #endif
 }
@@ -2625,7 +2624,7 @@ static void azsdk_exit_register_body(void *opaque) {
 int azsdk_exit_register(int deck, void *unit) {
     if (deck < 0 || deck >= 4 || !atomic_load_explicit(&(state().enabled), memory_order_acquire)) return 0;
     azsdk_exit_register_call call = {deck, unit, 0};
-    if (!az_native_try(azsdk_exit_register_body, &call)) return 0;
+    azsdk_exit_register_body(&call);
     return call.result;
 }
 void azsdk_exit_retire(int deck) {

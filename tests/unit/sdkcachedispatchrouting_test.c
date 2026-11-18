@@ -111,9 +111,29 @@ static void frame_results(const Frame *self) {
     }
 DISTINCT(0)
 DISTINCT(1)
-DISTINCT(2) DISTINCT(3) DISTINCT(4) DISTINCT(5) DISTINCT(6) DISTINCT(7) DISTINCT(8) DISTINCT(9) DISTINCT(10) DISTINCT(11) DISTINCT(12) DISTINCT(13) DISTINCT(14) DISTINCT(15) DISTINCT(16) DISTINCT(17) DISTINCT(18) DISTINCT(19) DISTINCT(20) DISTINCT(21) DISTINCT(22)
+DISTINCT(2)
+DISTINCT(3)
+DISTINCT(4)
+DISTINCT(5)
+DISTINCT(6)
+DISTINCT(7)
+DISTINCT(8)
+DISTINCT(9)
+DISTINCT(10)
+DISTINCT(11)
+DISTINCT(12)
+DISTINCT(13)
+DISTINCT(14)
+DISTINCT(15)
+DISTINCT(16)
+DISTINCT(17)
+DISTINCT(18)
+DISTINCT(19)
+DISTINCT(20)
+DISTINCT(21)
+DISTINCT(22)
 #undef DISTINCT
-    static void (*frame_original(unsigned kind))(azce_call *) {
+static void (*frame_original(unsigned kind))(azce_call *) {
     static void (*const originals[])(azce_call *) = {distinct_0, distinct_1, distinct_2, distinct_3, distinct_4, distinct_5, distinct_6, distinct_7, distinct_8, distinct_9, distinct_10, distinct_11, distinct_12, distinct_13, distinct_14, distinct_15, distinct_16, distinct_17, distinct_18, distinct_19, distinct_20, distinct_21, distinct_22};
     return kind < 23 ? originals[kind] : frame_original_call;
 }
@@ -126,7 +146,7 @@ static void maybe_throw(Frame *f) {
 }
 static void checked_dispatch(Frame *f, bool throwing) {
     unsigned before = fixture_exception_deletions;
-    bool caught = !az_native_try(dispatch, f);
+    bool caught = !fixture_native_try(dispatch, f);
     CHECK(caught == throwing && fixture_exception_deletions == before + (unsigned) throwing, "original native unwind propagates once");
 }
 static void run(unsigned kind, bool mutation, bool throwing) {
@@ -327,10 +347,29 @@ void azsdk_cache_invoke_original(azce_call *call) {
     void azsdk_cache_entry_##n(void) { abort(); }
 ENTRY(0)
 ENTRY(1)
-ENTRY(2) ENTRY(3) ENTRY(4) ENTRY(5) ENTRY(6) ENTRY(7) ENTRY(8) ENTRY(9) ENTRY(10) ENTRY(11)
-    ENTRY(12) ENTRY(13) ENTRY(14) ENTRY(15) ENTRY(16) ENTRY(17) ENTRY(18) ENTRY(19) ENTRY(20) ENTRY(21) ENTRY(22)
+ENTRY(2)
+ENTRY(3)
+ENTRY(4)
+ENTRY(5)
+ENTRY(6)
+ENTRY(7)
+ENTRY(8)
+ENTRY(9)
+ENTRY(10)
+ENTRY(11)
+ENTRY(12)
+ENTRY(13)
+ENTRY(14)
+ENTRY(15)
+ENTRY(16)
+ENTRY(17)
+ENTRY(18)
+ENTRY(19)
+ENTRY(20)
+ENTRY(21)
+ENTRY(22)
 #undef ENTRY
-        int main(void) {
+int main(void) {
     const unsigned forwarded[] = {AZCE_KIND_MESSAGE, AZCE_KIND_SELECTION, AZCE_KIND_CREATE, AZCE_KIND_QUERY, AZCE_KIND_GENERIC, AZCE_KIND_TRACKINFO, AZCE_KIND_REPLY_TICKET, AZCE_KIND_REPLY_RECEPTION, AZCE_KIND_COUNT, UINT32_MAX};
     for (size_t i = 0; i < sizeof forwarded / sizeof *forwarded; ++i) {
         run(forwarded[i], false, false);

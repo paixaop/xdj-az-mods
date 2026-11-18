@@ -901,203 +901,75 @@ static void cache_poison_scopes(CacheBirthScope *except) {
     for (__auto_type scope = cache_birth_scope; scope; scope = scope->parent)
         if (scope != except) scope->poisoned = true;
 }
-struct cache_birth_impl_guard_1 {
-    const BirthBorrow **capture_borrow;
-    const Build **capture_profile;
-    CachePins *capture_pins;
-    uint64_t *capture_before;
-    int *capture_status;
-    StrongOwner *capture_creator;
-};
-static void cache_birth_impl_guard_1_call(void *opaque) {
-    struct cache_birth_impl_guard_1 *guard = opaque;
-    (void) guard;
-
-    (*guard->capture_status) = cache_prepare_source(&((*guard->capture_borrow)->source), &((*(*guard->capture_profile))), (*guard->capture_borrow)->collector, &((*guard->capture_pins)), &((*guard->capture_before)));
-    if ((*guard->capture_status) == AZS_OK) {
-        if (!(*guard->capture_borrow)->creator_database || !(*guard->capture_borrow)->creator_database->object || !(*guard->capture_borrow)->native_result ||
-            guard->capture_pins->collector.object != (*guard->capture_borrow)->receiver_collector) (*guard->capture_status) = AZS_GUARD;
-        else {
-            az_native_owner_copy(&(*guard->capture_creator), &(*(*guard->capture_borrow)->creator_database));
-            if (guard->capture_creator->object != guard->capture_pins->database.object || (guard->capture_creator->control != guard->capture_pins->database.control) ||
-                (guard->capture_pins->database.control != guard->capture_creator->control)) (*guard->capture_status) = AZS_GUARD;
-        }
-    }
-}
-struct cache_birth_impl_guard_2 {
-    const BirthBorrow **capture_borrow;
-    const Build **capture_profile;
-    CachePins *capture_pins;
-    CacheBirthScope *capture_construction;
-    StrongOwner *capture_creator;
-    Observation **capture_out;
-    int result;
-};
-static int cache_birth_impl_guard_2_body(struct cache_birth_impl_guard_2 *guard) {
-    (void) guard;
-
-    __auto_type generation = guard->capture_construction->generation;
-        /* Preserve the actual final-write stamp through factory cleanup and
-         * native shared-owner publication. Never adopt the latest return stamp. */
-    if (!guard->capture_construction->completed || guard->capture_construction->poisoned || !cache_stamp_is(generation) ||
-        !cache_worker_is(&((*guard->capture_borrow)->source), &((*(*guard->capture_profile)))) ||
-        !cache_borrow_source_unchanged(&((*guard->capture_borrow)->source), &((*guard->capture_pins))) ||
-        !(*guard->capture_borrow)->collector->object || (*guard->capture_borrow)->collector->object != guard->capture_pins->collector.object ||
-        ((*guard->capture_borrow)->collector->control != guard->capture_pins->collector.control) || (guard->capture_pins->collector.control != (*guard->capture_borrow)->collector->control) ||
-        (*guard->capture_borrow)->creator_database->object != guard->capture_creator->object ||
-        ((*guard->capture_borrow)->creator_database->control != guard->capture_creator->control) || (guard->capture_creator->control != (*guard->capture_borrow)->creator_database->control) ||
-        !(*guard->capture_borrow)->native_result->object) return AZS_STALE;
-    az_native_owner_copy(&guard->capture_pins->cache, &(*(*guard->capture_borrow)->native_result)); // actual successfully constructed native owner
-    if (guard->capture_pins->cache.object != guard->capture_construction->raw_result) return AZS_STALE;
-    __auto_type s = &(source_state());
-    AZ_MUTEX_GUARD(lock, s->registry_mutex, true);
-    if (!lock.held) return AZS_BUSY;
-    if (!cache_stamp_is(generation) || !cache_source_is(&((*guard->capture_borrow)->source), &((*guard->capture_pins)), false)) return AZS_STALE;
-    CacheBinding *slot = NULL;
-    for (unsigned i = 0; i < s->cache_limit; ++i) {
-        __auto_type binding = &(s->cache_bindings[i]);
-        if (binding->birth_epoch && same_owner(&(binding->cache), &(guard->capture_pins->cache))) return AZS_STALE;
-        if (!slot && !cache_binding_retained(binding, generation)) slot = binding;
-    }
-    if (!slot || s->next_cache_birth == UINT64_MAX) return AZS_LIMIT;
-    CacheBinding candidate __attribute__((cleanup(cache_binding_drop))) = {0};
-    az_native_weak_copy(&candidate.mount, &(guard->capture_pins->mount));
-    az_native_weak_copy(&candidate.database, &(guard->capture_pins->database));
-    az_native_weak_copy(&candidate.collector, &(guard->capture_pins->collector));
-    az_native_weak_copy(&candidate.cache, &(guard->capture_pins->cache));
-    candidate.source_epoch = (*guard->capture_borrow)->source.source_epoch;
-    candidate.generation = generation;
-    candidate.birth_epoch = s->next_cache_birth + 1;
-    candidate.factory_kind = guard->capture_construction->factory_kind;
-    if (!cache_stamp_is(generation) || !cache_source_is(&((*guard->capture_borrow)->source), &((*guard->capture_pins)), false)) return AZS_STALE;
-    cache_binding_drop(slot);
-    *slot = candidate;
-    candidate = (CacheBinding) {0}; // reclaim stale weak controls only in this owned worker
-    s->next_cache_birth = slot->birth_epoch;
-    if ((*guard->capture_out)) {
-        azcb_observation_drop((*guard->capture_out));
-        *(*guard->capture_out) = cache_observation(slot);
-    }
-    return AZS_OK;
-}
-static void cache_birth_impl_guard_2_call(void *opaque) {
-    struct cache_birth_impl_guard_2 *guard = opaque;
-    guard->result = cache_birth_impl_guard_2_body(guard);
-}
 static int cache_birth_impl(const BirthBorrow *borrow, const Build *profile, Forward original, Observation *out) {
     if (!original.call) return AZS_INVALID;
     CachePins pins __attribute__((cleanup(cache_pins_drop))) = {0};
     StrongOwner creator __attribute__((cleanup(az_native_owner_reset))) = {0};
     uint64_t before = 0;
     int status = AZS_GUARD;
-    struct cache_birth_impl_guard_1 guarded_0 = {.capture_borrow = &borrow, .capture_profile = &profile, .capture_pins = &pins, .capture_before = &before, .capture_status = &status, .capture_creator = &creator};
-    if (!az_native_try(cache_birth_impl_guard_1_call, &guarded_0)) { status = AZS_GUARD; }
+    status = cache_prepare_source(&(borrow->source), &((*profile)), borrow->collector, &(pins), &(before));
+    if (status == AZS_OK) {
+        if (!borrow->creator_database || !borrow->creator_database->object || !borrow->native_result ||
+            pins.collector.object != borrow->receiver_collector) status = AZS_GUARD;
+        else {
+            az_native_owner_copy(&creator, &(*borrow->creator_database));
+            if (creator.object != pins.database.object || (creator.control != pins.database.control) ||
+                (pins.database.control != creator.control)) status = AZS_GUARD;
+        }
+    }
 
-    /* Native exceptions are deliberately outside the observer catch boundary.
-     * The closure alone constructs the real native result at its original sret
+    /* The original constructs the real native result at its original sret
      * destination. No reinterpretation as a plain pointer-return function. */
     CacheBirthScope construction __attribute__((cleanup(birth_scope_drop)));
     birth_scope_init(&construction, status == AZS_OK, &((*borrow)));
     original.call(original.context);
     if (status != AZS_OK) return status;
-    struct cache_birth_impl_guard_2 guarded_1 = {.capture_borrow = &borrow, .capture_profile = &profile, .capture_pins = &pins, .capture_construction = &construction, .capture_creator = &creator, .capture_out = &out};
-    if (!az_native_try(cache_birth_impl_guard_2_call, &guarded_1)) { return AZS_GUARD; }
-    return guarded_1.result;
-}
-struct cache_query_impl_guard_1 {
-    SelectionInvocation *capture_selection;
-    const QueryBorrow **capture_borrow;
-    const Build **capture_profile;
-    CachePins *capture_pins;
-    uint64_t *capture_generation;
-    int *capture_status;
-    CopyRowScalar *capture_copy;
-    Observation *capture_candidate;
-};
-static void cache_query_impl_guard_1_call(void *opaque) {
-    struct cache_query_impl_guard_1 *guard = opaque;
-    (void) guard;
-
-    (*guard->capture_status) = azsel_ready(&(*guard->capture_selection)) ? cache_prepare_source(&((*guard->capture_borrow)->source), &((*(*guard->capture_profile))), (*guard->capture_borrow)->collector, &((*guard->capture_pins)), &((*guard->capture_generation))) : AZS_GUARD;
-    if ((*guard->capture_status) == AZS_OK) {
-        if (!(*guard->capture_borrow)->selected_cache || !(*guard->capture_borrow)->selected_cache->object || !guard->capture_copy->copy ||
-            (*guard->capture_borrow)->selected_cache->object != (*guard->capture_borrow)->receiver_cache) (*guard->capture_status) = AZS_GUARD;
-        else {
-            az_native_owner_copy(&guard->capture_pins->cache, &(*(*guard->capture_borrow)->selected_cache));
-            __auto_type s = &(source_state());
-            AZ_MUTEX_GUARD(lock, s->registry_mutex, true);
-            if (!lock.held) (*guard->capture_status) = AZS_BUSY;
-            else {
-                (*guard->capture_status) = AZS_UNKNOWN;
-                if (!cache_stamp_is((*guard->capture_generation)) || !cache_source_is(&((*guard->capture_borrow)->source), &((*guard->capture_pins)), false)) (*guard->capture_status) = AZS_STALE;
-                else {
-                    for (unsigned range_index_10 = 0; range_index_10 < sizeof(s->cache_bindings) / sizeof(s->cache_bindings)[0]; ++range_index_10) {
-                        __auto_type binding = &(s->cache_bindings[range_index_10]);
-
-                        if (cache_binding_current(binding, (*guard->capture_generation)) &&
-                            binding->source_epoch == (*guard->capture_borrow)->source.source_epoch &&
-                            cache_owner_is(&(binding->cache), &(guard->capture_pins->cache)) &&
-                            cache_owner_is(&(binding->collector), &(guard->capture_pins->collector)) &&
-                            cache_owner_is(&(binding->mount), &(guard->capture_pins->mount)) &&
-                            cache_owner_is(&(binding->database), &(guard->capture_pins->database))) {
-                            azcb_observation_drop(&(*guard->capture_candidate));
-                            (*guard->capture_candidate) = cache_observation(binding);
-                            (*guard->capture_status) = AZS_OK;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-struct cache_query_impl_guard_2 {
-    SelectionInvocation *capture_selection;
-    uint64_t *capture_generation;
-    const QueryBorrow **capture_borrow;
-    const Build **capture_profile;
-    CachePins *capture_pins;
-    CopyRowScalar *capture_copy;
-    Observation *capture_candidate;
-    Observation **capture_out;
-    int result;
-};
-static int cache_query_impl_guard_2_body(struct cache_query_impl_guard_2 *guard) {
-    (void) guard;
-
-    if (!azsel_ready(&(*guard->capture_selection)) || !cache_stamp_is((*guard->capture_generation)) || !cache_worker_is(&((*guard->capture_borrow)->source), &((*(*guard->capture_profile)))) ||
-        !cache_query_borrows_unchanged((*guard->capture_borrow), &((*guard->capture_pins)))) return AZS_STALE;
-    uint32_t value = 0;
-    if (!guard->capture_copy->copy(guard->capture_copy->context, &value)) return AZS_GUARD;
-    if (!azsel_ready(&(*guard->capture_selection)) || !cache_worker_is(&((*guard->capture_borrow)->source), &((*(*guard->capture_profile))))) return AZS_GUARD;
-    __auto_type s = &(source_state());
-    AZ_MUTEX_GUARD(lock, s->registry_mutex, true);
-    if (!lock.held) return AZS_BUSY;
-        /* The scalar copier may reenter native work. Recheck every actual
-         * borrow and the pinned source tuple after it, before publication.
-         * Check the mutation stamp first, before any holder storage reread. */
-    if (!azsel_ready(&(*guard->capture_selection)) || !cache_stamp_is((*guard->capture_generation)) || !cache_query_borrows_unchanged((*guard->capture_borrow), &((*guard->capture_pins))) ||
-        !cache_source_is(&((*guard->capture_borrow)->source), &((*guard->capture_pins)), false)) return AZS_STALE;
-    bool retained = false;
     {
-        for (unsigned range_index_11 = 0; range_index_11 < sizeof(s->cache_bindings) / sizeof(s->cache_bindings)[0]; ++range_index_11) {
-            __auto_type binding = &(s->cache_bindings[range_index_11]);
-            if (binding->birth_epoch == guard->capture_candidate->birth_epoch &&
-                cache_binding_current(binding, (*guard->capture_generation)) &&
-                cache_owner_is(&(binding->cache), &(guard->capture_pins->cache)) && cache_owner_is(&(binding->collector), &(guard->capture_pins->collector))) {
-                retained = true;
-                break;
-            }
+
+        __auto_type generation = construction.generation;
+        /* Preserve the actual final-write stamp through factory cleanup and
+         * native shared-owner publication. Never adopt the latest return stamp. */
+        if (!construction.completed || construction.poisoned || !cache_stamp_is(generation) ||
+            !cache_worker_is(&(borrow->source), &((*profile))) ||
+            !cache_borrow_source_unchanged(&(borrow->source), &(pins)) ||
+            !borrow->collector->object || borrow->collector->object != pins.collector.object ||
+            (borrow->collector->control != pins.collector.control) || (pins.collector.control != borrow->collector->control) ||
+            borrow->creator_database->object != creator.object ||
+            (borrow->creator_database->control != creator.control) || (creator.control != borrow->creator_database->control) ||
+            !borrow->native_result->object) return AZS_STALE;
+        az_native_owner_copy(&pins.cache, &(*borrow->native_result)); // actual successfully constructed native owner
+        if (pins.cache.object != construction.raw_result) return AZS_STALE;
+        __auto_type s = &(source_state());
+        AZ_MUTEX_GUARD(lock, s->registry_mutex, true);
+        if (!lock.held) return AZS_BUSY;
+        if (!cache_stamp_is(generation) || !cache_source_is(&(borrow->source), &(pins), false)) return AZS_STALE;
+        CacheBinding *slot = NULL;
+        for (unsigned i = 0; i < s->cache_limit; ++i) {
+            __auto_type binding = &(s->cache_bindings[i]);
+            if (binding->birth_epoch && same_owner(&(binding->cache), &(pins.cache))) return AZS_STALE;
+            if (!slot && !cache_binding_retained(binding, generation)) slot = binding;
         }
+        if (!slot || s->next_cache_birth == UINT64_MAX) return AZS_LIMIT;
+        CacheBinding candidate __attribute__((cleanup(cache_binding_drop))) = {0};
+        az_native_weak_copy(&candidate.mount, &(pins.mount));
+        az_native_weak_copy(&candidate.database, &(pins.database));
+        az_native_weak_copy(&candidate.collector, &(pins.collector));
+        az_native_weak_copy(&candidate.cache, &(pins.cache));
+        candidate.source_epoch = borrow->source.source_epoch;
+        candidate.generation = generation;
+        candidate.birth_epoch = s->next_cache_birth + 1;
+        candidate.factory_kind = construction.factory_kind;
+        if (!cache_stamp_is(generation) || !cache_source_is(&(borrow->source), &(pins), false)) return AZS_STALE;
+        cache_binding_drop(slot);
+        *slot = candidate;
+        candidate = (CacheBinding) {0}; // reclaim stale weak controls only in this owned worker
+        s->next_cache_birth = slot->birth_epoch;
+        if (out) {
+            azcb_observation_drop(out);
+            *out = cache_observation(slot);
+        }
+        return AZS_OK;
     }
-    if (!azsel_ready(&(*guard->capture_selection)) || !retained || !cache_source_is(&((*guard->capture_borrow)->source), &((*guard->capture_pins)), false)) return AZS_STALE;
-    guard->capture_candidate->row_value = value;
-    if ((*guard->capture_out)) azcb_observation_copy((*guard->capture_out), &(*guard->capture_candidate));
-    return AZS_OK;
-}
-static void cache_query_impl_guard_2_call(void *opaque) {
-    struct cache_query_impl_guard_2 *guard = opaque;
-    guard->result = cache_query_impl_guard_2_body(guard);
 }
 static int cache_query_impl(const QueryBorrow *borrow, const Build *profile, Forward original, CopyRowScalar copy, Observation *out) {
     if (!original.call) return AZS_INVALID;
@@ -1107,14 +979,73 @@ static int cache_query_impl(const QueryBorrow *borrow, const Build *profile, For
     Observation candidate __attribute__((cleanup(azcb_observation_drop))) = {0};
     uint64_t generation = 0;
     int status = AZS_GUARD;
-    struct cache_query_impl_guard_1 guarded_0 = {.capture_selection = &selection, .capture_borrow = &borrow, .capture_profile = &profile, .capture_pins = &pins, .capture_generation = &generation, .capture_status = &status, .capture_copy = &copy, .capture_candidate = &candidate};
-    if (!az_native_try(cache_query_impl_guard_1_call, &guarded_0)) { status = AZS_GUARD; }
+    status = azsel_ready(&selection) ? cache_prepare_source(&(borrow->source), &((*profile)), borrow->collector, &(pins), &(generation)) : AZS_GUARD;
+    if (status == AZS_OK) {
+        if (!borrow->selected_cache || !borrow->selected_cache->object || !copy.copy ||
+            borrow->selected_cache->object != borrow->receiver_cache) status = AZS_GUARD;
+        else {
+            az_native_owner_copy(&pins.cache, &(*borrow->selected_cache));
+            __auto_type s = &(source_state());
+            AZ_MUTEX_GUARD(lock, s->registry_mutex, true);
+            if (!lock.held) status = AZS_BUSY;
+            else {
+                status = AZS_UNKNOWN;
+                if (!cache_stamp_is(generation) || !cache_source_is(&(borrow->source), &(pins), false)) status = AZS_STALE;
+                else {
+                    for (unsigned range_index_10 = 0; range_index_10 < sizeof(s->cache_bindings) / sizeof(s->cache_bindings)[0]; ++range_index_10) {
+                        __auto_type binding = &(s->cache_bindings[range_index_10]);
+
+                        if (cache_binding_current(binding, generation) &&
+                            binding->source_epoch == borrow->source.source_epoch &&
+                            cache_owner_is(&(binding->cache), &(pins.cache)) &&
+                            cache_owner_is(&(binding->collector), &(pins.collector)) &&
+                            cache_owner_is(&(binding->mount), &(pins.mount)) &&
+                            cache_owner_is(&(binding->database), &(pins.database))) {
+                            azcb_observation_drop(&candidate);
+                            candidate = cache_observation(binding);
+                            status = AZS_OK;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     original.call(original.context); // preserve destination, ownership and native exception
     if (status != AZS_OK) return status;
-    struct cache_query_impl_guard_2 guarded_1 = {.capture_selection = &selection, .capture_generation = &generation, .capture_borrow = &borrow, .capture_profile = &profile, .capture_pins = &pins, .capture_copy = &copy, .capture_candidate = &candidate, .capture_out = &out};
-    if (!az_native_try(cache_query_impl_guard_2_call, &guarded_1)) { return AZS_GUARD; }
-    return guarded_1.result;
+    {
+
+        if (!azsel_ready(&selection) || !cache_stamp_is(generation) || !cache_worker_is(&(borrow->source), &((*profile))) ||
+            !cache_query_borrows_unchanged(borrow, &(pins))) return AZS_STALE;
+        uint32_t value = 0;
+        if (!copy.copy(copy.context, &value)) return AZS_GUARD;
+        if (!azsel_ready(&selection) || !cache_worker_is(&(borrow->source), &((*profile)))) return AZS_GUARD;
+        __auto_type s = &(source_state());
+        AZ_MUTEX_GUARD(lock, s->registry_mutex, true);
+        if (!lock.held) return AZS_BUSY;
+        /* The scalar copier may reenter native work. Recheck every actual
+         * borrow and the pinned source tuple after it, before publication.
+         * Check the mutation stamp first, before any holder storage reread. */
+        if (!azsel_ready(&selection) || !cache_stamp_is(generation) || !cache_query_borrows_unchanged(borrow, &(pins)) ||
+            !cache_source_is(&(borrow->source), &(pins), false)) return AZS_STALE;
+        bool retained = false;
+        {
+            for (unsigned range_index_11 = 0; range_index_11 < sizeof(s->cache_bindings) / sizeof(s->cache_bindings)[0]; ++range_index_11) {
+                __auto_type binding = &(s->cache_bindings[range_index_11]);
+                if (binding->birth_epoch == candidate.birth_epoch &&
+                    cache_binding_current(binding, generation) &&
+                    cache_owner_is(&(binding->cache), &(pins.cache)) && cache_owner_is(&(binding->collector), &(pins.collector))) {
+                    retained = true;
+                    break;
+                }
+            }
+        }
+        if (!azsel_ready(&selection) || !retained || !cache_source_is(&(borrow->source), &(pins), false)) return AZS_STALE;
+        candidate.row_value = value;
+        if (out) azcb_observation_copy(out, &candidate);
+        return AZS_OK;
+    }
 }
 typedef struct CacheMutation CacheMutation;
 struct CacheMutation {
@@ -1175,34 +1106,6 @@ struct CacheLibraryScope {
 };
 static void library_scope_init(CacheLibraryScope *ctx, unsigned build, void *server, const Build *value);
 static void library_scope_drop(CacheLibraryScope *ctx);
-struct library_scope_init_guard_1 {
-    CacheLibraryScope **capture_ctx;
-    void **capture_server;
-};
-static void library_scope_init_guard_1_call(void *opaque) {
-    struct library_scope_init_guard_1 *guard = opaque;
-    (void) guard;
-
-    if (!cache_worker_is(&((*guard->capture_ctx)->source), &((*guard->capture_ctx)->profile))) return;
-    OwnedChain chain = {0};
-    if (!owned_chain(((uintptr_t) ((*guard->capture_server))), &((*guard->capture_ctx)->profile), &(chain))) return;
-    az_native_owner_copy(&(*guard->capture_ctx)->pins.mount, &(*chain.mount));
-    az_native_owner_copy(&(*guard->capture_ctx)->pins.database, &(*chain.database));
-    __auto_type s = &(source_state());
-    AZ_MUTEX_GUARD(lock, s->registry_mutex, true);
-    if (!lock.held) return;
-    {
-        for (unsigned range_index_12 = 0; range_index_12 < sizeof(s->bindings) / sizeof(s->bindings)[0]; ++range_index_12) {
-            __auto_type binding = &(s->bindings[range_index_12]);
-            if (binding->server == ((uintptr_t) ((*guard->capture_server)))) {
-                (*guard->capture_ctx)->source.source_epoch = binding->epoch;
-                (*guard->capture_ctx)->ready = cache_source_is(&((*guard->capture_ctx)->source), &((*guard->capture_ctx)->pins), false);
-                (*guard->capture_ctx)->status_ready = cache_source_is(&((*guard->capture_ctx)->source), &((*guard->capture_ctx)->pins), true);
-                break;
-            }
-        }
-    }
-}
 static void library_scope_init(CacheLibraryScope *ctx, unsigned build, void *server, const Build *value) {
     (void) ctx;
     *ctx = (CacheLibraryScope) {.row_selection = 0, .ready = false, .status_ready = false, .row_valid = false, .parent = cache_library_scope, .source = make_source(server, build, &ctx->pins.mount, &ctx->pins.database), .profile = (*value)};
@@ -1211,8 +1114,28 @@ static void library_scope_init(CacheLibraryScope *ctx, unsigned build, void *ser
     cache_library_scope = ctx;
     if (ctx->depth > kSlots || !azcm_current(server, &ctx->message) ||
         (ctx->message.kind != 0x2102 && ctx->message.kind != 0x2002 && ctx->message.kind != 0x3000)) return;
-    struct library_scope_init_guard_1 guarded_0 = {.capture_ctx = &ctx, .capture_server = &server};
-    if (!az_native_try(library_scope_init_guard_1_call, &guarded_0)) { ctx->ready = false; }
+    {
+
+        if (!cache_worker_is(&(ctx->source), &(ctx->profile))) return;
+        OwnedChain chain = {0};
+        if (!owned_chain(((uintptr_t) (server)), &(ctx->profile), &(chain))) return;
+        az_native_owner_copy(&ctx->pins.mount, &(*chain.mount));
+        az_native_owner_copy(&ctx->pins.database, &(*chain.database));
+        __auto_type s = &(source_state());
+        AZ_MUTEX_GUARD(lock, s->registry_mutex, true);
+        if (!lock.held) return;
+        {
+            for (unsigned range_index_12 = 0; range_index_12 < sizeof(s->bindings) / sizeof(s->bindings)[0]; ++range_index_12) {
+                __auto_type binding = &(s->bindings[range_index_12]);
+                if (binding->server == ((uintptr_t) (server))) {
+                    ctx->source.source_epoch = binding->epoch;
+                    ctx->ready = cache_source_is(&(ctx->source), &(ctx->pins), false);
+                    ctx->status_ready = cache_source_is(&(ctx->source), &(ctx->pins), true);
+                    break;
+                }
+            }
+        }
+    }
 }
 static void library_scope_drop(CacheLibraryScope *ctx) {
     (void) ctx;
@@ -1234,34 +1157,6 @@ struct CacheSelectionScope {
 };
 static void selection_scope_init(CacheSelectionScope *ctx, const struct azce_call *call);
 static void selection_scope_drop(CacheSelectionScope *ctx);
-struct selection_scope_init_guard_1 {
-    CacheSelectionScope **capture_ctx;
-    const struct azce_call **capture_call;
-};
-static void selection_scope_init_guard_1_call(void *opaque) {
-    struct selection_scope_init_guard_1 *guard = opaque;
-    (void) guard;
-
-            /* These are the reviewed selection entry's live native receiver
-             * and owning Creator reference, not addresses recovered from TLS.
-             * Only read them before the original; all later holders are local. */
-    __auto_type root = ((uintptr_t) ((*guard->capture_call)->args[0]));
-    az_native_owner_copy(&(*guard->capture_ctx)->pins.mount, &(*((const StrongOwner *) (root + 0x28))));
-    az_native_owner_copy(&(*guard->capture_ctx)->pins.collector, &(*((const StrongOwner *) (root + 0x40))));
-    if (!(*guard->capture_ctx)->pins.mount.object || !(*guard->capture_ctx)->pins.collector.object ||
-        !cache_owner_is(&((*guard->capture_ctx)->library->pins.mount), &((*guard->capture_ctx)->pins.mount))) return;
-    __auto_type mount = ((uintptr_t) ((*guard->capture_ctx)->pins.mount.object));
-    az_native_owner_copy(&(*guard->capture_ctx)->pins.database, &(*((const StrongOwner *) (mount + 0x30))));
-    if (!(*guard->capture_ctx)->pins.database.object || !cache_owner_is(&((*guard->capture_ctx)->library->pins.database), &((*guard->capture_ctx)->pins.database))) return;
-    (*guard->capture_ctx)->creator = load(const void *, (*guard->capture_call)->args[3]);
-    if (!(*guard->capture_ctx)->creator) return;
-    (*guard->capture_ctx)->source.server = (*guard->capture_ctx)->library->source.server;
-    (*guard->capture_ctx)->source.build = (*guard->capture_ctx)->library->source.build;
-    (*guard->capture_ctx)->source.source_epoch = (*guard->capture_ctx)->library->source.source_epoch;
-    __auto_type s = &(source_state());
-    AZ_MUTEX_GUARD(lock, s->registry_mutex, true);
-    (*guard->capture_ctx)->ready = lock.held && cache_source_is(&((*guard->capture_ctx)->source), &((*guard->capture_ctx)->pins), false);
-}
 static void selection_scope_init(CacheSelectionScope *ctx, const struct azce_call *call) {
     (void) ctx;
     *ctx = (CacheSelectionScope) {.creator = NULL, .ready = false, .parent = cache_selection_scope, .library = cache_library_scope, .source = make_source(NULL, 0, &ctx->pins.mount, &ctx->pins.database)};
@@ -1273,8 +1168,28 @@ static void selection_scope_init(CacheSelectionScope *ctx, const struct azce_cal
         ((unsigned char) (call->args[1])) != ctx->library->message.selector ||
         ((uint32_t) (call->args[2])) != ctx->library->message.client ||
         !canonical(call->args[0]) || !canonical(call->args[3])) return;
-    struct selection_scope_init_guard_1 guarded_0 = {.capture_ctx = &ctx, .capture_call = &call};
-    if (!az_native_try(selection_scope_init_guard_1_call, &guarded_0)) { ctx->ready = false; }
+    {
+
+            /* These are the reviewed selection entry's live native receiver
+             * and owning Creator reference, not addresses recovered from TLS.
+             * Only read them before the original; all later holders are local. */
+        __auto_type root = ((uintptr_t) (call->args[0]));
+        az_native_owner_copy(&ctx->pins.mount, &(*((const StrongOwner *) (root + 0x28))));
+        az_native_owner_copy(&ctx->pins.collector, &(*((const StrongOwner *) (root + 0x40))));
+        if (!ctx->pins.mount.object || !ctx->pins.collector.object ||
+            !cache_owner_is(&(ctx->library->pins.mount), &(ctx->pins.mount))) return;
+        __auto_type mount = ((uintptr_t) (ctx->pins.mount.object));
+        az_native_owner_copy(&ctx->pins.database, &(*((const StrongOwner *) (mount + 0x30))));
+        if (!ctx->pins.database.object || !cache_owner_is(&(ctx->library->pins.database), &(ctx->pins.database))) return;
+        ctx->creator = load(const void *, call->args[3]);
+        if (!ctx->creator) return;
+        ctx->source.server = ctx->library->source.server;
+        ctx->source.build = ctx->library->source.build;
+        ctx->source.source_epoch = ctx->library->source.source_epoch;
+        __auto_type s = &(source_state());
+        AZ_MUTEX_GUARD(lock, s->registry_mutex, true);
+        ctx->ready = lock.held && cache_source_is(&(ctx->source), &(ctx->pins), false);
+    }
 }
 static void selection_scope_drop(CacheSelectionScope *ctx) {
     (void) ctx;
@@ -1320,33 +1235,6 @@ static bool query_scope_mount(void *context, const void *candidate) {
         // This exact Mount already has a genuine, RTTI-checked source pin.
     return candidate == self->library->pins.mount.object;
 }
-struct query_scope_init_guard_1 {
-    CacheQueryScope **capture_ctx;
-    const struct azce_call **capture_call;
-};
-static void query_scope_init_guard_1_call(void *opaque) {
-    struct query_scope_init_guard_1 *guard = opaque;
-    (void) guard;
-
-    (*guard->capture_ctx)->native_owned = true; // actual reviewed QUERY entry's live receiver, on the owned library worker
-    SelectionBorrow borrow = {(*guard->capture_ctx)->library->source.build,
-                              ((const void *) ((*guard->capture_call)->args[0])), (*guard->capture_ctx), query_scope_owned, query_scope_mount};
-    struct azsel_resolution resolved __attribute__((cleanup(azsel_resolution_drop))) = {0};
-    azsel_resolve_owned(&(*guard->capture_ctx)->selection, &borrow, (struct azsel_position) {(*guard->capture_ctx)->client, (*guard->capture_ctx)->selector}, &resolved);
-    if (resolved.status != AZSEL_OK) return;
-    az_native_owner_copy(&(*guard->capture_ctx)->pins.mount, &(resolved.pins.mount));
-    az_native_owner_copy(&(*guard->capture_ctx)->pins.database, &(resolved.pins.database));
-    az_native_owner_copy(&(*guard->capture_ctx)->pins.collector, &(resolved.pins.collector));
-    az_native_owner_copy(&(*guard->capture_ctx)->pins.cache, &(resolved.pins.cache));
-    if (!cache_owner_is(&((*guard->capture_ctx)->library->pins.mount), &((*guard->capture_ctx)->pins.mount)) ||
-        !cache_owner_is(&((*guard->capture_ctx)->library->pins.database), &((*guard->capture_ctx)->pins.database))) return;
-    (*guard->capture_ctx)->source.server = (*guard->capture_ctx)->library->source.server;
-    (*guard->capture_ctx)->source.build = (*guard->capture_ctx)->library->source.build;
-    (*guard->capture_ctx)->source.source_epoch = (*guard->capture_ctx)->library->source.source_epoch;
-    __auto_type s = &(source_state());
-    AZ_MUTEX_GUARD(lock, s->registry_mutex, true);
-    (*guard->capture_ctx)->ready = lock.held && azsel_ready(&(*guard->capture_ctx)->selection) && cache_source_is(&((*guard->capture_ctx)->source), &((*guard->capture_ctx)->pins), false);
-}
 static void query_scope_init(CacheQueryScope *ctx, const struct azce_call *call) {
     (void) ctx;
     *ctx = (CacheQueryScope) {.start = 0, .count = 0, .client = 0, .selector = 0, .ready = false, .native_owned = false, .adapter_active = false, .adapter_done = false, .poisoned = false, .published = false, .parent = cache_query_scope, .library = cache_library_scope, .source = make_source(NULL, 0, &ctx->pins.mount, &ctx->pins.database)};
@@ -1369,8 +1257,27 @@ static void query_scope_init(CacheQueryScope *ctx, const struct azce_call *call)
     ctx->client = ctx->library->message.client;
     ctx->selector = ctx->library->message.selector;
     if (ctx->start > INT32_MAX || !ctx->count || ctx->count > 16) return;
-    struct query_scope_init_guard_1 guarded_0 = {.capture_ctx = &ctx, .capture_call = &call};
-    if (!az_native_try(query_scope_init_guard_1_call, &guarded_0)) { ctx->ready = false; }
+    {
+
+        ctx->native_owned = true; // actual reviewed QUERY entry's live receiver, on the owned library worker
+        SelectionBorrow borrow = {ctx->library->source.build,
+                                  ((const void *) (call->args[0])), ctx, query_scope_owned, query_scope_mount};
+        struct azsel_resolution resolved __attribute__((cleanup(azsel_resolution_drop))) = {0};
+        azsel_resolve_owned(&ctx->selection, &borrow, (struct azsel_position) {ctx->client, ctx->selector}, &resolved);
+        if (resolved.status != AZSEL_OK) return;
+        az_native_owner_copy(&ctx->pins.mount, &(resolved.pins.mount));
+        az_native_owner_copy(&ctx->pins.database, &(resolved.pins.database));
+        az_native_owner_copy(&ctx->pins.collector, &(resolved.pins.collector));
+        az_native_owner_copy(&ctx->pins.cache, &(resolved.pins.cache));
+        if (!cache_owner_is(&(ctx->library->pins.mount), &(ctx->pins.mount)) ||
+            !cache_owner_is(&(ctx->library->pins.database), &(ctx->pins.database))) return;
+        ctx->source.server = ctx->library->source.server;
+        ctx->source.build = ctx->library->source.build;
+        ctx->source.source_epoch = ctx->library->source.source_epoch;
+        __auto_type s = &(source_state());
+        AZ_MUTEX_GUARD(lock, s->registry_mutex, true);
+        ctx->ready = lock.held && azsel_ready(&ctx->selection) && cache_source_is(&(ctx->source), &(ctx->pins), false);
+    }
 }
 static void query_scope_drop(CacheQueryScope *ctx) {
     (void) ctx;
@@ -1453,41 +1360,31 @@ static bool cache_row_binding_current(const Evidence *row) {
     }
     return false;
 }
-struct cache_forward_query_guard_1 {
-    CacheQueryScope *capture_scope;
-    struct azce_call **capture_call;
-};
-static void cache_forward_query_guard_1_call(void *opaque) {
-    struct cache_forward_query_guard_1 *guard = opaque;
-    (void) guard;
-
-    if (!guard->capture_scope->ready || guard->capture_scope->poisoned || !guard->capture_scope->adapter_done || !azsel_ready(&guard->capture_scope->selection) ||
-        guard->capture_scope->library != cache_library_scope || !cache_stamp_is(guard->capture_scope->row.layout_generation)) return;
-    uint32_t value = 0;
-    if (!azcrow_copy_owned_tag23(((const void *) ((*guard->capture_call)->args[8])), &value) ||
-        value != guard->capture_scope->row.row_value) return;
-    __auto_type s = &(source_state());
-    AZ_MUTEX_GUARD(lock, s->registry_mutex, true);
-    if (!lock.held || !azsel_ready(&guard->capture_scope->selection) || !cache_source_is(&(guard->capture_scope->source), &(guard->capture_scope->pins), false) ||
-        !cache_stamp_is(guard->capture_scope->row.layout_generation)) return;
-    __auto_type row = &(guard->capture_scope->library->row);
-    azcb_observation_copy(&row->cache, &guard->capture_scope->row);
-    row->sequence = guard->capture_scope->library->message.sequence;
-    row->client = guard->capture_scope->client;
-    row->selector = guard->capture_scope->selector;
-    row->start = guard->capture_scope->start;
-    row->count = guard->capture_scope->count;
-    guard->capture_scope->library->row_selection = guard->capture_scope->selection.revision;
-    guard->capture_scope->library->row_valid = cache_row_binding_current(row);
-    guard->capture_scope->published = guard->capture_scope->library->row_valid;
-}
 static void cache_forward_query(struct azce_call *call, Forward original) {
     CacheQueryScope scope __attribute__((cleanup(query_scope_drop)));
     query_scope_init(&scope, &(*call));
     original.call(original.context);
-    struct cache_forward_query_guard_1 guarded_0 = {.capture_scope = &scope, .capture_call = &call};
-    if (!az_native_try(cache_forward_query_guard_1_call, &guarded_0)) {
-        if (scope.library) scope.library->row_valid = false;
+    {
+
+        if (!scope.ready || scope.poisoned || !scope.adapter_done || !azsel_ready(&scope.selection) ||
+            scope.library != cache_library_scope || !cache_stamp_is(scope.row.layout_generation)) return;
+        uint32_t value = 0;
+        if (!azcrow_copy_owned_tag23(((const void *) (call->args[8])), &value) ||
+            value != scope.row.row_value) return;
+        __auto_type s = &(source_state());
+        AZ_MUTEX_GUARD(lock, s->registry_mutex, true);
+        if (!lock.held || !azsel_ready(&scope.selection) || !cache_source_is(&(scope.source), &(scope.pins), false) ||
+            !cache_stamp_is(scope.row.layout_generation)) return;
+        __auto_type row = &(scope.library->row);
+        azcb_observation_copy(&row->cache, &scope.row);
+        row->sequence = scope.library->message.sequence;
+        row->client = scope.client;
+        row->selector = scope.selector;
+        row->start = scope.start;
+        row->count = scope.count;
+        scope.library->row_selection = scope.selection.revision;
+        scope.library->row_valid = cache_row_binding_current(row);
+        scope.published = scope.library->row_valid;
     }
 }
 typedef struct JoinScope JoinScope;
@@ -1561,36 +1458,24 @@ static void cache_forward_entry_impl(struct azce_call *call, Forward original) {
 
 
 
-struct azcq_current_owned_guard_1 {
-    Evidence **capture_out;
-    bool result;
-};
-static bool azcq_current_owned_guard_1_body(struct azcq_current_owned_guard_1 *guard) {
-    (void) guard;
-
-    __auto_type scope = cache_library_scope;
-    if (cache_query_scope || !scope || !scope->ready || !scope->row_valid || scope->message.kind != 0x3000 ||
-        !cache_worker_is(&(scope->source), &(scope->profile))) return false;
-    SelectionInvocation selection __attribute__((cleanup(azsel_invocation_drop)));
-    azsel_invocation_init(&selection, &source_state().cache_selection);
-    if (!azsel_ready(&selection) || selection.revision != scope->row_selection ||
-        !cache_stamp_is(scope->row.cache.layout_generation)) return false;
-    __auto_type s = &(source_state());
-    AZ_MUTEX_GUARD(lock, s->registry_mutex, true);
-    if (!lock.held || !cache_source_is(&(scope->source), &(scope->pins), false) ||
-        !cache_row_binding_current(&(scope->row)) || !azsel_ready(&selection) ||
-        !cache_stamp_is(scope->row.cache.layout_generation)) return false;
-    azcq_evidence_copy((*guard->capture_out), &scope->row);
-    return true;
-}
-static void azcq_current_owned_guard_1_call(void *opaque) {
-    struct azcq_current_owned_guard_1 *guard = opaque;
-    guard->result = azcq_current_owned_guard_1_body(guard);
-}
 bool azcq_current_owned(Evidence *out) {
-    struct azcq_current_owned_guard_1 guarded_0 = {.capture_out = &out};
-    if (!az_native_try(azcq_current_owned_guard_1_call, &guarded_0)) { return false; }
-    return guarded_0.result;
+    {
+
+        __auto_type scope = cache_library_scope;
+        if (cache_query_scope || !scope || !scope->ready || !scope->row_valid || scope->message.kind != 0x3000 ||
+            !cache_worker_is(&(scope->source), &(scope->profile))) return false;
+        SelectionInvocation selection __attribute__((cleanup(azsel_invocation_drop)));
+        azsel_invocation_init(&selection, &source_state().cache_selection);
+        if (!azsel_ready(&selection) || selection.revision != scope->row_selection ||
+            !cache_stamp_is(scope->row.cache.layout_generation)) return false;
+        __auto_type s = &(source_state());
+        AZ_MUTEX_GUARD(lock, s->registry_mutex, true);
+        if (!lock.held || !cache_source_is(&(scope->source), &(scope->pins), false) ||
+            !cache_row_binding_current(&(scope->row)) || !azsel_ready(&selection) ||
+            !cache_stamp_is(scope->row.cache.layout_generation)) return false;
+        azcq_evidence_copy(out, &scope->row);
+        return true;
+    }
 }
 
 
@@ -1735,66 +1620,32 @@ void azcb_selection_forward(Forward original) {
 }
 
 
-struct azsdk_sources_configure_guard_1 {
-    int *capture_enable;
-    int *capture_build_id;
-    unsigned *capture_policy;
-    int result;
-};
-static int azsdk_sources_configure_guard_1_body(struct azsdk_sources_configure_guard_1 *guard) {
-    (void) guard;
-
-    AZ_MUTEX_GUARD(lock, source_state().registry_mutex, false);
-    if (!lock.held) return AZS_UNSUPPORTED;
-    atomic_store_explicit(&(source_state().enabled), 0, memory_order_release);
-    {
-        for (unsigned range_index_14 = 0; range_index_14 < sizeof(source_state().bindings) / sizeof(source_state().bindings)[0]; ++range_index_14) {
-            __auto_type b = &(source_state().bindings[range_index_14]);
-            (*b) = (Binding) {0};
-        }
-    }
-    retire_unused();
-    atomic_store_explicit(&(source_state().capture_policy), 0, memory_order_relaxed);
-    if (!(*guard->capture_enable) || (*guard->capture_build_id) < 1 || (*guard->capture_build_id) > 2 || ((*guard->capture_policy) & ~kKnownPolicy)) return AZS_UNSUPPORTED;
-    int prior = atomic_load_explicit(&(source_state().bound_build), memory_order_relaxed);
-    if (prior && prior != (*guard->capture_build_id)) return AZS_UNSUPPORTED;
-    pthread_once(&source_state().image_once, prepare_image);
-    if (!source_state().main_image.count) return AZS_UNSUPPORTED;
-    atomic_store_explicit(&(source_state().bound_build), (*guard->capture_build_id), memory_order_relaxed);
-    if ((*guard->capture_policy) & AZS_CAPTURE_PHYSICAL_ON_LIBRARY_WORKER)
-        pthread_once(&source_state().sql_once, prepare_sqlcipher);
-    atomic_store_explicit(&(source_state().capture_policy), (*guard->capture_policy), memory_order_relaxed);
-    atomic_store_explicit(&(source_state().enabled), 1, memory_order_release);
-    return AZS_OK;
-}
-static void azsdk_sources_configure_guard_1_call(void *opaque) {
-    struct azsdk_sources_configure_guard_1 *guard = opaque;
-    guard->result = azsdk_sources_configure_guard_1_body(guard);
-}
 int azsdk_sources_configure(int enable, int build_id, unsigned policy) {
-    struct azsdk_sources_configure_guard_1 guarded_0 = {.capture_enable = &enable, .capture_build_id = &build_id, .capture_policy = &policy};
-    if (!az_native_try(azsdk_sources_configure_guard_1_call, &guarded_0)) { return AZS_UNSUPPORTED; }
-    return guarded_0.result;
-}
-struct azsdk_sources_observe_owned_message_guard_1 {
-    void **capture_server;
-    void **capture_out;
-    int *capture_build;
-    size_t *capture_size;
-    int result;
-};
-static int azsdk_sources_observe_owned_message_guard_1_body(struct azsdk_sources_observe_owned_message_guard_1 *guard) {
-    (void) guard;
+    {
 
-    return observe(((uintptr_t) ((*guard->capture_server))), &(builds[(*guard->capture_build)]), &(source_state().sql_profile),
-#if defined(__linux__)
-                   &metadata_ops,
-#endif
-                   (*guard->capture_out), (*guard->capture_size));
-}
-static void azsdk_sources_observe_owned_message_guard_1_call(void *opaque) {
-    struct azsdk_sources_observe_owned_message_guard_1 *guard = opaque;
-    guard->result = azsdk_sources_observe_owned_message_guard_1_body(guard);
+        AZ_MUTEX_GUARD(lock, source_state().registry_mutex, false);
+        if (!lock.held) return AZS_UNSUPPORTED;
+        atomic_store_explicit(&(source_state().enabled), 0, memory_order_release);
+        {
+            for (unsigned range_index_14 = 0; range_index_14 < sizeof(source_state().bindings) / sizeof(source_state().bindings)[0]; ++range_index_14) {
+                __auto_type b = &(source_state().bindings[range_index_14]);
+                (*b) = (Binding) {0};
+            }
+        }
+        retire_unused();
+        atomic_store_explicit(&(source_state().capture_policy), 0, memory_order_relaxed);
+        if (!enable || build_id < 1 || build_id > 2 || (policy & ~kKnownPolicy)) return AZS_UNSUPPORTED;
+        int prior = atomic_load_explicit(&(source_state().bound_build), memory_order_relaxed);
+        if (prior && prior != build_id) return AZS_UNSUPPORTED;
+        pthread_once(&source_state().image_once, prepare_image);
+        if (!source_state().main_image.count) return AZS_UNSUPPORTED;
+        atomic_store_explicit(&(source_state().bound_build), build_id, memory_order_relaxed);
+        if (policy & AZS_CAPTURE_PHYSICAL_ON_LIBRARY_WORKER)
+            pthread_once(&source_state().sql_once, prepare_sqlcipher);
+        atomic_store_explicit(&(source_state().capture_policy), policy, memory_order_relaxed);
+        atomic_store_explicit(&(source_state().enabled), 1, memory_order_release);
+        return AZS_OK;
+    }
 }
 int azsdk_sources_observe_owned_message(void *server, void *out,
                                         size_t size) {
@@ -1802,154 +1653,106 @@ int azsdk_sources_observe_owned_message(void *server, void *out,
     if (!atomic_load_explicit(&(source_state().enabled), memory_order_acquire)) return AZS_UNSUPPORTED;
     int build = atomic_load_explicit(&(source_state().bound_build), memory_order_relaxed);
     if (build < 1 || build > 2) return AZS_UNSUPPORTED;
-    struct azsdk_sources_observe_owned_message_guard_1 guarded_0 = {.capture_server = &server, .capture_out = &out, .capture_build = &build, .capture_size = &size};
-    if (!az_native_try(azsdk_sources_observe_owned_message_guard_1_call, &guarded_0)) { return AZS_GUARD; }
-    return guarded_0.result;
-}
-struct azsdk_sources_read_guard_1 {
-    uint64_t *capture_epoch;
-    void **capture_out;
-    size_t *capture_size;
-    int result;
-};
-static int azsdk_sources_read_guard_1_body(struct azsdk_sources_read_guard_1 *guard) {
-    (void) guard;
-
-    AZ_MUTEX_GUARD(lock, source_state().registry_mutex, true);
-    if (!lock.held) return AZS_BUSY;
     {
-        for (unsigned range_index_15 = 0; range_index_15 < sizeof(source_state().entries) / sizeof(source_state().entries)[0]; ++range_index_15) {
-            __auto_type e = &(source_state().entries[range_index_15]);
-            if (e->sample.owner_epoch == (*guard->capture_epoch)) {
-                __auto_type s = scalar_sample(e);
-                copy_output((*guard->capture_out), (*guard->capture_size), &(s));
-                return (s.flags & AZS_CURRENT) ? AZS_OK : AZS_STALE;
-            }
-        }
+
+        return observe(((uintptr_t) (server)), &(builds[build]), &(source_state().sql_profile),
+#if defined(__linux__)
+                       &metadata_ops,
+#endif
+                       out, size);
     }
-    return AZS_UNKNOWN;
-}
-static void azsdk_sources_read_guard_1_call(void *opaque) {
-    struct azsdk_sources_read_guard_1 *guard = opaque;
-    guard->result = azsdk_sources_read_guard_1_body(guard);
 }
 int azsdk_sources_read(uint64_t epoch, void *out, size_t size) {
     if (!epoch || !output_ok(out, size, false)) return AZS_INVALID;
-    struct azsdk_sources_read_guard_1 guarded_0 = {.capture_epoch = &epoch, .capture_out = &out, .capture_size = &size};
-    if (!az_native_try(azsdk_sources_read_guard_1_call, &guarded_0)) { return AZS_BUSY; }
-    return guarded_0.result;
-}
-struct azsdk_sources_status_read_guard_1 {
-    uint64_t *capture_epoch;
-    void **capture_out;
-    size_t *capture_size;
-    int result;
-};
-static int azsdk_sources_status_read_guard_1_body(struct azsdk_sources_status_read_guard_1 *guard) {
-    (void) guard;
-
-    AZ_MUTEX_GUARD(lock, source_state().registry_mutex, true);
-    if (!lock.held) return AZS_BUSY;
     {
-        for (unsigned range_index_16 = 0; range_index_16 < sizeof(source_state().entries) / sizeof(source_state().entries)[0]; ++range_index_16) {
-            __auto_type entry = &(source_state().entries[range_index_16]);
-            if (entry->sample.owner_epoch == (*guard->capture_epoch)) {
-                if (!status_live(entry)) return AZS_STALE;
-                copy_output((*guard->capture_out), (*guard->capture_size), &(entry->sample));
-                return AZS_OK;
+
+        AZ_MUTEX_GUARD(lock, source_state().registry_mutex, true);
+        if (!lock.held) return AZS_BUSY;
+        {
+            for (unsigned range_index_15 = 0; range_index_15 < sizeof(source_state().entries) / sizeof(source_state().entries)[0]; ++range_index_15) {
+                __auto_type e = &(source_state().entries[range_index_15]);
+                if (e->sample.owner_epoch == epoch) {
+                    __auto_type s = scalar_sample(e);
+                    copy_output(out, size, &(s));
+                    return (s.flags & AZS_CURRENT) ? AZS_OK : AZS_STALE;
+                }
             }
         }
+        return AZS_UNKNOWN;
     }
-    return AZS_UNKNOWN;
-}
-static void azsdk_sources_status_read_guard_1_call(void *opaque) {
-    struct azsdk_sources_status_read_guard_1 *guard = opaque;
-    guard->result = azsdk_sources_status_read_guard_1_body(guard);
 }
 int azsdk_sources_status_read(uint64_t epoch, void *out, size_t size) {
     if (!epoch || !output_ok(out, size, false)) return AZS_INVALID;
-    struct azsdk_sources_status_read_guard_1 guarded_0 = {.capture_epoch = &epoch, .capture_out = &out, .capture_size = &size};
-    if (!az_native_try(azsdk_sources_status_read_guard_1_call, &guarded_0)) { return AZS_BUSY; }
-    return guarded_0.result;
-}
-struct azsdk_sources_candidate_guard_1 {
-    uint16_t *capture_media;
-    void **capture_out;
-    size_t *capture_size;
-    int result;
-};
-static int azsdk_sources_candidate_guard_1_body(struct azsdk_sources_candidate_guard_1 *guard) {
-    (void) guard;
-
-    AZ_MUTEX_GUARD(lock, source_state().registry_mutex, true);
-    if (!lock.held) return AZS_BUSY;
-    if (bit(source_state().ambiguous_media, (*guard->capture_media))) {
-        struct azsdk_source_sample s = {0};
-        s.struct_size = sizeof s;
-        s.native_media_id = (*guard->capture_media);
-        s.flags = AZS_HISTORY_INCOMPLETE | AZS_MEDIA_AMBIGUOUS;
-        copy_output((*guard->capture_out), (*guard->capture_size), &(s));
-        return AZS_AMBIGUOUS;
-    }
     {
-        for (unsigned range_index_17 = 0; range_index_17 < sizeof(source_state().entries) / sizeof(source_state().entries)[0]; ++range_index_17) {
-            __auto_type e = &(source_state().entries[range_index_17]);
-            if (e->sample.native_media_id == (*guard->capture_media)) {
-                __auto_type s = scalar_sample(e);
-                if (!(s.flags & AZS_CURRENT)) continue;
-                copy_output((*guard->capture_out), (*guard->capture_size), &(s));
-                return AZS_OK;
+
+        AZ_MUTEX_GUARD(lock, source_state().registry_mutex, true);
+        if (!lock.held) return AZS_BUSY;
+        {
+            for (unsigned range_index_16 = 0; range_index_16 < sizeof(source_state().entries) / sizeof(source_state().entries)[0]; ++range_index_16) {
+                __auto_type entry = &(source_state().entries[range_index_16]);
+                if (entry->sample.owner_epoch == epoch) {
+                    if (!status_live(entry)) return AZS_STALE;
+                    copy_output(out, size, &(entry->sample));
+                    return AZS_OK;
+                }
             }
         }
+        return AZS_UNKNOWN;
     }
-    return AZS_UNKNOWN;
-}
-static void azsdk_sources_candidate_guard_1_call(void *opaque) {
-    struct azsdk_sources_candidate_guard_1 *guard = opaque;
-    guard->result = azsdk_sources_candidate_guard_1_body(guard);
 }
 int azsdk_sources_candidate(uint16_t media, void *out, size_t size) {
     if (!media || !output_ok(out, size, false)) return AZS_INVALID;
-    struct azsdk_sources_candidate_guard_1 guarded_0 = {.capture_media = &media, .capture_out = &out, .capture_size = &size};
-    if (!az_native_try(azsdk_sources_candidate_guard_1_call, &guarded_0)) { return AZS_BUSY; }
-    return guarded_0.result;
-}
-struct azsdk_sources_sweep_guard_1 {
-    unsigned result;
-};
-static unsigned azsdk_sources_sweep_guard_1_body(struct azsdk_sources_sweep_guard_1 *guard) {
-    (void) guard;
-
-    AZ_MUTEX_GUARD(lock, source_state().registry_mutex, false);
-    if (!lock.held) return 0;
-    unsigned reclaimed = 0;
     {
-        for (unsigned range_index_18 = 0; range_index_18 < sizeof(source_state().entries) / sizeof(source_state().entries)[0]; ++range_index_18) {
-            __auto_type e = &(source_state().entries[range_index_18]);
-            if (e->sample.owner_epoch && !owner_bound(e)) {
-                __auto_type epoch = e->sample.owner_epoch;
-                {
-                    for (unsigned range_index_19 = 0; range_index_19 < sizeof(source_state().bindings) / sizeof(source_state().bindings)[0]; ++range_index_19) {
-                        __auto_type b = &(source_state().bindings[range_index_19]);
-                        if (b->epoch == epoch) (*b) = (Binding) {0};
-                    }
+
+        AZ_MUTEX_GUARD(lock, source_state().registry_mutex, true);
+        if (!lock.held) return AZS_BUSY;
+        if (bit(source_state().ambiguous_media, media)) {
+            struct azsdk_source_sample s = {0};
+            s.struct_size = sizeof s;
+            s.native_media_id = media;
+            s.flags = AZS_HISTORY_INCOMPLETE | AZS_MEDIA_AMBIGUOUS;
+            copy_output(out, size, &(s));
+            return AZS_AMBIGUOUS;
+        }
+        {
+            for (unsigned range_index_17 = 0; range_index_17 < sizeof(source_state().entries) / sizeof(source_state().entries)[0]; ++range_index_17) {
+                __auto_type e = &(source_state().entries[range_index_17]);
+                if (e->sample.native_media_id == media) {
+                    __auto_type s = scalar_sample(e);
+                    if (!(s.flags & AZS_CURRENT)) continue;
+                    copy_output(out, size, &(s));
+                    return AZS_OK;
                 }
-                entry_drop(e);
-                (*e) = (Entry) {0}; /* Weak control blocks may be deallocated on this worker only. */
-                ++reclaimed;
             }
         }
+        return AZS_UNKNOWN;
     }
-    return reclaimed;
-}
-static void azsdk_sources_sweep_guard_1_call(void *opaque) {
-    struct azsdk_sources_sweep_guard_1 *guard = opaque;
-    guard->result = azsdk_sources_sweep_guard_1_body(guard);
 }
 unsigned azsdk_sources_sweep() {
-    struct azsdk_sources_sweep_guard_1 guarded_0 = {0};
-    if (!az_native_try(azsdk_sources_sweep_guard_1_call, &guarded_0)) { return 0; }
-    return guarded_0.result;
+    {
+
+        AZ_MUTEX_GUARD(lock, source_state().registry_mutex, false);
+        if (!lock.held) return 0;
+        unsigned reclaimed = 0;
+        {
+            for (unsigned range_index_18 = 0; range_index_18 < sizeof(source_state().entries) / sizeof(source_state().entries)[0]; ++range_index_18) {
+                __auto_type e = &(source_state().entries[range_index_18]);
+                if (e->sample.owner_epoch && !owner_bound(e)) {
+                    __auto_type epoch = e->sample.owner_epoch;
+                    {
+                        for (unsigned range_index_19 = 0; range_index_19 < sizeof(source_state().bindings) / sizeof(source_state().bindings)[0]; ++range_index_19) {
+                            __auto_type b = &(source_state().bindings[range_index_19]);
+                            if (b->epoch == epoch) (*b) = (Binding) {0};
+                        }
+                    }
+                    entry_drop(e);
+                    (*e) = (Entry) {0}; /* Weak control blocks may be deallocated on this worker only. */
+                    ++reclaimed;
+                }
+            }
+        }
+        return reclaimed;
+    }
 }
 int azsdk_sources_physical_ready() {
     return atomic_load_explicit(&(source_state().enabled), memory_order_acquire) && atomic_load_explicit(&(source_state().physical_prepared), memory_order_acquire);

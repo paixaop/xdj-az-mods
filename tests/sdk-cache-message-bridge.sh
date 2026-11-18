@@ -9,7 +9,7 @@ flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra
 case ${SAN:-plain} in plain|'') ;;asan)flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer);;tsan)flags+=(-fsanitize=thread -fno-omit-frame-pointer);;*)exit 2;;esac
 sources=(tests/unit/sdkcachemessagebridge_test.c)
 [ ! -f src/azmod/sdk_cache_message.c ] || sources+=(src/azmod/sdk_cache_message.c)
-"${HOST_CC:-gcc}" "${flags[@]}" "${sources[@]}" src/common/aznative_guard.c src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/test"
+"${HOST_CC:-gcc}" "${flags[@]}" "${sources[@]}" tests/unit/native_unwind.c src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/test"
 status=0
 (ulimit -c 0;"$task_tmp/test") >"$task_tmp/run.log" 2>&1 || status=$?
 cat "$task_tmp/run.log"

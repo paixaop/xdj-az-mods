@@ -212,7 +212,7 @@ static void failure_rollback() {
             azsdk_live_configure(1, 2);
             f.server.fail_stream = stream;
             f.server.fail_after = after;
-            CHECK(!azsdk_live_register(0, &f.unit));
+            CHECK(fixture_registration_unwind(azsdk_live_register, 0, &f.unit));
             CHECK(!azsdk_live_capabilities());
             unchanged(0);
             sync_unchanged(0);

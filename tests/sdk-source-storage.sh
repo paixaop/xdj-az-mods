@@ -11,7 +11,7 @@ plain|'') ;;
 asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer) ;;
 tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 *) exit 2;; esac
-"${HOST_CC:-gcc}" "${flags[@]}" tests/unit/sdksourcestorage_test.c src/azmod/sdk_connection_hooks.c src/common/aznative_guard.c src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/test"
+"${HOST_CC:-gcc}" "${flags[@]}" tests/unit/sdksourcestorage_test.c src/azmod/sdk_connection_hooks.c tests/unit/native_unwind.c src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/test"
 failures=0
 for profile in 1 2;do
  status=0

@@ -61,7 +61,7 @@ static void hook_tail(void *server, void *msg, unsigned param) {
                         throwing = fail;
                         stage = source_calls = pst_calls = 0;
                         unsigned deletions = fixture_exception_deletions;
-                        bool caught = !az_native_try(hook_forward, NULL);
+                        bool caught = !fixture_native_try(hook_forward, NULL);
                         struct azcm_envelope e = {0};
                         REQUIRE(caught == throwing && fixture_exception_deletions == deletions + (unsigned) throwing && !expected_message && !azcm_current(expected_server, &e), "native unwind/normal cleanup remains transparent");
                         REQUIRE(throwing ? (stage == 1 && !source_calls && !pst_calls) : (stage == 3 && source_calls == g_sdk_sources_on && pst_calls == 1), "post-steps only after normal native return");

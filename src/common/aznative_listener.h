@@ -32,21 +32,10 @@ static inline struct az_native_owner az_listener_create(size_t size, const void 
     *(const void *const **) object = vtable;
     return (struct az_native_owner) {object, control};
 }
-struct az_listener_registration {
-    uintptr_t entry, server;
-    struct az_native_owner weak;
-};
-static inline void az_listener_register_call(void *opaque) {
-    struct az_listener_registration *call = opaque;
-    /* A nontrivial native weak argument is passed indirectly. The caller owns
-     * its temporary until the original returns, including foreign unwind. */
-    ((void (*)(void *, struct az_native_owner *)) call->entry)((void *) call->server, &call->weak);
-}
-static inline int az_listener_register(uintptr_t entry, uintptr_t server, const struct az_native_owner *owner) {
-    struct az_listener_registration call = {entry, server, *owner};
-    az_native_weak_add(call.weak.control);
-    int result = az_native_try(az_listener_register_call, &call);
-    az_native_weak_reset(&call.weak);
-    return result;
+static inline void az_listener_register(uintptr_t entry, uintptr_t server, const struct az_native_owner *owner) {
+    /* The temporary weak owner is released on return and on native unwind. */
+    struct az_native_owner weak __attribute__((cleanup(az_native_weak_reset))) = *owner;
+    az_native_weak_add(weak.control);
+    ((void (*)(void *, struct az_native_owner *)) entry)((void *) server, &weak);
 }
 #endif

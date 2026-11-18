@@ -19,7 +19,7 @@ s=s.replace(before,before+'\n        if (cache_reclaim_test_boundary) cache_recl
 s=s.replace(after,'        if (cache_reclaim_test_boundary) cache_reclaim_test_boundary(1);\n'+after)
 Path(sys.argv[2]).write_text(s.replace('"../common/','"'))
 PY
-"${HOST_CC:-gcc}" "${flags[@]}" -DSOURCES_INC="\"$task_tmp/source.c\"" tests/unit/sdkcachebirth_test.c src/azmod/sdk_connection_hooks.c tests/unit/sdkcachebirth_return.S src/common/aznative_guard.c src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/test"
+"${HOST_CC:-gcc}" "${flags[@]}" -DSOURCES_INC="\"$task_tmp/source.c\"" tests/unit/sdkcachebirth_test.c src/azmod/sdk_connection_hooks.c tests/unit/sdkcachebirth_return.S tests/unit/native_unwind.c src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/test"
 for profile in 1 2;do
  status=0
  (ulimit -c 0;"$task_tmp/test" "$profile") >"$task_tmp/$profile.log" 2>&1 || status=$?

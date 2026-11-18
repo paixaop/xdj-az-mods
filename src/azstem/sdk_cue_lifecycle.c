@@ -199,5 +199,6 @@ static void configure(void *context) {
 int azsdk_cue_lifecycle_configure(int build, azexit_install_fn install) {
     if (!install) return 0;
     struct Install call = {build, install, 0};
-    return az_native_try(configure, &call) ? call.result : 0;
+    configure(&call);
+    return call.result;
 }

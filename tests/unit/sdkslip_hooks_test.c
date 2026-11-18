@@ -14,9 +14,10 @@ void azsdk_slip_entry_3(void);
 #define ENTRY(n) void azsdk_slip_entry_##n(void) {0}
 ENTRY(0)
 ENTRY(1)
-ENTRY(2) ENTRY(3)
+ENTRY(2)
+ENTRY(3)
 #undef ENTRY
-    void azsdk_slip_invoke_original(struct azce_call *c) {
+void azsdk_slip_invoke_original(struct azce_call *c) {
     c->result[0] = 0x130200;
     errno = ERANGE;
 }
@@ -71,7 +72,7 @@ static void arm_entry() {
     throwing = true;
     bool caught = false;
     errno = EINTR;
-    caught = !az_native_try(arm_throw, NULL);
+    caught = !fixture_native_try(arm_throw, NULL);
     assert(caught && errno == EDOM);
     puts("PASS actual Slip entry3 integer/result/errno/CFI exception forwarding");
 }

@@ -390,7 +390,7 @@ static void birth_action(void *v) {
 static void query_action(void *v) { Queried result QUERIED = query(v); }
 static bool catches(void (*call)(void *), void *v) {
     unsigned before = fixture_exception_deletions;
-    bool caught = !az_native_try(call, v);
+    bool caught = !fixture_native_try(call, v);
     REQUIRE(fixture_exception_deletions == before + (unsigned) caught, "native unwind payload reaches its handler once");
     return caught;
 }

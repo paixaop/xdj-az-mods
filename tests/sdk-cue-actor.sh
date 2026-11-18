@@ -11,5 +11,5 @@ asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-f
 tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 *) exit 2 ;;
 esac
-"${HOST_CC:-cc}" "${flags[@]}" src/azstem/sdk_cue_actor.c tests/unit/sdkcueactor_test.c src/common/aznative_guard.c -lstdc++ -ldl -o "$task_tmp/actor"
+"${HOST_CC:-cc}" "${flags[@]}" src/azstem/sdk_cue_actor.c tests/unit/sdkcueactor_test.c tests/unit/native_unwind.c -lstdc++ -ldl -o "$task_tmp/actor"
 "$task_tmp/actor"

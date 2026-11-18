@@ -312,14 +312,14 @@ static void failures(void) {
     tc.raises = true;
     unsigned deleted = fixture_exception_deletions;
     struct UnwindCall call = {&h->installer, &tc, true};
-    REQUIRE(!az_native_try(unwind_call, &call) && tc.forwards == 1 && errno == tc.exit_errno && fixture_exception_deletions == deleted + 1 && !current, "same close unwind, errno, forwarding count and TLS restoration");
+    REQUIRE(!fixture_native_try(unwind_call, &call) && tc.forwards == 1 && errno == tc.exit_errno && fixture_exception_deletions == deleted + 1 && !current, "same close unwind, errno, forwarding count and TLS restoration");
     unknown(&h->epochs, &a, "exception cannot undo close retirement");
     struct NativeCall to = NATIVE_CALL_INIT;
     to.output = &output;
     to.connection = &b;
     to.raises = true;
     call = (struct UnwindCall) {&h->installer, &to, false};
-    REQUIRE(!az_native_try(unwind_call, &call) && to.forwards == 1 && errno == to.exit_errno && fixture_exception_deletions == deleted + 2 && !current, "same open unwind, errno, forwarding count and TLS restoration");
+    REQUIRE(!fixture_native_try(unwind_call, &call) && to.forwards == 1 && errno == to.exit_errno && fixture_exception_deletions == deleted + 2 && !current, "same open unwind, errno, forwarding count and TLS restoration");
     REQUIRE(output == &b, "output written before exception preserved");
     unknown(&h->epochs, &b, "unwinding open cannot publish a birth");
 }

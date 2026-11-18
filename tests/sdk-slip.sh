@@ -14,7 +14,7 @@ for name in sdk_native_slip sdk_slip_hooks sdk_slip_getters; do
     ${CC:-gcc} -std=gnu11 -O1 -g -Wall -Wextra -Werror -fexceptions -fasynchronous-unwind-tables -fno-omit-frame-pointer ${CFLAGS:-} \
         "$@" -c "src/azmod/$name.c" -o "$work/$name.o"
 done
-${CC:-gcc} -std=gnu11 -O1 -g -Wall -Wextra -Werror -fexceptions -fasynchronous-unwind-tables -fno-omit-frame-pointer ${CFLAGS:-} "$@" -c src/common/aznative_guard.c -o "$work/guard.o"
+${CC:-gcc} -std=gnu11 -O1 -g -Wall -Wextra -Werror -fexceptions -fasynchronous-unwind-tables -fno-omit-frame-pointer ${CFLAGS:-} "$@" -c tests/unit/native_unwind.c -o "$work/guard.o"
 ${CC:-gcc} -std=gnu11 -O1 -g -Wall -Wextra -Werror -fexceptions -fno-omit-frame-pointer ${CFLAGS:-} \
     "$@" "$work/sdk_native_slip.o" "$work/guard.o" tests/unit/sdkslip_test.c -pthread -lstdc++ -ldl -o "$work/slip"
 "$work/slip" raw

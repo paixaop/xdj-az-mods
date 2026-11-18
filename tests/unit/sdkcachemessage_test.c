@@ -151,7 +151,7 @@ static void nested_outer(void *opaque) {
     azcm_forward_owned(&c->inner, (struct azcb_forward) {nested_inner, c});
     REQUIRE(azcm_current(&c->server, &e) && e.fields[1] == 11, "normal nesting restores outer scalar frame");
     unsigned before = fixture_exception_deletions;
-    REQUIRE(!az_native_try(nested_throw, c) && fixture_exception_deletions == before + 1 && azcm_current(&c->server, &e) && e.fields[1] == 11, "native unwind propagates and restores exact outer frame");
+    REQUIRE(!fixture_native_try(nested_throw, c) && fixture_exception_deletions == before + 1 && azcm_current(&c->server, &e) && e.fields[1] == 11, "native unwind propagates and restores exact outer frame");
 }
 static void nested_and_exception(void) {
     struct Owned outer __attribute__((cleanup(owned_drop))), inner __attribute__((cleanup(owned_drop)));

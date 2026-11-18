@@ -8,6 +8,8 @@
 #include <stdio.h>
 #include <time.h>
 #include <pthread.h>
+#include "native_abi_fixture.h"
+static bool confirm_raises;
 
 
 
@@ -346,6 +348,7 @@ int validate(const struct azexit_cue_request *unused_0, void *owner, uint64_t co
     return identity_valid && owner == maintainer.bytes && cookie == 7;
 }
 int confirm(const struct azexit_cue_request *r, void *unused_1, uint64_t unused_2, uint64_t *revision, void *unused_4) {
+    if (confirm_raises) fixture_raise();
     (void) unused_1;
     (void) unused_2;
     (void) unused_4;
@@ -471,6 +474,10 @@ void finish(struct azexit_cue_request *r, unsigned outcome, int native_result) {
     assert(out.revision == (outcome == AZ_COMMAND_APPLIED ? 91u : 0u));
 }
 
+static void poll_raising(void *request) {
+    struct azexit_result result = {0};
+    (void) azsdk_cue_persist_poll(request, maintainer.bytes, &result);
+}
 int main() {
     struct azcuepersist_profile profile = {0};
     profile.save = ((uintptr_t) (producer));
@@ -599,6 +606,10 @@ int main() {
     unsigned submissions = producer_calls, notifications = ready_calls;
     assert(azsdk_cue_persist_poll(&r, maintainer.bytes, &delayed) == AZ_PENDING && delayed.token == 999);
     assert(producer_calls == submissions && ready_calls == notifications);
+    confirm_raises = true;
+    assert(!fixture_native_try(poll_raising, &r));
+    assert(fixture_exception_deletions == 1);
+    confirm_raises = false;
     effect_confirmed = true;
     assert(azsdk_cue_persist_poll(&r, maintainer.bytes, &delayed) == AZ_OK && delayed.outcome == AZ_COMMAND_APPLIED);
     assert(producer_calls == submissions && delayed.revision == 91);

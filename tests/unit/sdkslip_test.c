@@ -96,6 +96,10 @@ struct Model {
 static struct Parent *parent(struct Model *m) { return m->parent.object; }
 static struct Source *source(struct Model *m) { return parent(m)->source.object; }
 static struct Receiver *receiver(struct Model *m) { return m->native.object; }
+static void publish_model(void *context) {
+    struct Model *m = context;
+    invoke(AZ_SLIP_PUBLISH_PARENT, parent(m), profile.parent_returns[m->deck], m->deck);
+}
 static struct Model model(unsigned deck, bool publish, bool native_view, bool fail) {
     struct Model m = {.deck = deck, .parent = fixture_make(sizeof(struct Parent), parent_vtable)};
     parent(&m)->source = fixture_make(sizeof(struct Source), source_vtable);
@@ -109,7 +113,8 @@ static struct Model model(unsigned deck, bool publish, bool native_view, bool fa
     invoke(AZ_SLIP_CONSTRUCT, source(&m), profile.construct_return, deck);
     if (publish) {
         fail_registration = fail;
-        invoke(AZ_SLIP_PUBLISH_PARENT, parent(&m), profile.parent_returns[deck], deck);
+        if (fail) assert(!fixture_native_try(publish_model, &m));
+        else publish_model(&m);
     }
     return m;
 }
@@ -218,7 +223,7 @@ int main(void) {
     azsdk_slip_collect_v1();
     assert(!g0->seen_mask && !g0->conflict_mask && !g0->target_slot4);
     exception_model = &exceptions;
-    assert(!az_native_try(throw_dispatch, NULL));
+    assert(!fixture_native_try(throw_dispatch, NULL));
     assert(errno == EDOM && receiver(&exceptions)->calls == 2 && az_slip_read(0, &r) && r.raw == 3);
     receiver(&exceptions)->throwing = false;
     dispatch(&exceptions, 11);

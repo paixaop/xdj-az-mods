@@ -61,16 +61,16 @@ if [ "$(uname -s)" != Linux ]; then
     exit 77
 fi
 map=-Wl,--version-script=src/azstem/sdk_native.map
-${HOST_CC:-gcc} "${flags[@]}" "$map" src/azstem/sdk_live_observer.c tests/unit/sdkliveobserver_test.c -DAZ_NATIVE_LISTENER_TESTING src/common/aznative_guard.c -lstdc++ -ldl -lm -ldl -o "$task_tmp/real"
+${HOST_CC:-gcc} "${flags[@]}" "$map" src/azstem/sdk_live_observer.c tests/unit/sdkliveobserver_test.c -DAZ_NATIVE_LISTENER_TESTING tests/unit/native_unwind.c -lstdc++ -ldl -lm -ldl -o "$task_tmp/real"
 "$task_tmp/real"
-${HOST_CC:-gcc} "${flags[@]}" "$map" src/azstem/sdk_loop_observer.c tests/unit/sdkloopobserver_test.c src/common/aznative_guard.c -lstdc++ -ldl -lm -ldl -o "$task_tmp/loop"
+${HOST_CC:-gcc} "${flags[@]}" "$map" src/azstem/sdk_loop_observer.c tests/unit/sdkloopobserver_test.c tests/unit/native_unwind.c -lstdc++ -ldl -lm -ldl -o "$task_tmp/loop"
 "$task_tmp/loop"
 # Controls use a plain build; the real fixture above always uses the requested sanitizer.
 control_flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread -Isrc/common -Itests/unit -fvisibility=hidden)
 python3 tests/unit/sdk_loop_controls.py "$task_tmp"
 for deck in 0 1 2 3; do
     control=loop-strict-slot-$deck
-    ${HOST_CC:-gcc} "${control_flags[@]}" "$map" "$task_tmp/$control.c" tests/unit/sdkloopobserver_test.c src/common/aznative_guard.c -lstdc++ -ldl -lm -ldl -o "$task_tmp/$control"
+    ${HOST_CC:-gcc} "${control_flags[@]}" "$map" "$task_tmp/$control.c" tests/unit/sdkloopobserver_test.c tests/unit/native_unwind.c -lstdc++ -ldl -lm -ldl -o "$task_tmp/$control"
     if ( ulimit -c 0; "$task_tmp/$control" >"$task_tmp/$control.log" 2>&1 ) 2>/dev/null; then
         echo "FAIL: $control was not caught" >&2; exit 1
     fi
@@ -97,7 +97,7 @@ for name, pattern, replacement, expected in variants:
     (Path(sys.argv[1]) / (name + '.c')).write_text(source.replace(pattern, replacement))
 PY
 for control in player generation slot boolean invalid-retention allocation-rollback sync-slot sync-mode sync-legacy-leak; do
-    ${HOST_CC:-gcc} "${control_flags[@]}" "$map" "$task_tmp/$control.c" tests/unit/sdkliveobserver_test.c -DAZ_NATIVE_LISTENER_TESTING src/common/aznative_guard.c -lstdc++ -ldl -lm -ldl -o "$task_tmp/$control"
+    ${HOST_CC:-gcc} "${control_flags[@]}" "$map" "$task_tmp/$control.c" tests/unit/sdkliveobserver_test.c -DAZ_NATIVE_LISTENER_TESTING tests/unit/native_unwind.c -lstdc++ -ldl -lm -ldl -o "$task_tmp/$control"
     status=0
     ( ulimit -c 0; "$task_tmp/$control" >"$task_tmp/$control.log" 2>&1 ) 2>/dev/null || status=$?
     if [ "$status" -eq 0 ]; then
@@ -128,7 +128,7 @@ s = Path('tests/unit/sdkliveobserver_test.c').read_text()
 s = s.replace('"live_native_fixture.h"', '"' + str(root / 'allocator-bypass.h') + '"')
 (root / 'allocator-bypass.c').write_text(s)
 PYA
-${HOST_CC:-gcc} "${control_flags[@]}" "$map" -DAZ_NATIVE_LISTENER_TESTING src/azstem/sdk_live_observer.c "$task_tmp/allocator-bypass.c" src/common/aznative_guard.c -lstdc++ -ldl -lm -ldl -o "$task_tmp/allocator-bypass"
+${HOST_CC:-gcc} "${control_flags[@]}" "$map" -DAZ_NATIVE_LISTENER_TESTING src/azstem/sdk_live_observer.c "$task_tmp/allocator-bypass.c" tests/unit/native_unwind.c -lstdc++ -ldl -lm -ldl -o "$task_tmp/allocator-bypass"
 if ( ulimit -c 0; "$task_tmp/allocator-bypass" >"$task_tmp/allocator-bypass.log" 2>&1 ) 2>/dev/null; then
     echo 'FAIL: live allocator-bypass control was not caught' >&2; exit 1
 fi
@@ -163,7 +163,7 @@ PYX
         fixture=sdkliveobserver_test.c
         [ "$control" != loop-rtti-overread ] || fixture=sdkloopobserver_test.c
         testing=(); [ "$control" = loop-rtti-overread ] || testing=(-DAZ_NATIVE_LISTENER_TESTING)
-        ${HOST_CC:-gcc} "${flags[@]}" "${testing[@]}" "$map" "$task_tmp/$control.c" "tests/unit/$fixture" src/common/aznative_guard.c -lstdc++ -ldl -lm -ldl -o "$task_tmp/$control"
+        ${HOST_CC:-gcc} "${flags[@]}" "${testing[@]}" "$map" "$task_tmp/$control.c" "tests/unit/$fixture" tests/unit/native_unwind.c -lstdc++ -ldl -lm -ldl -o "$task_tmp/$control"
         if ( ulimit -c 0; "$task_tmp/$control" >"$task_tmp/$control.log" 2>&1 ) 2>/dev/null; then
             echo "FAIL: live $control control was not caught" >&2; exit 1
         fi

@@ -6,24 +6,46 @@ platform unwinder. No C++ compiler or C++ source is required.
 
 ## Error handling
 
-Core and SDK operations continue to report their existing status codes. A guarded
-firmware call uses `az_native_try`: one means normal return, zero means the native
-call failed. Unguarded firmware calls retain their original propagation behavior.
+Follow upstream's C conventions: validate inputs and native identity, return the
+existing status or null result for an ordinary failure, and release acquired
+resources on every exit. Refused hooks leave the feature off. Fatal-signal
+handlers report the fault and chain to EP147; they are not recovery handlers.
 
-`src/common/aznative_guard.c` implements this boundary in C. Its hidden C
-personality recognizes the nearest active guard and delegates ordinary cleanup
-to the platform C personality. The unwinder runs intervening native destructors
-and C cleanup handlers before the guard cleanup uses `longjmp` to return zero.
-Jumping directly from a throw site would skip those cleanups and is not supported.
-Guards are thread-local and nestable. Forced unwinds, including glibc thread exit,
-continue unwinding instead of becoming ordinary error returns.
+Firmware exceptions propagate through core hooks to EP147's own handlers. Keep
+upstream's `-fexceptions -fasynchronous-unwind-tables` flags: C frames and their
+cleanup handlers must be unwindable. GNU C cleanup attributes release locks,
+temporary native owners and provisional registrations on normal return and unwind,
+as upstream uses them for scoped state restoration.
 
-The firmware still uses its native exception runtime. The boundary calls that
-runtime's C ABI functions `__cxa_begin_catch` and `__cxa_end_catch` to preserve
-exception bookkeeping and payload destruction. The core therefore still links
-that runtime. This is firmware interoperability, not C++ source or language-level
-exception handling in our implementation. Removing it would change native error
-behavior.
+Production code must not define an exception personality, catch native exceptions,
+translate an exception into an SDK error, or jump over native cleanup. There is no
+`az_native_try`, `setjmp`/`longjmp` exception boundary or direct `__cxa_*` dependency
+in the core. The production link does not add `libstdc++`. EP147 still owns its
+native runtime and decides how its exceptions are handled.
+
+The shared libraries use `-shared-libgcc`. This differs from upstream's static
+GCC link: the target-toolchain DSO regression aborts in the private unwinder with
+`-static-libgcc`, and passes with the shared unwinder. It follows
+[GCC's shared-library exception guidance](https://gcc.gnu.org/onlinedocs/gcc/Link-Options.html).
+`libgcc_s` is compiler support for C unwinding; it does not add C++ source or a
+C++ exception handler.
+
+`tests/unit/native_unwind.c` is a test-only stand-in for that outer firmware handler.
+It lets C fixtures verify propagation and cleanup; it is never linked into either
+production library. The SDK has the same stand-in only under `tests/fixtures/`.
+
+## Upstream conventions
+
+The baseline is upstream 1.2.9, commit `f851c610fd2c68adcc950c1032d97bceeae1bb02`:
+[`src/Makefile`](https://github.com/Kyle-Hosman/xdj-az-mods/blob/f851c610fd2c68adcc950c1032d97bceeae1bb02/src/Makefile),
+[`ARCHITECTURE.md`](https://github.com/Kyle-Hosman/xdj-az-mods/blob/f851c610fd2c68adcc950c1032d97bceeae1bb02/ARCHITECTURE.md#9-contributing-notes),
+and [`.clang-format`](https://github.com/Kyle-Hosman/xdj-az-mods/blob/f851c610fd2c68adcc950c1032d97bceeae1bb02/.clang-format).
+
+Keep helpers static, expose only deliberate library interfaces, and keep native
+object ownership inside the core. Use per-deck state, exact supported-build
+profiles, constructor-time hook installation and existing feature gates. Keep
+blocking work off playback and paint paths. Public SDK calls remain the only mod
+boundary. Format C with the repository's unchanged clang-format 21.1.8 settings.
 
 ## Native return values
 
@@ -56,7 +78,7 @@ wave-report probe labels are C.
 
 ## Verification
 
-`bash tests/native-c.sh` checks normal and failing calls, real native-runtime and
+`bash tests/native-c.sh` checks normal calls and propagation to a test outer handler, with real native-runtime and
 foreign exceptions raised from C, nested cleanup, payload destruction, `errno`,
 thread isolation and forced unwind. On Linux it also compiles an independent GCC
 `-fpcc-struct-return` oracle that returns exactly 8 or 16 bytes, checking the C

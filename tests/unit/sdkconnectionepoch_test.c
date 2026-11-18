@@ -238,13 +238,13 @@ static void nesting_and_exceptions(void) {
     struct az_connection_receipt before = birth(&state, &a);
     unsigned forwards = 0, deletions = fixture_exception_deletions;
     struct UnwindCall unwinding = {.native = {.state = &state, .connection = &a, .forwards = &forwards, .error = ERANGE, .raises = true}, .closing = true};
-    REQUIRE(!az_native_try(unwind_call, &unwinding) && forwards == 1 && errno == ERANGE && fixture_exception_deletions == deletions + 1, "close unwind identity, errno and single forwarding survive bookkeeping cleanup");
+    REQUIRE(!fixture_native_try(unwind_call, &unwinding) && forwards == 1 && errno == ERANGE && fixture_exception_deletions == deletions + 1, "close unwind identity, errno and single forwarding survive bookkeeping cleanup");
     unknown(&state, &a, "exception cannot undo entry retirement");
     output = NULL;
     outer.generation = 95;
     forwards = 0;
     unwinding = (struct UnwindCall) {.native = {.state = &state, .connection = &b, .output = &output, .forwards = &forwards, .error = EDOM, .raises = true}, .receipt = &outer};
-    REQUIRE(!az_native_try(unwind_call, &unwinding) && forwards == 1 && errno == EDOM && outer.generation == 95 && fixture_exception_deletions == deletions + 2, "unwinding open never publishes and preserves the native failure and errno");
+    REQUIRE(!fixture_native_try(unwind_call, &unwinding) && forwards == 1 && errno == EDOM && outer.generation == 95 && fixture_exception_deletions == deletions + 2, "unwinding open never publishes and preserves the native failure and errno");
     unknown(&state, &b, "written output before exception is not a completed birth");
     REQUIRE(birth(&state, &a).generation > before.generation, "normal operation resumes after balanced exception unwind");
 }

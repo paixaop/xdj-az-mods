@@ -20,7 +20,6 @@ static _Atomic(bool) analysis_ready;
 static void analysis_drop(uintptr_t content) {
     if (content && analysis_ops.release(content)) analysis_ops.trash(read_ptr(content, 0x18), content);
 }
-static void analysis_phrase_drop(uintptr_t *content) { analysis_drop(*content); }
 struct AnalysisAtom {
     uint64_t header;
     uint32_t prefix;
@@ -49,6 +48,7 @@ struct AnalysisMake {
     const uint8_t *pssi;
     uint32_t size;
 };
+static void analysis_make_drop(struct AnalysisMake *call) { analysis_drop(call->content); }
 static void analysis_make(void *opaque) {
     struct AnalysisMake *call = opaque;
     struct AnalysisAtom atom __attribute__((cleanup(analysis_atom_drop))) = {.header = 32, .prefix = 18, .stride = 24};
@@ -147,12 +147,9 @@ static int analysis_publish(unsigned deck, uint64_t load, const struct aznm_pack
     __auto_type pssi = ((const uint8_t *) (data));
     if (!analysis_pssi(pssi, size, beats)) return AZ_INVALID;
     if (analysis_current(deck, load, expected) != AZ_OK) return AZ_STALE;
-    struct AnalysisMake call = {.pssi = pssi, .size = size};
-    if (!az_native_try(analysis_make, &call)) {
-        analysis_drop(call.content);
-        return AZ_FAILED;
-    }
-    uintptr_t made __attribute__((cleanup(analysis_phrase_drop))) = call.content;
+    struct AnalysisMake call __attribute__((cleanup(analysis_make_drop))) = {.pssi = pssi, .size = size};
+    analysis_make(&call);
+    uintptr_t made = call.content;
     if (!made || !typed(made, profile->phrase_content) ||
         read_u32(made, 0x48) != analysis_u16(pssi + 16)) return AZ_FAILED;
     MAP_MUTATION(mutation);

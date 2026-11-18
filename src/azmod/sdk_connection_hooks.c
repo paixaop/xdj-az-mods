@@ -234,7 +234,8 @@ static int install_claimed(struct az_connection_state *epochs, struct az_connect
     }
     // Publication precedes either installer; its callbacks may enter immediately.
     struct InstallCall call = {b, installer, base, 0};
-    return az_native_try(install_call, &call) ? call.result : 0;
+    install_call(&call);
+    return call.result;
 }
 
 int az_connection_install(struct az_connection_state *epochs, struct az_connection_installer installer) {

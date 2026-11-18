@@ -12,7 +12,7 @@ asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-f
 tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 *) exit 2;; esac
 if [ -n "${PIN_HEADER:-}" ]; then flags+=("-DAZCACHE_PIN_HEADER=\"${PIN_HEADER}\""); fi
-"${HOST_CC:-gcc}" "${flags[@]}" tests/unit/sdkcachepin_test.c src/common/aznative_guard.c -lstdc++ -ldl -o "$task_tmp/test"
+"${HOST_CC:-gcc}" "${flags[@]}" tests/unit/sdkcachepin_test.c tests/unit/native_unwind.c -lstdc++ -ldl -o "$task_tmp/test"
 status=0
 (ulimit -c 0; "$task_tmp/test") >"$task_tmp/run.log" 2>&1 || status=$?
 cat "$task_tmp/run.log"

@@ -363,7 +363,7 @@ static void outer_entry(const struct azcr_promotion *p, struct Receiver *self, v
     struct Nested *n = v;
     n->outer_native = p;
     n->outer_self = self;
-    CHECK(!az_native_try(nested_guard, n), "native nested unwind reaches outer handler");
+    CHECK(!fixture_native_try(nested_guard, n), "native nested unwind reaches outer handler");
     n->restored = azcr_receive_current_owned(p, self, n->out);
 }
 static void throw_callback(struct Receiver *r, void *v) {
@@ -404,7 +404,7 @@ static void nesting_and_throw(void) {
     ((struct Receiver *) owner.object)->callback = throw_callback;
     unsigned calls = native_calls, deletions = fixture_exception_deletions;
     struct Throwing t = {&throwing_scope, &throwing};
-    bool caught = !az_native_try(throwing_body, &t);
+    bool caught = !fixture_native_try(throwing_body, &t);
     azcr_receipt_copy(&before, &out);
     struct azcr_promotion p = promotion((uintptr_t) owner.control, callback_return);
     CHECK(caught && fixture_exception_deletions == deletions + 1 && native_calls == calls + 1 && !packets && owner.control->strong == 1 && !azcr_receive_owned(&throwing_scope, &p, owner.object, &out) && unchanged(&out, &before), "native callback unwind propagates once and retires scoped admission with native cleanup");

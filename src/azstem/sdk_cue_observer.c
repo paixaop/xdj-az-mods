@@ -213,6 +213,20 @@ void azsdk_cue_configure(int on, int build) {
     (void) build;
 #endif
 }
+struct cue_registration {
+    unsigned deck, slot;
+};
+static void registration_drop(struct cue_registration *registration) {
+    if (!registration->slot) return;
+    struct State *s = state();
+    unsigned deck = registration->deck, slot = registration->slot;
+    invalidate_slot(deck, slot);
+    AZ_MUTEX_GUARD(lock, s->registration, false);
+    if (!lock.error && s->owner_slot[deck] == slot) {
+        az_native_owner_reset(&s->owners[deck]);
+        s->owner_slot[deck] = 0;
+    }
+}
 int azsdk_cue_register(int deck, void *owned_unit) {
     struct State *s = state();
     if (!deck_ok(deck) || !owned_unit || !atomic_load_explicit(&s->enabled, memory_order_acquire)) return 0;
@@ -258,15 +272,8 @@ int azsdk_cue_register(int deck, void *owned_unit) {
     }
     /* Native registration may reenter or unwind. Retain the local core listener
      * without holding any SDK lock while native registration is running. */
-    if (!az_listener_register(entry, server, &listener)) {
-        invalidate_slot((unsigned) deck, slot);
-        AZ_MUTEX_GUARD(lock, s->registration, false);
-        if (!lock.error && s->owner_slot[deck] == slot) {
-            az_native_owner_reset(&s->owners[deck]);
-            s->owner_slot[deck] = 0;
-        }
-        return 0;
-    }
+    struct cue_registration registration __attribute__((cleanup(registration_drop))) = {(unsigned) deck, slot};
+    az_listener_register(entry, server, &listener);
     AZ_MUTEX_GUARD(lock, s->registration, false);
     if (lock.error) {
         invalidate_slot((unsigned) deck, slot);
@@ -281,6 +288,7 @@ int azsdk_cue_register(int deck, void *owned_unit) {
         }
         return 0;
     }
+    registration.slot = 0;
     atomic_store_explicit(&s->acknowledged[deck], slot, memory_order_release);
     return 1;
 }

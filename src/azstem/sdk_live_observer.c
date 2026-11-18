@@ -279,6 +279,13 @@ void azsdk_live_status_start(int build, int legacy_active) {
     atomic_store_explicit(&(status_enabled), true, memory_order_release);
 }
 #endif
+/* A provisional listener must not survive an interrupted registration. The
+ * caller still owns registration_mutex while this cleanup runs. */
+static void registration_drop(int *deck) {
+    if (*deck < 0) return;
+    invalidate((unsigned) *deck);
+    for (unsigned i = 0; i < kStreams; ++i) az_native_owner_reset(&owners[*deck][i]);
+}
 int azsdk_live_register(int deck, void *owned_unit) {
     if (!deck_ok(deck) || !owned_unit || !atomic_load_explicit(&(enabled), memory_order_acquire)) return 0;
     {
@@ -318,14 +325,12 @@ int azsdk_live_register(int deck, void *owned_unit) {
         atomic_store_explicit(&(published[deck].unit), unit, memory_order_release);
 #endif
         atomic_store_explicit(&(published[deck].active_generation), generation, memory_order_release);
+        int pending_deck __attribute__((cleanup(registration_drop))) = deck;
         for (unsigned s = 0; s < kStreams; ++s) {
             if (!(mask & (1u << s))) continue;
-            if (!az_listener_register(entries[s], server, &owners[deck][s])) {
-                invalidate((unsigned) deck);
-                for (unsigned i = 0; i < kStreams; ++i) az_native_owner_reset(&owners[deck][i]);
-                return 0;
-            }
+            az_listener_register(entries[s], server, &owners[deck][s]);
         }
+        pending_deck = -1;
         atomic_fetch_or_explicit(&(submitted), 1u << deck, memory_order_release);
         return 1;
     }

@@ -75,7 +75,7 @@ int main(void) {
         bool caught = false;
         struct UnwindCall call = {kind, witness + kind, argument};
         unsigned deletions = fixture_exception_deletions;
-        caught = !az_native_try(caller_unwind, &call);
+        caught = !fixture_native_try(caller_unwind, &call);
         CHECK(fixture_exception_deletions == deletions + 1, "native unwind payload released once");
         throwing = false;
         CHECK(caught, "caller capture keeps native exception unwind intact");

@@ -15,7 +15,7 @@ static void throwing_renderer(long self) {
 static void original(void *context) { overview_exception_start(throwing_renderer, *(int *) context); }
 static void run(int mode) {
     unsigned before = fixture_exception_deletions;
-    if (az_native_try(original, &mode) || fixture_exception_deletions != before + 1) abort();
+    if (fixture_native_try(original, &mode) || fixture_exception_deletions != before + 1) abort();
     overview_exception_check();
 }
 int main(int argc, char **argv) {

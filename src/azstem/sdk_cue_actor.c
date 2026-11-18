@@ -459,25 +459,10 @@ int azsdk_cue_actor_resume(unsigned deck, uint64_t token) {
     return AZ_OK;
 }
 
-/* Native installation and production were non-throwing API boundaries. Catch
- * foreign unwinding here after C cleanup handlers release the recursive lock. */
-struct configure_call {
-    const struct azcue_actor_profile *profile;
-    azexit_install_fn install;
-    const struct azcue_actor_callbacks *callbacks;
-    int result;
-};
-static void invoke_configure(void *opaque) {
-    struct configure_call *call = opaque;
-    call->result = configure(call->profile, call->install, call->callbacks);
-}
 int azsdk_cue_actor_configure(const struct azcue_actor_profile *profile, azexit_install_fn install,
                               const struct azcue_actor_callbacks *callbacks) {
-    struct configure_call call = {profile, install, callbacks, AZ_FAILED};
-    if (!az_native_try(invoke_configure, &call)) abort();
-    return call.result;
+    return configure(profile, install, callbacks);
 }
-static void invoke_drive(void *opaque) { drive(*(unsigned *) opaque); }
 void azsdk_cue_actor_drive(unsigned deck) {
-    if (!az_native_try(invoke_drive, &deck)) abort();
+    drive(deck);
 }

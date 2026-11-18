@@ -292,7 +292,7 @@ static void capture_call(void *opaque) {
 }
 int capture(Fixture *f, struct azsdk_source_sample *out, const SqlProfile *p) {
     struct Capture c = {f, out, p, AZS_GUARD};
-    return az_native_try(capture_call, &c) ? c.result : AZS_GUARD;
+    return fixture_native_try(capture_call, &c) ? c.result : AZS_GUARD;
 }
 struct ForeignCapture {
     Fixture *fixture;

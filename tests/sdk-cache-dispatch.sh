@@ -18,7 +18,7 @@ esac
 # production C message/dispatcher module. No test dispatcher overrides it.
 "${HOST_CC:-cc}" "${cflags[@]}" -c src/azmod/sdk_cache_entry.c -o "$task_tmp/entry.o"
 "${HOST_CC:-gcc}" "${flags[@]}" tests/unit/sdkcachedispatch_test.c \
-    "${CACHE_DISPATCH_SOURCE:-src/azmod/sdk_cache_message.c}" src/azmod/sdk_connection_hooks.c "$task_tmp/entry.o" tests/unit/sdkcachebirth_return.S src/common/aznative_guard.c src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/test"
+    "${CACHE_DISPATCH_SOURCE:-src/azmod/sdk_cache_message.c}" src/azmod/sdk_connection_hooks.c "$task_tmp/entry.o" tests/unit/sdkcachebirth_return.S tests/unit/native_unwind.c src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/test"
 failures=0
 for profile in 1 2; do
     status=0

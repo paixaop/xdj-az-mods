@@ -465,27 +465,13 @@ static bool timed_property_impl(const azcs_snapshot *self, unsigned kind, double
     }
     return true;
 }
-struct timed_property_call {
-    const azcs_snapshot *self;
-    unsigned kind;
-    double in_s, out_s;
-    bool loop;
-    uint32_t rgb;
-    const char *comment;
-    azcs_property *out;
-    bool result;
-};
-static void timed_property_call(void *opaque) {
-    struct timed_property_call *c = opaque;
-    c->result = timed_property_impl(c->self, c->kind, c->in_s, c->out_s, c->loop, c->rgb, c->comment, c->out);
-}
 bool azcs_snapshot_timed_property(const azcs_snapshot *self, unsigned kind, double in_s, double out_s, bool loop, uint32_t rgb, const char *comment, azcs_property *out) {
-    struct timed_property_call c = {self, kind, in_s, out_s, loop, rgb, comment, out, false};
-    if (!az_native_try(timed_property_call, &c)) {
-        azcs_property_reset(out);
-        return false;
-    }
-    return c.result;
+    azcs_property value __attribute__((cleanup(azcs_property_reset))) = {0};
+    azcs_property_reset(out);
+    if (!timed_property_impl(self, kind, in_s, out_s, loop, rgb, comment, &value)) return false;
+    *out = value;
+    value = (azcs_property) {0};
+    return true;
 }
 bool azcs_snapshot_canonical_property(const azcs_snapshot *self, unsigned kind, const azcs_property *original, azcs_property *out) {
     if (out == original) return false;

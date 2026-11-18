@@ -79,6 +79,21 @@ typedef struct Scope Scope;
 struct Scope {
     Slot *previous;
 };
+/* Interrupted native work invalidates its provisional receipt without catching
+ * the exception. A normal return keeps the explicit result checks below. */
+struct pending_call {
+    Slot *slot;
+    unsigned diagnostic;
+    bool returned;
+};
+static void pending_call_drop(struct pending_call *call) {
+    if (call->returned) return;
+    if (call->diagnostic) atomic_store_explicit(&call->slot->diagnostic, call->diagnostic, memory_order_release);
+    atomic_store_explicit(&call->slot->invalid, 1, memory_order_release);
+}
+static void polling_drop(Slot **slot) {
+    if (*slot) atomic_store_explicit(&(*slot)->phase, RECEIPT, memory_order_release);
+}
 static void submitting_scope_init(Scope *ctx, Slot *slot);
 static void submitting_scope_drop(Scope *ctx);
 static void submitting_scope_init(Scope *ctx, Slot *slot) {
@@ -181,7 +196,8 @@ static bool valid(Slot *slot) {
     uint64_t time = now();
     if (atomic_load_explicit(&(slot->invalid), memory_order_acquire) || !time || compare_timestamps(time, slot->request.identity.deadline_ns, 1000000000, 1000000000, 1) >= AZ_TIME_EQUAL) return false;
     struct ValidateCall call = {slot, false};
-    return az_native_try(validate_call, &call) && call.result;
+    validate_call(&call);
+    return call.result;
 }
 static void *original_address(void *const *p) {
     void *entry = __atomic_load_n(p, __ATOMIC_ACQUIRE);
@@ -498,10 +514,9 @@ static int metadata_hook(bool hot, void *cache, const void *request, const void 
     }
     int result;
     struct HelperCall call = {(void *) original_address(hot ? &state().hot_original : &state().memory_original), cache, request, track, cue, set_ref, priority, 1};
-    if (!az_native_try(helper_call, &call)) {
-        atomic_store_explicit(&(slot->invalid), 1, memory_order_release);
-        return 1;
-    }
+    struct pending_call pending __attribute__((cleanup(pending_call_drop))) = {slot, 0, false};
+    helper_call(&call);
+    pending.returned = true;
     result = call.result;
     if (slot->request.operation == AZ_CMD_HOT_SET && result == 0) {
         atomic_store_explicit(&(slot->metadata_applied), 1, memory_order_release);
@@ -512,7 +527,10 @@ static int metadata_hook(bool hot, void *cache, const void *request, const void 
         return result;
     }
     struct BuildCall build = {slot, hot, word(((uintptr_t) (set_ref))), target_begin, target_end, cue, false};
-    if (az_native_try(build_call, &build) && build.result) return 0;
+    pending.returned = false;
+    build_call(&build);
+    pending.returned = true;
+    if (build.result) return 0;
     atomic_store_explicit(&(slot->invalid), 1, memory_order_release);
     return result;
 }
@@ -599,7 +617,10 @@ static bool handler_hook(void *self) {
         unsigned expected = 0;
         if (atomic_compare_exchange_strong_explicit(&(slot->mutated), &(expected), 1, memory_order_acq_rel, memory_order_acquire)) {
             struct MutationCall call = {slot, handler, false};
-            if (!az_native_try(mutation_call, &call) || !call.result) {
+            struct pending_call pending __attribute__((cleanup(pending_call_drop))) = {slot, 0, false};
+            mutation_call(&call);
+            pending.returned = true;
+            if (!call.result) {
                 atomic_store_explicit(&(slot->invalid), 1, memory_order_release);
                 return false;
             }
@@ -654,7 +675,10 @@ static void reply_hook(void *self, const void *request_id, const void *track, co
             atomic_store_explicit(&(owner->invalid), 1, memory_order_release);
         } else {
             struct ReplyCall call = {owner, memory, hot, false};
-            if (!az_native_try(reply_call, &call) || !call.result) atomic_store_explicit(&(owner->invalid), 1, memory_order_release);
+            struct pending_call pending __attribute__((cleanup(pending_call_drop))) = {owner, 0, false};
+            reply_call(&call);
+            pending.returned = true;
+            if (!call.result) atomic_store_explicit(&(owner->invalid), 1, memory_order_release);
         }
     }
     if (owner) PERSIST_DIAG(owner->request.identity.deck, owner->request.identity.token, "reply", result ? *result : -1);
@@ -765,7 +789,8 @@ int azsdk_cue_persist_configure(const struct azcuepersist_profile *profile, azex
     state().profile = *profile;
     state().callbacks = *callbacks;
     struct InstallCall call = {profile, install, false};
-    if (!az_native_try(install_call, &call) || !call.result) return 0;
+    install_call(&call);
+    if (!call.result) return 0;
     atomic_store_explicit(&(state().enabled), 1, memory_order_release);
     return 1;
 }
@@ -924,10 +949,9 @@ int azsdk_cue_persist_submit(const struct azexit_cue_request *request, void *man
     Scope scope __attribute__((cleanup(submitting_scope_drop)));
     submitting_scope_init(&scope, slot);
     struct ProducerCall call = {slot, request, maintainer, kind, property};
-    if (!az_native_try(producer_call, &call)) {
-        atomic_store_explicit(&(slot->diagnostic), 32, memory_order_release);
-        atomic_store_explicit(&(slot->invalid), 1, memory_order_release);
-    }
+    struct pending_call pending __attribute__((cleanup(pending_call_drop))) = {slot, 32, false};
+    producer_call(&call);
+    pending.returned = true;
     if (atomic_load_explicit(&(slot->no_effect), memory_order_acquire) && !atomic_load_explicit(&(slot->request_entered), memory_order_acquire) &&
         !atomic_load_explicit(&(slot->handler), memory_order_acquire)) {
         release_witness(slot);
@@ -975,7 +999,9 @@ int azsdk_cue_persist_take(const struct azexit_cue_request *request, void *manag
     Slot *slot = &(state().slots[request->identity.deck]);
     unsigned phase = RECEIPT;
     if (!atomic_compare_exchange_strong_explicit(&(slot->phase), &(phase), POLLING, memory_order_acq_rel, memory_order_acquire)) return phase == FREE ? AZ_STALE : AZ_PENDING;
+    Slot *polling __attribute__((cleanup(polling_drop))) = slot;
     if (slot->request.identity.token != request->identity.token || atomic_load_explicit(&(slot->manager), memory_order_acquire) != manager) {
+        polling = NULL;
         atomic_store_explicit(&(slot->phase), RECEIPT, memory_order_release);
         return AZ_STALE;
     }
@@ -986,12 +1012,14 @@ int azsdk_cue_persist_take(const struct azexit_cue_request *request, void *manag
     uint64_t revision = 0;
     if (eligible) {
         struct ConfirmCall call = {slot, manager, &revision, false};
-        applied = az_native_try(confirm_call, &call) && call.result;
+        confirm_call(&call);
+        applied = call.result;
         /* The repository reply can precede publication of the source-qualified
          * CueSet. Observe on fresh owner continuations until the ORIGINAL
          * deadline; never submit the native save/delete producer again. */
         eligible = !atomic_load_explicit(&(state().overflow), memory_order_acquire) && valid(slot);
         if (!applied && eligible) {
+            polling = NULL;
             atomic_store_explicit(&(slot->phase), RECEIPT, memory_order_release);
             return AZ_PENDING;
         }
@@ -1000,6 +1028,7 @@ int azsdk_cue_persist_take(const struct azexit_cue_request *request, void *manag
     *out = (struct azexit_result) {slot->request.identity.token, slot->request.identity.load_generation, applied ? revision : 0,
                                    applied ? AZ_COMMAND_APPLIED : AZ_COMMAND_UNCERTAIN, applied ? AZ_OK : AZ_FAILED};
     release_witness(slot);
+    polling = NULL;
     atomic_store_explicit(&(slot->phase), FREE, memory_order_release);
     return AZ_OK;
 }

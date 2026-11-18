@@ -12,7 +12,7 @@ asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-f
 tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 *) exit 2;; esac
 if [ -n "${MESSAGE_HEADER:-}" ]; then flags+=("-DAZCACHE_MESSAGE_HEADER=\"${MESSAGE_HEADER}\""); fi
-"${HOST_CC:-gcc}" "${flags[@]}" tests/unit/sdkcachemessage_test.c src/common/azcache_scopes.c src/common/aznative_guard.c -lstdc++ -ldl -o "$task_tmp/test"
+"${HOST_CC:-gcc}" "${flags[@]}" tests/unit/sdkcachemessage_test.c src/common/azcache_scopes.c tests/unit/native_unwind.c -lstdc++ -ldl -o "$task_tmp/test"
 failures=0
 for profile in 1 2; do
  status=0

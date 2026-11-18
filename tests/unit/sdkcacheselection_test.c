@@ -385,7 +385,7 @@ static int observe(struct Call *c, struct Witness *out) {
     if (r.status != AZSEL_OK) return r.status;
     if (!azsel_validate_fresh(&invocation, &b, p, &r)) return AZSEL_CHANGED;
     struct Copy copy = {c, 0};
-    if (!az_native_try(copy_call, &copy)) return AZSEL_GUARD;
+    if (!fixture_native_try(copy_call, &copy)) return AZSEL_GUARD;
     if (!azsel_validate_fresh(&invocation, &b, p, &r)) return AZSEL_CHANGED;
     if (out) {
         struct Witness result __attribute__((cleanup(witness_drop))) = {.invocation = r.invocation, .value = copy.value};
@@ -603,7 +603,7 @@ static void positive_taint_and_nesting(void) {
     struct Witness out __attribute__((cleanup(witness_drop))) = {0};
     witness_copy(&out, &before);
     struct ObserveCall oc = {&c, &out};
-    REQUIRE(!az_native_try(observe_call, &oc), "native unwind must propagate");
+    REQUIRE(!fixture_native_try(observe_call, &oc), "native unwind must propagate");
     REQUIRE(unchanged(&out, &before) && !active(&w.state), "native unwind restores embedded fence state and leaves output unchanged");
     observed_drop(&w.a);
 }

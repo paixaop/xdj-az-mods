@@ -619,10 +619,10 @@ int main(void) {
     assert(!azsdk_loop_register(0, unit.bytes));
     publisher.server = original_server;
     server.fail = true;
-    assert(!azsdk_loop_register(0, unit.bytes) && !azsdk_loop_capabilities());
+    assert(fixture_registration_unwind(azsdk_loop_register, 0, unit.bytes) && !azsdk_loop_capabilities());
     server.fail = false;
     server.fail_after = true;
-    assert(!azsdk_loop_register(0, unit.bytes) && !azsdk_loop_capabilities());
+    assert(fixture_registration_unwind(azsdk_loop_register, 0, unit.bytes) && !azsdk_loop_capabilities());
     assert(server.count == 1 && last_expired(&server));
     server_clear(&server);
     server.fail_after = false;

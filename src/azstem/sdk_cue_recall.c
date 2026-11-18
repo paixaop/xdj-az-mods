@@ -32,20 +32,9 @@ static State storage = {.mutex = PTHREAD_MUTEX_INITIALIZER,
                         .slots = {{.mutex = PTHREAD_MUTEX_INITIALIZER}, {.mutex = PTHREAD_MUTEX_INITIALIZER}, {.mutex = PTHREAD_MUTEX_INITIALIZER}, {.mutex = PTHREAD_MUTEX_INITIALIZER}}};
 static State *state(void) { return &storage; }
 #define read(type, address) ({ type value; memcpy(&value, (const void *)(address), sizeof value); value; })
-struct Copy {
-    uintptr_t function;
-    void *target;
-    const void *source;
-    bool load;
-};
-static void native_copy(void *context) {
-    const struct Copy *c = context;
-    if (c->load) ((void (*)(void *, int, const void *)) c->function)(c->target, 0, c->source);
-    else ((void (*)(void *, const void *)) c->function)(c->target, c->source);
-}
-static bool guarded_copy(uintptr_t function, void *target, const void *source, bool load) {
-    struct Copy call = {function, target, source, load};
-    return az_native_try(native_copy, &call) != 0;
+static void native_copy(uintptr_t function, void *target, const void *source, bool load) {
+    if (load) ((void (*)(void *, int, const void *)) function)(target, 0, source);
+    else ((void (*)(void *, const void *)) function)(target, source);
 }
 static uintptr_t word(uintptr_t a) { return read(uintptr_t, a); }
 static bool nominal(uintptr_t object, uintptr_t table) { return object && word(object) == table; }
@@ -121,7 +110,7 @@ int azsdk_cue_recall_prepare(const struct azexit_cue_request *r, void *manager,
         facade = word(loader + 0x1b8);
         if (!nominal(facade, p->load_table)) return AZ_UNSUPPORTED;
     }
-    if (!guarded_copy(p->copy_property, slot->property, property, false)) return AZ_FAILED;
+    native_copy(p->copy_property, slot->property, property, false);
     slot->operation = r->operation;
     slot->kind = r->entry_id;
     slot->token = r->identity.token;
@@ -174,7 +163,7 @@ int azsdk_cue_recall_dispatch(unsigned deck, uint64_t token, void *core,
                                                                                                                                : 0;
         if (!assign || word(word(target) + 7 * sizeof(uintptr_t)) != assign) return AZ_UNSUPPORTED;
         slot->dispatched = true;
-        if (!guarded_copy(assign, (void *) target, slot->property, false)) return AZ_FAILED;
+        native_copy(assign, (void *) target, slot->property, false);
         return AZ_OK;
     }
     if (!nominal(facade, p->load_table) || word(facade + 0x10) != c + 0x110 ||
@@ -183,7 +172,7 @@ int azsdk_cue_recall_dispatch(unsigned deck, uint64_t token, void *core,
     /* Native root copies the owned property again. The affinity check above
      * forces its synchronous branch, preserving sdk_exit's causal node scope. */
     slot->dispatched = true;
-    if (!guarded_copy(p->load_call, (void *) facade, slot->property, true)) return AZ_FAILED;
+    native_copy(p->load_call, (void *) facade, slot->property, true);
     return AZ_OK; /* Submission only: sdk_exit requires the correlated seek and settled work. */
 }
 void azsdk_cue_recall_release(unsigned deck, uint64_t token) {

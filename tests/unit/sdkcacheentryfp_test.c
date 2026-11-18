@@ -111,7 +111,7 @@ int main() {
         bool caught = false;
         current_float = fn;
         unsigned deletions = fixture_exception_deletions;
-        caught = !az_native_try(float_unwind, NULL);
+        caught = !fixture_native_try(float_unwind, NULL);
         REQUIRE(fixture_exception_deletions == deletions + 1, "native unwind payload released once");
         throwing = false;
         REQUIRE(caught && originals == 1 && entered == 1 && !completed && !active, "expanded frame preserves native exception CFI");

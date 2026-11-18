@@ -77,5 +77,18 @@ static __attribute__((noreturn, unused)) void fixture_raise(void) {
     (void) _Unwind_RaiseException(value);
     abort();
 }
-int az_native_try(void (*call)(void *), void *context);
+int fixture_native_try(void (*call)(void *), void *context);
+struct fixture_registration {
+    int (*call)(int, void *);
+    int deck;
+    void *unit;
+};
+static inline void fixture_registration_call(void *opaque) {
+    struct fixture_registration *call = opaque;
+    (void) call->call(call->deck, call->unit);
+}
+static inline bool fixture_registration_unwind(int (*call)(int, void *), int deck, void *unit) {
+    struct fixture_registration registration = {call, deck, unit};
+    return !fixture_native_try(fixture_registration_call, &registration);
+}
 #endif

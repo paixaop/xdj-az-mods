@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
-/* C error boundary for firmware calls. The C unwinder runs every intervening
+/* TEST ONLY: stand-in for EP147's outer exception handler. Never link this
+ * fixture into either production library. C error boundary for fixture calls. The C unwinder runs every intervening
  * cleanup before this frame translates a native failure into a zero status.
  * Only this library's C frames bind to the hidden personality below. Other C
  * frames retain libgcc's cleanup behavior, and forced unwinds are never caught.
@@ -17,7 +18,7 @@
 #ifndef __EXCEPTIONS
 #error "The native C boundary requires -fexceptions for compiler-generated cleanup landing pads"
 #endif
-int az_native_try(void (*fn)(void *), void *argument);
+int fixture_native_try(void (*fn)(void *), void *argument);
 struct frame {
     jmp_buf jump;
     struct frame *previous;
@@ -41,7 +42,7 @@ _Unwind_Reason_Code
 __gcc_personality_v0(int version, _Unwind_Action actions, _Unwind_Exception_Class kind, struct _Unwind_Exception *error, struct _Unwind_Context *context) {
     if (version != 1) return _URC_FATAL_PHASE1_ERROR;
     struct frame *f = active;
-    if (f && !(actions & _UA_FORCE_UNWIND) && (uintptr_t) az_native_try == _Unwind_GetRegionStart(context)) {
+    if (f && !(actions & _UA_FORCE_UNWIND) && (uintptr_t) fixture_native_try == _Unwind_GetRegionStart(context)) {
         /* Keep this guard active until payload destruction finishes. A failure
          * inside that runtime cleanup must terminate, like the native handler. */
         if (f->handling) return _URC_FATAL_PHASE1_ERROR;
@@ -69,7 +70,7 @@ static void release(struct frame *f) {
     }
     active = f->previous;
 }
-__attribute__((noinline, visibility("hidden"))) int az_native_try(void (*fn)(void *), void *argument) {
+__attribute__((noinline, visibility("hidden"))) int fixture_native_try(void (*fn)(void *), void *argument) {
     if (!real_personality) real_personality = resolve_personality();
     struct frame f __attribute__((cleanup(release))) = {.previous = active};
     if (setjmp(f.jump)) {
@@ -79,24 +80,4 @@ __attribute__((noinline, visibility("hidden"))) int az_native_try(void (*fn)(voi
     active = &f;
     fn(argument);
     return 1;
-}
-
-/* A C aggregate larger than two words uses the native indirect-result register
- * (x8 on AAPCS64; the first argument on SysV x86-64). The firmware writes only
- * its documented one- or two-word prefix. Never read the unused carrier bytes.
- * These are caller adapters, not native entry points: returning this carrier
- * to an eight-byte firmware destination would overwrite that destination. */
-struct native_result_storage {
-    uintptr_t first;
-    uintptr_t second;
-    unsigned char unused[8];
-};
-_Static_assert(sizeof(struct native_result_storage) == 24, "indirect native result ABI");
-__attribute__((visibility("hidden"))) void az_native_result_word(void *function, void *result, const void *argument) {
-    struct native_result_storage value = ((struct native_result_storage (*)(const void *)) function)(argument);
-    __builtin_memcpy(result, &value.first, sizeof value.first);
-}
-__attribute__((visibility("hidden"))) void az_native_result_pair(void *function, void *result, const void *argument) {
-    struct native_result_storage value = ((struct native_result_storage (*)(const void *)) function)(argument);
-    __builtin_memcpy(result, &value, 2 * sizeof(uintptr_t));
 }

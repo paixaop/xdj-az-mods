@@ -1443,7 +1443,7 @@ PYOBS
         $CC -std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -pthread "${SANFLAGS[@]}" \
             -Iguest/common -Iguest/azstem -fvisibility=hidden \
             -Wl,--version-script=guest/azstem/sdk_native.map \
-            "$d/$v.c" $T/sdkloopobserver_test.c guest/common/aznative_guard.c -lstdc++ -ldl -lm -ldl -o "$d/$v"
+            "$d/$v.c" $T/sdkloopobserver_test.c $T/native_unwind.c -lstdc++ -ldl -lm -ldl -o "$d/$v"
     done
     suite "sdk GNU loop listener ABI and lifetime" "$d/real"
     control "sdk loop listener: wrong native player accepted" "$d/ctl-player"

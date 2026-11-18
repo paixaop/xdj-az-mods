@@ -84,7 +84,7 @@ int main(void) {
             original_calls = 0;
             throwing = true;
             unsigned deletions = fixture_exception_deletions;
-            REQUIRE(!az_native_try(forward, NULL) && fixture_exception_deletions == deletions + 1 && original_calls == 1, "native unwind propagates through C bridge");
+            REQUIRE(!fixture_native_try(forward, NULL) && fixture_exception_deletions == deletions + 1 && original_calls == 1, "native unwind propagates through C bridge");
             message_delete(message);
             message = NULL;
             absent(&server);

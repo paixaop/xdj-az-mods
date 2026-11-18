@@ -273,7 +273,7 @@ static void pinned(unsigned build, unsigned index, bool release, bool replace_po
     size_t begin = cleanup_count;
     struct Native n = {.context = &c, .result = &r, .receiver = c.collector->object, .pool = ((struct Collector *) c.collector->object)->pool, .index = index, .release = release, .replace_pool = replace_pool, .throwing = throwing, .source = source(&c), .creator = *c.creator, .mount = fixture_weak(*c.mount), .database = fixture_weak(*c.database), .collector = fixture_weak(*c.collector), .status = AZS_UNSUPPORTED};
     unsigned deletions = fixture_exception_deletions;
-    bool caught = !az_native_try(pin_call, &n);
+    bool caught = !fixture_native_try(pin_call, &n);
     result_guards(&r);
     CHECK(n.originals == 1 && n.observed == 1 && (throwing ? caught : n.status == AZS_OK), "missing observed stable cache/source ownership pins");
     CHECK(caught == throwing && !r.initialized && fixture_exception_deletions == deletions + (throwing ? 1u : 0u), "native unwind/result cleanup is untouched");

@@ -17,7 +17,7 @@ tail=body[a:]
 fixture=Path(sys.argv[2]).read_text();assert fixture.count('/* ACTUAL_NATIVE_HOOK_TAIL */')==1
 Path(sys.argv[3]).write_text(fixture.replace('/* ACTUAL_NATIVE_HOOK_TAIL */',tail))
 PY
-"${HOST_CC:-gcc}" "${flags[@]}" "$task_tmp/test.c" src/azmod/sdk_cache_message.c src/common/aznative_guard.c src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/test"
+"${HOST_CC:-gcc}" "${flags[@]}" "$task_tmp/test.c" src/azmod/sdk_cache_message.c tests/unit/native_unwind.c src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/test"
 status=0
 (ulimit -c 0;"$task_tmp/test") >"$task_tmp/run.log" 2>&1 || status=$?
 cat "$task_tmp/run.log"

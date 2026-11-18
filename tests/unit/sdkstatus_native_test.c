@@ -1892,7 +1892,7 @@ int main(int argc, char **argv) {
     assert(!atomic_load_explicit(&(slot->motion.active_writers), memory_order_seq_cst) && atomic_load_explicit(&(slot->motion.active_serial), memory_order_seq_cst) == active_serial + 4);
     rate_original[0] = ((void *) (native_callback_1));
     unsigned deleted = fixture_exception_deletions;
-    assert(!az_native_try(failing_rate_writer, (void *) c));
+    assert(!fixture_native_try(failing_rate_writer, (void *) c));
     assert(fixture_exception_deletions == deleted + 1 && !atomic_load_explicit(&(slot->motion.active_writers), memory_order_seq_cst) && atomic_load_explicit(&(slot->motion.active_serial), memory_order_seq_cst) == active_serial + 6);
     rate_original[0] = rate_original[1] = NULL;
     puts("PASS actual start/stop writer depth, serial and exceptional release");

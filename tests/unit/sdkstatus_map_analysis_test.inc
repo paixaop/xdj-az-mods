@@ -95,6 +95,16 @@ static void current_retime(void) { grid_retime(replacement_holder + 0x28, 1); }
 static void current_arm_retime(void) { during_current = current_retime; }
 static void make_reload(void) { ++epoch; }
 static void make_retime(void) { grid_retime(replacement_holder + 0x28, 3); }
+struct publish_call {
+    const struct azn_maps_api *api;
+    const struct aznm_packet *packet;
+    const void *data;
+    uint32_t size;
+};
+static void publish_raising(void *opaque) {
+    const struct publish_call *call = opaque;
+    (void) call->api->publish_phrases(0, epoch, call->packet, call->data, call->size);
+}
 int test_analysis(const struct azn_maps_api *api) {
     assert(profile == &profiles[1]);
     struct aznm_packet initial = {0};
@@ -170,7 +180,8 @@ int test_analysis(const struct azn_maps_api *api) {
         memory_failure = stage;
         memory_calls = 0;
         make_failure = stage == 2;
-        assert(api->publish_phrases(0, epoch, &initial, pssi, sizeof pssi) == AZ_FAILED);
+        struct publish_call call = {api, &initial, pssi, sizeof pssi};
+        assert(!fixture_native_try(publish_raising, &call));
         assert(!memory_live && !analysis_made && !analysis_notified);
         assert(fixture_exception_deletions == (unsigned) stage + 1);
         assert(api->current(0, epoch, &initial) == AZ_OK);

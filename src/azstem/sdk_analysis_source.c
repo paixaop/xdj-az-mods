@@ -144,7 +144,7 @@ static int wait_decrypt(uintptr_t owner, const WeakTrack *weak, int generation) 
     const int result = ((WaitDecrypt) (original_wait))(owner, weak, generation);
     if (result == 0) {
         struct Capture call = {owner, weak, generation, id};
-        (void) az_native_try(capture_guarded, &call);
+        capture_guarded(&call);
     }
     return result;
 }

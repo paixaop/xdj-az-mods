@@ -69,16 +69,6 @@ int az_owner_publish(struct az_owner_gate *gate, void *owner, az_owner_thread_ch
     *generation = current;
     return AZ_OK;
 }
-struct OwnerCheck {
-    struct az_owner_gate *gate;
-    int status;
-};
-static void check_owner(void *opaque) {
-    struct OwnerCheck *call = opaque;
-    struct az_owner_gate *gate = call->gate;
-    if (!gate->check(gate->owner)) call->status = AZ_INVALID;
-    else if (__atomic_load_n(&gate->state, __ATOMIC_ACQUIRE) & Retiring) call->status = AZ_STALE;
-}
 int az_owner_enter(struct az_owner_gate *gate, struct az_owner_lease *out) {
     if (out->gate) return AZ_BUSY;
     uint64_t thread = thread_cookie();
@@ -89,11 +79,12 @@ int az_owner_enter(struct az_owner_gate *gate, struct az_owner_lease *out) {
     /* Native pointers are read only after admission. Retirement cannot change
      * them until the reader bit is released. */
     __atomic_store_n(&gate->holder, thread, __ATOMIC_RELEASE);
-    *out = (struct az_owner_lease) {gate, gate->owner, thread, az_owner_generation(gate)};
-    struct OwnerCheck call = {gate, AZ_OK};
-    int status = az_native_try(check_owner, &call) ? call.status : AZ_FAILED;
-    if (status != AZ_OK) az_owner_lease_end(out);
-    return status;
+    struct az_owner_lease lease __attribute__((cleanup(az_owner_lease_drop))) = {gate, gate->owner, thread, az_owner_generation(gate)};
+    if (!gate->check(gate->owner)) return AZ_INVALID;
+    if (__atomic_load_n(&gate->state, __ATOMIC_ACQUIRE) & Retiring) return AZ_STALE;
+    *out = lease;
+    lease = (struct az_owner_lease) {0}; // NOLINT(clang-analyzer-deadcode.DeadStores): disarm cleanup after transferring the lease to out.
+    return AZ_OK;
 }
 int az_owner_retire(struct az_owner_gate *gate, uint64_t expected_generation) {
     if (!expected_generation) return AZ_INVALID;

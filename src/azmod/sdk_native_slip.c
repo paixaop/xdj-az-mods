@@ -83,9 +83,8 @@ static void *control_deleter(void *control, const void *type) {
 static const void *const control_vtable[] = {
     (void *) control_dispose, (void *) control_destroy, (void *) control_dispose,
     (void *) control_destroy, (void *) control_deleter};
-static void register_listener(void *context) {
-    Slot *slot = context;
-    state()->profile.registration((void *) slot->source, &slot->listener);
+static void listener_registration_drop(Slot **slot) {
+    if (*slot) retire(*slot);
 }
 static bool make_listener(Slot *slot) {
     struct ListenerControl *control = calloc(1, sizeof *control);
@@ -95,7 +94,10 @@ static bool make_listener(Slot *slot) {
     slot->listener = (struct az_native_owner) {&control->receiver, &control->base};
     /* A const weak reference borrows the same two-word carrier during the call;
      * native code owns every weak copy it retains. The strong owner pins it. */
-    return az_native_try(register_listener, slot) != 0;
+    Slot *pending __attribute__((cleanup(listener_registration_drop))) = slot;
+    state()->profile.registration((void *) slot->source, &slot->listener);
+    pending = NULL;
+    return true;
 }
 static void constructed(const struct azce_call *call) {
     State *s = state();

@@ -12,7 +12,7 @@ asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-f
 tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 *) exit 2;; esac
 "${HOST_CC:-gcc}" "${flags[@]}" tests/unit/sdkcachedispatchrouting_test.c src/azmod/sdk_cache_message.c \
-    src/azmod/sdk_cache_entry.c src/common/aznative_guard.c src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/test"
+    src/azmod/sdk_cache_entry.c tests/unit/native_unwind.c src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/test"
 
 status=0
 (ulimit -c 0; "$task_tmp/test") >"$task_tmp/run.log" 2>&1 || status=$?

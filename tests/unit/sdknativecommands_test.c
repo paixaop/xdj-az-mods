@@ -160,6 +160,7 @@ static void *held_reader(void *opaque) {
 static void *held_retirer(void *opaque) {
     struct WaitContext *w = opaque;
     CHECK(az_owner_retire(w->gate, w->epoch) == AZ_OK);
+    CHECK(atomic_load_explicit(&w->release, memory_order_acquire));
     atomic_store_explicit(&w->owner->alive, false, memory_order_release);
     free(w->owner);
     atomic_store_explicit(&w->retired, true, memory_order_release);
@@ -253,6 +254,10 @@ static void lifecycle() {
     CHECK(az_owner_lease_end(&(lease)) == AZ_OK && az_owner_retire(&(gate), replacement) == AZ_OK);
     CHECK(azsdk_native_commands_capabilities() == 0); /* a synthetic gate certifies nothing */
 }
+static void enter_raising_owner(void *opaque) {
+    AZ_OWNER_LEASE(lease);
+    (void) az_owner_enter(opaque, &lease);
+}
 static void predicate_failures() {
     AZ_OWNER_GATE(gate);
     Owner owner = owner_init(false);
@@ -262,7 +267,7 @@ static void predicate_failures() {
     owner.epoch = epoch;
     AZ_OWNER_LEASE(lease);
     owner.check_mode = 1;
-    CHECK(az_owner_enter(&(gate), &(lease)) == AZ_FAILED && az_owner_lease_owner(&(lease)) == NULL);
+    CHECK(!fixture_native_try(enter_raising_owner, &gate) && az_owner_lease_owner(&lease) == NULL);
     owner.check_mode = 0;
     CHECK(az_owner_enter(&(gate), &(lease)) == AZ_OK); /* exception also releases admission */
     CHECK(az_owner_lease_end(&(lease)) == AZ_OK);

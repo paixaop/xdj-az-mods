@@ -123,7 +123,7 @@ int main(int argc, char **argv) {
                 bool caught = false;
                 const unsigned prior = invoked, old_records = records;
                 struct GetterCall call = {table, i, 0};
-                caught = !az_native_try(getter_invoke, &call);
+                caught = !fixture_native_try(getter_invoke, &call);
                 if (!caught) assert(!throwing && call.result == UINT64_C(0x200130fefefefe));
                 assert(caught == (bool) throwing && errno == EDOM && invoked == prior + 1 && records == old_records + 1);
                 assert(record_site == i && record_source == 0x130300 + i * 16 && record_target == ((uintptr_t) (slip_getter_test_target)));

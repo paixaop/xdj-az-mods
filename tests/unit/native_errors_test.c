@@ -7,8 +7,11 @@
 #include <dlfcn.h>
 #include <stdio.h>
 #include <unwind.h>
+int fixture_native_try(void (*call)(void *), void *context);
 
 static _Thread_local unsigned cleaned, disposed;
+static int (*through_core)(void (*)(void *), void *, unsigned *);
+static unsigned core_cleaned;
 static void *int_type;
 extern void *__cxa_allocate_exception(size_t);
 extern void __cxa_throw(void *, void *, void (*)(void *)) __attribute__((noreturn));
@@ -46,7 +49,7 @@ static void raise_native(void *argument) {
 }
 static void destroy_reentrant(void *payload) {
     destroy_native(payload);
-    assert(!az_native_try(raise_native, NULL));
+    assert(!fixture_native_try(raise_native, NULL));
 }
 static void raise_reentrant(void *argument) {
     (void) argument;
@@ -67,10 +70,14 @@ static void raise_foreign(void *argument) {
     (void) _Unwind_RaiseException(payload);
     abort();
 }
+static void raise_through_core(void *foreign) {
+    through_core(foreign ? raise_foreign : raise_native, NULL, &core_cleaned);
+    abort(); /* The production gate must not catch or translate the exception. */
+}
 static void nested(void *argument) {
     unsigned count __attribute__((cleanup(cleanup))) = 1;
     unsigned before = cleaned, deleted = disposed;
-    assert(!az_native_try(raise_native, argument));
+    assert(!fixture_native_try(raise_native, argument));
     assert(cleaned == before + 1 && disposed == deleted + 1);
     assert(uncaught() == 0 && errno == EIO);
     raise_foreign(argument);
@@ -85,14 +92,14 @@ static void *worker(void *unused) {
     for (unsigned i = 0; i < 100; ++i) {
         unsigned before = cleaned, deleted = disposed;
         errno = ERANGE;
-        assert(az_native_try(normal, &cleaned));
+        assert(fixture_native_try(normal, &cleaned));
         assert(errno == ERANGE && cleaned == before + 1);
-        assert(!az_native_try(nested, NULL));
+        assert(!fixture_native_try(nested, NULL));
         assert(cleaned == before + 4 && disposed == deleted + 2);
         assert(errno == EIO && uncaught() == 0);
     }
     unsigned before = cleaned, deleted = disposed;
-    assert(!az_native_try(raise_reentrant, NULL));
+    assert(!fixture_native_try(raise_reentrant, NULL));
     assert(cleaned == before + 1 && disposed == deleted + 2);
     assert(errno == EIO && uncaught() == 0);
     return NULL;
@@ -105,12 +112,25 @@ static void exit_inside_guard(void *unused) {
     pthread_exit((void *) (uintptr_t) 37);
 }
 static void *exit_worker(void *unused) {
-    az_native_try(exit_inside_guard, unused);
+    fixture_native_try(exit_inside_guard, unused);
     abort(); /* Forced unwind must reach pthread_exit, never become a zero status. */
 }
 int main(void) {
     int_type = dlsym(RTLD_DEFAULT, "_ZTIi");
     assert(int_type);
+    const char *path = getenv("CORE_UNWIND_LIBRARY");
+    if (path) {
+        void *library = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        assert(library);
+        through_core = (int (*)(void (*)(void *), void *, unsigned *)) dlsym(library, "native_propagate");
+        assert(through_core && !dlsym(library, "fixture_native_try"));
+        unsigned before = core_cleaned;
+        assert(!fixture_native_try(raise_through_core, NULL));
+        assert(!fixture_native_try(raise_through_core, (void *) 1));
+        assert(core_cleaned == before + 2 && uncaught() == 0);
+        assert(!dlclose(library));
+        puts("PASS production C DSO: native/foreign errors reach outer handler and release admission");
+    }
     pthread_t threads[4];
     for (unsigned i = 0; i < 4; ++i) assert(!pthread_create(&threads[i], NULL, worker, NULL));
     for (unsigned i = 0; i < 4; ++i) assert(!pthread_join(threads[i], NULL));
@@ -123,5 +143,5 @@ int main(void) {
 #else
     (void) exit_worker;
 #endif
-    puts("PASS C error status: native/foreign payloads, nested/reentrant cleanup, errno and threads");
+    puts("PASS outer firmware handler: native/foreign payloads, nested/reentrant cleanup, errno and threads");
 }

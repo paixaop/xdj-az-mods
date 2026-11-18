@@ -1148,9 +1148,11 @@ static void pending(const az_command_request r) {
     int status = sdk_exit_public_poll("one", r.request_id, &out);
     assert(status == AZ_OK && out.outcome == AZ_COMMAND_ACCEPTED);
 }
+static void process_completion(void *opaque) { process(*(unsigned *) opaque); }
 static void complete(az_command_request r, unsigned outcome, int reason) {
     __auto_type out = result();
     assert(sdk_exit_public_submit("one", &r, &out) == AZ_OK && out.outcome == AZ_COMMAND_ACCEPTED);
+    if (exit_throw) assert(!fixture_native_try(process_completion, &r.deck));
     process(r.deck);
     terminal(r, outcome, reason);
 }
@@ -1405,7 +1407,7 @@ static void child_exception() {
     process(0);
     process(0);
     command_throw_role = SLIP_STATE + 1;
-    assert(!az_native_try(process_zero, NULL));
+    assert(!fixture_native_try(process_zero, NULL));
     command_throw_role = 0;
     owner_frame = false;
     assert(n->context.bytes[0x190] == 1);
@@ -1649,7 +1651,7 @@ static void lifecycle() {
     assert(atomic_load_explicit(&(calls), memory_order_seq_cst) == before);
     process_result = true;
     process_throw = true;
-    assert(!az_native_try(process_zero, NULL));
+    assert(!fixture_native_try(process_zero, NULL));
     process_throw = false;
     assert(sdk_exit_public_cancel("one", r.request_id, &out) == AZ_OK);
     assert(sdk_exit_public_release("one", r.request_id) == AZ_OK);

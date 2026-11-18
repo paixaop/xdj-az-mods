@@ -153,7 +153,8 @@ static inline void azsel_mount_proof(void *opaque) {
 static inline bool azsel_allowed(const struct azsel_invocation *i, const struct azsel_borrow *b) {
     if (!azsel_ready(i) || (b->build != 1 && b->build != 2) || !b->root || ((uintptr_t) b->root & 7u) || !b->already_owned || !b->supported_sqlite_mount) return false;
     struct azsel_proof p = {.borrow = b};
-    return az_native_try(azsel_owned_proof, &p) && p.result && azsel_ready(i);
+    azsel_owned_proof(&p);
+    return p.result && azsel_ready(i);
 }
 struct azsel_pins {
     struct az_native_owner mount, database, collector, cache;
@@ -190,7 +191,8 @@ static inline void azsel_resolve_owned(const struct azsel_invocation *i, const s
     if (!p.mount.object || !p.collector.object || !azsel_ready(i)) return;
     struct azsel_proof proof = {b, p.mount.object, false};
     r->status = AZSEL_GUARD;
-    if (!az_native_try(azsel_mount_proof, &proof) || !proof.result) return;
+    azsel_mount_proof(&proof);
+    if (!proof.result) return;
     r->status = AZSEL_CHANGED;
     if (!azsel_allowed(i, b)) return;
     uintptr_t da = 0;
