@@ -9,13 +9,15 @@
 #include <stdarg.h>
 
 static int provider(const az_track_ref *ref, uint32_t mask, struct st_data *data, void *ctx) {
-    (void)mask; (void)ctx;
-    snprintf(data->view.metadata.title, sizeof data->view.metadata.title, "source %llu", (unsigned long long)ref->source_id);
+    (void) mask;
+    (void) ctx;
+    snprintf(data->view.metadata.title, sizeof data->view.metadata.title, "source %llu", (unsigned long long) ref->source_id);
     data->view.metadata_info.availability = AZ_AVAIL_READY;
     return AZ_OK;
 }
 static int wave_provider(const az_track_ref *ref, uint32_t mask, struct st_data *data, void *ctx) {
-    (void)ref; (void)ctx;
+    (void) ref;
+    (void) ctx;
     assert(mask == ST_DETAIL);
     data->wave_view.column_count = data->wave_query.column_count;
     data->wave_view.info.availability = AZ_AVAIL_READY;
@@ -32,6 +34,7 @@ typedef struct {
     int state, nhooks;
     char reason[112];
 } cm_mod;
+static void cm_set_state(cm_mod *c, int state) { __atomic_store_n(&c->state, state, __ATOMIC_SEQ_CST); }
 static cm_mod g_cm[CM_MAX];
 static int g_cm_loading = -1, g_sdk_in_init, g_cm_live;
 static const az_core_v1 g_cm_core;
@@ -47,17 +50,20 @@ static void ds_retire(int owner) {
 }
 static void sdk_command_owner_init(int owner) { (void) owner; }
 static void sdk_command_owner_ready(int owner) { (void) owner; }
-static void sdk_command_retire_owner(int owner) { (void)owner; }
+static void sdk_command_retire_owner(int owner) { (void) owner; }
 static az_track_ref lifecycle_ref = {sizeof(az_track_ref), AZ_DATA_VERSION, 1, 1, 9, 42, 0};
 static void cm_refuse(cm_mod *c, int state, const char *format, ...) {
-    (void)format;
+    (void) format;
     c->state = state;
 }
-static int fixture_unlink(const char *path) { (void)path; return 0; }
+static int fixture_unlink(const char *path) {
+    (void) path;
+    return 0;
+}
 #define CM_INITING "unused-fixture-init-marker"
 #define unlink fixture_unlink
-#define dbg(...) ((void)0)
-#define cm_logf(...) ((void)0)
+#define dbg(...) ((void) 0)
+#define cm_logf(...) ((void) 0)
 #define g_st lifecycle
 #include SDK_DATA_LIFECYCLE_INC
 #undef g_st
@@ -84,7 +90,8 @@ static void reset_lifecycle(void) {
     memset(g_cm, 0, sizeof g_cm);
     memset(owned, 0, sizeof owned);
     memset(status_retired, 0, sizeof status_retired);
-    held = NULL; held_wave = NULL;
+    held = NULL;
+    held_wave = NULL;
     fail_init = borrow_data = wave_data = g_cm_live = 0;
 }
 static void reinitialize_engine(void) {
@@ -140,7 +147,8 @@ int main(void) {
         const az_track_snapshot *out = NULL;
         const az_wave_snapshot *out_wave = NULL;
         assert((mode ? st_wave_acquire(&lifecycle, 0, owned[0][0], &out_wave)
-                     : st_acquire(&lifecycle, 0, owned[0][0], &out)) == AZ_STALE && !out && !out_wave);
+                     : st_acquire(&lifecycle, 0, owned[0][0], &out)) == AZ_STALE &&
+               !out && !out_wave);
         uint64_t refused = UINT64_C(0xfedcba9876543210);
         assert(st_request(&lifecycle, 0, &lifecycle_ref, AZ_DATA_METADATA, &refused) == AZ_STALE);
         assert(refused == UINT64_C(0xfedcba9876543210));
@@ -160,5 +168,23 @@ int main(void) {
     assert(st_acquire(&lifecycle, 1, adopted, &out) == AZ_OK && !strcmp(out->metadata.title, "source 1"));
     assert(st_release(&lifecycle, 1, adopted, 0) == AZ_OK);
     st_destroy(&lifecycle);
+    reinitialize_engine();
+    reset_lifecycle();
+    for (unsigned cycle = 0; cycle < 40; ++cycle) {
+        run_actual_init(&g_cm[0], &module);
+        assert(request_status == AZ_OK);
+        st_work(&lifecycle, provider, NULL, NULL);
+        assert(st_acquire(&lifecycle, 0, owned[0][0], &out) == AZ_OK);
+        uint64_t old = owned[0][0];
+        sdk_data_retire_owner(0);
+        run_actual_init(&g_cm[0], &module);
+        assert(request_status == AZ_OK && owned[0][0] != old);
+        assert(st_acquire(&lifecycle, 0, old, &out) == AZ_STALE);
+        az_data_change event = {.size = sizeof event, .version = AZ_DATA_VERSION};
+        assert(st_event_read(&lifecycle, 0, 0, &event) == AZ_OK && event.ticket == owned[0][0]);
+        sdk_data_retire_owner(0);
+    }
+    st_destroy(&lifecycle);
+    puts("PASS live restart: data owners reopen, old handles and queued events stay retired");
     puts("PASS failed-init data cleanup: real init routing, bounded quota, immutable lifetime and nonblocking retirement");
 }

@@ -180,6 +180,15 @@ static void sd_prune_listeners(void) {
     g_sd_nlisten = kept;
 }
 
+/* A mod turned off live: its listeners are dropped (init() adds them again). UI thread. */
+static void sdk_deck_forget(int owner) {
+    int k = 0;
+    for (int i = 0; i < g_sd_nlisten; i++)
+        if (g_sd_listen[i].owner != owner)
+            g_sd_listen[k++] = g_sd_listen[i];
+    g_sd_nlisten = k;
+}
+
 /* az_core_v1.on_deck_event: from init() only. */
 static int sd_on_deck_event(const char *id, void (*fn)(int deck, int what, void *user),
                             void *user) {
@@ -258,7 +267,7 @@ static void sdk_deck_tick(long now) {
         for (int k = 0; k < n; k++)
             for (int i = 0; i < g_sd_nlisten; i++) {
                 cm_mod *c = &g_cm[g_sd_listen[i].owner];
-                if (c->state == AZCM_LOADED)
+                if (cm_running(c))
                     g_sd_listen[i].fn(d, ev[k], g_sd_listen[i].user);
             }
     }

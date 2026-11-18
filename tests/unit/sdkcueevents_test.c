@@ -17,6 +17,7 @@ typedef struct {
     int state;
     uintptr_t lo, hi;
 } cm_mod;
+static int cm_running(const cm_mod *c) { return __atomic_load_n(&c->state, __ATOMIC_ACQUIRE) == AZCM_LOADED; }
 static cm_mod g_cm[2] = {{AZCM_LOADED, 1, UINTPTR_MAX}, {0, 1, UINTPTR_MAX}};
 static int __attribute__((unused)) master_state_supported(void) { return 0; }
 static int g_cm_loading, g_st_enabled = 1;

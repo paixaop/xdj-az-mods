@@ -28,7 +28,10 @@
 #   elfcheck  a community mod's .so before approval (guest/azmod/community.c cm_elf_check)
 #   mp4       MP3 / M4A source tracks: ID3 + Info/Xing, the MP4 box walk (guest/azstem/ofsload.c)
 #   hcanlz    a track's analysis file, for its hot cues (guest/azmod/hc_anlz.h)
+#   vdanlz    a track's analysis file, for its vocal detection (guest/azmod/vd_anlz.h)
 #   clocktz   a time zone file for the Clock readout (guest/azmod/clock_tz.h)
+#   clockset  the Clock's manual set record in the deck's settings (guest/azmod/clock_set.h)
+#   wzsave    Remember Waveform Zoom's saved value, azmod.conf's wave.zoom (guest/azmod/wave_zoom.h)
 #   inputmem  the deck's settings file, for Channel Input Select Memory (guest/azmod/input_memory.h)
 #   cmbrowse  Community Mods > Browse: a mod's category and updated values and the
 #             orders over them (guest/azmod/cm_browse.h)
@@ -36,7 +39,7 @@
 #   colwidths Column Edit's saved column widths (guest/azmod/browse_edit.h)
 #   colfields Column Edit's saved column fields, and a library text as a field shows it
 #             (guest/azmod/browse_fields.h)
-FZ_NAMES="azconf cmjson cmcat png bus drumwav stemname ofscache sdklib pdbsync elfcheck mp4 hcanlz sdkanalysis clocktz cmbrowse inputmem fcopy colwidths colfields"
+FZ_NAMES="azconf cmjson cmcat png bus drumwav stemname ofscache sdklib pdbsync elfcheck mp4 hcanlz sdkanalysis vdanlz clocktz clockset cmbrowse inputmem fcopy colwidths colfields wzsave"
 FZ_T=tools/fuzz
 FZ_UT=tools/unit-tests
 
@@ -72,9 +75,15 @@ fz_prepare() {
         grep -q 'static int cmi_png_fit(unsigned char \*b, int n, uint32_t maxw, uint32_t maxh) {' "$dir/png.inc" &&
             grep -q 'int cmi_png_ok' "$dir/png.inc" && grep -q 'no IEND' "$dir/png.inc" ;;
     pdbsync)
-        cp guest/azmod/pdb_sync.c "$dir/" ;;
+        cp guest/azmod/pdb_sync.c guest/azmod/pioneer_dir.h "$dir/" ;;
     clocktz)
         cp guest/azmod/clock_tz.h "$dir/" ;;
+    clockset)
+        cp guest/azmod/clock_tz.h guest/azmod/clock_set.h "$dir/"
+        grep -q 'static inline int cs_rec_parse' "$dir/clock_set.h" ;;
+    wzsave)
+        cp guest/azmod/wave_zoom.h "$dir/"
+        grep -q 'static inline uint32_t wz_parse' "$dir/wave_zoom.h" ;;
     inputmem)
         cp guest/azmod/input_memory.h "$dir/" ;;
     colwidths)
@@ -93,7 +102,8 @@ fz_prepare() {
         cp guest/common/azsha256.h "$dir/"
         grep -q 'CM_LIBS' "$dir/elfcheck.inc" && grep -q 'azsha256_hex(b, sz, sha);' "$dir/elfcheck.inc" ;;
     stemname)
-        { awk '/^static int slot_for_filename\(/ {p=1} p {print} p && /^}$/ {exit}' guest/azstem/stem_playback.c
+        { cat guest/azstem/stem_source_rule.h
+          awk '/^static int slot_for_filename\(/ {p=1} p {print} p && /^}$/ {exit}' guest/azstem/stem_playback.c
           awk '/^static int stem_folder_rank\(/ {p=1} p {print} p && /^static int stem_folder_identity\(/ {q=1} q && /^}$/ {exit}' guest/azstem/stem_playback.c
         } > "$dir/stemname.inc"
         grep -q 'static int json_str' "$dir/stemname.inc" && grep -q 'file_fingerprint(src)' "$dir/stemname.inc" &&
@@ -115,7 +125,7 @@ fz_prepare() {
         [ ! -d guest/azmod/icons ] || cp -R guest/azmod/icons "$dir/azmod/"
         grep -q '^static void cm_load(void)' "$dir/azmod/screen_community.c" ;;
     sdklib)
-        cp guest/azmod/sdk_lib.c guest/azmod/azmod-mod.h $FZ_UT/sdklib_test.c $FZ_UT/check.h "$dir/"
+        cp guest/azmod/sdk_lib.c guest/azmod/azmod-mod.h guest/azmod/pioneer_dir.h $FZ_UT/sdklib_test.c $FZ_UT/check.h "$dir/"
         grep -q '^static void sdk_copy_col' "$dir/sdk_lib.c" ;;
     sdkanalysis)
         mkdir -p "$dir/../common"
@@ -124,6 +134,9 @@ fz_prepare() {
     hcanlz)
         cp guest/azmod/hc_anlz.h "$dir/"
         grep -q 'static inline int hc_anlz_hot_cues' "$dir/hc_anlz.h" ;;
+    vdanlz)
+        cp guest/azmod/vd_anlz.h "$dir/"
+        grep -q 'static inline int vd_anlz_read' "$dir/vd_anlz.h" ;;
     mp4)
         awk '/^static long ofs_stems_decoded\(/ {exit} {print}' guest/azstem/ofsload.c > "$dir/mp4.inc"
         cp guest/azstem/ep147rate.h "$dir/"
@@ -144,6 +157,8 @@ fz_cflags() {   # <name> <dir>: per-harness compile arguments (sources and inclu
     png)    FZ_ARGS=(-DPNG_INC="\"$dir/png.inc\"" $FZ_T/png_fuzz.c) ;;
     pdbsync) FZ_ARGS=(-I"$dir" $FZ_T/pdbsync_fuzz.c) ;;
     clocktz) FZ_ARGS=(-I"$dir" $FZ_T/clocktz_fuzz.c) ;;
+    clockset) FZ_ARGS=(-I"$dir" $FZ_T/clockset_fuzz.c) ;;
+    wzsave) FZ_ARGS=(-I"$dir" $FZ_T/wzsave_fuzz.c) ;;
     inputmem) FZ_ARGS=(-I"$dir" $FZ_T/inputmem_fuzz.c) ;;
     colwidths) FZ_ARGS=(-I"$dir" $FZ_T/colwidths_fuzz.c) ;;
     colfields) FZ_ARGS=(-I"$dir" $FZ_T/colfields_fuzz.c) ;;
@@ -162,6 +177,7 @@ fz_cflags() {   # <name> <dir>: per-harness compile arguments (sources and inclu
     mp4)    FZ_ARGS=(-I"$dir" -DMP4_INC="\"$dir/mp4.inc\"" $FZ_T/mp4_fuzz.c -ldl) ;;
     sdkanalysis) FZ_ARGS=(-I"$dir" $FZ_T/sdkanalysis_fuzz.c) ;;
     hcanlz) FZ_ARGS=(-DHCANLZ_HDR="\"$dir/hc_anlz.h\"" $FZ_T/hcanlz_fuzz.c) ;;
+    vdanlz) FZ_ARGS=(-DVDANLZ_HDR="\"$dir/vd_anlz.h\"" $FZ_T/vdanlz_fuzz.c) ;;
     cmjson) FZ_ARGS=(-I"$dir" -DCMJSON_INC="\"$dir/cmjson.inc\"" $FZ_T/cmjson_fuzz.c) ;;
     esac
 }

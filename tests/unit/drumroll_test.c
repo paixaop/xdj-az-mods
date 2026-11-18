@@ -497,7 +497,7 @@ static void test_mix(void) {
         mix_block(0, frozen);
     mix_press(0, 2);
     float pk[16];
-    CHECK("setup: 1/4 beat at 120 BPM is 5513 frames", drum_period_frames(0) == period);
+    CHECK("setup: 1/4 beat at 120 BPM is 5513 frames", drum_period_frames(0, 0) == period);
     for (int b = 0; b < 16; b++)
         pk[b] = mix_block(0, frozen);
     CHECK("paused deck: the first hit sounds at once", pk[0] > 0.4f);
@@ -617,6 +617,235 @@ static void test_mix(void) {
 #else
     printf("SKIP  drumroll: steady roll (the hit record is development-only)\n");
 #endif
+}
+
+/* ---- an empty deck following the master deck ----
+ * Side 0 is the master: playing, with a grid. Side 1 is empty (playhead -1, no grid of its
+ * own) and follows side 0 (azstem_drum_follow, which azmod sends an empty deck). Each
+ * "callback" renders the master's block first, then the follower's, as the decks are rendered
+ * in turn; the follower reads the playhead the master's block just published. */
+static void test_follow(void) {
+    ut_suite = "drum follow";
+    const double beat = 22050.0, sub = beat * 0.25; /* 120 BPM grid, rate 2 = 1/4 beat */
+    azstem_drum_sync(1);
+    azstem_drum_bpm(0, 120.f);
+    azstem_drum_bpm(1, 120.f);
+    drum_grid_publish(0, 1, 0, beat);
+    drum_grid_publish(1, 0, 0, 0.0); /* the empty deck has no grid of its own */
+    azstem_drum_gate(0, 0);
+    azstem_drum_gate(1, 0);
+
+    azstem_drum_follow(1, 1);
+    CHECK("a deck told to follow itself follows nobody", atomic_load(&g_drum_follow[1]) == -1);
+    azstem_drum_follow(1, 7);
+    CHECK("a lead out of range follows nobody", atomic_load(&g_drum_follow[1]) == -1);
+    azstem_drum_follow(1, 0);
+    CHECK("an empty deck follows the master", atomic_load(&g_drum_follow[1]) == 0);
+
+    /* the master playing, the empty deck pressed off the beat. EP147 refreshes the master's
+     * playhead every other block, so it reports the true position on even blocks and the
+     * previous one on odd blocks; the press lands on a stale (odd) block, where only the
+     * master's moving playhead says to wait for its grid. */
+    long long pos = (long long) beat * 6 + 700; /* true position */
+    int blk = 0;
+#define MASTER_SRC(p, b) ((p) - ((b) & 1 ? MIX_NS : 0))
+    for (; blk < 7; blk++, pos += MIX_NS) {
+        mix_block(0, MASTER_SRC(pos, blk));
+        mix_block(1, -1);
+    }
+    mix_press(1, 2);
+    double ph = fmod((double) pos, sub);
+    int want = (int) ((sub - ph) / MIX_NS); /* blocks from the press to the master's boundary */
+    int hit = -1, second = -1;
+    CHECK("follow: setup: the press lands on a stale master block", blk & 1);
+    for (int b = 0; b < 40; b++, blk++, pos += MIX_NS) {
+        mix_block(0, MASTER_SRC(pos, blk));
+        if (mix_block(1, -1) > 0.4f) {
+            if (hit < 0)
+                hit = b;
+            else if (second < 0 && b > hit + 4)
+                second = b;
+        }
+    }
+    CHECK("follow: setup: the press is blocks away from the master's next boundary", want > 1);
+    CHECK("empty deck following the master: the first hit is not fired at the press", hit != 0);
+    CHECK("...and lands in the block holding the master's next grid boundary", hit == want);
+    CHECK("...and the next one a subdivision later, on the master's grid",
+          second == (int) ((sub * 2 - ph) / MIX_NS));
+#undef MASTER_SRC
+    azstem_drum_gate(1, 0);
+    for (int b = 0; b < 8; b++, pos += MIX_NS) {
+        mix_block(0, pos);
+        mix_block(1, -1);
+    }
+
+    /* the master paused: nothing to lock to, the follower rolls free at once */
+    for (int b = 0; b < 20; b++) {
+        mix_block(0, pos);
+        mix_block(1, -1);
+    }
+    mix_press(1, 2);
+    mix_block(0, pos);
+    CHECK("master paused: the empty deck's first hit sounds at once", mix_block(1, -1) > 0.4f);
+    azstem_drum_gate(1, 0);
+
+    /* follow cleared (a track loaded on it, or no master): its own grid, here none */
+    azstem_drum_follow(1, -1);
+    for (int b = 0; b < 8; b++, pos += MIX_NS) {
+        mix_block(0, pos);
+        mix_block(1, -1);
+    }
+    mix_press(1, 2);
+    mix_block(0, pos);
+    CHECK("follow cleared: back to its own (no) grid, the first hit at once",
+          mix_block(1, -1) > 0.4f);
+    azstem_drum_gate(1, 0);
+    for (int b = 0; b < 8; b++)
+        mix_block(1, -1);
+
+    /* the master's blocks stop running while the follower waits for its boundary: the
+     * follower sees the lead's playhead stand still and, after the stall window, fires */
+    azstem_drum_follow(1, 0);
+    for (int b = 0; b < 8; b++, pos += MIX_NS) {
+        mix_block(0, pos);
+        mix_block(1, -1);
+    }
+    mix_press(1, 2);
+    int fired = -1;
+    for (int b = 0; b < 40 && fired < 0; b++)
+        if (mix_block(1, -1) > 0.4f)
+            fired = b;
+    CHECK("master's blocks stopped: setup: the press waited for the master's grid", fired != 0);
+    CHECK("...and the first hit sounds within the stall window, never hangs silent",
+          fired > 0 && (long) fired * MIX_NS <= DRUM_SYNC_STALL + MIX_NS);
+    azstem_drum_gate(1, 0);
+
+    /* follow set on a master that moved, then paused, while nobody followed it: the
+     * follower's first reading of a new lead (one block before the press) is no evidence
+     * of motion, so the press fires at once instead of waiting out the stall window */
+    azstem_drum_follow(1, -1);
+    for (int b = 0; b < 4; b++, pos += MIX_NS) {
+        mix_block(0, pos);
+        mix_block(1, -1);
+    }
+    for (int b = 0; b < 20; b++) {
+        mix_block(0, pos);
+        mix_block(1, -1);
+    }
+    azstem_drum_follow(1, 0);
+    mix_block(0, pos);
+    mix_block(1, -1);
+    mix_press(1, 2);
+    mix_block(0, pos);
+    CHECK("follow set on a paused master, pressed at once: the first hit sounds at once",
+          mix_block(1, -1) > 0.4f);
+    azstem_drum_gate(1, 0);
+    azstem_drum_follow(1, -1);
+    for (int b = 0; b < 8; b++)
+        mix_block(1, -1);
+}
+
+/* ---- a paused deck with a track following the master (Paused Deck = Master) ----
+ * Side 0 is the master: playing at 120 BPM, with a grid. Side 1 has a track at 100 BPM with
+ * a grid of its own, and is told to follow side 0 while it is not playing
+ * (azstem_drum_follow_paused, which azmod sends while Paused Deck = Master). Each "callback"
+ * renders the master's block first, then side 1's. pb_onsets holds side 1 for n blocks and
+ * records the blocks where a hit starts; `run1` moves side 1's playhead too. */
+static long long pb_pos, pb_p1;
+static int pb_onsets(int n, int run1, int *on, int max, long long *at) {
+    int k = 0, prev = 0;
+    for (int b = 0; b < n; b++, pb_pos += MIX_NS, pb_p1 += run1 ? MIX_NS : 0) {
+        mix_block(0, pb_pos);
+        int loud = mix_block(1, pb_p1) > 0.4f;
+        if (loud && !prev && k < max) {
+            on[k] = b;
+            if (at)
+                at[k] = run1 ? pb_p1 : pb_pos; /* the playhead whose grid it should be on */
+            k++;
+        }
+        prev = loud;
+    }
+    return k;
+}
+/* Does the block starting at playhead `p` hold a boundary of a grid with subdivision `sub`? */
+static int pb_on_grid(long long p, double sub) {
+    return floor((double) (p + MIX_NS - 1) / sub) > floor((double) (p - 1) / sub);
+}
+static void test_paused(void) {
+    ut_suite = "drum paused follow";
+    const double beat = 22050.0, sub = beat * 0.25;    /* master: 120 BPM, rate 2 = 1/4 beat */
+    const double beat1 = 26460.0, sub1 = beat1 * 0.25; /* side 1's track: 100 BPM */
+    int on[16];
+    long long at[16];
+    azstem_drum_sync(1);
+    azstem_drum_bpm(0, 120.f);
+    azstem_drum_bpm(1, 100.f);
+    drum_grid_publish(0, 1, 0, beat);
+    drum_grid_publish(1, 1, 0, beat1);
+    azstem_drum_follow(1, -1);
+    azstem_drum_gate(0, 0);
+    azstem_drum_gate(1, 0);
+
+    azstem_drum_follow_paused(1, 7);
+    CHECK("paused: a lead out of range follows nobody", atomic_load(&g_drum_follow_paused[1]) == -1);
+    azstem_drum_follow_paused(1, 1);
+    CHECK("paused: a deck told to follow itself follows nobody",
+          atomic_load(&g_drum_follow_paused[1]) == -1);
+    azstem_drum_follow_paused(1, 0);
+    CHECK("paused: a deck follows the master", atomic_load(&g_drum_follow_paused[1]) == 0);
+
+    /* side 1 paused, the master playing: the press waits for the master's boundary, and the
+     * hits come at the master's tempo, not side 1's */
+    pb_pos = (long long) beat * 6 + 700;
+    pb_p1 = (long long) beat1 * 3 + 1234;
+    pb_onsets(16, 0, on, 16, NULL);
+    mix_press(1, 2);
+    double ph = fmod((double) pb_pos, sub);
+    int want = (int) ((sub - ph) / MIX_NS);
+    int k = pb_onsets(30, 0, on, 16, NULL);
+    CHECK("paused: setup: the press is blocks away from the master's next boundary", want > 1);
+    CHECK("paused deck with a track: the first hit is not fired at the press", k > 0 && on[0] != 0);
+    CHECK("...and lands in the block holding the master's next grid boundary", k > 0 && on[0] == want);
+    CHECK("...and the next one a subdivision of the master's tempo later",
+          k > 1 && on[1] == (int) ((sub * 2 - ph) / MIX_NS));
+
+    /* still held: side 1 starts playing and the follow is cleared (the master changed, or the
+     * setting turned off): the roll keeps the master's beat until the release */
+    azstem_drum_follow_paused(1, -1);
+    k = pb_onsets(60, 1, on, 16, NULL);
+    long long mpos = pb_pos - 60LL * MIX_NS; /* the master's playhead at the first of those blocks */
+    int on_master = 0;
+    for (int i = 0; i < k; i++)
+        on_master += pb_on_grid(mpos + (long long) on[i] * MIX_NS, sub);
+    printf("      held through play: %d hits, %d on the master's grid\n", k, on_master);
+    CHECK("held through play and a cleared follow: every hit stays on the master's grid",
+          k >= 4 && on_master == k);
+    azstem_drum_gate(1, 0);
+
+    /* side 1 playing at the press: its own grid, even with the follow set */
+    pb_onsets(8, 1, on, 16, NULL);
+    azstem_drum_follow_paused(1, 0);
+    pb_onsets(4, 1, on, 16, NULL);
+    mix_press(1, 2);
+    int want1 = (int) ((sub1 - fmod((double) pb_p1, sub1)) / MIX_NS);
+    int wantm = (int) ((sub - fmod((double) pb_pos, sub)) / MIX_NS);
+    k = pb_onsets(30, 1, on, 16, at);
+    CHECK("playing: setup: its own boundary and the master's are in different blocks",
+          want1 != wantm);
+    CHECK("a playing deck pressed with the follow set: the first hit on its own grid",
+          k > 0 && on[0] == want1);
+    azstem_drum_gate(1, 0);
+
+    /* Paused Deck = Own Track (no follow): a paused deck rolls free at its own tempo */
+    azstem_drum_follow_paused(1, -1);
+    pb_onsets(16, 0, on, 16, NULL);
+    mix_press(1, 2);
+    k = pb_onsets(30, 0, on, 16, NULL);
+    CHECK("own track: a paused deck's first hit sounds at once", k > 0 && on[0] == 0);
+    CHECK("...and the next one a subdivision of its own track's tempo later",
+          k > 1 && on[1] == (int) (sub1 / MIX_NS));
+    azstem_drum_gate(1, 0);
+    pb_onsets(8, 0, on, 16, NULL);
 }
 
 /* ---- the native grid: its sample rate measured from its own tempo field ----
@@ -747,13 +976,13 @@ static void test_grid(void) {
     atomic_store(&g_drum_rate[0], 0);
     long fa, fb, fx, fy;
     drum_grid_publish(0, 1, GA_ANCHOR, GA_BEAT);
-    fa = drum_sync_frames_to_next(0, GRID_POS, GRID_PERIOD);
+    fa = drum_sync_frames_to_next(0, 0, GRID_POS, GRID_PERIOD);
     drum_grid_publish(0, 1, GB_ANCHOR, GB_BEAT);
-    fb = drum_sync_frames_to_next(0, GRID_POS, GRID_PERIOD);
+    fb = drum_sync_frames_to_next(0, 0, GRID_POS, GRID_PERIOD);
     drum_grid_publish(0, 1, GA_ANCHOR, GB_BEAT);
-    fx = drum_sync_frames_to_next(0, GRID_POS, GRID_PERIOD);
+    fx = drum_sync_frames_to_next(0, 0, GRID_POS, GRID_PERIOD);
     drum_grid_publish(0, 1, GB_ANCHOR, GA_BEAT);
-    fy = drum_sync_frames_to_next(0, GRID_POS, GRID_PERIOD);
+    fy = drum_sync_frames_to_next(0, 0, GRID_POS, GRID_PERIOD);
     CHECK("the two grids and both mixes give four different answers",
           fa >= 0 && fb >= 0 && fx >= 0 && fy >= 0 && fa != fb && fx != fa && fx != fb &&
               fy != fa && fy != fb);
@@ -764,7 +993,7 @@ static void test_grid(void) {
     long reads = 0, whole = 0, torn = 0, t_end = grid_now_ms() + GRID_MS;
     while (grid_now_ms() < t_end) {
         for (int k = 0; k < 1000; k++) {
-            long f = drum_sync_frames_to_next(0, GRID_POS, GRID_PERIOD);
+            long f = drum_sync_frames_to_next(0, 0, GRID_POS, GRID_PERIOD);
             reads++;
             if (f < 0)
                 continue;
@@ -791,6 +1020,8 @@ int main(int argc, char **argv) {
     test_service();
     test_swap();
     test_mix();
+    test_follow();
+    test_paused();
     test_grid_rate();
     test_grid();
     return ut_summary();

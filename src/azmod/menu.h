@@ -59,8 +59,8 @@ typedef enum {
  * make those flags live. azmod's diagnostic logs go through azlog_open(), which writes
  * nothing unless /home/root/settings/azmod-logs.on existed at start. Not everything is
  * behind those two gates: a few plain access()/open() test hooks under /tmp remain in
- * release builds (fake temperature and CPU-frequency inputs, touch-simulation and
- * Themes test triggers), and azstem writes small status files to /tmp unconditionally.
+ * release builds (fake temperature and CPU-frequency inputs, touch-simulation test
+ * triggers), and azstem writes small status files to /tmp unconditionally.
  * Feature flags and ".off" kill switches are plain access() by design. */
 #ifdef AZMOD_PROBES
 #define AZ_PROBE_ON(p) (access((p), F_OK) == 0)
@@ -266,6 +266,9 @@ extern __attribute__((visibility("hidden"))) uint32_t g_azmod_clockn_ink, g_azmo
 /* Set Time Manually: the UTC time the menu asks the overlay thread to set, 0 = none (screen_overlays.c
  * writes it, mod_menu_overlay.c ov_poll_clock takes it); __atomic only */
 extern __attribute__((visibility("hidden"))) int64_t g_azmod_clock_set_req;
+/* the seconds the Clock adds to the system time (the manual set's offset, 0 = none); ov_poll_clock
+ * writes it, the Set Time picker starts from it; __atomic only */
+extern __attribute__((visibility("hidden"))) int64_t g_azmod_clock_off;
 __attribute__((visibility("hidden"))) int azmod_clock_tz_index(const char *zone); /* -1 unknown */
 __attribute__((visibility("hidden"))) const char *azmod_clock_tz_zone(int k);     /* UTC if out of range */
 
@@ -310,6 +313,14 @@ void azmod_stats_rect(const azmod_state *s, const azmod_fb *fb, int *x, int *y, 
 __attribute__((visibility("hidden"))) bool azmod_clockn_on(const azmod_state *s);
 __attribute__((visibility("hidden"))) void azmod_clockn_rect(const azmod_fb *fb, int *x, int *y, int *w, int *h);
 __attribute__((visibility("hidden"))) void azmod_draw_clockn(const azmod_state *s, const azmod_fb *fb);
+/* The Clock's countdown Timer (clock_timer.h), overlay thread only: a tap on the Clock opens or
+ * closes its popup; the popup's rect (0 = not shown), a tap on it, its drawing; a key that changes
+ * whenever the Clock's place must be drawn again (the countdown's seconds and its red). */
+__attribute__((visibility("hidden"))) void azmod_clockn_tap(const azmod_state *s, const azmod_fb *fb);
+__attribute__((visibility("hidden"))) int azmod_ctpop_rect(const azmod_state *s, const azmod_fb *fb, int *x, int *y, int *w, int *h);
+__attribute__((visibility("hidden"))) void azmod_ctpop_tap(const azmod_fb *fb, int x, int y);
+__attribute__((visibility("hidden"))) void azmod_draw_ctpop(const azmod_fb *fb);
+__attribute__((visibility("hidden"))) int azmod_clockn_key(void);
 
 /* A screen's row rect, i in [0..N]. */
 void azmod_item_rect(const azmod_fb *fb, int i, int *x, int *y, int *w, int *h);

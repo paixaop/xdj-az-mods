@@ -473,6 +473,9 @@ static int st_start_worker(void) {
     pthread_mutex_unlock(&g_st_source_mu);
     return rc;
 }
+static void sdk_data_owner_init(int owner) {
+    st_reopen_owner(&g_st, owner);
+}
 static void sdk_data_retire_owner(int owner) {
 #ifdef CM_MAX
     _Static_assert(CM_MAX <= ST_OWNER_CAP, "data owner retirement covers every core mod index");

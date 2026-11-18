@@ -44,7 +44,7 @@ static inline int st_owner_retired(struct st_engine *e, int owner) {
     return owner >= 0 && owner < ST_OWNER_CAP &&
            (atomic_load_explicit(&e->retired_owners, memory_order_acquire) & (UINT64_C(1) << owner));
 }
-/* Core mod indices are never reused in a process. Retirement is nonblocking,
+/* A stopped owner stays retired until its next init. Retirement is nonblocking,
  * including when a worker is publishing or a caller has the cache mutex. */
 static inline void st_retire_owner(struct st_engine *e, int owner) {
     if (owner >= 0 && owner < ST_OWNER_CAP)
@@ -60,6 +60,23 @@ static inline void st_reap_retired_locked(struct st_engine *e) {
             t->id = 0;
         }
     }
+}
+/* The loader calls this only before init, after stop and all mod threads have
+ * finished. Old handles and events cannot cross into the new lifetime. */
+static inline void st_reopen_owner(struct st_engine *e, int owner) {
+    if (owner < 0 || owner >= ST_OWNER_CAP) return;
+    pthread_mutex_lock(&e->mu);
+    for (unsigned i = 0; i < ST_TICKETS; ++i) {
+        struct st_ticket *t = &e->tickets[i];
+        if (t->id && t->owner == owner) {
+            --e->slots[t->slot].refs;
+            t->id = 0;
+        }
+    }
+    for (unsigned i = 0; i < ST_EVENTS; ++i)
+        if (e->events[i].owner == owner) e->events[i].owner = -1;
+    atomic_fetch_and_explicit(&e->retired_owners, ~(UINT64_C(1) << owner), memory_order_release);
+    pthread_mutex_unlock(&e->mu);
 }
 static inline uint64_t st_now(void) {
     struct timespec ts;

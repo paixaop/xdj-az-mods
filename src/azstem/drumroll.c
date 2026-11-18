@@ -112,6 +112,28 @@ static long g_drum_hit_age[DRUM_SIDES] = {[0 ... DRUM_SIDES - 1] = DRUM_AGE_MAX}
  * the playhead is unknown. RT only. */
 static long g_drum_src_still[DRUM_SIDES] = {[0 ... DRUM_SIDES - 1] = DRUM_AGE_MAX};
 static long long g_drum_prev_src[DRUM_SIDES];
+/* The playhead the last beat-lock reading used, per side (its own, or its lead's). RT only. */
+static long long g_drum_prev_sync[DRUM_SIDES];
+/* An empty deck follows the master deck: azmod names the lead (azstem_drum_follow, -1 =
+ * none), and the side's roll is placed on the lead's grid at the lead's playhead. Each
+ * side's block publishes its playhead for a follower to read. */
+static _Atomic int g_drum_follow[DRUM_SIDES] = {[0 ... DRUM_SIDES - 1] = -1};
+static _Atomic long long g_drum_src_pub[DRUM_SIDES] = {[0 ... DRUM_SIDES - 1] = -1};
+/* A follower judges the lead's motion itself, from the readings its own blocks see: output
+ * frames since the lead's published playhead last changed (saturating), and the lead that
+ * reading came from (-1 = none yet). A lead whose blocks stop running therefore reads as
+ * stopped after DRUM_SYNC_STALL, so a waiting first hit never hangs silent. RT only. */
+static long g_drum_lead_still[DRUM_SIDES] = {[0 ... DRUM_SIDES - 1] = DRUM_AGE_MAX};
+static int g_drum_lead_of[DRUM_SIDES] = {[0 ... DRUM_SIDES - 1] = -1};
+static long long g_drum_lead_prev[DRUM_SIDES];
+/* A deck that is not playing follows the deck azmod names for it (azstem_drum_follow_paused,
+ * the master deck while Paused Deck = Master; -1 = none), chosen once at the press and held
+ * until the release (g_drum_latch, -1 = none), so a roll keeps its beat when the deck is
+ * started or the master changes mid-roll. g_drum_latch_gate: the gate the last block saw.
+ * RT only, but g_drum_follow_paused. */
+static _Atomic int g_drum_follow_paused[DRUM_SIDES] = {[0 ... DRUM_SIDES - 1] = -1};
+static int g_drum_latch[DRUM_SIDES] = {[0 ... DRUM_SIDES - 1] = -1};
+static int g_drum_latch_gate[DRUM_SIDES];
 
 #define DRUM_FADE_IN 16   /* frames: kills the click on retrigger */
 #define DRUM_FADE_OUT 192 /* frames: kills the click when a hit is cut short */
@@ -673,7 +695,9 @@ static drum_grid g_drum_grid[DRUM_SIDES];
 static _Atomic int g_drum_sync_on = 0;        /* azmod owns this; power-on default off */
 static _Atomic int g_grid_demand = 0;         /* a community mod asked for beat phases */
 static _Atomic long g_drum_sync_off = 0;      /* the tunable, source samples */
+static _Atomic int g_sfx_mode;                /* stem_fx.c: Stem FX on pads 5-8 reads the grid */
 static unsigned g_drum_grid_seen[DRUM_SIDES]; /* last track generation parsed */
+static unsigned g_drum_grid_told[DRUM_SIDES]; /* last generation logged as having no grid */
 static int g_drum_grid_init = 0;
 
 /* First hit on press: 1 = fire immediately and lock from the next subdivision;
@@ -881,30 +905,35 @@ static void drum_grid_service(void) {
             g_drum_grid_seen[d] =
                 atomic_load_explicit(&g_deck_trackgen[d], memory_order_relaxed) - 1u;
     }
-    /* No work while nothing reads the grid: Beat Sync off and no community mod asking for
-     * beat phases. The track generation is deliberately not consumed then, so turning
-     * either on picks up the tracks already loaded. The grid drives Drum Roll only while
-     * Beat Sync is on (drum_sync_frames_to_next checks it first). */
+    /* No work while nothing reads the grid: Beat Sync off, no community mod asking for beat
+     * phases and the stem pads not FX pads. The track generation is deliberately not consumed
+     * then, so turning any of them on picks up the tracks already loaded. The grid drives
+     * Drum Roll only while Beat Sync is on (drum_sync_frames_to_next checks it first). */
     if (!atomic_load_explicit(&g_drum_sync_on, memory_order_relaxed) &&
-        !atomic_load_explicit(&g_grid_demand, memory_order_relaxed))
+        !atomic_load_explicit(&g_grid_demand, memory_order_relaxed) &&
+        !atomic_load_explicit(&g_sfx_mode, memory_order_relaxed))
         return;
 
     for (int d = 0; d < DRUM_SIDES && d < NDECK; d++) {
         unsigned gen = atomic_load_explicit(&g_deck_trackgen[d], memory_order_relaxed);
         if (gen == g_drum_grid_seen[d])
             continue;
-        g_drum_grid_seen[d] = gen;
         drum_grid_publish(d, 0, 0, 0.0); /* invalidate first */
 
         /* EP147's in-memory grid: microseconds, no file I/O. */
         long long anchor = 0;
         double beat = 0.0;
         if (!drum_grid_native(d, &anchor, &beat)) {
-            /* Unknown (empty, ejected or mid-load): the grid stays invalid and
-             * the deck free-runs. */
-            logln("drumsync: d%d no native grid yet -- FREE-RUNNING", d);
+            /* Unknown (empty, ejected or mid-load): the grid stays invalid and the deck
+             * free-runs. The generation stays unconsumed, so the next tick reads again: the
+             * analysis often lands after the track change that announced it. */
+            if (g_drum_grid_told[d] != gen + 1u) {
+                g_drum_grid_told[d] = gen + 1u;
+                logln("drumsync: d%d no native grid yet -- FREE-RUNNING", d);
+            }
             continue;
         }
+        g_drum_grid_seen[d] = gen;
         drum_grid_publish(d, 1, anchor, beat);
         logln("drumsync: d%d LOCKED  anchor=%lld src  beat=%.1f src (%.2f BPM)  from EP147", d,
               anchor, beat, (double) DRUM_SR * 60.0 / beat);
@@ -924,13 +953,14 @@ void azstem_drum_sync(int on) {
  * Additive and post-DSP: one-shots need no tempo or key following, and adding
  * cannot clobber the track.
  */
-static long drum_period_frames(int side) {
+/* The hit interval: `side`'s X-PAD rate at `bpm_side`'s BPM (its own, or a latched lead's). */
+static long drum_period_frames(int side, int bpm_side) {
     int ri = atomic_load_explicit(&g_drum_rate[side], memory_order_relaxed);
     if (ri < 0)
         ri = 0;
     else if (ri >= DRUM_RATES)
         ri = DRUM_RATES - 1;
-    int q = atomic_load_explicit(&g_drum_bpm_q16[side], memory_order_relaxed);
+    int q = atomic_load_explicit(&g_drum_bpm_q16[bpm_side], memory_order_relaxed);
     double bpm = q > 0 ? (double) q / 65536.0 : 120.0; /* unknown BPM -> 120 */
     if (bpm < 40.0)
         bpm = 40.0;
@@ -963,12 +993,12 @@ static int drum_sync_grid_ready(int side) {
  * where tempo does not enter; `period` is the output interval at the live BPM,
  * so the fraction of a subdivision left maps directly onto it.
  * RT-safe: atomic loads and one fmod. */
-static long drum_sync_frames_to_next(int side, long long src_pos, long period) {
+static long drum_sync_frames_to_next(int grid_side, int side, long long src_pos, long period) {
     if (!atomic_load_explicit(&g_drum_sync_on, memory_order_relaxed))
         return -1;
     if (src_pos < 0)
         return -1;
-    drum_grid *g = &g_drum_grid[side];
+    drum_grid *g = &g_drum_grid[grid_side]; /* the side's own grid, or its lead's */
     unsigned s1 = atomic_load_explicit(&g->seq, memory_order_acquire);
     if (s1 & 1u)
         return -1; /* mid-write: skip this block */
@@ -1019,7 +1049,6 @@ static void drum_mix_block_in(int side, float **chans, int nch, int ns, long lon
         /* release: let the tail finish, then idle. No new retriggers. */
         g_drum_next[side] = 0;
     }
-    long period = drum_period_frames(side);
 
     /* Is this deck's transport moving? Tracked whether or not the roll is gated, so a
      * press on a deck that has been paused for a while knows it at once. */
@@ -1029,8 +1058,55 @@ static void drum_mix_block_in(int side, float **chans, int nch, int ns, long lon
         g_drum_src_still[side] = 0;
     else if (g_drum_src_still[side] < DRUM_AGE_MAX)
         g_drum_src_still[side] += ns;
+    atomic_store_explicit(&g_drum_src_pub[side], src_pos, memory_order_relaxed);
+    /* Whose grid and playhead place the hits: this deck's, or another deck's (its lead):
+     *  - an empty deck follows the master deck (g_drum_follow), re-read on every block;
+     *  - a deck that is not playing at the press follows its paused lead (g_drum_latch),
+     *    at that lead's BPM too, until the release.
+     * The lead's playhead is the one its last block published: at most a block old, and
+     * re-read on every block like a deck's own. */
+    int fl = atomic_load_explicit(&g_drum_follow[side], memory_order_relaxed);
+    if (fl < 0 || fl >= DRUM_SIDES || fl == side)
+        fl = -1;
+    int pl = atomic_load_explicit(&g_drum_follow_paused[side], memory_order_relaxed);
+    if (pl < 0 || pl >= DRUM_SIDES || pl == side)
+        pl = -1;
+    if (!gate)
+        g_drum_latch[side] = -1;
+    else if (!g_drum_latch_gate[side]) /* the press */
+        g_drum_latch[side] = fl < 0 && g_drum_src_still[side] >= DRUM_SYNC_STALL ? pl : -1;
+    g_drum_latch_gate[side] = gate;
+    int lead = fl >= 0 ? fl : g_drum_latch[side];
+    /* The deck whose motion is judged: the lead, or, before a press, the deck a press would
+     * latch, so the latched lead's motion is already known on the press's first block. */
+    int watch = lead >= 0 ? lead : pl;
+    int grid_side = side;
+    long long sync_src = src_pos;
+    int moving = g_drum_src_still[side] < DRUM_SYNC_STALL;
+    if (watch >= 0) {
+        long long wsrc = atomic_load_explicit(&g_drum_src_pub[watch], memory_order_relaxed);
+        if (wsrc < 0)
+            g_drum_lead_still[side] = DRUM_AGE_MAX;
+        else if (g_drum_lead_of[side] != watch)
+            g_drum_lead_still[side] = DRUM_AGE_MAX; /* a new lead's first reading: no motion yet */
+        else if (wsrc != g_drum_lead_prev[side])
+            g_drum_lead_still[side] = 0;
+        else if (g_drum_lead_still[side] < DRUM_AGE_MAX)
+            g_drum_lead_still[side] += ns;
+        g_drum_lead_of[side] = wsrc < 0 ? -1 : watch;
+        g_drum_lead_prev[side] = wsrc;
+    } else {
+        g_drum_lead_of[side] = -1;
+    }
+    if (lead >= 0) {
+        grid_side = lead;
+        sync_src = g_drum_lead_prev[side];
+        moving = g_drum_lead_still[side] < DRUM_SYNC_STALL;
+    }
+    long period =
+        drum_period_frames(side, fl < 0 && g_drum_latch[side] >= 0 ? g_drum_latch[side] : side);
     /* The grid can place hits only on a moving deck (DRUM_SYNC_STALL). */
-    int sync_ready = g_drum_src_still[side] < DRUM_SYNC_STALL && drum_sync_grid_ready(side);
+    int sync_ready = moving && drum_sync_grid_ready(grid_side);
 
     /* Beat sync: re-anchor the countdown to the grid once per block (~1.5 ms),
      * which also follows tempo moves and jogs. With sync off or no grid,
@@ -1046,8 +1122,8 @@ static void drum_mix_block_in(int side, float **chans, int nch, int ns, long lon
          * call; re-anchoring on a stale one recomputes the same `tonext`, stalls
          * the countdown and makes the roll alternate one and three subdivisions.
          * Between refreshes the countdown free-runs at `period`. */
-        long tonext = (gate && src_pos != prev_src[side])
-                          ? drum_sync_frames_to_next(side, src_pos, period)
+        long tonext = (gate && sync_src != g_drum_prev_sync[side])
+                          ? drum_sync_frames_to_next(grid_side, side, sync_src, period)
                           : -1;
         if (gate && !prev_gate[side]) { /* rising edge */
             if (DRUM_SYNC_FIRST_HIT_IMMEDIATE || !sync_ready) {
@@ -1086,6 +1162,8 @@ static void drum_mix_block_in(int side, float **chans, int nch, int ns, long lon
             g_drum_wait_anchor[side] = 0;
         if (src_pos >= 0)
             prev_src[side] = src_pos;
+        if (sync_src >= 0)
+            g_drum_prev_sync[side] = sync_src;
         prev_gate[side] = gate;
     }
 
@@ -1195,6 +1273,8 @@ void azstem_drum_select(int side, int slot);
 void azstem_drum_rate(int side, int idx);
 void azstem_drum_touch(int side, int on);
 void azstem_drum_bpm(int side, float bpm);
+void azstem_drum_follow(int side, int lead);
+void azstem_drum_follow_paused(int side, int lead);
 
 /* bit0..3 = banks present on the stick; 0 = no DRUM ROLLS folder found. */
 int azstem_drum_available(void) {
@@ -1242,4 +1322,23 @@ void azstem_drum_bpm(int side, float bpm) {
         return;
     atomic_store_explicit(&g_drum_bpm_q16[side], bpm > 0.f ? (int) (bpm * 65536.f) : 0,
                           memory_order_relaxed);
+}
+/* lead 0..3: this side's roll is placed on that deck's beat grid at that deck's playhead
+ * (azmod sends an empty deck the master deck); -1, itself or out of range: its own. */
+void azstem_drum_follow(int side, int lead) {
+    if (side < 0 || side >= DRUM_SIDES)
+        return;
+    if (lead < 0 || lead >= DRUM_SIDES || lead == side)
+        lead = -1;
+    atomic_store_explicit(&g_drum_follow[side], lead, memory_order_relaxed);
+}
+/* lead 0..3: a roll pressed while this side is not playing is placed on that deck's beat grid,
+ * at its playhead and BPM, until the release (azmod sends the master deck while Paused Deck =
+ * Master); -1, itself or out of range: its own grid and BPM. */
+void azstem_drum_follow_paused(int side, int lead) {
+    if (side < 0 || side >= DRUM_SIDES)
+        return;
+    if (lead < 0 || lead >= DRUM_SIDES || lead == side)
+        lead = -1;
+    atomic_store_explicit(&g_drum_follow_paused[side], lead, memory_order_relaxed);
 }

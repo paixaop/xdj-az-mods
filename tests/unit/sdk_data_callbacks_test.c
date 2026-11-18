@@ -197,6 +197,14 @@ int main(void) {
     g_sdk_commands.records[0] = (struct scmd_record) {.owner = 0, .token = 5, .phase = SCMD_FINAL};
     sdk_data_callbacks_tick();
     assert(commands[0] == 2);
+    st_reopen_owner(&g_st, 0);
+    g_sdk_commands.records[0].retired = 1;
+    sdk_data_callbacks_tick();
+    assert(commands[0] == 2);
+    g_sdk_commands.records[0].retired = 0;
+    ++g_sdk_commands.owner_lifetime[0];
+    sdk_data_callbacks_tick();
+    assert(commands[0] == 2 && "a restarted mod must not receive an old command completion");
     st_destroy(&g_st);
     puts("data callbacks: passed");
     return 0;

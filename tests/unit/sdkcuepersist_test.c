@@ -339,7 +339,8 @@ void *install(uintptr_t address, void *hook, void **original) {
     else assert(false);
     return hook;
 }
-int validate(const struct azexit_cue_request *, void *owner, uint64_t cookie, void *unused_3) {
+int validate(const struct azexit_cue_request *unused_0, void *owner, uint64_t cookie, void *unused_3) {
+    (void) unused_0;
     (void) unused_3;
     return identity_valid && owner == maintainer.bytes && cookie == 7;
 }
@@ -355,7 +356,7 @@ int confirm(const struct azexit_cue_request *r, void *unused_1, uint64_t unused_
         __auto_type wrong = fresh;
         wrong.source_id[0] ^= 1;
         assert(!azsdk_cue_persist_confirm_publication(r, &wrong));
-        __auto_type wrong_request = *r;
+        struct azexit_cue_request wrong_request = *r;
         ++wrong_request.entry_id;
         assert(!azsdk_cue_persist_confirm_publication(&wrong_request, &fresh));
         /* A genuine native publication with identical logical rows is still

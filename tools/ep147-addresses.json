@@ -1713,6 +1713,142 @@
       "EP_3b8e9f8": {
         "v200": "0x3ff6c90",
         "basis": "hand: the juce::String the TrackListWidget button listener's click slot (vtable +0x10: v1."
+      },
+      "EP_1d76f18": {
+        "v200": "0x1ee21c8",
+        "basis": "hand: gui::waveform::KeyWidget: writes the tray KEY Label (+0x140) with juce::Label::setTe"
+      },
+      "EP_1d77468": {
+        "v200": "0x1ee2718",
+        "basis": "hand: KeyWidget: isEnabled() of its KEY row arrow (+0x148; ldr x0,[x0,#0x148]; b Component"
+      },
+      "EP_1d7f848": {
+        "v200": "0x1eeaaf8",
+        "basis": "hand: gui::waveform::DeckInfo4DeckWidget paint: slot 26 of its primary vtable (1.30 0x2cfe"
+      },
+      "EP_1e27d28": {
+        "v200": "0x1f93f08",
+        "basis": "hand: vtable slot 2 (timerCallback) of N3gui11player_info11LocalPlayerE: v2.00 vtable 0x31"
+      },
+      "EP_1f4a5b0": {
+        "v200": "0x20b6928",
+        "basis": "hand: EP147's UI font factory (float height -> juce::Font through x8): String(\"PDJ-TsukuGo"
+      },
+      "EP_1fc9a80": {
+        "v200": "0x2137120",
+        "basis": "hand: the per-deck GUI model update: the only function that calls gui::CueState's update ("
+      },
+      "EP_230f5c0": {
+        "v200": "0x247ca60",
+        "basis": "code w=12 | xref 6/6 agree"
+      },
+      "EP_23a54e0": {
+        "v200": "0x2512980",
+        "basis": "hand: juce::Colour::withMultipliedAlpha(float), result through x8: drawLabel, right after"
+      },
+      "EP_23af590": {
+        "v200": "0x251ca30",
+        "basis": "hand: juce::Graphics::setFont(const Font &): drawLabel, x1 = the Label + 0x178 (its font)"
+      },
+      "EP_23eb200": {
+        "v200": "0x25586a0",
+        "basis": "hand: juce::Graphics::drawFittedText(String, Rectangle<int>, Justification, maxLines, minS"
+      },
+      "EP_2437090": {
+        "v200": "0x25a4530",
+        "basis": "hand: juce::Component::isEnabled: drawLabel (1.30 0x2475408 / 2.00 0x25e270c) picks alpha"
+      },
+      "EP_2471200": {
+        "v200": "0x25de6a0",
+        "basis": "hand: juce::Component::findColour(id), result through x8: the call after mov w1,#0x281 in"
+      },
+      "EP_2485140": {
+        "v200": "0x25f25e0",
+        "basis": "hand: juce::Component::addChildComponent body (parent, child, zOrder): addAndMakeVisible t"
+      },
+      "EP_2487a80": {
+        "v200": "0x25f4f20",
+        "basis": "hand: juce::Component::setTransform(const AffineTransform&): the one function that tests t"
+      },
+      "EP_249a4b0": {
+        "v200": "0x2607950",
+        "basis": "hand: juce::Component::removeChildComponent(Component *): addAndMakeVisible (1.30 0x249d6b"
+      },
+      "EP_2968228": {
+        "v200": "0x2cda4e0",
+        "basis": "hand: vtable of device_adapter::DefaultMainWindow (RTTI, offset-to-top 0, only one on both"
+      },
+      "EP_2b60cf8": {
+        "v200": "0x2edab68",
+        "basis": "hand: gui::detailed_waveform::BeatMeasure, the vtable of its juce::Component (RTTI, offset"
+      },
+      "EP_2b62268": {
+        "v200": "0x2edc0d8",
+        "basis": "hand: gui::detailed_waveform::CueCountdownWidget, the vtable of its juce::Component (offse"
+      },
+      "EP_2b66f68": {
+        "v200": "0x2ee0dd8",
+        "basis": "hand: DetailedWaveformWidget<DetailedWaveform_Blue, ...>, the vtable of its juce::Componen"
+      },
+      "EP_2b675d8": {
+        "v200": "0x2ee1448",
+        "basis": "hand: DetailedWaveformWidget<DetailedWaveform_RGB, ...>, its juce::Component vtable (RTTI,"
+      },
+      "EP_2b67c48": {
+        "v200": "0x2ee1ab8",
+        "basis": "hand: DetailedWaveformWidget<DetailedWaveform_3Band, ...>, its juce::Component vtable (RTT"
+      },
+      "EP_2b6ca28": {
+        "v200": "0x2ee6898",
+        "basis": "hand: gui::detailed_waveform::own_deck::UnderCueMarkerCollectWidget, the vtable of its juc"
+      },
+      "EP_2b88870": {
+        "v200": "0x2f027a0",
+        "basis": "hand: RTTI: the primary vtable (offset-to-top 0) of N3gui11performance14KeyShiftWidgetE (t"
+      },
+      "EP_2b88a48": {
+        "v200": "0x2f02978",
+        "basis": "hand: RTTI: the same vtable group, the entry with offset-to-top -112: the KeyShiftWidget j"
+      },
+      "EP_2ce7020": {
+        "v200": "0x3097a40",
+        "basis": "hand: gui::waveform::SimpleWaveform4DeckFieldWidget primary vtable: the vtable its constru"
+      },
+      "EP_2ceae40": {
+        "v200": "0x309c160",
+        "basis": "hand: vtable of gui::waveform::SimpleWaveformFieldWidget (RTTI, offset-to-top 0, the only"
+      },
+      "EP_2cedcf8": {
+        "v200": "0x309f030",
+        "basis": "hand: RTTI: the primary vtable (offset-to-top 0) of N3gui8waveform9KeyWidgetE; its ctor 1."
+      },
+      "EP_2cfe3a8": {
+        "v200": "0x30af6e8",
+        "basis": "hand: vtable of gui::waveform::DeckInfo4DeckFieldWidget (RTTI, offset-to-top 0, the only v"
+      },
+      "EP_2d0dc08": {
+        "v200": "0x30bef48",
+        "basis": "hand: vtable of gui::waveform::DeckSetup4DeckFieldWidget (RTTI, offset-to-top 0, only one"
+      },
+      "EP_2d0ddc0": {
+        "v200": "0x30bf100",
+        "basis": "hand: vtable of gui::waveform::DeckSetup4DeckWidget (RTTI, offset-to-top 0, only one on bo"
+      },
+      "EP_2d3ddc8": {
+        "v200": "0x30f0738",
+        "basis": "hand: vtable of gui::waveform::PlayerInfoFieldWidget (RTTI, offset-to-top 0, only one on b"
+      },
+      "EP_2dd5300": {
+        "v200": "0x3188300",
+        "basis": "hand: vtable of the shared_ptr block of gui::CueCountdown (RTTI, 1.30 and 2.00)"
+      },
+      "EP_2dedd88": {
+        "v200": "0x31a1198",
+        "basis": "hand: vtable of the shared_ptr block of gui::CueState (RTTI, 1.30 and 2.00)"
+      },
+      "EP_3b32488": {
+        "v200": "0x3f92028",
+        "basis": "hand: gui::detailed_waveform::DispStateHolder static zoom (u16 num, u16 den; .data 01 00 0"
       }
     },
     "azstem": {

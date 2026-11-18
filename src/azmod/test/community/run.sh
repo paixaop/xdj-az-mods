@@ -77,21 +77,21 @@ ok "no update for the same version"                          '[ "$($W/harness ve
 ok "no update for a malformed version"                       '[ "$($W/harness vernewer 1.1 1.0.1)" = 0 ]'
 ok "CONTROL: the old test (versions differ) offers 0.9.0 under 1.0.1" '[ "$($W/harness verdiffer 0.9.0 1.0.1)" = 1 ]'
 
-# 1a. min_core against the core's AZ_CORE_VERSION (1.2.8): equal / older / absent load; newer and
+# 1a. min_core against the core's AZ_CORE_VERSION (1.2.9): equal / older / absent load; newer and
 # malformed are refused with the reason on the Mod Menu
 reset
 for m in mc-eq mc-old mc-none mc-new mc-bad; do mod $m; done
-manifest mc-eq '["any"]' false ',"min_core":"1.2.8"'
+manifest mc-eq '["any"]' false ',"min_core":"1.2.9"'
 manifest mc-old '["any"]' false ',"min_core":"1.2.6"'
 manifest mc-none '["any"]' false
-manifest mc-new '["any"]' false ',"min_core":"1.2.9"'
+manifest mc-new '["any"]' false ',"min_core":"1.2.10"'
 manifest mc-bad '["any"]' false ',"min_core":"1.3"'
 enable mc-eq mc-old mc-none mc-new mc-bad
 $W/harness init > $W/out
 ok "min_core equal loads"          '[ "$(st mc-eq)" = 1 ]'
 ok "min_core older loads"          '[ "$(st mc-old)" = 1 ]'
 ok "no min_core loads"             '[ "$(st mc-none)" = 1 ]'
-ok "min_core newer refused (1.2.9 > 1.2.8)" '[ "$(st mc-new)" = 3 ] && rs mc-new | grep -q "Needs AZ-MODS 1.2.9 or newer"'
+ok "min_core newer refused (1.2.10 > 1.2.9)" '[ "$(st mc-new)" = 3 ] && rs mc-new | grep -q "Needs AZ-MODS 1.2.10 or newer"'
 ok "min_core malformed refused"    '[ "$(st mc-bad)" = 3 ] && rs mc-bad | grep -q "MAJOR.MINOR.PATCH"'
 
 # 1c. core 1.2.3 services: text settings round-trip (control bytes dropped, default when unset),
@@ -624,5 +624,43 @@ ctl_core stems 's/    struct azstem_deck_snap s;\n    return cm_snap\(d, &s\) ==
 reset; mod decks-mod -DMOD_DECKS; manifest decks-mod '["any"]' false; enable decks-mod
 CM_TEST_DECKS=LE $W/harness-stems init run > $W/out
 ok "CONTROL: following the stems' track, a loaded deck without a STEMS tree reads 0" 'grep -qx "loaded0=0" $W/cv/decks-mod.cfg'
+# 11. Turning a mod off and on while the deck runs (az_mod_v1.stop): only a mod with stop() and
+#     nothing that lasts until the next start; nothing is called into it between stop() and init();
+#     the stage says what was chosen, so a restart without a re-mirror agrees
+lv(){ grep "^LIVESET" $W/out | sed -n "${1}p"; }
+reset; mod live-mod -DMOD_LIVE; manifest live-mod '["any"]' false; enable live-mod
+$W/harness init live live-mod off,on,off,on > $W/out
+ok "live off: done now, stop() called, nothing runs, the stage says off" 'lv 1 | grep -q "^LIVESET off rc=1 state=2 byte0=0 ran=0 inits=1 stops=1 filtered=0 filters=1 off=1 enabled=\[\] dirty=0"'
+ok "live on again: init() again, on_frame and the filter run, the filter slot reused" 'lv 2 | grep -q "^LIVESET on rc=1 state=1 byte0=42 ran=0 inits=2 stops=1 filtered=1 filters=1 off=0 enabled=\[live-mod \] dirty=0"'
+ok "off and on twice: still one filter slot" 'lv 4 | grep -q "^LIVESET on rc=1 state=1 byte0=42 ran=0 inits=3 stops=2 filtered=2 filters=1 off=0"'
+reset; mod plain-mod; manifest plain-mod '["any"]' false; enable plain-mod
+$W/harness init live plain-mod off > $W/out
+ok "no stop(): keeps running until a reload, the stage already says off" 'lv 1 | grep -q "^LIVESET off rc=0 state=1 byte0=42 .* off=1 enabled=\[\]"'
+reset; mod live-hooks -DMOD_LIVE -DFWTAG="\"$TAG\""; manifest live-hooks "[\"$TAG\"]" true; enable live-hooks
+$W/harness init live live-hooks off > $W/out
+ok "stop() but \"hooks\": true: not stopped live" 'lv 1 | grep -q "^LIVESET off rc=0 state=1 byte0=42 .* stops=0"'
+reset; mod live-late -DMOD_LIVE; manifest live-late '["any"]' false; enable live-late; enable_only; touch $W/root/az-usbload/community/live-late/live-late.off
+$W/harness init live live-late on,off > $W/out
+ok "turned on live, never loaded this start: loads now" 'grep -q "^MOD live-late state=2" $W/out && lv 1 | grep -q "^LIVESET on rc=1 state=1 byte0=42 .* inits=1 .* off=0 enabled=\[live-late \]"'
+ok "and off again live" 'lv 2 | grep -q "^LIVESET off rc=1 state=2 byte0=0 .* stops=1 .* off=1 enabled=\[\]"'
+reset; mod late-plain; manifest late-plain '["any"]' false; enable late-plain; enable_only; touch $W/root/az-usbload/community/late-plain/late-plain.off
+$W/harness init live late-plain on,on > $W/out
+ok "turned on live without stop(): waits for a reload (twice), the stage says on" 'lv 1 | grep -q "^LIVESET on rc=0 state=2 .* off=0 enabled=\[late-plain \]" && lv 2 | grep -q "^LIVESET on rc=0 state=2"'
+reset; mod live-mod -DMOD_LIVE; manifest live-mod '["any"]' false; enable live-mod
+$W/harness init livestress live-mod 40 > $W/out
+ok "40 live offs and ons while the bus thread runs frames: no call outside init()..stop()" 'grep -q "^STRESS bad=0 overlap=0 filtered=[1-9][0-9]* frames=[1-9][0-9]* filters=1 state=1" $W/out'
+ctl_core nodrain 's/    while \(__atomic_load_n\(&c->inflight, __ATOMIC_SEQ_CST\) && k\+\+ < CM_LIVE_DRAIN_MS\) cm_wait_ms\(1\);\n    if \(__atomic_load_n\(&c->inflight, __ATOMIC_SEQ_CST\)\) \{/    if (0) {/'
+reset; mod live-mod -DMOD_LIVE; manifest live-mod '["any"]' false; enable live-mod
+# the race is this control's point: its sanitizer report is not one of the suite's
+TSAN_OPTIONS="${TSAN_OPTIONS:-}:report_bugs=0" $W/harness-nodrain init livestress live-mod 40 > $W/out
+ok "CONTROL: without waiting for calls in flight, stop() runs during one" 'grep -q "^STRESS bad=0 overlap=[1-9]" $W/out'
+# 12. A service as the last statement of a callback: a tail call at -O2, unless the mod is built
+#     with the SDK template's -fno-optimize-sibling-calls; the refusal names that flag
+reset; mod tail-flag -DMOD_LIVE -DMOD_TAILSTOP -O2 -fno-optimize-sibling-calls; manifest tail-flag '["any"]' false; enable tail-flag
+$W/harness init live tail-flag off > $W/out
+ok "last call in stop(), built with the flag: the service runs" 'grep -qx "stopped=1" $W/cv/tail-flag.cfg && ! grep -q "refused" $W/log/tail-flag.log'
+reset; mod tail-noflag -DMOD_LIVE -DMOD_TAILSTOP -O2; manifest tail-noflag '["any"]' false; enable tail-noflag
+$W/harness init live tail-noflag off > $W/out
+ok "CONTROL: last call in stop(), built without the flag: refused, the log names the flag" '! grep -q "^stopped=" $W/cv/tail-noflag.cfg && grep -q "cfg_set refused.*-fno-optimize-sibling-calls" $W/log/tail-noflag.log'
 echo "passed $PASS failed $FAIL"
 [ $FAIL = 0 ]

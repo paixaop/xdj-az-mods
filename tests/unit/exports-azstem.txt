@@ -7,9 +7,12 @@ _edata
 _end
 _fini
 _init
+azstem_avail
+azstem_ctl_set
 azstem_cue_observation_v1
 azstem_cue_observer_mask_v1
 azstem_cue_take_v1
+azstem_curtrack_seq
 azstem_deck_beat_phase
 azstem_deck_has_track
 azstem_deck_observation_v1
@@ -19,6 +22,8 @@ azstem_decks_loaded
 azstem_drum_available
 azstem_drum_bank
 azstem_drum_bpm
+azstem_drum_follow
+azstem_drum_follow_paused
 azstem_drum_gate
 azstem_drum_rate
 azstem_drum_select
@@ -41,8 +46,12 @@ azstem_play_obs
 azstem_present
 azstem_status_service_v1
 azstem_stem_eq
+azstem_stem_fx
+azstem_stem_fx_config
+azstem_stem_fx_on
 azstem_stem_gain
 azstem_sync_observation_v1
 azstem_tempo_lock_observation_v1
+azstem_track_env
 azstem_trackgen
 azstem_wave

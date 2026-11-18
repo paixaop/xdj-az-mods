@@ -362,6 +362,26 @@ def clocktz():
     yield "no-footer", b"\4" + tzif(us[:3], [1, 0, 1], [-7 * 3600, -6 * 3600], b"")
     yield "v1-only", b"\5" + tzif([], [], [0], b"", ver=b"\0")
 
+@seed("clockset")
+def clockset():
+    boot = b"0b6d3f2e-9a41-4c7e-8f10-2d5b6a7c8e90"
+    mt = struct.pack("<q", 1793451420)
+    yield "record", mt + b"\0" + b"azclock1 " + boot + b" 946685400 846766020\n"
+    yield "record-behind", mt + b"\5" + b"azclock1 " + boot + b" 1793472825 -21600"
+    yield "marker", mt + b"\1"
+    yield "marker-old", struct.pack("<q", 1358499000) + b"\2"
+    yield "bad-version", mt + b"\3" + b"azclock2 " + boot + b" 1 2\n"
+
+@seed("wzsave")
+def wzsave():
+    for t in ("2/1", "1/1", "1/2", "1/4", "1/8", "1/16"):
+        yield "level-" + t.replace("/", "-"), t.encode()
+    yield "bad-1-32", b"1/32"
+    yield "bad-zero", b"01/4"
+    yield "bad-tail", b"1/4 "
+    yield "bad-empty", b""
+    yield "live-stock", b"\x01\x00\x04\x00"
+
 @seed("colwidths")
 def colwidths():
     yield "two", b"5:300 6:120\n"
@@ -385,12 +405,12 @@ def colfields():
 
 @seed("ofscache")
 def ofscache():
-    yield "taken", b"AZOFS1 1000 2000 3000 1042\n"
-    yield "negative", b"AZOFS1 1000 2000 3000 -8192\n"
-    yield "other-size", b"AZOFS1 1001 2000 3000 1042\n"
-    yield "past-window", b"AZOFS1 1000 2000 3000 8193\n"
-    yield "no-newline", b"AZOFS1 1000 2000 3000 1042"
-    yield "huge", b"AZOFS1 99999999999999999999 2000 3000 1042\n"
+    yield "taken", b"AZOFS2 1000 2000 3000 1042\n"
+    yield "negative", b"AZOFS2 1000 2000 3000 -8192\n"
+    yield "other-size", b"AZOFS2 1001 2000 3000 1042\n"
+    yield "past-window", b"AZOFS2 1000 2000 3000 8193\n"
+    yield "no-newline", b"AZOFS2 1000 2000 3000 1042"
+    yield "huge", b"AZOFS2 99999999999999999999 2000 3000 1042\n"
 
 @seed("inputmem")
 def inputmem():
@@ -505,6 +525,18 @@ def hcanlz():
                                     pcp2(2, 29343, 0x00c4ff, b"\0d\0r\0o\0p"), pcp2(8, 999999, 0xffe800)])])
     yield "no-cues", anlz_file([(b"PPTH", b"\0" * 4, b"\0" * 8)])
     yield "short", b"PMAI\0\0\0\x1c"
+
+
+@seed("vdanlz")
+def vdanlz():
+    key = bytes.fromhex("1edd1e1902191b11192318192411fb111e2a15")
+    plain = bytes([0] * 15 + [1, 1, 1, 2, 2, 3, 3, 4, 4, 4])
+    masked = bytes(x ^ key[i % 19] for i, x in enumerate(plain))
+    pvdi = lambda hop, v: (b"PVDI", struct.pack(">IHHI", hop, 22050, 1, len(v)), v)
+    yield "plain", anlz_file([(b"PPTH", b"\0" * 4, b"\0" * 8), pvdi(1024, plain)])
+    yield "masked", anlz_file([pvdi(0x80000400, masked)])
+    yield "no-pvdi", anlz_file([(b"PPTH", b"\0" * 4, b"\0" * 8)])
+    yield "empty", anlz_file([pvdi(1024, b"")])
 
 
 @seed("cmbrowse")

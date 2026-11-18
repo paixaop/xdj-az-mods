@@ -10,6 +10,9 @@
  * mapping. A vtable check alone passes a reused allocation: deck B's new FGPR
  * landing at deck A's freed address would make A's mapping name B's object. */
 static _Atomic unsigned g_deck_trackgen[NDECK];
+/* The content id of the track the deck's stems load is for, 0 = none or unknown. Cleared on every
+ * track change, set when its load starts, so an envelope is never taken for a newer track. */
+static _Atomic unsigned g_env_cid[NDECK];
 static const int STEM_SLOT[NDECK] = {
     0, 1, 2, 3};                 /* audio slots (deck_slot) for Deck 1..4 */
 static _Atomic int g_enable = 1; /* master on/off (azstem.enable); 0 = all decks pass through */
@@ -33,7 +36,6 @@ static deck_stems g_dk[NDECK];
 #define OFS_DEC 16       /* coarse-search decimation */
 #define OFS_MINCORR 0.80 /* fine peak needed to adopt a lag */
 #define OFS_MARGIN 0.10  /* ... and its lead over the runner-up */
-#define OFS_TRIES 6
 #define NOSTEMOFS_PATH "/home/root/settings/azstem.nostemofs" /* escape hatch: never apply */
 enum {
     OFS_IDLE,
@@ -92,7 +94,7 @@ static pthread_mutex_t g_adv_lock = PTHREAD_MUTEX_INITIALIZER;
  * Each .ogg is decoded to interleaved stereo f32 @44100 and mlock'd. */
 
 static pthread_mutex_t g_stems_base_mu = PTHREAD_MUTEX_INITIALIZER;
-static char g_stems_base[512]; /* discovered .../MixRack-stems dir, "" if none (shared) */
+static char g_stems_base[512]; /* discovered <stick>/STEMS dir, "" if none (shared) */
 
 /* Per-deck gui::LoadState, captured by lsctor_hook (the ctor receives the deck).
  * Declared above the drumroll.c include because the beat grid hangs off the same
@@ -170,14 +172,11 @@ static int is_dir(const char *p) {
     struct stat st;
     return (stat(p, &st) == 0 && S_ISDIR(st.st_mode));
 }
-/* Stems base under <root>, in priority order:
- *   <root>/STEMS                           what AZ-MODS writes
- *   <root>/_MixRack_library/MixRack-stems  legacy
- * STEMS/ wins only when it is not empty: AZ-MODS creates it on every stick it sets up,
- * so an empty STEMS/ is normal on a stick whose stems are still in the legacy
- * folder. Matched case-insensitively because FAT tooling may uppercase.
- * This picks the base for the availability scan only; a track load searches both
- * layouts on every stick and ranks candidates (find_track_folder_any_c). */
+/* Stems base under <root>: <root>/STEMS (what AZ-MODS writes), only when it is not empty:
+ * AZ-MODS creates it on every stick it sets up, so an empty STEMS/ is normal on a stick
+ * without stems. Matched case-insensitively because FAT tooling may uppercase.
+ * This picks the base for the availability scan only; a track load searches every
+ * stick and ranks candidates (find_track_folder_any_c). */
 static int dir_has_entries(const char *p) {
     DIR *d = opendir(p);
     if (!d)
@@ -195,12 +194,12 @@ static int dir_has_entries(const char *p) {
 }
 /* <parent>/<name>, case-insensitive, directory only. */
 static int child_named_checked(const char *parent, const char *name, char *out, size_t outsz, int *complete) {
-    DIR *d = stem_opendir(parent,complete);
+    DIR *d = stem_opendir(parent, complete);
     if (!d)
         return 0;
     struct dirent *de;
     int found = 0;
-    while ((de = stem_readdir(d,complete))) {
+    while ((de = stem_readdir(d, complete))) {
         if (de->d_name[0] == '.')
             continue;
         if (strcasecmp(de->d_name, name))
@@ -214,18 +213,11 @@ static int child_named_checked(const char *parent, const char *name, char *out, 
     return found;
 }
 static int child_named(const char *parent, const char *name, char *out, size_t outsz) {
-    return child_named_checked(parent,name,out,outsz,NULL);
+    return child_named_checked(parent, name, out, outsz, NULL);
 }
 static int root_has_stems(const char *root, char *out, size_t outsz) {
     char p[1024];
-    /* 1. <root>/STEMS, only when it holds something. */
     if (child_named(root, "STEMS", p, sizeof p) && dir_has_entries(p)) {
-        snprintf(out, outsz, "%s", p);
-        return 1;
-    }
-    /* 2. legacy MixRack layout. */
-    snprintf(p, sizeof p, "%s/_MixRack_library/MixRack-stems", root);
-    if (is_dir(p)) {
         snprintf(out, outsz, "%s", p);
         return 1;
     }
@@ -449,19 +441,19 @@ static void advance_stem_frames(int deck) {
 }
 
 /* Progressive decode of one stem into the deck's live buffer: at 44100, decode
- * in 0.5 s chunks, mlock and expose each as it lands. Other rates fall back to
- * the whole-file resampling decoder. On failure the slot leaves g_stem_present
- * so it stops gating the min. Off-RT. */
+ * in 0.5 s chunks, mlock and expose each as it lands. Other rates fall back to the
+ * whole-file resampling decoder. On failure the slot leaves g_stem_present so it
+ * stops gating the min. Takes ownership of v, the open stream (NULL = it did not
+ * open). Off-RT. */
 #define PROG_CHUNK (AZ_EP147_RATE / 2) /* 0.5 s */
 typedef struct {
     int deck;
     int slot;
     char path[1600];
+    stb_vorbis *v;
 } pjob_t;
-static void decode_stem_progressive(int deck, int slot, const char *path) {
+static void decode_stem_progressive(int deck, int slot, const char *path, stb_vorbis *v) {
     deck_stems *dk = &g_dk[deck];
-    int err = 0;
-    stb_vorbis *v = stb_vorbis_open_filename(path, &err, NULL);
     if (!v)
         goto fail;
     stb_vorbis_info info = stb_vorbis_get_info(v);
@@ -516,8 +508,9 @@ static void decode_stem_progressive(int deck, int slot, const char *path) {
     __sync_synchronize();
     dk->stem[slot] = buf; /* stem_frames still 0 -> RT ignores it */
 
-    float *tmp = malloc((size_t) PROG_CHUNK * (size_t) ch * sizeof(float));
-    if (!tmp) {
+    /* Stereo, the usual case, decodes straight into buf; only other layouts need a copy. */
+    float *tmp = ch == 2 ? NULL : malloc((size_t) PROG_CHUNK * (size_t) ch * sizeof(float));
+    if (ch != 2 && !tmp) {
         /* buf is already live in dk->stem[slot]: NULL it before dropping the slot,
          * or the RT hook sums garbage once the other stems open the gate. */
         dk->stem[slot] = NULL;
@@ -532,10 +525,11 @@ static void decode_stem_progressive(int deck, int slot, const char *path) {
         long want = cap - done;
         if (want > PROG_CHUNK)
             want = PROG_CHUNK;
-        int got = stb_vorbis_get_samples_float_interleaved(v, ch, tmp, (int) (want * (long) ch));
+        int got = stb_vorbis_get_samples_float_interleaved(v, ch, ch == 2 ? &buf[done * 2] : tmp,
+                                                           (int) (want * (long) ch));
         if (got <= 0)
             break;
-        for (long i = 0; i < got; i++) {
+        for (long i = 0; ch != 2 && i < got; i++) {
             float L, R;
             if (ch == 1) {
                 L = R = tmp[i];
@@ -575,7 +569,7 @@ static void *dth_prog(void *arg) {
      * a load decodes every stem at once, and at nice 0 they took most of the free cores
      * from it for the whole decode. Decoding still runs well ahead of the playhead. */
     setpriority(PRIO_PROCESS, (id_t) syscall(SYS_gettid), 10);
-    decode_stem_progressive(j->deck, j->slot, j->path);
+    decode_stem_progressive(j->deck, j->slot, j->path, j->v);
     return NULL;
 }
 
@@ -585,8 +579,8 @@ static void *dth_prog(void *arg) {
  *   0  <key>
  *   1  <key>_           a name the stick cannot store as written (trailing
  *                       dot/space, CON/NUL/...)
- *   2  <key>-xxxxxxxx   8-hex id: legacy MixRack, or AZ-MODS for a different song
- *                       with the same file name (told apart by source.json)
+ *   2  <key>-xxxxxxxx   8-hex id: AZ-MODS, for a different song with the same file
+ *                       name (told apart by source.json)
  * Case-insensitive, like FAT/exFAT. */
 static int stem_folder_rank(const char *name, const char *key) {
     size_t kl = strlen(key);
@@ -746,8 +740,9 @@ static int source_fp(const char *q, unsigned long long *fp) {
  * different folders share a key, so the name alone cannot tell their stems
  * apart. AZ-MODS writes <folder>/source.json:
  *   {"file": "<path relative to the stick>", "size": <bytes>, "fp": "fnv1a64:<hex>", ...}
- * Returns  1  made from `src`: same path (ASCII case ignored) and size; else the
- *             fingerprint decides when present (equal = same audio at any path);
+ * Returns  1  made from `src`: same path (ASCII case ignored) and the same size give or take a
+ *             tag edit (stem_source_rule.h); else the fingerprint decides when present
+ *             (equal = same audio at any path);
  *             else (no "fp") same size or same path.
  *          0  unknown: no source.json, no usable field, or `src` unreadable.
  *             Loads by name.
@@ -798,7 +793,7 @@ static int stem_folder_identity(const char *folder, srcid_t *src) {
         same_path =
             sl > fl && src->path[sl - fl - 1] == '/' && !strcasecmp(src->path + sl - fl, file);
     }
-    if (same_path && have_size && size == src->size)
+    if (same_path && have_size && stem_same_path_same_file(size, src->size))
         return 1;
     if (have_fp) {
         if (!file_fingerprint(src))
@@ -889,19 +884,18 @@ static int find_track_folder_any(const char *track, const char *src, char *folde
                                  int *ident) {
     return find_track_folder_any_c(track, src, folder, sz, ident, 0, NULL);
 }
-/* Find the stems folder for `track` across every mounted stick and both layouts.
+/* Find the stems folder for `track` in every mounted stick's STEMS/.
  * A folder made from a different file is never taken (stem_folder_identity).
  * Best candidate wins by, in order:
  *   1. made from this file (source.json) before unknown;
  *   2. on the same stick as the track's file `src`, when known;
- *   3. match rank (stem_folder_rank);
- *   4. STEMS/ before legacy MixRack.
+ *   3. match rank (stem_folder_rank).
  * Read-only. Off-RT. Returns 1 and fills `folder`. */
 static int find_track_folder_any_c(const char *track, const char *src, char *folder, size_t sz,
                                    int *ident, int cached, int *complete) {
     char extra_base[sizeof g_stems_base];
     pthread_mutex_lock(&g_stems_base_mu);
-    memcpy(extra_base,g_stems_base,sizeof extra_base);
+    memcpy(extra_base, g_stems_base, sizeof extra_base);
     pthread_mutex_unlock(&g_stems_base_mu);
     folder[0] = 0;
     *ident = 0;
@@ -915,75 +909,70 @@ static int find_track_folder_any_c(const char *track, const char *src, char *fol
     if (sid.size < 0)
         logln("ogg: identity of '%s' unchecked (file '%s' unknown)", track, src ? src : "");
     for (size_t r = 0; r < sizeof sroots / sizeof sroots[0]; r++) {
-        DIR *rd = stem_opendir(sroots[r],complete);
+        DIR *rd = stem_opendir(sroots[r], complete);
         if (!rd)
             continue;
         struct dirent *rde;
-        while ((rde = stem_readdir(rd,complete))) {
+        while ((rde = stem_readdir(rd, complete))) {
             if (rde->d_name[0] == '.')
                 continue;
             char stick[512];
             snprintf(stick, sizeof stick, "%s/%s", sroots[r], rde->d_name);
             size_t sl = strlen(stick);
             int other = !(src && !strncmp(src, stick, sl) && src[sl] == '/');
-            for (int layout = 0; layout < 2; layout++) {
-                char base[1024];
-                if (layout == 0) {
-                    if (!child_named_checked(stick, "STEMS", base, sizeof base,complete))
-                        continue;
-                } else
-                    snprintf(base, sizeof base, "%s/_MixRack_library/MixRack-stems", stick);
-                DIR *d = 0;
-                struct dirent *de;
-                char **nl = 0;
-                int nn = 0, ni = 0;
-                if (cached) {
-                    pthread_mutex_lock(&g_nl_mu);
-                    nl = nl_get(base, &nn);
-                    if (!nl) {
-                        pthread_mutex_unlock(&g_nl_mu);
-                        continue;
-                    }
-                } else if (!(d = stem_opendir(base,complete)))
-                    continue;
-                for (;;) {
-                    const char *dn;
-                    if (cached) {
-                        if (ni >= nn)
-                            break;
-                        dn = nl[ni++];
-                    } else {
-                        if (!(de = stem_readdir(d,complete)))
-                            break;
-                        dn = de->d_name;
-                    }
-                    if (dn[0] == '.')
-                        continue;
-                    int rank = stem_folder_rank(dn, track);
-                    if (rank < 0)
-                        continue;
-                    char p[1600];
-                    snprintf(p, sizeof p, "%s/%s", base, dn);
-                    if (!is_dir(p))
-                        continue;
-                    int id = stem_folder_identity(p, &sid);
-                    if (id < 0) {
-                        logln("ogg: reject folder '%s' for '%s': made from a different file", p,
-                              track);
-                        continue;
-                    }
-                    int score = (id ? 0 : 1000) + other * 100 + rank * 10 + layout;
-                    if (score >= best)
-                        continue;
-                    best = score;
-                    *ident = id;
-                    snprintf(folder, sz, "%s", p);
-                }
-                if (cached)
+            char base[1024];
+            if (!child_named_checked(stick, "STEMS", base, sizeof base, complete))
+                continue;
+            DIR *d = 0;
+            struct dirent *de;
+            char **nl = 0;
+            int nn = 0, ni = 0;
+            if (cached) {
+                pthread_mutex_lock(&g_nl_mu);
+                nl = nl_get(base, &nn);
+                if (!nl) {
                     pthread_mutex_unlock(&g_nl_mu);
-                else
-                    closedir(d);
+                    continue;
+                }
+            } else if (!(d = stem_opendir(base, complete)))
+                continue;
+            for (;;) {
+                const char *dn;
+                if (cached) {
+                    if (ni >= nn)
+                        break;
+                    dn = nl[ni++];
+                } else {
+                    if (!(de = stem_readdir(d, complete)))
+                        break;
+                    dn = de->d_name;
+                }
+                if (dn[0] == '.')
+                    continue;
+                int rank = stem_folder_rank(dn, track);
+                if (rank < 0)
+                    continue;
+                char p[1600];
+                snprintf(p, sizeof p, "%s/%s", base, dn);
+                if (!is_dir(p))
+                    continue;
+                int id = stem_folder_identity(p, &sid);
+                if (id < 0) {
+                    logln("ogg: reject folder '%s' for '%s': made from a different file", p,
+                          track);
+                    continue;
+                }
+                int score = (id ? 0 : 1000) + other * 100 + rank * 10;
+                if (score >= best)
+                    continue;
+                best = score;
+                *ident = id;
+                snprintf(folder, sz, "%s", p);
             }
+            if (cached)
+                pthread_mutex_unlock(&g_nl_mu);
+            else
+                closedir(d);
         }
         closedir(rd);
     }
@@ -1000,7 +989,7 @@ static int find_track_folder_any_c(const char *track, const char *src, char *fol
             if (!ok)
                 pthread_mutex_unlock(&g_nl_mu);
         } else
-            ok = (d = stem_opendir(extra_base,complete)) != 0;
+            ok = (d = stem_opendir(extra_base, complete)) != 0;
         if (ok) {
             for (;;) {
                 const char *dn;
@@ -1009,7 +998,7 @@ static int find_track_folder_any_c(const char *track, const char *src, char *fol
                         break;
                     dn = nl[ni++];
                 } else {
-                    if (!(de = stem_readdir(d,complete)))
+                    if (!(de = stem_readdir(d, complete)))
                         break;
                     dn = de->d_name;
                 }
@@ -1067,28 +1056,28 @@ int azstem_has_stems(const char *abs_path) {
 #ifdef AZ_STATUS_NATIVE_PRODUCER
 static int status_stem_probe(const char *src, int *available) {
     char key[256], folder[1024];
-    const char *base=strrchr(src,'/');
-    struct stat start,end;
-    if (!base || !base[1] || strlen(base+1)>=sizeof key || stat(src,&start)!=0 || !S_ISREG(start.st_mode))
+    const char *base = strrchr(src, '/');
+    struct stat start, end;
+    if (!base || !base[1] || strlen(base + 1) >= sizeof key || stat(src, &start) != 0 || !S_ISREG(start.st_mode))
         return AZ_AVAIL_STALE;
-    strcpy(key,base+1);
-    char *ext=strrchr(key,'.');
-    if (ext) *ext=0;
-    int ident=0, complete=1, found=0;
-    if (find_track_folder_any_c(key,src,folder,sizeof folder,&ident,0,&complete)) {
-        DIR *d=stem_opendir(folder,&complete);
+    strcpy(key, base + 1);
+    char *ext = strrchr(key, '.');
+    if (ext) *ext = 0;
+    int ident = 0, complete = 1, found = 0;
+    if (find_track_folder_any_c(key, src, folder, sizeof folder, &ident, 0, &complete)) {
+        DIR *d = stem_opendir(folder, &complete);
         if (!d) return AZ_AVAIL_STALE;
         struct dirent *de;
-        while ((de=stem_readdir(d,&complete)))
-            if (de->d_name[0]!='.' && has_ogg_ext(de->d_name) && slot_for_filename(de->d_name)>=0) found=1;
+        while ((de = stem_readdir(d, &complete)))
+            if (de->d_name[0] != '.' && has_ogg_ext(de->d_name) && slot_for_filename(de->d_name) >= 0) found = 1;
         closedir(d);
         /* A same-name folder without a matching file fingerprint is not a
          * qualified positive until this engine actually decodes it for src. */
         if (found && !ident) return AZ_AVAIL_LOADING;
     }
-    if (!complete || stat(src,&end)!=0 || start.st_dev!=end.st_dev || start.st_ino!=end.st_ino ||
-        start.st_size!=end.st_size || start.st_mtime!=end.st_mtime) return AZ_AVAIL_STALE;
-    *available=found;
+    if (!complete || stat(src, &end) != 0 || start.st_dev != end.st_dev || start.st_ino != end.st_ino ||
+        start.st_size != end.st_size || start.st_mtime != end.st_mtime) return AZ_AVAIL_STALE;
+    *available = found;
     return AZ_AVAIL_READY;
 }
 #endif
@@ -1152,6 +1141,43 @@ static long long mem_available_bytes(void) {
     fclose(f);
     return kb < 0 ? -1 : kb << 10;
 }
+/* What a load has been admitted for, and has not written yet, counts against the next
+ * load: MemAvailable still shows those malloc'd pages as free, and loads on several decks can
+ * overlap. A deck's own entry lives from its admission to the join of its decode threads. */
+static pthread_mutex_t g_mem_lock = PTHREAD_MUTEX_INITIALIZER;
+static long long g_mem_admitted[NDECK];
+/* 1 and the deck's need reserved when it fits above the floor. held = this deck's current
+ * stems, released before its decode. *avail and *pending report the decision. */
+static int stems_mem_admit(int deck, long long need, long long held, long long *avail,
+                           long long *pending) {
+    pthread_mutex_lock(&g_mem_lock);
+    long long inflight = 0;
+    for (int d = 0; d < NDECK; d++) {
+        if (d == deck || !g_mem_admitted[d])
+            continue;
+        long long left = g_mem_admitted[d];
+        for (int k = 0; k < NSTEM; k++)
+            left -= atomic_load_explicit(&g_stem_dec[d][k], memory_order_relaxed) * 2 *
+                    (long long) sizeof(float);
+        if (left > 0)
+            inflight += left;
+    }
+    long long a = mem_available_bytes();
+    int ok = a >= 0 && a + held - inflight - need >= ((long long) AZSTEM_MEM_FLOOR_MB << 20);
+    g_mem_admitted[deck] = ok ? need : 0;
+    /* the counts above must not read this deck's previous load as written */
+    for (int k = 0; ok && k < NSTEM; k++)
+        atomic_store_explicit(&g_stem_dec[deck][k], 0, memory_order_relaxed);
+    pthread_mutex_unlock(&g_mem_lock);
+    *avail = a;
+    *pending = inflight;
+    return ok;
+}
+static void stems_mem_done(int deck) {
+    pthread_mutex_lock(&g_mem_lock);
+    g_mem_admitted[deck] = 0;
+    pthread_mutex_unlock(&g_mem_lock);
+}
 /* Find the stems folder for this deck's track, check the memory floor, then
  * decode its .ogg stems progressively on parallel threads. Returns 1 when stems
  * are playable, 0 otherwise (the caller frees and shows no stems). Off-RT, on a
@@ -1205,13 +1231,14 @@ static int load_stems_ogg(int deck, const char *track, const char *src) {
     }
     closedir(fd);
 
-    /* Memory floor, checked before any allocation: decoded f32 stems are mlock'd
-     * (8 B/frame/stem), and four long tracks can exhaust a 3.85 GB deck. Not
+    /* Memory floor, checked before any allocation: decoded f32 stems take
+     * 8 B/frame/stem, mlock'd, and four long tracks can exhaust a 3.85 GB deck. Not
      * enough room -> the track plays without stems. This deck's current stems
-     * count as free (released before the decode). Two decks loading at once each
-     * see the other's untouched malloc pages as free; the floor is the margin. */
+     * count as free (released before the decode). The streams opened here go on to
+     * the decode threads. */
+    stb_vorbis *streams[NSTEM] = {NULL};
     {
-        long long need = 0, held = 0, avail = mem_available_bytes();
+        long long need = 0, held = 0, avail = 0, pending = 0;
         for (int k = 0; k < NSTEM; k++) {
             held += (long long) g_dk[deck].stem_bytes[k];
             if (!paths[k][0])
@@ -1224,13 +1251,17 @@ static int load_stems_ogg(int deck, const char *track, const char *src) {
             long long fr = stb_vorbis_stream_length_in_samples(v);
             if (in.sample_rate > 0 && in.sample_rate != AZ_EP147_RATE)
                 fr = fr * AZ_EP147_RATE / in.sample_rate;
-            stb_vorbis_close(v);
+            streams[k] = v;
             need += fr * 2 * (long long) sizeof(float);
         }
-        if (avail < 0 || avail + held - need < ((long long) AZSTEM_MEM_FLOOR_MB << 20)) {
-            logln("stems REFUSED d%d for '%s': need %lld MB, MemAvailable %lld MB (+%lld MB held), "
-                  "floor %d MB -- playing without stems",
-                  deck, track, need >> 20, avail >> 20, held >> 20, AZSTEM_MEM_FLOOR_MB);
+        if (!stems_mem_admit(deck, need, held, &avail, &pending)) {
+            for (int k = 0; k < NSTEM; k++)
+                if (streams[k])
+                    stb_vorbis_close(streams[k]);
+            logln("stems REFUSED d%d for '%s': need %lld MB, MemAvailable %lld MB (+%lld MB held, "
+                  "-%lld MB other loads), floor %d MB -- playing without stems",
+                  deck, track, need >> 20, avail >> 20, held >> 20, pending >> 20,
+                  AZSTEM_MEM_FLOOR_MB);
             return 0;
         }
     }
@@ -1273,6 +1304,7 @@ static int load_stems_ogg(int deck, const char *track, const char *src) {
     }
     atomic_store_explicit(&g_stem_present[deck], present, memory_order_relaxed);
     if (!present) {
+        stems_mem_done(deck);
         atomic_store_explicit(&g_stem_pending[deck], 0, memory_order_relaxed);
         publish_deck_file(deck, "avail", "0");
         logln("stems: no .ogg slots in '%s'", folder);
@@ -1290,9 +1322,10 @@ static int load_stems_ogg(int deck, const char *track, const char *src) {
                 continue;
             job[nth].deck = deck;
             job[nth].slot = k;
+            job[nth].v = streams[k];
             snprintf(job[nth].path, sizeof job[nth].path, "%s", paths[k]);
             if (az_thread_create(&th[nth], NULL, dth_prog, &job[nth]) != 0)
-                decode_stem_progressive(deck, k, paths[k]); /* thread exhausted: decode inline */
+                decode_stem_progressive(deck, k, paths[k], streams[k]); /* thread exhausted: inline */
             else
                 nth++;
         }
@@ -1300,6 +1333,7 @@ static int load_stems_ogg(int deck, const char *track, const char *src) {
         for (int i = 0; i < nth; i++)
             pthread_join(th[i], NULL);
     }
+    stems_mem_done(deck);
     t_dec = ms_now();
     for (int k = 0; k < NSTEM; k++)
         logln("ogg: decode slot %d -> %s frames=%ld", k, dk->stem[k] ? "ok" : "(none)",
@@ -1396,6 +1430,10 @@ static int publish_write(const char *path, const char *val) {
     }
     return 0;
 }
+/* What azmod would read from these files, for its tick without a file open per deck:
+ * azstem_avail and azstem_curtrack_seq. -1 = not published yet. */
+static _Atomic int g_avail_pub[NDECK] = {-1, -1, -1, -1};
+static _Atomic unsigned g_curtrack_seq[NDECK];
 /* Publish a per-deck control file (avail / curtrack). Failures are logged: on a
  * full settings partition a silent failure means azmod never sees the track
  * change and never resets the stem toggles. */
@@ -1411,6 +1449,8 @@ static void publish_deck_file(int deck, const char *stem, const char *val) {
     snprintf(line, sizeof line, "%s\n", val);
     if (publish_write(pth, line) != 0)
         logln("publish FAILED %s (disk full?)", pth);
+    if (!strcmp(stem, "curtrack")) /* after the rename: a reader that sees the bump sees the file */
+        atomic_fetch_add_explicit(&g_curtrack_seq[deck], 1, memory_order_release);
 }
 
 /* Publish the loaded file per deck to /tmp/azstem.cursrcN for deck-side tools
@@ -1488,7 +1528,7 @@ static void *loader_thread(void *arg) {
         logln("no stems d%d for '%s' -- passthrough", j->deck, g_dk[j->deck].loaded_track);
     }
 #ifdef AZ_STATUS_NATIVE_PRODUCER
-    azn_stems_decoded((unsigned)j->deck,j->status_job,j->src,ok);
+    azn_stems_decoded((unsigned) j->deck, j->status_job, j->src, ok);
 #endif
     int d = j->deck; /* read before the free: j is not valid after it */
     free(j);
@@ -1506,11 +1546,14 @@ static char g_pending_name[NDECK][512];
  * playing under B. */
 static char g_loaded_src[NDECK][600];
 static char g_pending_src[NDECK][600];
+/* A track identified while no stems base was known: load its stems once one is found. */
+static int g_load_deferred[NDECK];
 #define EJECT_EMPTY_TICKS 8
 /* The deck's track identity changed: a confirmed new track or an eject. Every per-deck
  * consumer keyed on the generation (azmod's stem toggle reset, the drum roll's grid, the
  * auto key-shift FGPR mapping) must see both, so both paths come through here. */
 static void deck_track_changed(int deck) {
+    atomic_store_explicit(&g_env_cid[deck], 0, memory_order_relaxed);
     atomic_fetch_add_explicit(&g_deck_trackgen[deck], 1, memory_order_relaxed);
 }
 static int lti_read(int deck, unsigned char id16[16], char *title, size_t tn, char *artist,
@@ -1539,6 +1582,7 @@ static void drop_stems(int deck) {
 }
 
 static int lti_native_path(int deck, char *out, size_t n); /* LoadedTrackInfo route, below */
+static unsigned lti_content_id(int deck);                 /* same route, 0 = unknown */
 /* Full path of the deck's file. Same authority rule as get_loaded_track_name:
  * when the native route is armed it is the only answer; empty = unknown. */
 static void loaded_track_path(int deck, char *out, size_t n) {
@@ -1558,16 +1602,17 @@ static void start_load(int deck, const char *tr) {
     j->deck = deck;
     snprintf(j->track, sizeof j->track, "%s", tr);
 #ifdef AZ_STATUS_NATIVE_PRODUCER
-    struct azsdk_load_sample before={0}, after={0};
-    j->status_job=(struct azn_stem_job){0};
-    int matched=azsdk_load_read(deck,&before);
+    struct azsdk_load_sample before = {0}, after = {0};
+    j->status_job = (struct azn_stem_job) {0};
+    int matched = azsdk_load_read(deck, &before);
 #endif
     loaded_track_path(deck, j->src, sizeof j->src);
 #ifdef AZ_STATUS_NATIVE_PRODUCER
-    if (matched && azsdk_load_read(deck,&after) && before.load_generation==after.load_generation &&
-        before.invalidation_epoch==after.invalidation_epoch && before.unit_generation==after.unit_generation)
-        j->status_job=azn_stems_job((unsigned)deck,before.load_generation,j->src);
+    if (matched && azsdk_load_read(deck, &after) && before.load_generation == after.load_generation &&
+        before.invalidation_epoch == after.invalidation_epoch && before.unit_generation == after.unit_generation)
+        j->status_job = azn_stems_job((unsigned) deck, before.load_generation, j->src);
 #endif
+    atomic_store_explicit(&g_env_cid[deck], lti_content_id(deck), memory_order_release);
     atomic_store_explicit(&g_stem_loading[deck], 1, memory_order_relaxed);
     pthread_t th;
     if (az_thread_create(&th, NULL, loader_thread, j) == 0)
@@ -1587,7 +1632,7 @@ static void stems_tick(void) {
             find_stems_base(candidate, sizeof candidate);
             if (candidate[0]) {
                 pthread_mutex_lock(&g_stems_base_mu);
-                memcpy(g_stems_base,candidate,sizeof g_stems_base);
+                memcpy(g_stems_base, candidate, sizeof g_stems_base);
                 pthread_mutex_unlock(&g_stems_base_mu);
 #ifdef AZ_STATUS_NATIVE_PRODUCER
                 azn_stems_rescan();
@@ -1605,14 +1650,15 @@ static void stems_tick(void) {
             logln("STICK d%d base='%s' self=%p frames=%ld gl='%s'", deck, g_stems_base, sf,
                   dk->stem_frames, dk->loaded_track);
         }
+        /* No stems base: track identity still runs below, since the drum roll's grid,
+         * the auto key-shift mapping and azmod's toggle reset key on the generation
+         * whether or not the stick has stems. Only stem loading waits for a base. */
+        int have_base = g_stems_base[0] != 0;
         /* no USB tree: emulator f32 fallback (Deck 1 only) */
-        if (!g_stems_base[0]) {
-            if (deck == 0 && dk->stem_frames == 0) {
-                load_stems_f32(0);
-                if (dk->stem_frames > 0)
-                    logln("stems(f32 fallback) loaded: frames=%ld", dk->stem_frames);
-            }
-            continue;
+        if (!have_base && deck == 0 && dk->stem_frames == 0) {
+            load_stems_f32(0);
+            if (dk->stem_frames > 0)
+                logln("stems(f32 fallback) loaded: frames=%ld", dk->stem_frames);
         }
         const char *tr = get_loaded_track_name(deck);
         if (!tr || !tr[0]) {
@@ -1623,8 +1669,10 @@ static void stems_tick(void) {
             if (dk->loaded_track[0] && ++g_eject_empty[deck] >= EJECT_EMPTY_TICKS) {
                 logln("stems_tick: d%d EJECT (name empty %d ticks) -- free + clear avail", deck,
                       g_eject_empty[deck]);
-                drop_stems(deck);
+                if (have_base)
+                    drop_stems(deck);
                 atomic_store_explicit(&g_stem_pending[deck], 0, memory_order_relaxed);
+                g_load_deferred[deck] = 0;
                 dk->loaded_track[0] = 0;
                 g_loaded_src[deck][0] = 0;
                 deck_track_changed(deck); /* generation + identity: ejected */
@@ -1652,6 +1700,12 @@ static void stems_tick(void) {
             if (!atomic_load_explicit(&g_stem_loading[deck], memory_order_acquire) &&
                 atomic_exchange_explicit(&g_load_again[deck], 0, memory_order_acq_rel))
                 start_load(deck, tr);
+            /* identified before a stems base existed: the base is here now */
+            else if (have_base && g_load_deferred[deck] &&
+                     !atomic_load_explicit(&g_stem_loading[deck], memory_order_acquire)) {
+                g_load_deferred[deck] = 0;
+                start_load(deck, tr);
+            }
             continue;
         }
 
@@ -1677,6 +1731,15 @@ static void stems_tick(void) {
         /* before the publish below: azmod must see the new name and the new generation
          * together, or it resets the deck's stem toggles twice */
         deck_track_changed(deck);
+        if (!have_base) {
+            /* identity only: publish it, and load the stems if a base turns up */
+            publish_deck_file(deck, "curtrack", tr);
+            publish_src(deck);
+            snprintf(dk->loaded_track, sizeof dk->loaded_track, "%s", tr);
+            g_load_deferred[deck] = 1;
+            continue;
+        }
+        g_load_deferred[deck] = 0;
 
         /* Drop the old stems now, or the RT hook keeps rendering them against the
          * new track's playhead until the new decode lands. Without buffers it

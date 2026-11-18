@@ -21,6 +21,10 @@ static _Atomic int g_drum_arm;
 
 static int g_drum_held[AZMOD_STEM_DECKS];
 
+static int g_drum_hold[AZMOD_STEM_DECKS];
+#define DRUM_HOLD_ON 1      /* pad 7 HOLD is on for this deck */
+#define DRUM_HOLD_SUSTAIN 2 /* the X-PAD has played a roll under the hold */
+
 static _Atomic unsigned g_caption_repaint;
 
 static volatile unsigned g_drum_sel_led[AZMOD_STEM_DECKS];
@@ -257,6 +261,8 @@ static void ds_pad_fresh(uintptr_t object);
 static void ds_models_install(void);
 static void ds_master_capture(uint64_t revision,uint64_t observed,int master,int captured);
 static float drum_feed_bpm(int d, double live, int master, int master_ok, double master_live);
+static int drum_feed_lead(int d, double live, int master, int master_ok, double master_live);
+static int drum_feed_paused_lead(int d, int master, int master_ok, double master_live, int on);
 
 static _Atomic int g_ui60_on;
 
@@ -295,6 +301,10 @@ static long g_disp_bt[10];
 static int g_disp_btn;
 
 static _Atomic long g_disp_pass;
+
+static _Atomic long g_feed_frame_n, g_feed_pass_n;
+
+static int feedlock_on(void);
 
 static void apply_ui60(int on);
 

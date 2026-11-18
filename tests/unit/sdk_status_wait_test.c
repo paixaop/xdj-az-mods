@@ -2,6 +2,7 @@
 /* Exercise the production overlay wait with deterministic descriptor readiness. */
 #include "../../src/common/aztimestamp.h"
 #include <assert.h>
+#include <errno.h>
 #include <poll.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -60,6 +61,14 @@ static int simulated_poll(struct pollfd *fds, nfds_t count, int timeout) {
 #include "status-wait.inc"
 #undef poll
 
+static void wait_frame(struct overlay_ctx *context, useconds_t us, long start) {
+    unsigned wake;
+    do {
+        wake = ov_wait(context, us, start);
+        if (wake & OV_WAKE_COMMAND) sdk_command_ui_drain(8);
+    } while (!(wake & OV_WAKE_FRAME));
+}
+
 static void reset(void) {
     next_step = step_count = polls = commands = statuses = 0;
     elapsed = callback_duration = pending_x = 0;
@@ -68,41 +77,41 @@ int main(void) {
     struct overlay_ctx context = {0};
     reset();
     for (unsigned i = 0; i < 6; ++i) steps[step_count++] = (struct readiness) {i + 1, 0, 0, POLLIN, 0};
-    ov_wait(&context, 10000, 0);
+    wait_frame(&context, 10000, 0);
     assert(statuses == 6 && compare_timestamps(elapsed, 10, 1000, 1000, 1) == AZ_TIME_EQUAL && polls == 7);
 
     reset();
     steps[step_count++] = (struct readiness) {2, 0, POLLIN, 0, 0};
     steps[step_count++] = (struct readiness) {3, 0, 0, 0, POLLIN};
     steps[step_count++] = (struct readiness) {5, POLLIN, POLLIN, POLLIN, 0};
-    ov_wait(&context, 30000, 0);
+    wait_frame(&context, 30000, 0);
     assert(commands == 2 && statuses == 2 && compare_timestamps(elapsed, 5, 1000, 1000, 1) == AZ_TIME_EQUAL);
 
     reset();
     for (unsigned i = 0; i < 20; ++i) steps[step_count++] = (struct readiness) {i + 1, 0, 0, POLLIN, 0};
-    ov_wait(&context, 10000, 0);
+    wait_frame(&context, 10000, 0);
     assert(statuses == 10 && polls == 10 && compare_timestamps(elapsed, 10, 1000, 1000, 1) == AZ_TIME_EQUAL);
 
     reset();
     pending_x = 1;
     steps[step_count++] = (struct readiness) {0, 0, POLLIN, POLLIN, POLLIN};
-    ov_wait(&context, 30000, 0);
+    wait_frame(&context, 30000, 0);
     assert(commands == 1 && statuses == 1 && polls == 1 && compare_timestamps(elapsed, 0, 1000, 1000, 1) == AZ_TIME_EQUAL);
 
     reset();
     elapsed = 31;
-    ov_wait(&context, 30000, 0);
+    wait_frame(&context, 30000, 0);
     assert(polls == 1 && compare_timestamps(elapsed, 31, 1000, 1000, 1) == AZ_TIME_EQUAL);
 
     reset();
     callback_duration = 40;
     steps[step_count++] = (struct readiness) {1, 0, 0, POLLIN, 0};
-    ov_wait(&context, 10000, 0);
+    wait_frame(&context, 10000, 0);
     assert(polls == 1 && statuses == 1 && compare_timestamps(elapsed, 41, 1000, 1000, 1) == AZ_TIME_EQUAL);
 
     reset();
     steps[step_count++] = (struct readiness) {1, 0, 0, POLLNVAL, 0};
-    ov_wait(&context, 10000, 0);
+    wait_frame(&context, 10000, 0);
     assert(polls == 1 && statuses == 0);
     puts("status UI wake pacing, independent commands, timer and X input passed");
 }

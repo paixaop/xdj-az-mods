@@ -44,7 +44,9 @@
 #include "ep147addr.h" /* EP_<v130> -> this build's EP147 address (generated table) */
 #include "ep147png.h"  /* the PNG images in this build's .rodata: where stick art may go */
 #include "bus_cfg.h"   /* settings word, color words and LED blocks the bus threads read */
+#include "pioneer_dir.h" /* PIONEER/ or .PIONEER/: where a stick's rekordbox export is */
 #include "bl_flip.h"   /* BEAT LOOP press: azmod's page flip or EP147's */
+#include "stem_fx_pads.h" /* pads 5-8 as Stem FX pads: tap latches, hold is momentary */
 #include "../common/azlogcap.h" /* every /tmp append is size-capped */
 #include "../common/azprot.h"   /* every write into EP147's image: unlock, write, restore */
 #include "../common/azspawn.h"  /* helpers start with posix_spawn: no fork of EP147, no shell */
@@ -87,7 +89,6 @@ static int g_ep147_build;        /* EPB_* from ep147build.h, set in azmod_init *
 #include <sys/timex.h> /* adjtimex: is the system clock synchronized (the Clock readout) */
 #include "clock_tz.h"   /* the Clock readout's zone file and local time */
 #include "clock_set.h"  /* Set Time Manually: when a set time may be shown */
-#include <linux/rtc.h>  /* RTC_SET_TIME: Set Time Manually also sets the RTC */
 #include "mm_resume.h"  /* reopen the Mod Menu when SOURCE comes back */
 #include <unistd.h>
 #include <X11/Xlib.h>
@@ -180,7 +181,20 @@ static int settings_write(const char *path, const char *buf, size_t len, int dur
  * screen is up (not SOURCE), the master (STEMS mod) is on, and that deck's
  * track has stems; on SOURCE / master-off the deck plays normally (value 0).
  * bit7 engaged | bits0-3 = enabled stems (VOCAL/INST/BASS/DRUM). */
+static void (*g_stem_ctl_fn)(int deck, unsigned v); /* azstem_ctl_set; overlay thread */
+static void stem_ctl_resolve(void) {
+    if (!g_stem_ctl_fn) /* azstem is preloaded after us */
+        *(void **) &g_stem_ctl_fn = dlsym(RTLD_DEFAULT, "azstem_ctl_set");
+}
 static void write_stems(const azmod_state *s) {
+    static unsigned last[AZMOD_STEM_DECKS];
+    static int have[AZMOD_STEM_DECKS]; /* the direct call and the file carry last[d] */
+    static int have_ctl;
+    stem_ctl_resolve();
+    if (g_stem_ctl_fn && !have_ctl) { /* the first call since azstem appeared hands over all decks */
+        have_ctl = 1;
+        memset(have, 0, sizeof have);
+    }
     for (int d = 0; d < AZMOD_STEM_DECKS; d++) {
         unsigned v = 0;
         if (azmod_stems_engine(s) && s->stems_available[d]) {
@@ -189,6 +203,12 @@ static void write_stems(const azmod_state *s) {
                 if (s->stem_on[d][i])
                     v |= (1u << i);
         }
+        if (have[d] && v == last[d])
+            continue;
+        last[d] = v;
+        have[d] = 1;
+        if (g_stem_ctl_fn)
+            g_stem_ctl_fn(d, v); /* the audio follows the pad now, not at the next file poll */
         char line[16];
         int n = snprintf(line, sizeof line, "%u\n", v);
         settings_write(STEMS_CTRL_PATH[d], line, (size_t) n, 0);
@@ -210,6 +230,10 @@ static unsigned g_stem_pm[AZMOD_STEM_DECKS];
  * brightness is the RGB magnitude (e.g. hot-cue green = 10 ff 00 00,
  * beat-loop orange = c1 63 00 00, idle = 08 0b 04 00). Pads 1-4 show the stem
  * color (full when on, dim when off); pads 5-8 are SOLO, white. */
+/* Stem FX pads (stem_fx_pads.h): set by the overlay before it builds a deck's LEDs. */
+static int g_sfx_led_mode;                       /* 1 = pads 5-8 are FX pads */
+/* bit f = effect f on (azstem_stem_fx_on); __atomic: the message thread reads it for the tile art */
+static unsigned g_sfx_led_on[AZMOD_STEM_DECKS];
 static void build_pad_led(const azmod_state *s, int d, unsigned char *out) {
     /* Same per-stem colors as the overlay strip. */
     static const unsigned char RGB[AZMOD_STEM_COUNT][3] = {
@@ -246,7 +270,26 @@ static void build_pad_led(const azmod_state *s, int d, unsigned char *out) {
             non++;
             which = k;
         }
-    for (int i = 0; i < AZMOD_STEM_COUNT && AZMOD_STEM_COUNT + i < 8; i++) {
+    /* FX pads: the pad palette's SPRING green, bright while the effect is on and dim while
+     * ready, dark where the track has no such stem. Pad order VOCAL ECHO, INST ECHO, INST BRAKE,
+     * DRUMS ECHO. */
+    static const int FX_STEM[4] = {0, 1, 1, 3};
+    static const azmod_pad_color FX_PAL[AZMOD_PAD_PALETTE_COUNT] = AZMOD_PAD_PALETTE;
+    const uint32_t fx_led = FX_PAL[17].led; /* 17 SPRING */
+    for (int i = 0; g_sfx_led_mode && i < 4 && AZMOD_STEM_COUNT + i < 8; i++) {
+        unsigned char *e = out + (AZMOD_STEM_COUNT + i) * 4;
+        if (g_stem_pm[d] && !(g_stem_pm[d] >> FX_STEM[i] & 1u)) {
+            e[0] = e[1] = e[2] = e[3] = 0;
+            continue;
+        }
+        unsigned on = (__atomic_load_n(&g_sfx_led_on[d], __ATOMIC_RELAXED) >> i) & 1u;
+        const unsigned sh = on ? 0 : 3; /* the dim step of pads 1-4 */
+        e[0] = (unsigned char) (((fx_led >> 16) & 0xffu) >> sh);
+        e[1] = (unsigned char) (((fx_led >> 8) & 0xffu) >> sh);
+        e[2] = (unsigned char) ((fx_led & 0xffu) >> sh);
+        e[3] = 0;
+    }
+    for (int i = 0; !g_sfx_led_mode && i < AZMOD_STEM_COUNT && AZMOD_STEM_COUNT + i < 8; i++) {
         unsigned char *e = out + (AZMOD_STEM_COUNT + i) * 4;
         if (g_stem_pm[d] && !(g_stem_pm[d] >> i & 1u)) {
             e[0] = e[1] = e[2] = e[3] = 0;
@@ -264,6 +307,9 @@ static void build_pad_led(const azmod_state *s, int d, unsigned char *out) {
 
 /* Mirror the stem engine (the Stems mod) to azstem.so's audio enable. */
 static void write_enable(const azmod_state *s) {
+    stem_ctl_resolve();
+    if (g_stem_ctl_fn)
+        g_stem_ctl_fn(-1, azmod_stems_engine(s) ? 1u : 0u);
     settings_write(ENABLE_CTRL_PATH, azmod_stems_engine(s) ? "1" : "0", 1, 0);
 }
 
@@ -1192,6 +1238,7 @@ static volatile unsigned g_dbg_padrise[AZMOD_STEM_DECKS];   /* last rising edge 
 static volatile unsigned g_dbg_reqraised[AZMOD_STEM_DECKS]; /* cumulative pad_req raised */
 #include "pad_leds.c"
 static void vs_save_flush(void); /* vinyl_slider.c: the overlay thread writes the saved value */
+static void wz_tick(long now); /* wave_zoom.c: Remember Waveform Zoom's saver, overlay thread */
 static void load_config(azmod_state *s); /* the settings block, below */
 static int settings_import_pending(void);  /* likewise */
 #include "link_members.c" /* PRO DJ LINK player numbers present (Stem Volume) */
@@ -1237,6 +1284,19 @@ static int g_settings_early;   /* load_settings_early has run: the values are lo
  * every load from "vinyl.brake", read at every save. */
 static _Atomic int g_vb_milli;
 static void conf_apply_small(const struct azconf *c); /* theme + vinyl.brake, below */
+/* Remember Waveform Zoom's saved level (wave_zoom.c): set here at every load from "wave.zoom",
+ * written back at every save. WZ_NONE = none. __atomic builtins only. */
+#include "wave_zoom.h"
+static uint32_t g_wz_saved = WZ_NONE;
+static void wz_conf_apply(const struct azconf *c) { /* absent or not a level: none */
+    __atomic_store_n(&g_wz_saved, wz_parse(azconf_get(c, "wave.zoom")), __ATOMIC_RELAXED);
+}
+static void wz_conf_capture(struct azconf *c) { /* a conf that never had one gets no key */
+    char w[WZ_TEXT];
+    wz_format(w, sizeof w, __atomic_load_n(&g_wz_saved, __ATOMIC_RELAXED));
+    if (w[0] || azconf_get(c, "wave.zoom"))
+        azconf_set(c, "wave.zoom", w);
+}
 static void azconf_dbg(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -1404,6 +1464,7 @@ static void conf_apply_small(const struct azconf *c) {
     g_vb_milli = m; /* _Atomic */
     int tz = azmod_clock_tz_index(azconf_get(c, "clock.tz")); /* absent or unknown: UTC */
     __atomic_store_n(&g_azmod_clock_tz, tz < 0 ? 0 : tz, __ATOMIC_RELAXED);
+    wz_conf_apply(c);
 }
 static void conf_capture_small(struct azconf *c) {
     const char *const *themes;
@@ -1415,6 +1476,7 @@ static void conf_capture_small(struct azconf *c) {
         snprintf(w, sizeof w, "%.2f", (double) m / 1000.0);
     azconf_set(c, "vinyl.brake", w); /* empty = never set: the stock values */
     azconf_set(c, "clock.tz", azmod_clock_tz_zone(__atomic_load_n(&g_azmod_clock_tz, __ATOMIC_RELAXED)));
+    wz_conf_capture(c);
 }
 /* A conf written before the theme and the vinyl value moved into it: each key it lacks is
  * imported once from its old file (when that holds a valid value). The key is then present
@@ -1908,21 +1970,20 @@ static _Atomic int g_bv_vis;
 static void setvis_hook(long self, int on) {
     /* SearchView visible == on the search screen; unlike the byte-32
      * screen-button bits this also catches touch entry. */
-    if (self > 0x10000 && *(unsigned long *) self == SEARCHVIEW_VT)
+    unsigned long vt = self > 0x10000 ? *(unsigned long *) self : 0; /* tens of thousands of calls a second */
+    if (vt == SEARCHVIEW_VT) {
         __atomic_store_n(&g_search_on, on ? 1 : 0, __ATOMIC_RELAXED);
-    if (self > 0x10000 && *(unsigned long *) self == SEARCHVIEW_VT) {
         __atomic_store_n(&g_sv_obj, (unsigned long) self, __ATOMIC_RELEASE);
         if (on)
             nm_view_changed(1); /* Search opening: its keyboard must be home first */
-    }
-    if (self > 0x10000 && *(unsigned long *) self == BROWSEVIEW_VT) {
+    } else if (vt == BROWSEVIEW_VT) {
         __atomic_store_n(&g_bv_obj, (unsigned long) self, __ATOMIC_RELEASE);
         __atomic_store_n(&g_bv_vis, on ? 1 : 0, __ATOMIC_RELEASE);
         if (!on)
             nm_view_changed(0); /* leaving Browse: naming ends */
+        else
+            __atomic_store_n(&g_browseview_shown, 1, __ATOMIC_RELEASE);
     }
-    if (self > 0x10000 && on && *(unsigned long *) self == BROWSEVIEW_VT)
-        __atomic_store_n(&g_browseview_shown, 1, __ATOMIC_RELEASE);
     if (self == __atomic_load_n(&g_waveview, __ATOMIC_RELAXED))
         __atomic_store_n(&g_wave_vis, on ? 1 : 0, __ATOMIC_RELAXED);
     /* Opt-in census of large components' visibility changes (EP147 never calls
@@ -2692,10 +2753,15 @@ static void install_wavestems_hook(void) {
     int dr = azm_install_hook(DISPREFRESH_TIMERCB, (void *) disprefresh_hook,
                               (void **) &g_orig_disprefresh);
     int dt = 0;
+    g_feedlock_ok = access("/home/root/settings/azmod-feedlock.off", F_OK) != 0;
+    int lp = g_feedlock_ok ? azm_install_hook(LOCALPLAYER_TIMERCB, (void *) lptick_hook,
+                                              (void **) &g_orig_lptick)
+                           : -2;
     {
         FILE *hf = azlog_open("/tmp/azmod-hooks2", "w");
         if (hf) {
-            fprintf(hf, "starttimer=%d peerrepaint=%d disprefresh=%d divpatch=%d\n", g, rp, dr, dt);
+            fprintf(hf, "starttimer=%d peerrepaint=%d disprefresh=%d divpatch=%d feedlock=%d\n", g, rp,
+                    dr, dt, lp);
             fclose(hf);
         }
     }
@@ -2839,6 +2905,7 @@ static int g_last_click_bit = 0, g_last_back_bit = 0;
 #include "browse_fields.c" /* Column Edit: a library field on a column */
 #include "browse_edit.c"  /* Column Edit: the COLUMN EDIT button and its edit mode */
 #include "vinyl_slider.c" /* SHORTCUT: Vinyl Speed Adjust Time as a stepless slider */
+#include "wave_zoom.c"    /* Remember Waveform Zoom */
 #include "jog_display.c"  /* stem state on the jog display */
 #include "onelibrary_key_emulator.c"
 #include "community.c"       /* community mod host */
@@ -2880,9 +2947,9 @@ static void ep147_late_init(void) { /* EP147 addresses that cannot be constant i
 #include "sdk_status_source.c"
 #include "sdk_status_map_source.c"
 #include "sdk_status_save.c"
-static int sdk_source_join_patch(uintptr_t at,uintptr_t expected,void *hook,void **original,int slot) {
-    if (slot) return *(uintptr_t *)at==expected && azm_patch_vtable(at,hook,original)==1;
-    return azm_install_hook_at(at,hook,original,"status-source")==1;
+static int sdk_source_join_patch(uintptr_t at, uintptr_t expected, void *hook, void **original, int slot) {
+    if (slot) return *(uintptr_t *) at == expected && azm_patch_vtable(at, hook, original) == 1;
+    return azm_install_hook_at(at, hook, original, "status-source") == 1;
 }
 static int sdk_passive_sources;
 #include "sdk_connections.c"
@@ -2908,25 +2975,26 @@ __attribute__((constructor)) static void azmod_init(void) {
         g_ep147_build = b;
         ep147_late_init();
         ep_img_init();     /* img_q: EP147's own image bounds */
-        sdk_passive_sources = access("/home/root/settings/azmod.deck-status.off",F_OK)!=0;
-        if (sdk_passive_sources || (access("/home/root/settings/azmod.track-data.on", F_OK)==0 &&
-            access("/home/root/settings/azmod.native-sources.on", F_OK)==0)) {
-            unsigned policy = sdk_passive_sources || access("/home/root/settings/azmod.native-source-files.on",F_OK)==0
-                ? AZS_CAPTURE_PHYSICAL_ON_LIBRARY_WORKER : 0u;
-            g_sdk_sources_on=azsdk_sources_configure(1,b,policy)==AZS_OK;
+        sdk_passive_sources = access("/home/root/settings/azmod.deck-status.off", F_OK) != 0;
+        if (sdk_passive_sources || (access("/home/root/settings/azmod.track-data.on", F_OK) == 0 &&
+                                    access("/home/root/settings/azmod.native-sources.on", F_OK) == 0)) {
+            unsigned policy = sdk_passive_sources || access("/home/root/settings/azmod.native-source-files.on", F_OK) == 0
+                                  ? AZS_CAPTURE_PHYSICAL_ON_LIBRARY_WORKER
+                                  : 0u;
+            g_sdk_sources_on = azsdk_sources_configure(1, b, policy) == AZS_OK;
         }
         sdk_connections_at_start();
         sdk_cache_at_start();
         if (sdk_passive_sources) {
-            int physical=g_sdk_sources_on && azsdk_sources_physical_ready();
-            int cache=g_sdk_sources_on && azsdk_cache_capture_ready();
-            int installed=physical && cache && azjs_install(b,sdk_source_join_patch);
-            int map_installed=sdk_status_map_source_install(b,sdk_source_join_patch);
-            int save_installed=sdk_status_save_install(b,sdk_source_join_patch);
-            FILE *source_log=azlog_open("/tmp/azmod-build.log","a");
+            int physical = g_sdk_sources_on && azsdk_sources_physical_ready();
+            int cache = g_sdk_sources_on && azsdk_cache_capture_ready();
+            int installed = physical && cache && azjs_install(b, sdk_source_join_patch);
+            int map_installed = sdk_status_map_source_install(b, sdk_source_join_patch);
+            int save_installed = sdk_status_save_install(b, sdk_source_join_patch);
+            FILE *source_log = azlog_open("/tmp/azmod-build.log", "a");
             if (source_log) {
-                fprintf(source_log,"[status-source] registry=%d physical=%d cache=%d capture=%d map=%d save=%d\n",
-                        g_sdk_sources_on,physical,cache,installed,map_installed,save_installed);
+                fprintf(source_log, "[status-source] registry=%d physical=%d cache=%d capture=%d map=%d save=%d\n",
+                        g_sdk_sources_on, physical, cache, installed, map_installed, save_installed);
                 fclose(source_log);
             }
         }
@@ -2959,6 +3027,7 @@ __attribute__((constructor)) static void azmod_init(void) {
         g_sdk_sources_on = 0;
         (void) azsdk_sources_configure(0, g_ep147_build, 0);
     }
+    wz_restore();          /* Remember Waveform Zoom: the saved zoom, before EP147's main */
     install_banner();        /* unconditional, inert; must precede EP147Application::initialise */
     install_daymode_early(); /* Themes: record EP147's art as it decodes (off only
                                 with azmod-themes.off) */

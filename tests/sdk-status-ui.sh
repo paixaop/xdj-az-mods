@@ -7,7 +7,7 @@ trap 'rm -rf "$work"' EXIT
 python3 - "$root/src/azmod/mod_menu_overlay.c" "$work/status-wait.inc" <<'PY'
 import pathlib, sys
 text = pathlib.Path(sys.argv[1]).read_text()
-start = text.index('static void ov_wait(')
+start = text.index('#define OV_MIN_TICK_US ')
 end = text.index("/* The Mod Menu's thread:", start)
 pathlib.Path(sys.argv[2]).write_text(text[start:end])
 PY

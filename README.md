@@ -123,8 +123,14 @@ your music. Tracks without stems play as normal.
 <p align="center"><img src="images/stems.png" width="520" alt="Stems pad page"></p>
 
 Tracks and playlists that have stems show a small stem mark in the track
-lists, so you can see at a glance what is ready. It can be turned off under
-**Stems** in the Mod Menu.
+lists, so you can see at a glance what is ready. The marks come in **Color** or
+**Mono**, and can be turned off under **Stems** in the Mod Menu.
+
+**Stem FX** puts four effects on pads 5-8 of the stems page: **vocal echo**,
+**instrument echo**, **instrument brake** and **drums echo**. Tap a pad to
+latch the effect, or hold it for as long as you want it. Echo and brake
+lengths follow the deck's beat grid. Turn it on under **Stems > Bottom Stem
+Pads > FX**.
 
 ### Remote Stems
 
@@ -167,7 +173,12 @@ rekordbox. Turn it on under **Playlist Editing** in the Mod Menu.
 A sample roll instrument on the X-PAD. In SLIP LOOP mode, **pad 8** arms it
 (red off, green on). Pads 1-4 pick **kick · snare · clap · hi-hat**. The six
 X-PAD zones set the rate, **1 to 1/32** of a beat, locked to the deck's BPM.
-Four banks of your own samples.
+Four banks of your own samples. It plays on a stopped deck too, and an empty
+deck rolls at the master deck's BPM.
+
+**Pad 7** is **HOLD**: with it on, the roll keeps going after you lift your
+finger from the X-PAD, at the last rate you touched. Touch another zone to
+change the rate, and press pad 7 again to stop it.
 
 The **MIC 2** EQ knobs shape the roll on both decks. **HI** is the volume:
 12 o'clock is the normal level, turn left to fade it out or right for up to
@@ -202,7 +213,9 @@ Smaller tweaks, each with its own switch in the Mod Menu (most of them under
 
 | Mod | What it does |
 |:--|:--|
-| **Phase Meter** | Shows how the two decks line up, beat by beat, above their waveforms |
+| **Phase Meter** | Shows how the decks line up, beat by beat, above their waveforms. In 4 DECK all four decks' meters sit together at the top, like the CDJ-3000's: each deck's beats against the master's, with its memory cue countdown |
+| **Compact Track Info** | In 4 DECK, the decks' info in one row at the bottom (as in BROWSE), and taller waveforms in the space it frees, with or without the Phase Meter. Tap a deck's key for key shift |
+| **4 DECK Order 1 2 3 4** | In 4 DECK, the waveforms in deck order 1, 2, 3, 4 from the top instead of 3, 1, 2, 4 |
 | **Hide Track Title** | Tap a deck's track title to hide it or show it again |
 | **BEAT JUMP 2 First** | BEAT JUMP opens the 8, 16, 32 and 64 beat jumps first |
 | **Fine Vinyl Speed Adjust** | The SHORTCUT vinyl speed steps become a 1% slider |
@@ -210,6 +223,15 @@ Smaller tweaks, each with its own switch in the Mod Menu (most of them under
 | **Remember Selected Channel** | Your Bluetooth channel is set again when a device connects |
 | **Pad Colors** | Your own color for each pad-mode button (HOT CUE, BEAT LOOP, SLIP LOOP, BEAT JUMP) |
 | **Overlays** | Small readouts on the deck screen: FPS, CPU use and clock, RAM and temperature |
+| **Clock** | A clock in the status bar, with optional seconds. Tap it for a countdown timer |
+| **Key in Track Title** | Each deck's key at the end of its track title. Tap it for key shift |
+| **Vocal Indicator** | Where the vocals are, above each deck's overview waveform (tracks analyzed with vocal detection in rekordbox) |
+| **Camelot Keys** | Keys shown in Camelot notation in the track lists and the deck info |
+| **Preview Hot Cues** | Hot cue marks on the track list's waveform previews |
+| **Extended Lead-In** | Spin a track back up to 5 minutes before its start; BEAT JUMP back runs into it |
+| **Column Edit** | Resize the Browse track list columns and put any library field in a column |
+| **Hide Column** | Hide a column in the Browse track lists |
+| **Remember Waveform Zoom** | The waveform zoom is kept over a restart |
 
 I have tons of other ideas for more mods. This is only the beginning!
 
@@ -314,6 +336,11 @@ The AZ-MODS desktop app has a Community Mods tab that does the same from your co
   **New mod found: allow?** page. A mod whose code crashes the deck is switched off on
   the next start, and only that mod; if the deck keeps restarting right after starting
   community mods, none are loaded until you turn them back on in the Mod Menu.
+- **Paid mods:** AZ-MODS is free, and the Mod Index lists only mods that are free with
+  every feature. Mods that are sold, or that unlock features through a paid account or
+  subscription, are not listed and not supported: AZ-MODS offers no help with them, and
+  questions about them go to whoever sells them. Installing AZ-MODS is free and needs no
+  paid service; anyone charging for it is not part of this project.
 
 <br>
 
@@ -383,6 +410,10 @@ in [`NOTICE`](NOTICE).
 
 Community mods run inside the AZ-MODS core, so they are GPL-3.0 as well; the
 [AZ-MODS SDK](https://github.com/Kyle-Hosman/az-mods-sdk) has the details.
+
+The GPL-3.0 covers the code, not the AZ-MODS name or logo. Neither may be used to sell
+or promote a paid product, service or installation, or to suggest that AZ-MODS endorses
+one.
 
 <br>
 

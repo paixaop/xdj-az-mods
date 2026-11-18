@@ -15,10 +15,12 @@ if needle in track:
 else:
     retire='static void sdk_data_retire_owner(int owner) { (void)owner; }'
 source=Path('src/azmod/community.c').read_text()
-start=source.index('static void cm_load_one(')
-begin=source.index('    c->m = m;',start)
-end=source.index('\n}',begin)
-Path(sys.argv[1]).write_text(retire+'\nstatic void run_actual_init(cm_mod *c, const az_mod_v1 *m) {\n'+source[begin:end]+'\n}\n')
+start=source.index('static int cm_run_init(')
+end=source.index('\n}',start)+2
+init=source[start:end].replace('cm_run_init(', 'run_actual_init(', 1)
+start=track.index('static void sdk_data_owner_init(')
+owner_init=track[start:track.index('\n}',start)+2]
+Path(sys.argv[1]).write_text(owner_init+'\n'+retire+'\n'+init+'\n')
 PY
 flags=(-std=c11 -O1 -g -Wall -Wextra -Werror -pthread -Isrc/azmod)
 case ${SAN:-plain} in plain|'') ;; asan)flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer);;tsan)flags+=(-fsanitize=thread);;*)exit 2;;esac

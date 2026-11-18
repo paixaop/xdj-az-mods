@@ -218,7 +218,8 @@ bool azcs_snapshot_property(const azcs_snapshot *self, uint32_t id, uint64_t rev
     out->destroy_ = dummy_destroy;
     return true;
 }
-bool azcs_snapshot_content_witness(const azcs_snapshot *self, uint64_t expected, struct azcuepersist_witness *out, bool) {
+bool azcs_snapshot_content_witness(const azcs_snapshot *self, uint64_t expected, struct azcuepersist_witness *out, bool unused_3) {
+    (void) unused_3;
     (void) (*self);
     ++witness_calls;
     if (!out || expected != self->revision_ || fail_witness) return false;
@@ -299,7 +300,8 @@ uint32_t azcs_snapshot_source_rate(const azcs_snapshot *self) {
     (void) (*self);
     return source_clock;
 }
-bool azcs_snapshot_timed_property(const azcs_snapshot *self, unsigned unused_1, double in, double out, bool loop, uint32_t, const char *comment, azcs_property *value) {
+bool azcs_snapshot_timed_property(const azcs_snapshot *self, unsigned unused_1, double in, double out, bool loop, uint32_t unused_5, const char *comment, azcs_property *value) {
+    (void) unused_5;
     (void) unused_1;
     (void) (*self);
     fixture_property(&(value->native), (uint64_t) (in * 48000), loop);
@@ -405,7 +407,8 @@ int azsdk_cue_lifecycle_configure(int unused_0, azexit_install_fn unused_1) {
     (void) unused_1;
     return 1;
 }
-int azsdk_cue_actor_configure(const struct azcue_actor_profile *, azexit_install_fn unused_1, const struct azcue_actor_callbacks *c) {
+int azsdk_cue_actor_configure(const struct azcue_actor_profile *unused_0, azexit_install_fn unused_1, const struct azcue_actor_callbacks *c) {
+    (void) unused_0;
     (void) unused_1;
     actor = *c;
     return AZ_OK;
@@ -475,7 +478,8 @@ int azsdk_cue_actor_complete(unsigned deck, uint64_t token, const struct azexit_
     phase = 4;
     return AZ_OK;
 }
-int azsdk_cue_persist_configure(const struct azcuepersist_profile *, azexit_install_fn unused_1, const struct azcuepersist_callbacks *c) {
+int azsdk_cue_persist_configure(const struct azcuepersist_profile *unused_0, azexit_install_fn unused_1, const struct azcuepersist_callbacks *c) {
+    (void) unused_0;
     (void) unused_1;
     persist = *c;
     return 1;
@@ -612,7 +616,8 @@ int azsdk_exit_recall_release(unsigned unused_0, uint64_t unused_1) {
     bridge_done = false;
     return AZ_OK;
 }
-static void *install(uintptr_t unused_0, void *unused_1, void **) {
+static void *install(uintptr_t unused_0, void *unused_1, void **unused_2) {
+    (void) unused_2;
     (void) unused_0;
     (void) unused_1;
     return NULL;

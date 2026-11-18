@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <dlfcn.h>
+#include <pthread.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -46,7 +47,11 @@ static int bpmstate_sample(int d, double *live, double *track, uint64_t *generat
     *generation = 0;
     return 0;
 }
-static int bpmstate_current(int deck, uint64_t generation) { (void)deck; (void)generation; return 0; }
+static int bpmstate_current(int deck, uint64_t generation) {
+    (void) deck;
+    (void) generation;
+    return 0;
+}
 static int deck_for_ds(long ds) { return ds == 0x1000 ? 2 : -1; }
 static int deck_for_modeobj(long p) {
     (void) p;
@@ -184,34 +189,47 @@ static int anyloaded_cmd(int argc, char **argv) {
 __attribute__((noinline, aligned(65536))) static void tagmp_victim(void) { __asm__ volatile(".skip 65536"); }
 
 static int status_cadence_cmd(void) {
-    if (ds_publish(2,1,DS_BOUNDARY,ds_now(),NULL,0,NULL,NULL,0,0)!=AZ_OK) return 2;
-    az_status_coord_v1 head={0,0,44100,0};
-    const struct ds_time_axis clock={44100, NULL, 64, 44100, NULL};
-    struct ds_field f={AZ_STATUS_POSITION,AZ_STATUS_POSITION_HEAD,
-        {.info={AZ_AVAIL_READY,AZ_PROV_NATIVE,1,ds_now()},.scope=AZ_STATUS_LOAD_SCOPE,
-         .scope_id=1,.provider_id=1,.count=1},&head,&clock};
-    if (ds_publish(2,1,0,ds_now(),&f,1,NULL,NULL,0,0)!=AZ_OK) return 3;
+    if (ds_publish(2, 1, DS_BOUNDARY, ds_now(), NULL, 0, NULL, NULL, 0, 0) != AZ_OK) return 2;
+    az_status_coord_v1 head = {0, 0, 44100, 0};
+    const struct ds_time_axis clock = {44100, NULL, 64, 44100, NULL};
+    struct ds_field f = {AZ_STATUS_POSITION, AZ_STATUS_POSITION_HEAD, {.info = {AZ_AVAIL_READY, AZ_PROV_NATIVE, 1, ds_now()}, .scope = AZ_STATUS_LOAD_SCOPE, .scope_id = 1, .provider_id = 1, .count = 1}, &head, &clock};
+    if (ds_publish(2, 1, 0, ds_now(), &f, 1, NULL, NULL, 0, 0) != AZ_OK) return 3;
     sdk_status_ui_drain();
-    head.seconds=1; head.samples=44100;
-    if (ds_publish(2,1,DS_MOTION,ds_now(),&f,1,NULL,NULL,0,0)!=AZ_OK) return 4;
+    head.seconds = 1;
+    head.samples = 44100;
+    if (ds_publish(2, 1, DS_MOTION, ds_now(), &f, 1, NULL, NULL, 0, 0) != AZ_OK) return 4;
     sdk_status_ui_drain();
     /* Producers stop. The two actual timerfd expirations each drive a new UI
      * drain without a tick, sleep loop, further sample or mod getter. */
-    struct pollfd timer={.fd=ds_timer_fd,.events=POLLIN};
-    for (unsigned i=0;i<2;i++) {
-        if (poll(&timer,1,1500)!=1 || !(timer.revents&POLLIN)) return 5;
+    struct pollfd timer = {.fd = ds_timer_fd, .events = POLLIN};
+    for (unsigned i = 0; i < 2; i++) {
+        if (poll(&timer, 1, 1500) != 1 || !(timer.revents & POLLIN)) return 5;
         sdk_status_ui_drain();
     }
-    head.seconds=9; head.samples=9*44100;
-    if (ds_publish(2,1,DS_MOTION,ds_now(),&f,1,NULL,NULL,0,0)!=AZ_OK) return 6;
-    head.seconds=20; head.samples=20*44100;
-    az_status_occurrence_v1 seek={.size=sizeof seek,.version=AZ_DATA_VERSION,.kind=AZ_STATUS_SEEK,
-                                   .endpoints=AZ_STATUS_OCCURRENCE_TO,.ordinal=1,.to=head};
-    if (ds_publish(2,1,0,ds_now(),&f,1,&seek,NULL,0,0)!=AZ_OK) return 7;
+    head.seconds = 9;
+    head.samples = 9 * 44100;
+    if (ds_publish(2, 1, DS_MOTION, ds_now(), &f, 1, NULL, NULL, 0, 0) != AZ_OK) return 6;
+    head.seconds = 20;
+    head.samples = 20 * 44100;
+    az_status_occurrence_v1 seek = {.size = sizeof seek, .version = AZ_DATA_VERSION, .kind = AZ_STATUS_SEEK, .endpoints = AZ_STATUS_OCCURRENCE_TO, .ordinal = 1, .to = head};
+    if (ds_publish(2, 1, 0, ds_now(), &f, 1, &seek, NULL, 0, 0) != AZ_OK) return 7;
     sdk_status_ui_drain();
-    return poll(&timer,1,80)==0 ? 0 : 8;
+    return poll(&timer, 1, 80) == 0 ? 0 : 8;
 }
 
+int az_live_probe[4]; /* the MOD_LIVE test mod's counters: inits, stops, calls outside init..stop, filter calls */
+static int g_live_stress_run;
+static long g_live_stress_frames;
+static void *live_stress_bus(void *a) {   /* the bus thread: on_frame and the frame filters, non-stop */
+    (void) a;
+    while (__atomic_load_n(&g_live_stress_run, __ATOMIC_ACQUIRE)) {
+        unsigned char fr[128] = {0};
+        community_frame(AZ_BUS_ERP_LED, fr, 0x78);
+        sdk_filter_run(AZ_BUS_ERP_LED, fr, 0x78);
+        __atomic_add_fetch(&g_live_stress_frames, 1, __ATOMIC_RELAXED);
+    }
+    return NULL;
+}
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "usage\n");
@@ -271,7 +289,7 @@ int main(int argc, char **argv) {
         void *o;
         azm_install_hook(m + 64, NULL, &o);
     }
-    g_cm_on_ui=1;
+    g_cm_on_ui = 1;
     community_init();
     for (int i = 0; i < azcm_count(); i++) {
         azcm_info_t in;
@@ -290,20 +308,18 @@ int main(int argc, char **argv) {
         }
     }
     printf("SUSPENDED %d\nLIVE %d\nNEW %d\n", azcm_suspended(), g_cm_live, azcm_new_count());
-    if (argc>2 && !strcmp(argv[2],"cadence")) return status_cadence_cmd();
-    if (argc>2 && !strcmp(argv[2],"status")) {
+    if (argc > 2 && !strcmp(argv[2], "cadence")) return status_cadence_cmd();
+    if (argc > 2 && !strcmp(argv[2], "status")) {
         /* Same UI path used by the overlay, with no community_tick call. */
-        int loaded=ds_publish(1,1,DS_BOUNDARY,ds_now(),NULL,0,NULL,NULL,0,0);
-        if (loaded!=AZ_OK) return 3;
-        for (int i=0;i<3;i++) {
-            int engaged=i%2;
-            struct ds_field field={AZ_STATUS_LOOP,AZ_STATUS_LOOP_ENGAGED,
-                {.info={AZ_AVAIL_READY,AZ_PROV_NATIVE,i+1,ds_now()},.scope=AZ_STATUS_LOAD_SCOPE,
-                 .scope_id=1,.provider_id=1,.count=1},&engaged, NULL};
-            if (ds_publish(1,1,0,ds_now(),&field,1,NULL,NULL,0,0)!=AZ_OK) return 4;
+        int loaded = ds_publish(1, 1, DS_BOUNDARY, ds_now(), NULL, 0, NULL, NULL, 0, 0);
+        if (loaded != AZ_OK) return 3;
+        for (int i = 0; i < 3; i++) {
+            int engaged = i % 2;
+            struct ds_field field = {AZ_STATUS_LOOP, AZ_STATUS_LOOP_ENGAGED, {.info = {AZ_AVAIL_READY, AZ_PROV_NATIVE, i + 1, ds_now()}, .scope = AZ_STATUS_LOAD_SCOPE, .scope_id = 1, .provider_id = 1, .count = 1}, &engaged, NULL};
+            if (ds_publish(1, 1, 0, ds_now(), &field, 1, NULL, NULL, 0, 0) != AZ_OK) return 4;
         }
-        struct pollfd wake={ds_event_fd,POLLIN,0};
-        if (poll(&wake,1,0)!=1) return 5;
+        struct pollfd wake = {ds_event_fd, POLLIN, 0};
+        if (poll(&wake, 1, 0) != 1) return 5;
         sdk_status_ui_drain();
         return 0;
     }
@@ -344,6 +360,52 @@ int main(int argc, char **argv) {
         int in_paint = g_headers;
         for (g_fake_now = 1; fake_time_within(1000); g_fake_now += 10) community_tick();
         printf("PAINT painted=%d in_paint=%d after_ticks=%d\n", painted, in_paint, g_headers - in_paint);
+        return 0;
+    }
+    if (argc > 4 && !strcmp(argv[2], "live")) {           /* the DJ turns mod argv[3] off/on: argv[4] = "off,on,..." */
+        cm_mod *c = cm_find(argv[3]);
+        char ops[64];
+        snprintf(ops, sizeof ops, "%s", argv[4]);
+        for (char *op = strtok(ops, ","); op; op = strtok(NULL, ",")) {
+            int rc = azcm_live_set(argv[3], !strcmp(op, "on"));
+            unsigned char fr[128] = {0};
+            int ran = community_frame(AZ_BUS_ERP_LED, fr, 0x78);
+            sdk_filter_run(AZ_BUS_ERP_LED, fr, 0x78);
+            int *inits = &az_live_probe[0], *stops = &az_live_probe[1], *filt = &az_live_probe[3];
+            char op_off[200];
+            snprintf(op_off, sizeof op_off, CM_STAGE "/%s/%s.off", argv[3], argv[3]);
+            char en[256] = {0};
+            FILE *ef = fopen(CM_STAGE "/enabled", "re");
+            if (ef) {
+                size_t k = fread(en, 1, sizeof en - 1, ef);
+                en[k] = 0;
+                fclose(ef);
+                for (char *q = en; *q; q++)
+                    if (*q == '\n') *q = ' ';
+            }
+            printf("LIVESET %s rc=%d state=%d byte0=%d ran=%d inits=%d stops=%d filtered=%d filters=%d off=%d enabled=[%s] dirty=%d reason=%s\n", op, rc,
+                   c ? c->state : -1, fr[0], ran, inits ? *inits : -1, stops ? *stops : -1, filt ? *filt : -1,
+                   g_sdk_ff_n, access(op_off, F_OK) == 0, en, c ? c->dirty : -1, c ? c->reason : "");
+        }
+        return 0;
+    }
+    if (argc > 4 && !strcmp(argv[2], "livestress")) {     /* the bus thread runs frames while the DJ turns it off and on */
+        cm_mod *c = cm_find(argv[3]);
+        int n = atoi(argv[4]), bad = 0;
+        pthread_t t;
+        __atomic_store_n(&g_live_stress_run, 1, __ATOMIC_RELEASE);
+        pthread_create(&t, NULL, live_stress_bus, NULL);
+        for (int i = 0; i < n; i++) {
+            if (azcm_live_set(argv[3], 0) != 1) bad++;
+            for (unsigned s = 0; s < DS_SUBS; ++s)
+                if (ds.sub[s].handle && ds.sub[s].owner == (int) (cm_find(argv[3]) - g_cm)) bad++;
+            if (azcm_live_set(argv[3], 1) != 1) bad++;
+        }
+        __atomic_store_n(&g_live_stress_run, 0, __ATOMIC_RELEASE);
+        pthread_join(t, NULL);
+        int *ov = &az_live_probe[2], *filt = &az_live_probe[3];
+        printf("STRESS bad=%d overlap=%d filtered=%d frames=%ld filters=%d state=%d\n", bad, ov ? *ov : -1, filt ? *filt : -1,
+               __atomic_load_n(&g_live_stress_frames, __ATOMIC_RELAXED), g_sdk_ff_n, c ? c->state : -1);
         return 0;
     }
     if (argc > 2 && !strcmp(argv[2], "selfcrash")) {      /* a fault in "EP147", not in a mod */

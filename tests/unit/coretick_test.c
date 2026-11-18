@@ -29,7 +29,7 @@ enum {
 };
 static int g_mod_ticks;
 static void mod_tick(void) { g_mod_ticks++; }
-static const az_mod_v1 g_mod = {AZ_MOD_ABI, sizeof(az_mod_v1), "mod-a", NULL, NULL, mod_tick, NULL};
+static const az_mod_v1 g_mod = {.abi = AZ_MOD_ABI, .size = sizeof(az_mod_v1), .id = "mod-a", .tick = mod_tick};
 typedef struct {
     int state, cfg_dirty;
     long cfg_flushed_at;
@@ -70,6 +70,9 @@ static void sdk_rows_tick(void) { g_rows_ticks++; }
  * extracted coretick fixture deliberately includes only community_tick, so
  * keep its optional per-frame services self-contained here. */
 static void sdk_data_callbacks_tick(void) {}
+static void sdk_beatport_owner_tick(void) {}
+static void sdk_cue_tick(void) {}
+static _Atomic(void *) g_sdk_exit_bound;
 static void azsdk_slip_collect_v1(void) {}
 /* the quarantine's heartbeat (cm_orderly.h has its own suite) */
 static long g_rtick_n;

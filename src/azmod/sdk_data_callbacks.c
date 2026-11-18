@@ -58,8 +58,9 @@ static void sdk_data_callbacks_tick(void) {
         if (pthread_mutex_trylock(&g_sdk_commands.mu)) break;
         const struct scmd_record *r = &g_sdk_commands.records[i];
         int owner = r->owner;
-        int deliver = r->phase == SCMD_FINAL && !r->asynchronous && !r->pinned && !r->awaiting &&
+        int deliver = r->phase == SCMD_FINAL && !r->retired && !r->asynchronous && !r->pinned && !r->awaiting &&
                       r->token != g_sdk_command_notified[i] && owner >= 0 && owner < g_cm_n &&
+                      r->owner_lifetime == g_sdk_commands.owner_lifetime[owner] &&
                       g_cm[owner].state == AZCM_LOADED && !st_owner_retired(&g_st, owner) &&
                       g_sdk_callbacks[owner].command;
         az_command_result result;

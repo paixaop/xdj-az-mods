@@ -654,6 +654,7 @@ struct ov_window {
 /* Everything the overlay thread keeps from one tick to the next. One instance lives on the
  * overlay thread's stack for the life of the process; nothing else touches it. */
 #include "touch_seq.h"
+#include "ht_tap.h"
 struct overlay_ctx {
     Display *dpy;
     int scr;
@@ -673,6 +674,10 @@ struct overlay_ctx {
     struct ov_window srcicon;  /* the AZ icon in the native MOD MENU source row */
     struct ov_window readouts; /* the OVERLAYS readouts (FPS and the rest) */
     struct ov_window clockn;   /* the Clock, in the place of EP147's recording time readout */
+    struct ov_window clocktap; /* the Clock's tap target (input only): opens its Timer popup */
+    struct ov_window ctpop;    /* the Clock's Timer popup */
+    struct ht_gest ct_gest;    /* taps on those two (a whole tap, never a press or a drag) */
+    int ct_key;                /* what the Clock's place last showed (azmod_clockn_key) */
     struct ov_window lane[AZMOD_STEM_DECKS]; /* one stem-lane band per deck */
 
     int need_raise;     /* something covered us: raise our windows once this tick */
@@ -681,6 +686,7 @@ struct overlay_ctx {
     int pending_reload; /* RELOAD was tapped: fire once its press flash is over */
     long left_src_ms;   /* when a screen button last closed the docked menu */
     int reloading_was;  /* /run/az-reloading was seen last tick (edge detect) */
+    int reloading_flag; /* the last look at it found it */
 };
 
 static void ov_window_init(struct ov_window *w) {
@@ -881,6 +887,23 @@ static void ov_create_windows(struct overlay_ctx *c) {
     /* The Clock when it sits top left. */
     ov_window_init(&c->clockn);
     c->clockn.id = ov_create_window(c, &a, -16, -16, 1, 1, 1);
+    /* The Clock's tap target: an input-only window over the Clock, a little taller than its
+     * 20 px text for a finger. It takes the taps there, so EP147's readout under it (which
+     * opens MIXER SETTINGS) does not get them. And the Clock's Timer popup. Both take press
+     * and release: the Timer acts on a whole tap. */
+    {
+        XSetWindowAttributes ia;
+        memset(&ia, 0, sizeof ia);
+        ia.override_redirect = True;
+        ia.event_mask = ButtonPressMask | ButtonReleaseMask;
+        ov_window_init(&c->clocktap);
+        c->clocktap.id = XCreateWindow(c->dpy, c->root, -16, -16, 1, 1, 0, 0, InputOnly, CopyFromParent,
+                                       CWOverrideRedirect | CWEventMask, &ia);
+    }
+    ov_window_init(&c->ctpop);
+    c->ctpop.id = ov_create_window(c, &a, -16, -16, 1, 1, 0);
+    XSelectInput(c->dpy, c->ctpop.id, ButtonPressMask | ButtonReleaseMask | ExposureMask | VisibilityChangeMask);
+    c->ct_key = -1;
     /* Stem lanes: one window per deck's waveform band, input-transparent so the waveform
      * underneath still takes needle-drop touches. There must be one per AZMOD_STEM_DECKS: the
      * paint loop uses lane[d] for every deck, and an uncreated entry is a BadWindow, which
@@ -909,7 +932,9 @@ static int ov_reload_banner(struct overlay_ctx *c) {
     /* The USB loader is about to restart EP147: it creates /run/az-reloading (tmpfs) and
      * waits ~1.5 s. Keep the RELOADING banner painted (each repaint re-raises it) until we
      * die with the restart. The loader owns both the flag and the restart. */
-    if (access("/run/az-reloading", F_OK) == 0) {
+    static unsigned look; /* checked about 10 times a second: the loader waits ~1.5 s after the flag */
+    if ((c->reloading_flag || (look++ % 10u) == 0) &&
+        (c->reloading_flag = access("/run/az-reloading", F_OK) == 0)) {
         ov_shm_wait(c); /* the banner draws into the buffer */
         show_reloading(c->dpy, c->menu.id, c->gc, c->img, c->buf, c->scr_w, c->scr_h);
         c->reloading_was = 1;
@@ -1055,6 +1080,28 @@ static void ov_on_release(struct overlay_ctx *c, XEvent *ev) {
     }
 }
 
+/* A button event on the Clock's tap target or its Timer popup (returns 1: taken). Only a whole
+ * tap acts (ht_tap.h), at the press point: on the Clock it opens or closes the popup, on the
+ * popup it presses the button there. */
+static int ov_clock_timer_event(struct overlay_ctx *c, XEvent *ev) {
+    if (ev->type != ButtonPress && ev->type != ButtonRelease)
+        return 0;
+    Window w = ev->xbutton.window;
+    if (w == None || (w != c->clocktap.id && w != c->ctpop.id))
+        return 0;
+    int tx, ty;
+    if (!ht_gest_feed(&c->ct_gest, ev->type == ButtonPress, ev->xbutton.button, ev->xbutton.x_root,
+                      ev->xbutton.y_root, now_ms(), &tx, &ty))
+        return 1;
+    if (c->clocktap.mapped && tx >= c->clocktap.x && tx < c->clocktap.x + c->clocktap.w &&
+        ty >= c->clocktap.y && ty < c->clocktap.y + c->clocktap.h)
+        azmod_clockn_tap(&g_state, &g_fb);
+    else
+        azmod_ctpop_tap(&g_fb, tx, ty);
+    c->dirty = 1;
+    return 1;
+}
+
 /* Taps, drags and visibility changes on our windows, drained first so a tap this tick shows
  * in this tick's draw. */
 static void ov_drain_x_events(struct overlay_ctx *c) {
@@ -1067,6 +1114,8 @@ static void ov_drain_x_events(struct overlay_ctx *c) {
         int touch = ev.type == ButtonPress || ev.type == ButtonRelease
                         ? touch_seq_feed(&c->touch, ev.type == ButtonPress, ev.xbutton.button, now_ms())
                         : TOUCH_OTHER;
+        if (ov_clock_timer_event(c, &ev))
+            continue; /* the Clock or its Timer popup */
         if (sdk_overlay_x_event(c, &ev, touch))
             continue; /* a community mod's surface */
         if (ev.type == ButtonPress && touch == TOUCH_MOVE) {
@@ -1317,6 +1366,10 @@ static void ov_resolve_drum_exports(void) {
     *(void **) &g_drum_bank_fn = dlsym(RTLD_DEFAULT, "azstem_drum_bank");
     *(void **) &g_drum_avail_fn = dlsym(RTLD_DEFAULT, "azstem_drum_available");
     *(void **) &g_drum_bpm_fn = dlsym(RTLD_DEFAULT, "azstem_drum_bpm");
+    /* absent in older azstem: an empty deck rolls at the master's BPM, off its beat */
+    *(void **) &g_drum_follow_fn = dlsym(RTLD_DEFAULT, "azstem_drum_follow");
+    /* absent in older azstem: a paused deck with a track rolls at its own tempo */
+    *(void **) &g_drum_follow_paused_fn = dlsym(RTLD_DEFAULT, "azstem_drum_follow_paused");
     *(void **) &g_drum_sync_fn = dlsym(RTLD_DEFAULT, "azstem_drum_sync");
     __atomic_store_n((void **) &g_drum_tone_fn,
                      dlsym(RTLD_DEFAULT, "azstem_drum_tone"), /* read by the bus */
@@ -1326,6 +1379,48 @@ static void ov_resolve_drum_exports(void) {
     *(void **) &g_deck_has_track_fn = dlsym(RTLD_DEFAULT, "azstem_deck_has_track");
     *(void **) &g_stem_gain_fn = dlsym(
         RTLD_DEFAULT, "azstem_stem_gain"); /* absent in older azstem: waveforms at unity */
+    *(void **) &g_sfx_config_fn = dlsym(RTLD_DEFAULT, "azstem_stem_fx_config");
+    __atomic_store_n((void **) &g_sfx_on_fn, dlsym(RTLD_DEFAULT, "azstem_stem_fx_on"),
+                     __ATOMIC_RELEASE); /* read by the bus */
+    __atomic_store_n((void **) &g_sfx_fn, dlsym(RTLD_DEFAULT, "azstem_stem_fx"),
+                     __ATOMIC_RELEASE); /* read by the bus; absent in older azstem: solo pads */
+}
+
+/* Stem FX (Stem FX = FX): the mode to the bus, mode and lengths to azstem when they
+ * change, and each deck's on bits for the LEDs. Overlay thread. */
+static void ov_sync_stem_fx(void) {
+    static int last = -1;
+    static const int ECHO_Q[8] = {-4, -3, -2, -1, 1, 2, 3, 4}; /* quarter beats; < 0 before the press */
+    static const int BRAKE_Q[4] = {2, 4, 8, 16};
+    int mode = az_on(AZF_STEMS) && az_get(AZF_STEM_FX) == 1 && g_sfx_fn && g_sfx_on_fn &&
+               g_sfx_config_fn;
+    int e = az_get(AZF_STEM_FX_ECHO), b = az_get(AZF_STEM_FX_BRAKE);
+    int key = mode | (e & 7) << 1 | (b & 3) << 4;
+    if (key != last) {
+        last = key;
+        if (g_sfx_config_fn)
+            g_sfx_config_fn(mode, ECHO_Q[e & 7], BRAKE_Q[b & 3]);
+        __atomic_store_n(&g_stemfx_pads, mode, __ATOMIC_RELEASE);
+    }
+    g_sfx_led_mode = mode;
+#ifdef AZMOD_PROBES
+    if (AZ_PROBE_ON("/home/root/settings/azmod-stemfx.log")) {
+        unsigned w = __atomic_load_n(&g_sfxlog_w, __ATOMIC_ACQUIRE);
+        if (w - g_sfxlog_r > 256u)
+            g_sfxlog_r = w - 256u;
+        FILE *f = g_sfxlog_r != w ? azlog_open("/tmp/azmod-stemfx.log", "a") : NULL;
+        for (; f && g_sfxlog_r != w; g_sfxlog_r++) {
+            unsigned e = __atomic_load_n(&g_sfxlog[g_sfxlog_r & 255u], __ATOMIC_RELAXED);
+            fprintf(f, "%ld %c d%d %d v=%02x\n", now_ms(), (char) (e >> 24), (int) (e >> 16 & 0xff),
+                    (int) (e >> 8 & 0xff), e & 0xffu);
+        }
+        if (f)
+            fclose(f);
+    } else
+        g_sfxlog_r = __atomic_load_n(&g_sfxlog_w, __ATOMIC_ACQUIRE);
+#endif
+    for (int d = 0; d < AZMOD_STEM_DECKS; d++)
+        __atomic_store_n(&g_sfx_led_on[d], mode ? g_sfx_on_fn(d) & 0xFu : 0u, __ATOMIC_RELAXED);
 }
 
 static void ov_sync_stem_volume(void) {
@@ -1383,9 +1478,15 @@ static void ov_feed_drum_bpm(void) {
      *    so a torn-down BpmState reads as unknown, never as freed memory.
      *  - EP147 spells "no track" as DBL_MAX here, which would overflow azstem's 16.16
      *    fixed point. drum_feed_bpm sends an empty deck the MASTER deck's BPM, and
-     *    anything else outside 20..400 BPM as 0.0f, drumroll.c's "unknown" (120). */
+     *    anything else outside 20..400 BPM as 0.0f, drumroll.c's "unknown" (120).
+     *  - The same empty deck is told to follow the master (drum_feed_lead): its roll is then
+     *    placed on the master's beat grid, at the master's playhead.
+     *  - Every other deck is told which deck a roll pressed while it is not playing locks to
+     *    (drum_feed_paused_lead): the master while Paused Deck = Master, else none. */
     static unsigned btk = 0;
     static float last_bpm[AZMOD_STEM_DECKS] = {0};
+    static int last_lead[AZMOD_STEM_DECKS] = {[0 ... AZMOD_STEM_DECKS - 1] = -1};
+    static int last_plead[AZMOD_STEM_DECKS] = {[0 ... AZMOD_STEM_DECKS - 1] = -1};
     if (g_drum_bpm_fn && (btk++ & 7u) == 0) {
         double live[AZMOD_STEM_DECKS];
         int ok[AZMOD_STEM_DECKS] = {0};
@@ -1393,10 +1494,37 @@ static void ov_feed_drum_bpm(void) {
             ok[d] = bpmstate_read(d, &live[d], NULL); /* 0: unknown, send nothing */
         int m = __atomic_load_n(&g_master_deck, __ATOMIC_RELAXED);
         int m_ok = m >= 0 && m < AZMOD_STEM_DECKS && ok[m];
+        int p_on = az_get(AZF_DRUM_PAUSED) == 0;
         for (int d = 0; d < AZMOD_STEM_DECKS; d++) {
             if (!ok[d])
                 continue;
             float bpm = drum_feed_bpm(d, live[d], m, m_ok, m_ok ? live[m] : 0.0);
+            int lead = drum_feed_lead(d, live[d], m, m_ok, m_ok ? live[m] : 0.0);
+            if (g_drum_follow_fn && lead != last_lead[d]) {
+                last_lead[d] = lead;
+                g_drum_follow_fn(d, lead);
+                FILE *lf = azlog_open("/tmp/azmod-drumbpm.log", "a");
+                if (lf) {
+                    if (lead < 0)
+                        fprintf(lf, "follow: deck%d -> its own grid\n", d + 1);
+                    else
+                        fprintf(lf, "follow: deck%d -> deck%d (master)\n", d + 1, lead + 1);
+                    fclose(lf);
+                }
+            }
+            int plead = drum_feed_paused_lead(d, m, m_ok, m_ok ? live[m] : 0.0, p_on);
+            if (g_drum_follow_paused_fn && plead != last_plead[d]) {
+                last_plead[d] = plead;
+                g_drum_follow_paused_fn(d, plead);
+                FILE *pf = azlog_open("/tmp/azmod-drumbpm.log", "a");
+                if (pf) {
+                    if (plead < 0)
+                        fprintf(pf, "paused: deck%d -> its own track\n", d + 1);
+                    else
+                        fprintf(pf, "paused: deck%d -> deck%d (master)\n", d + 1, plead + 1);
+                    fclose(pf);
+                }
+            }
             if (bpm != last_bpm[d]) {
                 last_bpm[d] = bpm;
                 g_drum_bpm_fn(d, bpm);
@@ -1422,6 +1550,7 @@ static void ov_sync_drum_roll(void) {
     static int last_drum = -1, last_bank = -1;
     ov_resolve_drum_exports();
     ov_sync_stem_volume();
+    ov_sync_stem_fx();
     int on = az_on(AZF_DRUM_ROLL) ? 1 : 0;
     if (on != last_drum) {
         last_drum = on;
@@ -1814,7 +1943,14 @@ static void ov_track_stems(struct overlay_ctx *c) {
      * below (that guard is for detect_source()'s readback). Under it, with the menu open, an
      * eject left the deck's mask stale and a reload of the same track kept the previous
      * track's stem mutes. Own counter, because det_tick only advances while closed. */
-    if ((++c->stem_tick % 10) == 0) { /* 8 small file reads per 10 ticks (every 100-300 ms) */
+    if ((++c->stem_tick % 10) == 0) { /* every 100-300 ms; atomics unless something changed */
+        if (!g_stem_ctl_fn) { /* azstem appeared: it takes the toggles from here on */
+            stem_ctl_resolve();
+            if (g_stem_ctl_fn) {
+                write_enable(&g_state);
+                write_stems(&g_state);
+            }
+        }
         if (read_avail(&g_state)) {
             write_stems(&g_state);
             c->dirty = 1;
@@ -1939,6 +2075,15 @@ static void ov_rates_display(FILE *rf, const struct ov_rate_window *d) {
         long p = __atomic_load_n(&g_disp_pass, __ATOMIC_RELAXED);
         fprintf(rf, "ui60: waveform limiter passed %ld/s\n", p - pp);
         pp = p;
+    }
+    {
+        static long pf, pq;
+        long f = __atomic_load_n(&g_feed_frame_n, __ATOMIC_RELAXED),
+             q = __atomic_load_n(&g_feed_pass_n, __ATOMIC_RELAXED);
+        fprintf(rf, "ui60: feed lock %s, frame runs %ld/s, own-timer pass %ld/s\n",
+                feedlock_on() ? "on" : "off", f - pf, q - pq);
+        pf = f;
+        pq = q;
     }
     fprintf(rf,
             "ui60: clock=%d wave=%d scroll60=%d ui-start-parts=%d  (mod4=%d "
@@ -2211,12 +2356,12 @@ static void ov_poll_readouts(struct overlay_ctx *c) {
 /* The Clock readout's text, once a second. It stays "" (drawn as --:--, "Not set" in the menu)
  * until the system clock is synchronized, by the rule timedatectl uses (systemd ntp_synced):
  * the kernel's maximum error, from adjtimex(), under 16 s. It is at that limit from boot (the
- * deck's RTC does not keep time through a power-off) until systemd-timesyncd's first NTP answer,
- * and again after any settimeofday(); without NTP updates it grows by 500 ppm and passes 16 s
- * after about 9 hours. A time set by hand (Set Time Manually) is shown too, as long as the
- * clock has not fallen back below it: the set leaves an empty file whose modification time is
- * the time set (CLOCK_SET_MARK), and a power-off that resets the RTC puts the clock before it
- * (clock_set.h cs_valid). NTP, when it answers, sets the time over it.
+ * deck's RTC does not keep time through a power-off) until systemd-timesyncd's first NTP answer;
+ * without NTP updates it grows by 500 ppm and passes 16 s after about 9 hours. A time set by
+ * hand (Set Time Manually) is shown too: it never changes the system time (a backward step
+ * stalls EP147, whose timed waits run on the wall clock), it is kept as an offset over it in
+ * CLOCK_SET_FILE, and holds until a power-off resets the RTC (clock_set.h cs_shown). NTP, when
+ * it answers, takes over and the file is removed.
  * The zone file is read when the zone changes; a zone that cannot be read or answered
  * (clock_tz.h) also leaves the text empty. */
 static void ov_clock_log(const char *fmt, ...) {
@@ -2230,52 +2375,71 @@ static void ov_clock_log(const char *fmt, ...) {
     va_end(ap);
     fclose(f);
 }
-#define CLOCK_SET_MARK "/home/root/settings/azmod-clock-set"
-/* Set Time Manually: the system time, the RTC (UTC, as the kernel reads it at boot) and the
- * marker; the time of the marker, or 0 when the time could not be set. */
-static int64_t ov_clock_set(int64_t t) {
-    struct timespec ts = {(time_t) t, 0};
-    if (clock_settime(CLOCK_REALTIME, &ts) != 0) {
-        ov_clock_log("set time %lld: clock_settime failed (errno %d)\n", (long long) t, errno);
-        return 0;
-    }
-    struct tm tm;
-    time_t tt = (time_t) t;
-    int rtc = -1, fd = open("/dev/rtc0", O_RDONLY | O_CLOEXEC);
-    if (fd >= 0 && gmtime_r(&tt, &tm)) {
-        struct rtc_time r;
-        memset(&r, 0, sizeof r);
-        r.tm_sec = tm.tm_sec, r.tm_min = tm.tm_min, r.tm_hour = tm.tm_hour;
-        r.tm_mday = tm.tm_mday, r.tm_mon = tm.tm_mon, r.tm_year = tm.tm_year;
-        rtc = ioctl(fd, RTC_SET_TIME, &r);
-    }
-    if (fd >= 0)
-        close(fd);
-    int64_t mark = 0;
-    int mf = open(CLOCK_SET_MARK, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+#define CLOCK_SET_FILE "/home/root/settings/azmod-clock-set"
+#define CLOCK_BOOT_ID "/proc/sys/kernel/random/boot_id"
+/* this boot's id (CS_BOOT_LEN characters) into out, or "" */
+static void ov_boot_id(char out[CS_BOOT_LEN + 1]) {
+    out[0] = 0;
+    int fd = open(CLOCK_BOOT_ID, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return;
+    ssize_t n = read(fd, out, CS_BOOT_LEN);
+    close(fd);
+    out[n == CS_BOOT_LEN ? CS_BOOT_LEN : 0] = 0;
+}
+/* the system time at this boot's start: now less the time since boot (suspend included) */
+static int64_t ov_boot_time(int64_t now) {
+    struct timespec b;
+    return clock_gettime(CLOCK_BOOTTIME, &b) == 0 ? now - (int64_t) b.tv_sec : now;
+}
+static void ov_clock_read(struct cs_rec *r) {
+    char b[CS_REC_MAX];
     struct stat st;
-    if (mf >= 0) {
-        if (futimens(mf, NULL) == 0 && fstat(mf, &st) == 0)
-            mark = (int64_t) st.st_mtime;
-        close(mf);
+    memset(r, 0, sizeof *r);
+    int fd = open(CLOCK_SET_FILE, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return;
+    ssize_t n = fstat(fd, &st) == 0 ? read(fd, b, sizeof b) : -1;
+    close(fd);
+    if (n >= 0 && (size_t) n < sizeof b)
+        cs_rec_parse(b, (size_t) n, (int64_t) st.st_mtime, r);
+}
+/* Set Time Manually: the offset of UTC time t over the system time now, written beside the
+ * file and moved over it; *r is the set, or unchanged when it could not be kept. */
+static void ov_clock_set(int64_t t, struct cs_rec *r) {
+    char boot[CS_BOOT_LEN + 1], line[CS_REC_MAX];
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ov_boot_id(boot);
+    int n = cs_rec_format(line, sizeof line, boot, (int64_t) ts.tv_sec, t);
+    int fd = n > 0 ? open(CLOCK_SET_FILE ".new", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644) : -1;
+    int ok = fd >= 0 && write(fd, line, (size_t) n) == n;
+    if (fd >= 0)
+        ok &= close(fd) == 0;
+    ok = ok && rename(CLOCK_SET_FILE ".new", CLOCK_SET_FILE) == 0;
+    if (!ok) {
+        unlink(CLOCK_SET_FILE ".new");
+        ov_clock_log("set time %lld: not kept (boot id %s, errno %d)\n", (long long) t, boot[0] ? "ok" : "unread", errno);
+        return;
     }
-    ov_clock_log("set time %lld: system ok, rtc %s, marker %lld\n", (long long) t, rtc == 0 ? "ok" : "failed",
-                 (long long) mark);
-    return mark ? mark : t;
+    cs_rec_parse(line, (size_t) n, 0, r);
+    ov_clock_log("set time %lld: offset %lld over the system time\n", (long long) t, (long long) r->off);
 }
 static void ov_poll_clock(struct overlay_ctx *c) {
     static long tt;
-    static int loaded = -1, zone_ok, last_sync = -1;
-    static int64_t mark = -1;
+    static int loaded = -1, zone_ok, last_sync = -1, read_once;
+    static struct cs_rec rec;
+    static char boot[CS_BOOT_LEN + 1];
     static struct ctz z;
     static unsigned char zbuf[1 << 16];
     int64_t req = __atomic_exchange_n(&g_azmod_clock_set_req, 0, __ATOMIC_ACQ_REL);
-    if (mark < 0) { /* the last manual set, once per run */
-        struct stat st;
-        mark = stat(CLOCK_SET_MARK, &st) == 0 ? (int64_t) st.st_mtime : 0;
+    if (!read_once) { /* the last manual set and this boot's id, once per run */
+        read_once = 1;
+        ov_clock_read(&rec);
+        ov_boot_id(boot);
     }
     if (req)
-        mark = ov_clock_set(req);
+        ov_clock_set(req, &rec);
     long nowt = now_ms();
     if (!req && nowt - tt < 1000)
         return;
@@ -2302,12 +2466,21 @@ static void ov_poll_clock(struct overlay_ctx *c) {
         ov_clock_log("system clock %s (adjtimex %d, status 0x%x, maxerror %ld us)\n",
                      sync ? "synchronized" : "not synchronized", st, (unsigned) tx.status, (long) tx.maxerror);
     }
+    if (sync && rec.has) { /* NTP has the time: the manual set is done with */
+        unlink(CLOCK_SET_FILE);
+        memset(&rec, 0, sizeof rec);
+        ov_clock_log("synchronized: the manual set removed\n");
+    }
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
+    int64_t now = (int64_t) ts.tv_sec, shown = 0;
+    int same = rec.boot[0] && !strcmp(rec.boot, boot);
+    int has = cs_shown(sync, &rec, same, now, ov_boot_time(now), &shown);
+    __atomic_store_n(&g_azmod_clock_off, has ? shown - now : 0, __ATOMIC_RELAXED);
     char t[sizeof g_state.clock_text] = "";
     int32_t off;
-    if (cs_valid(sync, mark, (int64_t) ts.tv_sec) && zone_ok && ctz_offset(&z, (int64_t) ts.tv_sec, &off) == 0) {
-        ctz_format(t, sizeof t, (int64_t) ts.tv_sec, off, az_get(AZF_CLOCK_24H) == 1);
+    if (has && zone_ok && ctz_offset(&z, shown, &off) == 0) {
+        ctz_format(t, sizeof t, shown, off, az_get(AZF_CLOCK_24H) == 1, az_get(AZF_CLOCK_SECONDS) == 1);
         if (k == 0)
             strncat(t, " UTC", sizeof t - strlen(t) - 1);
     }
@@ -2523,8 +2696,12 @@ static void ov_strip_visibility(int *side1, int *side2) {
                  g_state.stems_available[sd1] && !g_four_deck;
     int d2base = wave_closed && !gridadj && g_state.pad_beatloop[sd2] &&
                  g_state.stems_available[sd2] && !g_four_deck;
-    *side1 = d1base ? (azmod_stem_native ? 2 : 1) : 0;
-    *side2 = d2base ? (azmod_stem_native ? 2 : 1) : 0;
+    /* Stem FX = FX: row 2 is EP147's own FX tiles, so the lanes window is not mapped
+     * (azmod_native_lanes_drawn draws no lanes then either; a mapped window would paint its
+     * ground over the tiles). */
+    int lanes = az_get(AZF_STEM_FX) != 1;
+    *side1 = d1base ? (azmod_stem_native ? (lanes ? 2 : 0) : 1) : 0;
+    *side2 = d2base ? (azmod_stem_native ? (lanes ? 2 : 0) : 1) : 0;
 }
 
 /* The menu window: always mapped; wanted_rect() parks it off screen when unused. It also
@@ -2626,6 +2803,23 @@ static void ov_place_readouts(struct overlay_ctx *c) {
         azmod_clockn_rect(&g_fb, &x, &y, &w, &h);
     ov_window_place(c, &c->clockn, x, y, w, h);
     ov_window_show(c, &c->clockn);
+    /* the Clock's tap target: its rect, 14 px taller above and below (the status bar) */
+    c->clocktap.wanted = c->clockn.wanted;
+    if (c->clocktap.wanted) {
+        int ty = y - 14 < 0 ? 0 : y - 14;
+        ov_window_place(c, &c->clocktap, x, ty, w, y + h + 14 - ty);
+    } else
+        ov_window_place(c, &c->clocktap, -16, -16, 1, 1);
+    ov_window_show(c, &c->clocktap);
+    x = y = -16, w = h = 1;
+    c->ctpop.wanted = azmod_ctpop_rect(&g_state, &g_fb, &x, &y, &w, &h);
+    ov_window_place(c, &c->ctpop, x, y, w, h);
+    ov_window_show(c, &c->ctpop);
+    int key = azmod_clockn_key(); /* the countdown's seconds and its red flash */
+    if (key != c->ct_key) {
+        c->ct_key = key;
+        c->dirty = 1;
+    }
 }
 
 /* One deck's stem-lane window: only while the deck screen is up, STEMS is on and that deck
@@ -2762,6 +2956,11 @@ static void ov_present(struct overlay_ctx *c) {
         azmod_draw_clockn(&g_state, &g_fb);
         ov_put(c, c->clockn.id, c->clockn.x, c->clockn.y, c->clockn.w, c->clockn.h);
     }
+    if (c->ctpop.wanted && c->ctpop.mapped) {
+        ov_shm_wait(c);
+        azmod_draw_ctpop(&g_fb);
+        ov_put(c, c->ctpop.id, c->ctpop.x, c->ctpop.y, c->ctpop.w, c->ctpop.h);
+    }
 }
 
 /* Startup work that needs EP147 running: the hook table, Hide Track Title's runtime part,
@@ -2855,6 +3054,7 @@ static useconds_t ov_tick_us(void) {
 
 /* X input can start an early frame. SDK callbacks run on this thread between
  * frames without advancing menu timers or rendering once per audio receipt. */
+#define OV_MIN_TICK_US 4000
 enum {
     OV_WAKE_FRAME = 1,
     OV_WAKE_COMMAND = 2
@@ -2902,9 +3102,13 @@ static void *overlay_thread(void *arg) {
     for (;;) {
         if (wake & OV_WAKE_COMMAND) (void) sdk_command_ui_drain(8);
         if (wake & OV_WAKE_FRAME) {
+            long elapsed_us = (now_ms() - tick_start) * 1000;
+            if (elapsed_us < OV_MIN_TICK_US)
+                usleep((useconds_t) (OV_MIN_TICK_US - elapsed_us));
             tick_start = now_ms();
             bus_cfg_publish(); /* this tick's Mod Menu settings -> the bus threads */
             vs_save_flush(); /* a Vinyl Speed Adjust value posted by EP147's message thread */
+            wz_tick(tick_start); /* persist waveform zoom after it settles */
             if (ov_reload_banner(c)) sdk_status_ui_drain();
             else {
                 ov_poll_inputs(c);

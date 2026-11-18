@@ -538,6 +538,33 @@ static void draw_item_icon_raw(const azmod_fb *fb, int x, int y, int sz, int ite
         aa_icon(fb, x, y, sz, sh, 6, c);
         break;
     }
+    case AZF_WAVE_ZOOM: { /* a magnifier with a plus (Remember Waveform Zoom) */
+        float S = (float) sz, X = (float) x, Y = (float) y, w = S * 0.05f;
+        float cx = X + S * .42f, cy = Y + S * .42f, R = S * .26f, p = S * .12f;
+        struct aa_shape sh[4] = {
+            {1, cx, cy, R, 0, w},
+            {0, X + S * .61f, Y + S * .61f, X + S * .86f, Y + S * .86f, w * 1.6f},
+            {0, cx - p, cy, cx + p, cy, w},
+            {0, cx, cy - p, cx, cy + p, w},
+        };
+        aa_icon(fb, x, y, sz, sh, 4, c);
+        break;
+    }
+    case AZF_VOCAL_INDICATOR: { /* a row of dashes over a waveform (Vocal Indicator) */
+        float S = (float) sz, X = (float) x, Y = (float) y, w = S * 0.05f, d = Y + S * .26f;
+        struct aa_shape sh[8] = {
+            {0, X + S * .10f, d, X + S * .28f, d, w},
+            {0, X + S * .41f, d, X + S * .59f, d, w},
+            {0, X + S * .72f, d, X + S * .90f, d, w},
+            {0, X + S * .20f, Y + S * .56f, X + S * .20f, Y + S * .74f, w},
+            {0, X + S * .35f, Y + S * .46f, X + S * .35f, Y + S * .84f, w},
+            {0, X + S * .50f, Y + S * .54f, X + S * .50f, Y + S * .76f, w},
+            {0, X + S * .65f, Y + S * .42f, X + S * .65f, Y + S * .88f, w},
+            {0, X + S * .80f, Y + S * .56f, X + S * .80f, Y + S * .74f, w},
+        };
+        aa_icon(fb, x, y, sz, sh, 8, c);
+        break;
+    }
     case AZF_PHASE_METER: { /* two rulers with ticks, offset (Phase Meter) */
         float S = (float) sz, X = (float) x, Y = (float) y, w = S * 0.05f;
         float l = X + S * .10f, r = X + S * .90f, ya = Y + S * .36f, yb = Y + S * .68f,
@@ -555,6 +582,39 @@ static void draw_item_icon_raw(const azmod_fb *fb, int x, int y, int sz, int ite
         aa_icon(fb, x, y, sz, sh, 8, c);
         break;
     }
+    case AZF_COMPACT_INFO: { /* three tall lanes over a row of four cells (Compact Track Info) */
+        float S = (float) sz, X = (float) x, Y = (float) y, w = S * 0.05f;
+        float l = X + S * .10f, r = X + S * .90f, cy = Y + S * .84f, cw = S * .17f, g = S * .04f;
+        struct aa_shape sh[7] = {
+            {0, l, Y + S * .18f, r, Y + S * .18f, w},
+            {0, l, Y + S * .40f, r, Y + S * .40f, w},
+            {0, l, Y + S * .62f, r, Y + S * .62f, w},
+            {0, l, cy, l + cw, cy, w * 1.6f},
+            {0, l + cw + g, cy, l + 2 * cw + g, cy, w * 1.6f},
+            {0, l + 2 * (cw + g), cy, l + 3 * cw + 2 * g, cy, w * 1.6f},
+            {0, l + 3 * (cw + g), cy, r, cy, w * 1.6f},
+        };
+        aa_icon(fb, x, y, sz, sh, 7, c);
+        break;
+    }
+    case AZF_DECK_ORDER_4DECK: { /* four lanes and an up-down arrow (4 DECK Order 1 2 3 4) */
+        float S = (float) sz, X = (float) x, Y = (float) y, w = S * 0.05f;
+        float l = X + S * .10f, r = X + S * .60f, ax = X + S * .80f, t = Y + S * .16f,
+              b = Y + S * .84f, h = S * .10f;
+        struct aa_shape sh[9] = {
+            {0, l, Y + S * .20f, r, Y + S * .20f, w},
+            {0, l, Y + S * .40f, r, Y + S * .40f, w},
+            {0, l, Y + S * .60f, r, Y + S * .60f, w},
+            {0, l, Y + S * .80f, r, Y + S * .80f, w},
+            {0, ax, t, ax, b, w},
+            {0, ax, t, ax - h, t + h, w},
+            {0, ax, t, ax + h, t + h, w},
+            {0, ax, b, ax - h, b - h, w},
+            {0, ax, b, ax + h, b - h, w},
+        };
+        aa_icon(fb, x, y, sz, sh, 9, c);
+        break;
+    }
     case AZF_THEMES: { /* a sun (Day Mode): a ring and eight rays */
         float S = (float) sz, X = (float) x, Y = (float) y, w = S * 0.05f, cx = X + S * .50f,
               cy = Y + S * .50f;
@@ -567,6 +627,21 @@ static void draw_item_icon_raw(const azmod_fb *fb, int x, int y, int sz, int ite
                 0, cx + dx[k] * r0, cy + dy[k] * r0, cx + dx[k] * r1, cy + dy[k] * r1, w};
         sh[8] = (struct aa_shape) {1, cx, cy, S * .15f, 0, w};
         aa_icon(fb, x, y, sz, sh, 9, c);
+        break;
+    }
+    case AZF_DECK_KEY_TITLE: { /* a title bar: the title's line, a key mark at its end */
+        float S = (float) sz, X = (float) x, Y = (float) y, w = S * 0.05f;
+        float l = X + S * .10f, r = X + S * .90f, t = Y + S * .30f, b = Y + S * .70f,
+              m = Y + S * .50f;
+        struct aa_shape sh[6] = {
+            {0, l, t, r, t, w},
+            {0, l, b, r, b, w},
+            {0, l, t, l, b, w},
+            {0, r, t, r, b, w},
+            {0, X + S * .20f, m, X + S * .52f, m, w},
+            {1, X + S * .72f, m, S * .08f, 0, w},
+        };
+        aa_icon(fb, x, y, sz, sh, 6, c);
         break;
     }
     case AZF_HIDE_TRACK_TITLE: { /* an eye (Hide Track Title) */
@@ -760,6 +835,18 @@ static void c_text(const azmod_fb *fb, int x, int y, int w, int h, const char *s
         sc = 1;
     draw_text(fb, x, y + (h - 7 * sc) / 2, s, sc, c);
 }
+/* The text size of the value in a Mod Menu choice or bank button (official rows and community
+ * mods' rows alike): 40% of the button's height, smaller when it would not fit inside the button
+ * with a margin of an eighth of its width on each side, never below a quarter of its height. */
+static int c_btn_px(int w, int h, const char *s) {
+    int px = h * 40 / 100, room = w - w / 4, n = (int) strlen(s);
+    while (azmod_ttf_menu_width && px > h / 4 && azmod_ttf_menu_width(s, n, px, 2) > room)
+        px--;
+    return px;
+}
+static void c_btn_text(const azmod_fb *fb, int x, int y, int w, int h, const char *s, uint32_t c) {
+    c_text(fb, x, y, w, h, s, c_btn_px(w, h, s), c);
+}
 static void c_box(const azmod_fb *fb, int x, int y, int sz, bool on, uint32_t edge, uint32_t fill) {
     int t = sz / 8;
     if (t < 2)
@@ -771,10 +858,9 @@ static void c_box(const azmod_fb *fb, int x, int y, int sz, bool on, uint32_t ed
     }
 }
 
-/* A one-line description in a fixed-height row: left-aligned at x, and when wider
- * than maxw, cut at a word and ended with "..." (the menu face is drawn byte by
- * byte, so three dots, not the U+2026 glyph). Never wraps: the rows have one line
- * for it. Every pane description goes through here. */
+/* A one-line text in a fixed-height place: left-aligned at x, and when wider than maxw, cut at
+ * a word and ended with "..." (the menu face is drawn byte by byte, so three dots, not the
+ * U+2026 glyph). Descriptions never go through here: they wrap (c_wrap). */
 /* s fitted to maxw into t: unchanged, or cut at a word + "..." (returns its width) */
 static int c_fit_str(char *t, size_t tn, const char *s, int px, int maxw) {
     int n = (int) strlen(s);
@@ -801,28 +887,99 @@ static int c_fit_str(char *t, size_t tn, const char *s, int px, int maxw) {
     memcpy(t + cut, "...", 4);
     return azmod_ttf_menu_width(t, (int) strlen(t), px, 2);
 }
-static void c_text_fit(const azmod_fb *fb, int x, int y, int maxw, int h, const char *s, int px,
-                       uint32_t c) {
-    char t[256];
-    c_fit_str(t, sizeof t, s, px, maxw);
-    c_text(fb, x, y, 0, h, t, px, c);
-}
-static void c_draw_lines(const azmod_fb *fb, int x, int y, const char *t, int px, int lh,
-                         uint32_t c, int maxw) {
-    char line[160];
-    while (*t) {
-        const char *e = strchr(t, '\n');
-        int len = e ? (int) (e - t) : (int) strlen(t);
-        if (len > (int) sizeof line - 1)
-            len = sizeof line - 1;
-        memcpy(line, t, len);
-        line[len] = 0;
-        c_text_fit(fb, x, y, maxw, lh, line, px, c);
-        y += lh;
-        t += len;
-        if (*t == '\n')
-            t++;
+/* A description word-wrapped to maxw at px: each '\n' ends a line, and a line breaks at the
+ * last space that keeps it within maxw. A word wider than maxw on its own is broken between
+ * bytes at the longest part that fits (never inside a UTF-8 sequence, at least one character
+ * a line), so no text is ever dropped. line(arg, start, len) is called for each line when it is
+ * not NULL; the return is the number of lines (0 for an empty text). Without the face's width
+ * a line breaks only at '\n'. A line is at most C_WRAP_MAX bytes (the draw's buffer). */
+#define C_WRAP_MAX 255
+static int c_wrap(const char *s, int px, int maxw, void (*line)(void *, const char *, int),
+                  void *arg) {
+    int n = 0;
+    bool measure = azmod_ttf_menu_width && maxw > 0;
+    if (!s)
+        return 0;
+    while (*s) {
+        const char *e = strchr(s, '\n');
+        int len = e ? (int) (e - s) : (int) strlen(s);
+        const char *p = s;
+        int rem = len;
+        do { /* the paragraph [s, s + len), one line a pass */
+            int take = rem > C_WRAP_MAX ? C_WRAP_MAX : rem;
+            if (measure && azmod_ttf_menu_width(p, take, px, 2) > maxw) {
+                int cut = 0;
+                for (int i = 1; i < take; i++)
+                    if (p[i] == ' ') {
+                        if (azmod_ttf_menu_width(p, i, px, 2) > maxw)
+                            break; /* wider only grows: no later space fits */
+                        cut = i;
+                    }
+                if (!cut) { /* one word wider than the line: as many bytes as fit */
+                    cut = 1;
+                    while (cut < take && azmod_ttf_menu_width(p, cut + 1, px, 2) <= maxw)
+                        cut++;
+                    while (cut < take && ((unsigned char) p[cut] & 0xc0) == 0x80)
+                        cut++; /* finish the character rather than split it */
+                }
+                take = cut;
+            }
+            if (line)
+                line(arg, p, take);
+            n++;
+            p += take;
+            rem -= take;
+            while (rem > 0 && *p == ' ') { /* the break's spaces start no line */
+                p++;
+                rem--;
+            }
+        } while (rem > 0);
+        s += len;
+        if (*s == '\n')
+            s++;
     }
+    return n;
+}
+/* c_wrap's line count, kept per text, size and width: the layout asks for every row's on
+ * every frame (the rows stack by their heights). The menu is drawn and laid out on one thread. */
+static int c_wrap_n(const char *s, int px, int maxw) {
+    static struct {
+        unsigned long long key;
+        int n;
+    } memo[64];
+    if (!s || !*s)
+        return 0;
+    unsigned long long key = 1469598103934665603ull; /* FNV-1a over the text, then the sizes */
+    for (const char *p = s; *p; p++)
+        key = (key ^ (unsigned char) *p) * 1099511628211ull;
+    key = (key ^ (unsigned) px) * 1099511628211ull;
+    key = (key ^ (unsigned) maxw) * 1099511628211ull;
+    key = (key ^ (azmod_ttf_menu_width ? 1u : 0u)) * 1099511628211ull;
+    unsigned slot = (unsigned) (key % 64);
+    if (!key || memo[slot].key != key) {
+        memo[slot].key = key;
+        memo[slot].n = c_wrap(s, px, maxw, NULL, NULL);
+    }
+    return memo[slot].n;
+}
+struct c_wrap_draw {
+    const azmod_fb *fb;
+    int x, y, px, lh;
+    uint32_t c;
+};
+static void c_wrap_line(void *arg, const char *t, int len) {
+    struct c_wrap_draw *d = arg;
+    char line[C_WRAP_MAX + 1];
+    memcpy(line, t, (size_t) len);
+    line[len] = 0;
+    c_text(d->fb, d->x, d->y, 0, d->lh, line, d->px, d->c);
+    d->y += d->lh;
+}
+/* a description at (x, y), wrapped to maxw, one line every lh: returns its lines */
+static int c_draw_wrapped(const azmod_fb *fb, int x, int y, const char *t, int px, int lh,
+                          uint32_t c, int maxw) {
+    struct c_wrap_draw d = {fb, x, y, px, lh, c};
+    return c_wrap(t, px, maxw, c_wrap_line, &d);
 }
 
 /* Alpha-blend `c` over the pixel at (x,y) with 0..255 coverage. */
