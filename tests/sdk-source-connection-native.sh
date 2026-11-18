@@ -8,9 +8,9 @@ task_out=$(cd "$OUT_DIR" && pwd)
 if [ "${MODE:-build}" = build ];then
  : "${ISLAND_OBJECT:?previous exact real installer object required}"
  [ ! -e "$task_out/source-connection-native" ]
- "${HOST_CXX:-g++}" -std=c++11 -O1 -g -Wall -Wextra -Werror -pthread tests/unit/sdksourceconnectionnative_test.cpp src/azmod/sdk_connection_hooks.cpp "$ISLAND_OBJECT" -ldl -o "$task_out/source-connection-native"
+ "${HOST_CC:-gcc}" -std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread tests/unit/sdksourceconnectionnative_test.c src/azmod/sdk_connection_hooks.c "$ISLAND_OBJECT" src/common/aznative_guard.S src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_out/source-connection-native"
  readelf -h -l -d -V "$task_out/source-connection-native" >"$task_out/probe-elf-requirements.txt"
- sha256sum tests/unit/sdksourceconnectionnative_test.cpp tests/sdk-source-connection-native.sh src/azmod/sdk_native_sources.cpp src/azmod/sdk_connection_hooks.cpp src/common/azsources.h src/common/azcachebirth.h src/common/azconnectionepoch.h src/common/azconnectionhooks.h "$ISLAND_OBJECT" "$task_out/source-connection-native" >"$task_out/build-inputs.txt"
+ sha256sum tests/unit/sdksourceconnectionnative_test.c tests/sdk-source-connection-native.sh src/azmod/sdk_native_sources.c src/azmod/sdk_connection_hooks.c src/common/azsources.h src/common/azcachebirth.h src/common/azconnectionepoch.h src/common/azconnectionhooks.h "$ISLAND_OBJECT" "$task_out/source-connection-native" >"$task_out/build-inputs.txt"
  exit 0
 fi
 : "${MODULE_PATH:?explicit exact module required}" "${MODULE_BUILD:?1or2}" "${RUNTIME_LOADER:?coherent loader required}" "${RUNTIME_LIBRARY_PATH:?coherent group required}"

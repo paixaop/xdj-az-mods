@@ -6,9 +6,6 @@
 #include "azstatus_identity.h"
 #include "azstatus_maps.h"
 #include "azstatus_cue_origin.h"
-#ifdef __cplusplus
-extern "C" {
-#endif
 enum {
     AZN_LOAD = 1, AZN_LOOP, AZN_PLAY, AZN_QUANTIZE, AZN_KEY_LOCK, AZN_SYNC,
     AZN_SLIDER_LOCK, AZN_UNIT_END, AZN_GAP, AZN_METADATA, AZN_MOTION, AZN_STEMS
@@ -179,8 +176,5 @@ struct azn_stem_job { uint64_t load, pin, cut, retired; };
 __attribute__((visibility("hidden"))) struct azn_stem_job azn_stems_job(unsigned deck,uint64_t load,const char *path);
 __attribute__((visibility("hidden"))) void azn_stems_decoded(unsigned deck,struct azn_stem_job job,const char *path,int playable);
 __attribute__((visibility("hidden"))) void azn_stems_rescan(void);
-#endif
-#ifdef __cplusplus
-}
 #endif
 #endif

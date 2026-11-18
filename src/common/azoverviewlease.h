@@ -4,9 +4,6 @@
 #define AZOVERVIEWLEASE_H
 #include <stddef.h>
 #include <stdint.h>
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 #define AZOV_LEASE_ABI 1u
 #define AZOV_LEASE_PROFILE_UNAVAILABLE 1u
@@ -38,7 +35,4 @@ int azstem_overview_lease_v1(uint32_t abi, struct azov_lease_api *out, size_t ou
  * retires acquisition; it does not abandon existing leases or reset token generations. */
 __attribute__((visibility("hidden"))) void azov_lease_configure(int build_id,
                                                                 void (*owner_release)(void *, void *));
-#ifdef __cplusplus
-}
-#endif
 #endif

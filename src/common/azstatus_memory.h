@@ -4,9 +4,6 @@
 #include "azstatus_native.h"
 #include "azexit.h"
 #include "../azmod/azmod-mod.h"
-#ifdef __cplusplus
-extern "C" {
-#endif
 enum {
     AZN_MEMORY = 65,
     AZN_CAP_MEMORY = 1u << 17,
@@ -43,8 +40,5 @@ __attribute__((visibility("hidden"))) void azn_notify(void);
 __attribute__((visibility("hidden"))) const struct azn_memory_api *azn_memory_service(void);
 __attribute__((visibility("hidden"))) int azn_ref_pin(uintptr_t owned);
 __attribute__((visibility("hidden"))) void azn_ref_release(uintptr_t owned);
-#endif
-#ifdef __cplusplus
-}
 #endif
 #endif

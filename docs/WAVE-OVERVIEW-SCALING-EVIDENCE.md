@@ -76,7 +76,7 @@ native records; no firmware, audio or real track fixture is required.
 The fixture checks both height bytes at zero, fractional and identity attenuation, record
 counts 1, 3, 17 and 2048, the existing tint behavior, unchanged source bytes, cached-copy
 refresh when only the second height changes, unavailable-deck/settings fallbacks,
-concurrent atomic curve updates and pointer restoration. Its C++ driver throws through
+concurrent atomic curve updates and pointer restoration. Its C fixture raises a foreign native unwind through
 the actual extracted C dispatcher compiled with release `-O2 -fexceptions
 -fasynchronous-unwind-tables`. ARM Linux runs also traverse the actual entry assembly and
 check the captured register/SP values. Cases cover original exception propagation, native
@@ -112,7 +112,7 @@ SAN=tsan tests/wave-overview.sh
 The ASan mode also enables UBSan. These are standalone tests of the actual mod source and
 a modeled native consumer, not execution of the firmware GUI method.
 
-The expanded suite reports 96,279 scalar/hook/startup checks, plus the separate C++ unwind and
+The expanded suite reports 96,279 scalar/hook/startup checks, plus the separate C native-unwind and
 broker assertions, and catches all three controls. Host plain, ASan/UBSan and TSan and
 Ubuntu/Linaro GCC 7.5 ARM Linux plain runs are recorded. The TSan run includes a concurrent
 atomic attenuation-curve writer and cross-thread broker rejection. Compile-only native

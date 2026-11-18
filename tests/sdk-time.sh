@@ -6,7 +6,6 @@ cd "$(dirname "$0")/.."
 task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/az-sdk-time.XXXXXX")
 trap 'rm -rf "$task_tmp"' EXIT
 cflags=(-std=c11 -O1 -g -Wall -Wextra -Werror -pthread)
-cppflags=(-std=c++14 -O1 -g -Wall -Wextra -Werror -Isrc/common)
 san=()
 case ${SAN:-plain} in
 plain|'') ;;
@@ -16,8 +15,6 @@ tsan) san=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 esac
 ${HOST_CC:-cc} "${cflags[@]}" "${san[@]}" -Isrc/common tests/unit/timestamp_test.c -lm -o "$task_tmp/timestamps-c"
 "$task_tmp/timestamps-c"
-${HOST_CXX:-c++} "${cppflags[@]}" "${san[@]}" -x c++ -Isrc/common tests/unit/timestamp_test.c -lm -o "$task_tmp/timestamps-cpp"
-"$task_tmp/timestamps-cpp"
 python3 tests/unit/sdk_timestamps_test.py
 python3 - "$task_tmp" <<'PY'
 from pathlib import Path
@@ -25,7 +22,7 @@ import sys
 root=Path(sys.argv[1])
 (root/'common').mkdir()
 (root/'common/aztimestamp.h').write_bytes(Path('src/common/aztimestamp.h').read_bytes())
-s=Path('src/azstem/sdk_loop_observer.cpp').read_text()
+s=Path('src/azstem/sdk_loop_observer.c').read_text()
 a=s.index('bool source_time_consistent_us(')
 b=s.index('\n}',a)+2
 helper=s[a:b]+'\n'
@@ -34,7 +31,7 @@ variants=[
  ('strict', 'return compare_timestamps(2u * source, 2u * cached, 1, 1, UINT64_C(2000000) + rate + 1) == AZ_TIME_EQUAL;', 'return source == cached;'),
  ('fixed', 'UINT64_C(2000000) + rate + 1', 'UINT64_C(10) * rate + 1'),
  ('boundary', 'UINT64_C(2000000) + rate + 1', 'UINT64_C(2000000) + rate'),
- ('narrow', 'unsigned __int128', 'std::uint64_t'),
+ ('narrow', 'unsigned __int128', 'uint64_t'),
 ]
 for name,old,new in variants:
  assert helper.count(old)==1,(name,old)
@@ -65,14 +62,14 @@ for name,filename,old,new in [
  p=target/filename;s=p.read_text();assert s.count(old)==1,(name,old)
  p.write_text(s.replace(old,new))
 PY
-${HOST_CXX:-c++} "${cppflags[@]}" "${san[@]}" -DSAMPLE_TIME_IMPL="\"$task_tmp/sample.inc\"" tests/unit/sdksampletime_test.cpp -lm -o "$task_tmp/sample"
+${HOST_CC:-cc} "${cflags[@]}" -Isrc/common "${san[@]}" -DSAMPLE_TIME_IMPL="\"$task_tmp/sample.inc\"" tests/unit/sdksampletime_test.c -lm -o "$task_tmp/sample"
 "$task_tmp/sample"
 ${HOST_CC:-cc} "${cflags[@]}" "${san[@]}" -DINPUT_TIME_IMPL="\"$task_tmp/input-time.inc\"" -Isrc/azmod tests/unit/sdktime_test.c -lm -o "$task_tmp/time"
 for mode in clock budget elapsed grid interval; do "$task_tmp/time" "$mode"; done
 ${HOST_CC:-cc} "${cflags[@]}" "${san[@]}" -Wno-unused-function -Wno-missing-field-initializers -Isrc/azmod -Itests/unit -DSDK_INPUT_C="\"$PWD/src/azmod/sdk_input.c\"" tests/unit/sdkinput_test.c -lm -o "$task_tmp/input"
 "$task_tmp/input"
 for control in strict fixed boundary narrow; do
-    ${HOST_CXX:-c++} "${cppflags[@]}" -DSAMPLE_TIME_IMPL="\"$task_tmp/$control.inc\"" tests/unit/sdksampletime_test.cpp -lm -o "$task_tmp/$control"
+    ${HOST_CC:-cc} "${cflags[@]}" -Isrc/common -DSAMPLE_TIME_IMPL="\"$task_tmp/$control.inc\"" tests/unit/sdksampletime_test.c -lm -o "$task_tmp/$control"
     if ( ulimit -c 0; "$task_tmp/$control" >"$task_tmp/$control.log" 2>&1 ) 2>/dev/null; then
         echo "FAIL: sample-time $control control was not caught" >&2; exit 1
     fi

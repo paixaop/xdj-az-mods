@@ -6,12 +6,7 @@
 #include <stdint.h>
 #include <math.h>
 #include "azexitprofile.h"
-#ifdef __cplusplus
-extern "C" {
-#define AZEXIT_NOEXCEPT noexcept
-#else
 #define AZEXIT_NOEXCEPT
-#endif
 struct azexit_request {
     uint64_t token, load_generation, deadline_ns;
     uint32_t deck, reserved;
@@ -162,9 +157,6 @@ __attribute__((visibility("hidden"))) void azsdk_exit_retire_complete(unsigned d
 #ifdef AZSDK_EXIT_TESTING
 /* Inject exact nominal tables and a native-entry installer, never bypass guards. */
 void azsdk_exit_test_profile(const struct azexit_profile *profile) AZEXIT_NOEXCEPT;
-#endif
-#ifdef __cplusplus
-}
 #endif
 #undef AZEXIT_NOEXCEPT
 #endif

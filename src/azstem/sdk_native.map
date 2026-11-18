@@ -1,0 +1,4 @@
+/* Keep private native ABI definitions from interposing on EP147. */
+{
+    local: _Z*;
+};

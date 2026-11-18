@@ -88,7 +88,7 @@ and LTI update ownership. Its update hook forwards all eight arguments and copie
 native writer thread. LTI layout is TrackID +0x08 (16 bytes), title +0x38 and artist +0x40;
 LoadState owns LTI at +0x150. The core never exports those pointers. The new observation
 export reads only the atomic copy and validates its owner token and sequence. The existing
-vtable/address mappings and constructor/destructor hooks are reused. An optional C++ listener
+vtable/address mappings and constructor/destructor hooks are reused. An optional C listener
 registers through the owned publisher virtual interface; it adds no absolute-address lookup. Its weak ownership, player argument and retired-generation protection have native GNU C++ ABI
 fixtures and mutation controls. Submission succeeds for four units on both emulated builds
 and physical 2.00. Actual notification behavior and teardown still require acceptance. The

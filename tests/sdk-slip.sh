@@ -10,8 +10,13 @@ case ${SAN:-plain} in
     tsan) set -- -fsanitize=thread ;;
     *) echo 'unknown SAN' >&2;exit 2 ;;
 esac
-${CXX:-g++} -std=c++11 -O1 -g -Wall -Wextra -Werror -fexceptions -fno-omit-frame-pointer ${CXXFLAGS:-} \
-    "$@" src/azmod/sdk_native_slip.cpp tests/unit/sdkslip_test.cpp -pthread -o "$work/slip"
+for name in sdk_native_slip sdk_slip_hooks sdk_slip_getters; do
+    ${CC:-gcc} -std=gnu11 -O1 -g -Wall -Wextra -Werror -fexceptions -fasynchronous-unwind-tables -fno-omit-frame-pointer ${CFLAGS:-} \
+        "$@" -c "src/azmod/$name.c" -o "$work/$name.o"
+done
+${CC:-gcc} -c src/common/aznative_guard.S -o "$work/guard.o"
+${CC:-gcc} -std=gnu11 -O1 -g -Wall -Wextra -Werror -fexceptions -fno-omit-frame-pointer ${CFLAGS:-} \
+    "$@" "$work/sdk_native_slip.o" "$work/guard.o" tests/unit/sdkslip_test.c -pthread -lstdc++ -o "$work/slip"
 "$work/slip" raw
 entry=
 if [ "$(uname -s):$(uname -m)" = Linux:aarch64 ]; then
@@ -19,9 +24,9 @@ if [ "$(uname -s):$(uname -m)" = Linux:aarch64 ]; then
     entry="$work/entry.o"
     set -- "$@" -DAZSDK_SLIP_ARM_ENTRY
 fi
-${CXX:-g++} -std=c++11 -O1 -g -Wall -Wextra -Werror -fexceptions -fno-omit-frame-pointer ${CXXFLAGS:-} \
-    "$@" src/azmod/sdk_native_slip.cpp src/azmod/sdk_slip_hooks.cpp tests/unit/sdkslip_hooks_test.cpp \
-    $entry -pthread -o "$work/hooks"
+${CC:-gcc} -std=gnu11 -O1 -g -Wall -Wextra -Werror -fexceptions -fno-omit-frame-pointer ${CFLAGS:-} \
+    "$@" "$work/sdk_native_slip.o" "$work/guard.o" "$work/sdk_slip_hooks.o" tests/unit/sdkslip_hooks_test.c \
+    $entry -pthread -lstdc++ -o "$work/hooks"
 for mode in success prefix body owner partial duplicate unaligned;do "$work/hooks" "$mode";done
 getter_entry=
 if [ "$(uname -s):$(uname -m)" = Linux:aarch64 ]; then
@@ -30,7 +35,7 @@ if [ "$(uname -s):$(uname -m)" = Linux:aarch64 ]; then
     ${CC:-gcc} -std=c11 -Wno-unused-function -c tests/unit/sdkslip_getter_patch.c -o "$work/getter-patch.o"
     getter_entry="$work/getter-entry.o $work/getter-native.o $work/getter-patch.o"
 fi
-${CXX:-g++} -std=c++11 -O1 -g -Wall -Wextra -Werror -fexceptions -fno-omit-frame-pointer ${CXXFLAGS:-} \
-    "$@" src/azmod/sdk_slip_getters.cpp tests/unit/sdkslip_getter_test.cpp $getter_entry -pthread -o "$work/getters"
+${CC:-gcc} -std=gnu11 -O1 -g -Wall -Wextra -Werror -fexceptions -fno-omit-frame-pointer ${CFLAGS:-} \
+    "$@" "$work/sdk_slip_getters.o" tests/unit/sdkslip_getter_test.c "$work/guard.o" $getter_entry -pthread -lstdc++ -o "$work/getters"
 for mode in success body site partial;do "$work/getters" "$mode";done
 if [ -n "$getter_entry" ];then "$work/getters" arm;fi

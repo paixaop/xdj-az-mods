@@ -39,7 +39,7 @@ static const int STEM_SLOT[NDECK] = {0, 1, 2, 3};
 #define IDMAP_SUB_OFF 0x48UL
 static _Atomic(void *) g_deck_self[MAX_DECKS];
 static _Atomic unsigned g_ctor_calls[MAX_DECKS], g_ap_rebind, g_ap_ctor;
-/* Native loop registration is covered by its separate C++ fixture. */
+/* Native loop registration is covered by its separate C fixture. */
 static _Atomic uintptr_t g_djpu_vt = 0x289f878;
 static int g_sdk_loop_on;
 static int azsdk_loop_register(int deck, void *unit) {

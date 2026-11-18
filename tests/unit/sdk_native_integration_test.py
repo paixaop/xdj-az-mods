@@ -142,7 +142,7 @@ class NativeBundleTests(unittest.TestCase):
             self.assertIn("ext-live-lifetime-retire-control", labels)
             self.assertIn("ext-observer-loop-race-control", labels)
             self.assertIn("ext-observer-live-race-control", labels)
-            self.assertIn("ext-live-allocator-nothrow-bypass-control", labels)
+            self.assertIn("ext-live-allocator-bypass-control", labels)
             self.assertIn("ext-sources-vfs-short-name-control", labels)
             self.assertIn("ext-sources-rtti-short-name-control", labels)
             for kind in ("mono-count", "mono-word", "mono-clock"):
@@ -156,11 +156,13 @@ class NativeBundleTests(unittest.TestCase):
                 self.assertIn(label, labels)
             for slot in range(4):
                 self.assertIn("ext-loop-strict-slot-" + str(slot) + "-control", labels)
-            for kind in prepare.TIME_CPP + prepare.TIME_INPUT + prepare.TIME_ENGINE:
+            for kind in prepare.TIME_SAMPLES + prepare.TIME_INPUT + prepare.TIME_ENGINE:
                 self.assertIn("ext-time-" + kind + "-control", labels)
             self.assertEqual(len(labels), len(build.controls))
             for _, command, _ in build.actions:
                 self.assertNotIn("-w", command)
+                self.assertFalse(any(value.endswith((".cpp", ".cc", ".cxx")) for value in command))
+                self.assertNotIn("-std=c++11", command)
                 if "-fsanitize=address,undefined" in command:
                     if "-Wl,-rpath,$ORIGIN/runtime" not in command:
                         self.assertIn("-static-libasan", command)
@@ -170,7 +172,9 @@ class NativeBundleTests(unittest.TestCase):
                         self.assertIn("-static-libtsan", command)
             for name, command, _ in build.actions:
                 if name in ("ext-live-observer-asan", "ext-live-observer-tsan", "ext-live-payload-overread-control", "ext-live-rtti-overread-control"):
-                    self.assertIn("-Wl,-rpath,$ORIGIN/runtime", command)
+                    self.assertIn("-DAZ_NATIVE_LISTENER_TESTING", command)
+                    self.assertIn("-fexceptions", command)
+                    self.assertFalse(any(value.endswith(".cpp") for value in command))
 
     def test_generator_parser_ignores_runtime_helper_and_rejects_unterminated_block(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -2,12 +2,7 @@
 #ifndef AZCUERECALL_H
 #define AZCUERECALL_H
 #include "azexit.h"
-#ifdef __cplusplus
-extern "C" {
-#define AZCUERECALL_NOEXCEPT noexcept
-#else
 #define AZCUERECALL_NOEXCEPT
-#endif
 /* Manager-owner preparation copies every owned native member. DSP dispatch is
  * admitted only on the matching unit's native task owner, inside sdk_exit scope. */
 int azsdk_cue_recall_configure(int build, uintptr_t bias) AZCUERECALL_NOEXCEPT;
@@ -26,9 +21,6 @@ struct azcue_recall_profile {
     uintptr_t locked_property_table, assign_property, assign_locked;
 };
 void azsdk_cue_recall_test_profile(const struct azcue_recall_profile *) AZCUERECALL_NOEXCEPT;
-#endif
-#ifdef __cplusplus
-}
 #endif
 #undef AZCUERECALL_NOEXCEPT
 #endif

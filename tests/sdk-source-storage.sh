@@ -5,13 +5,13 @@ cd "$(dirname "$0")/.."
 [ "$(uname -s)" = Linux ] || { echo 'SKIP: SourceState shutdown fixture requires Linux GNU ABI';exit 77; }
 task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/az-source-storage.XXXXXX")
 trap 'rm -rf "$task_tmp"' EXIT
-flags=(-std=c++11 -O1 -g -Wall -Wextra -Werror -pthread -Isrc/common)
+flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread -Isrc/common)
 case ${SAN:-plain} in
 plain|'') ;;
 asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer) ;;
 tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 *) exit 2;; esac
-"${HOST_CXX:-g++}" "${flags[@]}" tests/unit/sdksourcestorage_test.cpp src/azmod/sdk_connection_hooks.cpp -ldl -o "$task_tmp/test"
+"${HOST_CC:-gcc}" "${flags[@]}" tests/unit/sdksourcestorage_test.c src/azmod/sdk_connection_hooks.c src/common/aznative_guard.S src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/test"
 failures=0
 for profile in 1 2;do
  status=0

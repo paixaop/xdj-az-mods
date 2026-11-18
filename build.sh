@@ -8,7 +8,7 @@ for h in caption_strips collabels fxart fxbars fxhdr menulabels onelibkey onelib
   [ -f "src/azmod/$h.h" ] || { echo "src/azmod/$h.h is missing: run python3 tools/extract-assets.py <official azmod.so> first" >&2; exit 1; }
 done
 if ! docker image inspect azmod-build:18.04 >/dev/null 2>&1 ||
-   ! docker run --rm --platform=linux/arm64 azmod-build:18.04 sh -c 'command -v g++ >/dev/null' >/dev/null 2>&1; then
+   ! docker run --rm --platform=linux/arm64 azmod-build:18.04 sh -c 'command -v gcc >/dev/null' >/dev/null 2>&1; then
   docker build --platform=linux/arm64 -f docker/azmod-build.Dockerfile -t azmod-build:18.04 .
 fi
 rm -rf src/out

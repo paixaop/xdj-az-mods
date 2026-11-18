@@ -1,119 +1,101 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #ifndef AZCACHEBIRTH_H
 #define AZCACHEBIRTH_H
-#include <cstdint>
-#include <memory>
-
-/* Private C++ borrow/forward contract. This is neither a native prototype
- * nor an installed/public SDK interface. */
-namespace music_library {
-class MountPoint;
-class SqliteDataBase;
-class ListCache;
-class ListCacheCollector;
-}
+#include "aznative_c.h"
+/* Private C borrow/forward contract, separate from native entry prototypes and
+ * the public SDK. Every owner below uses the actual GNU alias/control ABI. */
 struct azce_call;
-namespace azsdk_cache_birth {
-struct SourceBorrow {
+struct azcb_source_borrow {
     void *server;
     unsigned build;
-    std::uint64_t source_epoch;
-    const std::shared_ptr<music_library::MountPoint> *mount;
-    const std::shared_ptr<music_library::SqliteDataBase> *database;
+    uint64_t source_epoch;
+    const struct az_native_owner *mount, *database;
 };
-struct Forward {
+struct azcb_forward {
     void (*call)(void *);
     void *context;
 };
-/* Actual owned MusicLibraryServer callback and reviewed register bridge.
- * These keep local native owner pins; neither installs a hook nor turns a
- * copied message, pointer or TLS marker into ownership. */
-__attribute__((visibility("hidden"))) void forward_library_owned(unsigned, void *, Forward);
-__attribute__((visibility("hidden"))) void observe_entry_owned(azce_call *, Forward);
-struct BirthBorrow {
-    SourceBorrow source;
-    const std::shared_ptr<music_library::ListCacheCollector> *collector;
-    const std::shared_ptr<music_library::SqliteDataBase> *creator_database;
-    const void *receiver_collector;
-    const void *receiver_creator;
-    const void *borrowed_pool;
-    /* The original constructs this REAL native shared_ptr in its caller's
-     * result storage. It is read only after Forward returns normally. */
-    const std::shared_ptr<music_library::ListCache> *native_result;
+#define AZ_CACHE_PRIVATE __attribute__((visibility("hidden")))
+AZ_CACHE_PRIVATE void azcb_forward_library_owned(unsigned, void *, struct azcb_forward);
+AZ_CACHE_PRIVATE void azcb_observe_entry_owned(struct azce_call *, struct azcb_forward);
+struct azcb_birth_borrow {
+    struct azcb_source_borrow source;
+    const struct az_native_owner *collector, *creator_database;
+    const void *receiver_collector, *receiver_creator, *borrowed_pool;
+    /* Original constructs this native strong owner in the caller's result
+     * storage. Read it only after the original returns normally. */
+    const struct az_native_owner *native_result;
 };
-/* A wrapper may identify only an exact supported native factory. Primary
- * construction permits no relevant mutation. Standard fallback mode0 requires
- * setup16 followed by successful setters0..15 on its one newly owned raw result.
- * The raw result slot is live only in this same Collector invocation. */
-enum FactoryKind { PrimaryFactory = 1, StandardFallbackFactory = 2 };
-struct FactoryBorrow {
+enum azcb_factory_kind {
+    AZCB_PRIMARY_FACTORY = 1,
+    AZCB_STANDARD_FALLBACK_FACTORY = 2
+};
+struct azcb_factory_borrow {
     const void *receiver_creator;
     unsigned kind;
     const void *borrowed_pool;
     const void *const *native_result;
 };
-enum WriteKind { SetupWrite = 1, LayoutWrite = 2 };
-struct WriteBorrow {
-    const void *receiver_cache;
-    unsigned kind, argument; // setup count or incoming setter index
-    const void *borrowed_pool; // setup only
-    const int *native_status; // W0 copied by the original's actual wrapper
+enum azcb_write_kind {
+    AZCB_SETUP_WRITE = 1,
+    AZCB_LAYOUT_WRITE = 2
 };
-/* Neither function guesses native signatures or installs an entry. Wrappers
- * must preserve native results and provide only live, exact supported calls.
- * Unexpected or nested construction is forwarded but cannot publish a birth. */
-__attribute__((visibility("hidden"))) void observe_factory_owned(const FactoryBorrow &, Forward);
-__attribute__((visibility("hidden"))) void observe_construction_write_owned(const WriteBorrow &, Forward);
-struct QueryBorrow {
-    SourceBorrow source;
-    const std::shared_ptr<music_library::ListCacheCollector> *collector;
-    const std::shared_ptr<music_library::ListCache> *selected_cache;
+struct azcb_write_borrow {
+    const void *receiver_cache;
+    unsigned kind, argument;
+    const void *borrowed_pool;
+    const int *native_status;
+};
+/* Primary construction permits no mutation. Standard mode0 requires setup16,
+ * then successful setters0..15 on its newly owned raw result in this invocation.
+ * Unsupported/nested calls still forward, but cannot publish a birth. */
+AZ_CACHE_PRIVATE void azcb_observe_factory_owned(const struct azcb_factory_borrow *, struct azcb_forward);
+AZ_CACHE_PRIVATE void azcb_observe_construction_write_owned(const struct azcb_write_borrow *, struct azcb_forward);
+struct azcb_query_borrow {
+    struct azcb_source_borrow source;
+    const struct az_native_owner *collector, *selected_cache;
     const void *receiver_cache;
 };
-struct CopyRowScalar {
-    /* Called only after successful original forwarding, inside its owning
-     * callback. This copies a scalar; it must not copy/move/own a native row
-     * container, retain rows, or follow any saved pointer on a later call. */
-    bool (*copy)(void *, std::uint32_t &);
+/* Copies a scalar only, after successful native forwarding and within that
+ * owning callback. Never retain a native row/container or a later-use pointer. */
+struct azcb_copy_row {
+    bool (*copy)(void *, uint32_t *);
     void *context;
 };
-struct Observation {
-    std::uint64_t birth_epoch = 0, layout_generation = 0, source_epoch = 0;
-    std::weak_ptr<music_library::MountPoint> mount;
-    std::weak_ptr<music_library::SqliteDataBase> database;
-    std::weak_ptr<music_library::ListCacheCollector> collector;
-    std::weak_ptr<music_library::ListCache> cache;
-    std::uint32_t row_value = 0;
-    unsigned factory_kind = 0; // reviewed creation family, never a native type/deck ID
+struct azcb_observation {
+    uint64_t birth_epoch, layout_generation, source_epoch;
+    struct az_native_owner mount, database, collector, cache; /* weak owners */
+    uint32_t row_value;
+    unsigned factory_kind;
 };
-/* These functions preserve the original's destination, return ownership and
- * exceptions by invoking the supplied closure once. They never create/free a
- * native result object. Failure leaves Observation unchanged. Borrow fields
- * must remain valid for this actual invocation; guards do not acquire liveness.
- * In particular, a shared_ptr pin keeps its pointee alive, not the storage of
- * a borrowed shared_ptr in a mutable vector. Each holder reread requires live
- * storage, or a proved preceding mutation fence that declines before that
- * reread. A native wrapper must prove this or use stable owned snapshots with
- * fresh validation in its actual owned scope; this helper does not resolve
- * native vector elements or establish their storage lifetime.
- * Birth is ONLY for a proved fresh Collector creation, never a cache hit.
- * Query pins the actual selected cache AND its actual owning Collector only
- * until the callback returns. Only weak owners persist in SourceState.
- * Production entry points enforce the configured exact-build worker profile.
- */
-__attribute__((visibility("hidden"))) int observe_birth_owned(
-    const BirthBorrow &, Forward, Observation *);
-__attribute__((visibility("hidden"))) int observe_query_owned(
-    const QueryBorrow &, Forward, CopyRowScalar, Observation *);
-/* Conservative retirement before native setup/setter/storage/lifetime work.
- * No native receiver is read here. The active guard spans normal/exceptional
- * forwarding; saturation permanently disables cache acceptance until restart.
- */
-__attribute__((visibility("hidden"))) void retire_forward(Forward);
-/* Fence selected-owner storage before native assignment/clear. This prevents
- * a query from rereading released vector holders, without relabeling or
- * destroying the independent birth/layout witness of a still-owned cache. */
-__attribute__((visibility("hidden"))) void selection_forward(Forward);
-} // namespace azsdk_cache_birth
-
+static inline void azcb_observation_drop(struct azcb_observation *o) {
+    az_native_weak_reset(&o->cache);
+    az_native_weak_reset(&o->collector);
+    az_native_weak_reset(&o->database);
+    az_native_weak_reset(&o->mount);
+}
+static inline void azcb_observation_copy(struct azcb_observation *dst, const struct azcb_observation *src) {
+    if (dst == src) return;
+    az_native_weak_copy(&dst->mount, &src->mount);
+    az_native_weak_copy(&dst->database, &src->database);
+    az_native_weak_copy(&dst->collector, &src->collector);
+    az_native_weak_copy(&dst->cache, &src->cache);
+    dst->birth_epoch = src->birth_epoch;
+    dst->layout_generation = src->layout_generation;
+    dst->source_epoch = src->source_epoch;
+    dst->row_value = src->row_value;
+    dst->factory_kind = src->factory_kind;
+}
+/* Forward once without constructing/freeing native result objects. On failure,
+ * leave Observation unchanged. Borrowed holder storage must remain live or a
+ * preceding mutation fence must reject before rereading it; an owner pin alone
+ * cannot preserve a mutable vector's element storage. Only weak owners persist.
+ * Birth requires proved fresh Collector creation, never a cache hit. */
+AZ_CACHE_PRIVATE int azcb_observe_birth_owned(const struct azcb_birth_borrow *, struct azcb_forward, struct azcb_observation *);
+AZ_CACHE_PRIVATE int azcb_observe_query_owned(const struct azcb_query_borrow *, struct azcb_forward, struct azcb_copy_row, struct azcb_observation *);
+/* Retirement and selected-storage fencing precede native work and span unwind.
+ * Neither acquires liveness or dereferences an unowned native receiver. */
+AZ_CACHE_PRIVATE void azcb_retire_forward(struct azcb_forward);
+AZ_CACHE_PRIVATE void azcb_selection_forward(struct azcb_forward);
+#undef AZ_CACHE_PRIVATE
 #endif

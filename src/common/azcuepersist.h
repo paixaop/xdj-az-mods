@@ -2,12 +2,7 @@
 #ifndef AZCUEPERSIST_H
 #define AZCUEPERSIST_H
 #include "azexit.h"
-#ifdef __cplusplus
-extern "C" {
-#define AZCUEPERSIST_NOEXCEPT noexcept
-#else
 #define AZCUEPERSIST_NOEXCEPT
-#endif
 /* Exact-profile addresses supplied by the verified native profile generator.
  * All pointers are private core values. No SDK caller can supply these. */
 struct azcuepersist_profile {
@@ -57,9 +52,6 @@ __attribute__((visibility("hidden"))) int azsdk_cue_persist_submit(
     const struct azexit_cue_request *, void *manager, void *maintainer,
     unsigned kind, const void *owned_property, uint64_t source_cookie,
     const struct azcuepersist_witness *witness
-#ifdef __cplusplus
-    = nullptr
-#endif
     ) AZCUEPERSIST_NOEXCEPT;
 /* During confirm on the owner continuation: 0 rejects; 1 proves exact owned
  * receipt content identity; 2 proves the correlated receipt and owned source/
@@ -74,52 +66,48 @@ __attribute__((visibility("hidden"))) int azsdk_cue_persist_take(
 /* Retire only after the actor has closed admission. Held native refs are
  * released after the correlated receipt and any in-flight helper have quiesced. */
 __attribute__((visibility("hidden"))) void azsdk_cue_persist_retire(void *manager) AZCUEPERSIST_NOEXCEPT;
-#ifdef __cplusplus
-}
 #include "aztimestamp.h"
-#include <cstring>
-/* Native Cue80 stores cached microseconds and sample indices at its own
- * encoded rate. The observation window belongs to the actual loaded source. */
+#include <string.h>
+#include <stdbool.h>
+/* Native Cue80 stores microseconds and sample indices at its encoded rate. */
 struct azcue_native_timestamps {
-    uint32_t sample_rate = 0;
-    uint64_t in_us = 0, in_sample = 0, out_us = 0, out_sample = 0;
+    uint32_t sample_rate;
+    uint64_t in_us, in_sample, out_us, out_sample;
 };
-static inline azcue_native_timestamps azcue_read_timestamps(const void *cue) noexcept {
-    azcue_native_timestamps result;
-    const auto *p = static_cast<const unsigned char *>(cue);
-    std::memcpy(&result.sample_rate, p + 4, 4);
-    std::memcpy(&result.in_us, p + 8, 8);
-    std::memcpy(&result.in_sample, p + 16, 8);
-    std::memcpy(&result.out_us, p + 24, 8);
-    std::memcpy(&result.out_sample, p + 32, 8);
+static inline struct azcue_native_timestamps azcue_read_timestamps(const void *cue) {
+    struct azcue_native_timestamps result;
+    const unsigned char *p = (const unsigned char *) cue;
+    memcpy(&result.sample_rate, p + 4, 4);
+    memcpy(&result.in_us, p + 8, 8);
+    memcpy(&result.in_sample, p + 16, 8);
+    memcpy(&result.out_us, p + 24, 8);
+    memcpy(&result.out_sample, p + 32, 8);
     return result;
 }
-static inline bool azcue_timestamps_equal(const azcue_native_timestamps &a, const azcue_native_timestamps &b, uint32_t source_rate) noexcept {
+static inline bool azcue_microseconds_equal(uint64_t first, uint64_t second, uint32_t source_rate) {
+    const uint64_t absent = UINT64_C(0x7fffffffffffffff);
+    /* Absence markers do not represent timestamps. */
+    if (first == absent || second == absent) return first == absent && second == absent;
+    const int order = compare_timestamps(first, second, 1000000, source_rate, 1);
+    return order != AZ_TIME_INVALID && order == AZ_TIME_EQUAL;
+}
+static inline bool azcue_samples_equal(uint64_t first, uint64_t second, uint32_t first_rate, uint32_t second_rate, uint32_t source_rate) {
+    const uint64_t absent = UINT64_C(0x7fffffffffffffff);
+    if (first == absent || second == absent) return first == absent && second == absent;
+    if (!first_rate || !second_rate || first_rate >= 0x7fffffffu || second_rate >= 0x7fffffffu) return false;
+    const int order = compare_timestamps((__uint128_t) first * second_rate, (__uint128_t) second * first_rate,
+                                         (uint64_t) first_rate * second_rate, source_rate, 1);
+    return order != AZ_TIME_INVALID && order == AZ_TIME_EQUAL;
+}
+static inline bool azcue_timestamps_equal(struct azcue_native_timestamps a, struct azcue_native_timestamps b, uint32_t source_rate) {
     if (!source_rate || source_rate >= 0x7fffffffu) return false;
     const uint64_t absent = UINT64_C(0x7fffffffffffffff);
-    auto microseconds = [&](uint64_t first, uint64_t second) {
-        // Absence markers do not represent timestamps.
-        if (first == absent || second == absent) return first == absent && second == absent;
-        const int order = compare_timestamps(first, second, 1000000, source_rate, 1);
-        return order != AZ_TIME_INVALID && order == AZ_TIME_EQUAL;
-    };
-    auto samples = [&](uint64_t first, uint64_t second) {
-        if (first == absent || second == absent) return first == absent && second == absent;
-        if (!a.sample_rate || !b.sample_rate || a.sample_rate >= 0x7fffffffu || b.sample_rate >= 0x7fffffffu) return false;
-        // Exact common ticks explicitly convert the two encoded sample rates.
-        const int order = compare_timestamps(__uint128_t(first) * b.sample_rate, __uint128_t(second) * a.sample_rate,
-                                             uint64_t(a.sample_rate) * b.sample_rate, source_rate, 1);
-        return order != AZ_TIME_INVALID && order == AZ_TIME_EQUAL;
-    };
-    // Native point serialization leaves an unused cached OUT sample value,
-    // which need not be the absence marker. An absent endpoint has no sample
-    // coordinate to compare, even if that cache contains an overflowed value.
+    /* Native points can have unused, non-marker values in the OUT sample cache. */
     const bool in_absent = a.in_us == absent && b.in_us == absent;
     const bool out_absent = a.out_us == absent && b.out_us == absent;
-    return microseconds(a.in_us, b.in_us) && microseconds(a.out_us, b.out_us) &&
-           (in_absent || samples(a.in_sample, b.in_sample)) &&
-           (out_absent || samples(a.out_sample, b.out_sample));
+    return azcue_microseconds_equal(a.in_us, b.in_us, source_rate) && azcue_microseconds_equal(a.out_us, b.out_us, source_rate) &&
+           (in_absent || azcue_samples_equal(a.in_sample, b.in_sample, a.sample_rate, b.sample_rate, source_rate)) &&
+           (out_absent || azcue_samples_equal(a.out_sample, b.out_sample, a.sample_rate, b.sample_rate, source_rate));
 }
-#endif
 #undef AZCUEPERSIST_NOEXCEPT
 #endif

@@ -12,7 +12,7 @@ task_parent=${EVIDENCE_DIR:-${TMPDIR:-/tmp}}
 mkdir -p "$task_parent"
 task_tmp=$(mktemp -d "$task_parent/az-sdk-cache-row.XXXXXX")
 if [ -z "${EVIDENCE_DIR:-}" ]; then trap 'rm -rf "$task_tmp"' EXIT; fi
-flags=(-std=c++11 -O1 -g -Wall -Wextra -Werror -pthread)
+flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread)
 case ${SAN:-plain} in
 plain|'') ;;
 asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer) ;;
@@ -21,11 +21,11 @@ tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 *) echo 'SAN must be plain, asan, ubsan or tsan' >&2; exit 2 ;;
 esac
 if [ -n "${ROW_HEADER:-}" ]; then flags+=("-DAZCACHE_ROW_HEADER=\"${ROW_HEADER}\""); fi
-command=("${HOST_CXX:-g++}" "${flags[@]}" tests/unit/sdkcacherow_test.cpp -o "$task_tmp/cache-row")
+command=("${HOST_CC:-gcc}" "${flags[@]}" tests/unit/sdkcacherow_test.c -o "$task_tmp/cache-row")
 python3 - "$task_tmp/command.json" "${command[@]}" <<'PY'
 from pathlib import Path
 import hashlib,json,sys
-paths=['tests/unit/sdkcacherow_test.cpp','tests/sdk-cache-row.sh']
+paths=['tests/unit/sdkcacherow_test.c','tests/sdk-cache-row.sh']
 p=Path('src/common/azcacherow.h')
 if p.exists(): paths.append(str(p))
 Path(sys.argv[1]).write_text(json.dumps({'argv':sys.argv[2:],'sha256':{x:hashlib.sha256(Path(x).read_bytes()).hexdigest()for x in paths},'production_header_present':p.exists()},indent=2)+'\n')

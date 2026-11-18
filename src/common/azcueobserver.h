@@ -2,12 +2,7 @@
 #ifndef AZCUEOBSERVER_H
 #define AZCUEOBSERVER_H
 #include <stdint.h>
-#ifdef __cplusplus
-extern "C" {
-#define AZSDK_CUE_NOTHROW noexcept
-#else
 #define AZSDK_CUE_NOTHROW
-#endif
 struct azsdk_cue_sample {
     uint64_t unit_generation; /* Core registration lifetime, never track/load identity. */
     uint64_t revision;        /* Core GUI-collection counter, never native cue revision. */
@@ -35,8 +30,5 @@ __attribute__((visibility("hidden"))) int azsdk_cue_take(int deck, struct azsdk_
  * changes. Both read/take leave output unchanged on0. No source/load claim. */
 __attribute__((visibility("hidden"))) int azsdk_cue_read(int deck, struct azsdk_cue_sample *out) AZSDK_CUE_NOTHROW;
 __attribute__((visibility("hidden"))) unsigned azsdk_cue_capabilities(void) AZSDK_CUE_NOTHROW;
-#ifdef __cplusplus
-}
-#endif
 #undef AZSDK_CUE_NOTHROW
 #endif

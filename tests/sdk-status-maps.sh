@@ -4,9 +4,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
-flags=(-std=c++11 -Wall -Wextra -Werror -DAZ_STATUS_MAPS_PRODUCER -DAZ_STATUS_NATIVE_PRODUCER)
+flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -pthread -Wall -Wextra -Werror -DAZ_STATUS_MAPS_PRODUCER -DAZ_STATUS_NATIVE_PRODUCER)
 if [[ ${SAN:-plain} = asan ]]; then flags+=(-fsanitize=address,undefined -fno-omit-frame-pointer); fi
-"${HOST_CXX:-c++}" "${flags[@]}" tests/unit/sdkstatus_maps_test.cpp -o "$dir/maps"
+"${HOST_CC:-cc}" "${flags[@]}" tests/unit/sdkstatus_maps_test.c tests/unit/sdkstatus_map_return.S src/common/aznative_guard.S -lstdc++ -lm -o "$dir/maps"
 "$dir/maps" 1
 "$dir/maps" 2
 "$dir/maps" 1 browse-retain

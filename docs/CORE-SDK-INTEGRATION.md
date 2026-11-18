@@ -44,8 +44,8 @@ skips cannot establish a full SDK pass.
 `tests/run-linux.sh` retains the complete existing unit suite and adds these fifteen suites
 in each plain, ASan/UBSan and TSan pass. It first proves sanitizer readiness. Use
 `bash tests/run-linux.sh --preflight-only` to test readiness without running the long suites.
-The pinned ARM image needs GNU g++ as well as gcc. On a Linux host the same standalone
-scripts can run directly with `HOST_CC` and `HOST_CXX` selecting the compilers.
+The pinned ARM image builds the modules and fixtures with the GNU C compiler. On a Linux host the same standalone
+scripts can run directly with `HOST_CC` selecting the C compiler.
 Both the Linux driver and native package builder run the controller/integrity regression
 tests before their main workloads.
 
@@ -113,7 +113,7 @@ input must still match the current tree before staging. Unused context changes a
 recorded separately and cannot invalidate an unrelated binary or conceal a changed used
 input. Mutation code comes from the
 reviewed standalone scripts' exact Python generators; an unexpected generator or mutation
-inventory fails preparation. Production C/C++ headers and independent production
+inventory fails preparation. Production C headers and independent production
 translation units compile too. Sanitized binaries must contain their required runtime
 symbols. The command-request growth control must fail compilation with its specific
 layout-review diagnostic.

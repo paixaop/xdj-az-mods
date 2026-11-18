@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* Real private export + public registration/GUI tick. Native listener and
- * native ownership fixtures live in the separately linked C++ translation unit. */
+ * native ownership fixtures live in the separately linked C translation unit. */
 #include <assert.h>
 #include <stdatomic.h>
 #include <stdint.h>

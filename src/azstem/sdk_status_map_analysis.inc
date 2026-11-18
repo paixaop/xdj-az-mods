@@ -3,116 +3,126 @@
  * creates Content, parses its rows and supplies its native reference count.
  * This adapter only constructs the plain input value and transfers the counted
  * result to an unchanged native holder. No Content/vtable is synthesized. */
-struct AnalysisPhrase;
-struct AnalysisAtomRef;
 struct AnalysisMemory {
-    uintptr_t data = 0;
-    uint64_t size = 0;
-    ~AnalysisMemory();
+    uintptr_t data;
+    uint64_t size;
 };
 struct AnalysisOps {
-    AnalysisPhrase (*make)(const AnalysisAtomRef *) = nullptr;
-    void (*memory)(AnalysisMemory *, const void *, size_t) = nullptr;
-    void (*memory_drop)(AnalysisMemory *) = nullptr;
-    unsigned char (*grant)(uintptr_t) = nullptr;
-    unsigned char (*release)(uintptr_t) = nullptr;
-    void (*trash)(uintptr_t, uintptr_t) = nullptr;
-} analysis_ops;
-std::atomic<bool> analysis_ready {false};
-void analysis_drop(uintptr_t content) {
-    if (content && analysis_ops.release(content)) analysis_ops.trash(read_value<uintptr_t>(content, 0x18), content);
-}
-AnalysisMemory::~AnalysisMemory() {
-    if (data) analysis_ops.memory_drop(this);
-}
-/* A nontrivial return is intentional: AAPCS64 passes its result address in x8.
- * The native call at 0xe929c8 supplies x0=shared atom reference, x8=result. */
-struct AnalysisPhrase {
-    uintptr_t content = 0;
-    AnalysisPhrase() = default;
-    AnalysisPhrase(const AnalysisPhrase &) = delete;
-    AnalysisPhrase &operator=(const AnalysisPhrase &) = delete;
-    AnalysisPhrase(AnalysisPhrase &&from) noexcept : content(from.content) { from.content = 0; }
-    AnalysisPhrase &operator=(AnalysisPhrase &&from) noexcept {
-        if (this != &from) { analysis_drop(content); content = from.content; from.content = 0; }
-        return *this;
-    }
-    ~AnalysisPhrase() { analysis_drop(content); }
+    void *make; /* native nontrivial result: hidden destination, not a C value return */
+    void (*memory)(struct AnalysisMemory *, const void *, size_t);
+    void (*memory_drop)(struct AnalysisMemory *);
+    unsigned char (*grant)(uintptr_t);
+    unsigned char (*release)(uintptr_t);
+    void (*trash)(uintptr_t, uintptr_t);
 };
+static struct AnalysisOps analysis_ops;
+static _Atomic(bool) analysis_ready;
+static void analysis_drop(uintptr_t content) {
+    if (content && analysis_ops.release(content)) analysis_ops.trash(read_ptr(content, 0x18), content);
+}
+static void analysis_phrase_drop(uintptr_t *content) { analysis_drop(*content); }
 struct AnalysisAtom {
-    uint64_t header = 32;
-    uint32_t prefix = 18;
-    uint16_t mood = 0, end = 0;
-    uint64_t stride = 24;
-    uint32_t count = 0, reserved = 0;
-    AnalysisMemory rows, raw;
+    uint64_t header;
+    uint32_t prefix;
+    uint16_t mood, end;
+    uint64_t stride;
+    uint32_t count, reserved;
+    struct AnalysisMemory rows, raw;
 };
-struct AnalysisAtomRef { const AnalysisAtom *value; uintptr_t control; };
-static_assert(sizeof(AnalysisPhrase) == 8 && sizeof(AnalysisMemory) == 16 && sizeof(AnalysisAtom) == 64,
-              "firmware 2.00 phrase value ABI");
-static_assert(offsetof(AnalysisAtom, mood) == 0xc && offsetof(AnalysisAtom, end) == 0xe &&
-              offsetof(AnalysisAtom, stride) == 0x10 && offsetof(AnalysisAtom, count) == 0x18 &&
-              offsetof(AnalysisAtom, rows) == 0x20 && offsetof(AnalysisAtom, raw) == 0x30,
-              "firmware 2.00 phrase atom fields");
-void configure_analysis(int build, uintptr_t bias) {
-    if (analysis_ready.load(std::memory_order_acquire) || build != 2 || bias) return;
-    struct Site { uintptr_t address; uint32_t words[4]; };
-    constexpr Site sites[] = {
+struct AnalysisAtomRef {
+    const struct AnalysisAtom *value;
+    uintptr_t control;
+};
+static void analysis_atom_drop(struct AnalysisAtom *atom) {
+    /* Native aggregate destruction runs in reverse member order. */
+    if (atom->raw.data) analysis_ops.memory_drop(&atom->raw);
+    if (atom->rows.data) analysis_ops.memory_drop(&atom->rows);
+}
+_Static_assert(sizeof(uintptr_t) == 8 && sizeof(struct AnalysisMemory) == 16 && sizeof(struct AnalysisAtom) == 64,
+               "firmware 2.00 phrase value ABI");
+_Static_assert(offsetof(struct AnalysisAtom, mood) == 0xc && offsetof(struct AnalysisAtom, end) == 0xe &&
+                   offsetof(struct AnalysisAtom, stride) == 0x10 && offsetof(struct AnalysisAtom, count) == 0x18 &&
+                   offsetof(struct AnalysisAtom, rows) == 0x20 && offsetof(struct AnalysisAtom, raw) == 0x30,
+               "firmware 2.00 phrase atom fields");
+struct AnalysisMake {
+    uintptr_t content;
+    const uint8_t *pssi;
+    uint32_t size;
+};
+static void analysis_make(void *opaque) {
+    struct AnalysisMake *call = opaque;
+    struct AnalysisAtom atom __attribute__((cleanup(analysis_atom_drop))) = {.header = 32, .prefix = 18, .stride = 24};
+    atom.mood = (uint16_t) ((unsigned) call->pssi[18] << 8 | call->pssi[19]);
+    atom.end = (uint16_t) ((unsigned) call->pssi[26] << 8 | call->pssi[27]);
+    atom.count = (unsigned) call->pssi[16] << 8 | call->pssi[17];
+    analysis_ops.memory(&atom.rows, call->pssi + 32, call->size - 32);
+    analysis_ops.memory(&atom.raw, call->pssi, call->size);
+    const struct AnalysisAtomRef ref = {&atom, 0};
+    az_native_result(analysis_ops.make, &call->content, &ref);
+}
+static void configure_analysis(int build, uintptr_t bias) {
+    if (atomic_load_explicit(&(analysis_ready), memory_order_acquire) || build != 2 || bias) return;
+    struct Site {
+        uintptr_t address;
+        uint32_t words[4];
+    };
+    const struct Site sites[] = {
         {0xdafa38, {0xa9a47bfd, 0x910003fd, 0xa90363f7, 0xf9400017}},
         {0x2477df0, {0xa900081f, 0xb5000042, 0xd65f03c0, 0xa9bd7bfd}},
         {0x2477e70, {0xf9400000, 0x177eb92b, 0xd503201f, 0xd503201f}},
         {0x6f2728, {0xa9bb7bfd, 0x5289eb03, 0x91003002, 0x910003fd}},
         {0x6f2848, {0xa9bc7bfd, 0x5289eb01, 0x72aa4861, 0x910003fd}},
         {0x2371890, {0xa9b77bfd, 0x910003fd, 0x910203e8, 0xa90153f3}}};
-    for (const auto &site : sites)
-        if (std::memcmp(reinterpret_cast<const void *>(site.address), site.words, sizeof site.words)) return;
-    analysis_ops.make = reinterpret_cast<decltype(analysis_ops.make)>(sites[0].address);
-    analysis_ops.memory = reinterpret_cast<decltype(analysis_ops.memory)>(sites[1].address);
-    analysis_ops.memory_drop = reinterpret_cast<decltype(analysis_ops.memory_drop)>(sites[2].address);
-    analysis_ops.grant = reinterpret_cast<decltype(analysis_ops.grant)>(sites[3].address);
-    analysis_ops.release = reinterpret_cast<decltype(analysis_ops.release)>(sites[4].address);
-    analysis_ops.trash = reinterpret_cast<decltype(analysis_ops.trash)>(sites[5].address);
-    analysis_ready.store(true, std::memory_order_release);
+    for (unsigned i = 0; i < sizeof sites / sizeof *sites; ++i)
+        if (memcmp(((const void *) (sites[i].address)), sites[i].words, sizeof sites[i].words)) return;
+    analysis_ops.make = ((void *) (sites[0].address));
+    analysis_ops.memory = ((__typeof__(analysis_ops.memory)) (sites[1].address));
+    analysis_ops.memory_drop = ((__typeof__(analysis_ops.memory_drop)) (sites[2].address));
+    analysis_ops.grant = ((__typeof__(analysis_ops.grant)) (sites[3].address));
+    analysis_ops.release = ((__typeof__(analysis_ops.release)) (sites[4].address));
+    analysis_ops.trash = ((__typeof__(analysis_ops.trash)) (sites[5].address));
+    atomic_store_explicit(&(analysis_ready), true, memory_order_release);
 }
-bool analysis_supported() {
-    return enabled.load(std::memory_order_acquire) && profile == &profiles[1] &&
-           analysis_ready.load(std::memory_order_acquire) && map_writer_installed == 15;
+static bool analysis_supported() {
+    return atomic_load_explicit(&(enabled), memory_order_acquire) && profile == &profiles[1] &&
+           atomic_load_explicit(&(analysis_ready), memory_order_acquire) && map_writer_installed == 15;
 }
-int analysis_current(unsigned deck, uint64_t load, const aznm_packet *expected) {
+static int analysis_current(unsigned deck, uint64_t load, const struct aznm_packet *expected) {
     if (!expected || deck >= 4 || !load) return AZ_INVALID;
     if (!analysis_supported()) return AZ_UNSUPPORTED;
     return azn_maps_current(deck, load, expected) ? AZ_OK : AZ_STALE;
 }
-int analysis_capture(unsigned deck, uint64_t load, aznm_packet *out) {
+static int analysis_capture(unsigned deck, uint64_t load, struct aznm_packet *out) {
     if (!out || deck >= 4 || !load) return AZ_INVALID;
     if (!analysis_supported()) return AZ_UNSUPPORTED;
-    azn_pack_view view {};
+    struct azn_pack_view view = {0};
     if (!azn_pack_acquire(deck, &view)) return AZ_STALE;
-    struct Drop { uint64_t pin; ~Drop() { azn_pin_drop(pin); } } drop {view.token};
+    PIN_DROP(drop, view.token);
     if (view.load != load || !azn_pack_current(deck, &view)) return AZ_STALE;
-    aznm_packet result {};
+    struct aznm_packet result = {0};
     {
-        Slot &slot = cache[bucket(view.object)];
-        Lock lock(slot);
+        Slot *slot = &(cache[bucket(view.object)]);
+        SLOT_LOCK(lock, (*slot));
         if (!lock.held) return AZ_BUSY;
-        const Pair &pair = slot.pair;
-        if (pair.pack.address != view.object || !sample_matches(pair) || !pair.packet.owner ||
-            !pair.content[0].token || !pair.content[1].token) return AZ_BUSY;
-        if (!copy_packet(pair, result)) return AZ_STALE;
+        const Pair *pair = &(slot->pair);
+        if (pair->pack.address != view.object || !sample_matches(&(*pair)) || !pair->packet.owner ||
+            !pair->content[0].token || !pair->content[1].token) return AZ_BUSY;
+        if (!copy_packet(&(*pair), &result)) return AZ_STALE;
     }
     uint32_t count = 0;
-    int rc = read_rows(&result.grid, AZNM_GRID, nullptr, 0, &count);
-    if (rc != AZ_OK || !count || !current_identity(deck, view, result)) {
+    int rc = read_rows(&result.grid, AZNM_GRID, NULL, 0, &count);
+    if (rc != AZ_OK || !count || !current_identity(deck, &view, &result)) {
         release_packet(&result);
-        return rc != AZ_OK ? rc : !count ? AZ_BUSY : AZ_STALE;
+        return rc != AZ_OK ? rc : !count ? AZ_BUSY
+                                         : AZ_STALE;
     }
     *out = result;
     return AZ_OK;
 }
-unsigned analysis_u16(const uint8_t *p) { return unsigned(p[0]) << 8 | p[1]; }
-uint32_t analysis_u32(const uint8_t *p) { return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3]; }
-bool analysis_pssi(const uint8_t *p, uint32_t size, uint32_t beats) {
-    if (!p || size < 56 || size > 32 + 1024 * 24 || std::memcmp(p, "PSSI", 4) ||
+static unsigned analysis_u16(const uint8_t *p) { return (unsigned) (p[0]) << 8 | p[1]; }
+static uint32_t analysis_u32(const uint8_t *p) { return (uint32_t) (p[0]) << 24 | (uint32_t) (p[1]) << 16 | (uint32_t) (p[2]) << 8 | p[3]; }
+static bool analysis_pssi(const uint8_t *p, uint32_t size, uint32_t beats) {
+    if (!p || size < 56 || size > 32 + 1024 * 24 || memcmp(p, "PSSI", 4) ||
         analysis_u32(p + 4) != 32 || analysis_u32(p + 8) != size || analysis_u16(p + 12) != 0 ||
         analysis_u16(p + 14) != 24) return false;
     unsigned count = analysis_u16(p + 16), mood = analysis_u16(p + 18), end = analysis_u16(p + 26);
@@ -125,63 +135,58 @@ bool analysis_pssi(const uint8_t *p, uint32_t size, uint32_t beats) {
     }
     return true;
 }
-int analysis_publish(unsigned deck, uint64_t load, const aznm_packet *expected, const void *data, uint32_t size) {
+static int analysis_publish(unsigned deck, uint64_t load, const struct aznm_packet *expected, const void *data, uint32_t size) {
     if (!expected || deck >= 4 || !load || !data) return AZ_INVALID;
     if (!analysis_supported()) return AZ_UNSUPPORTED;
     uint32_t beats = 0, phrases = 0;
-    int rc = read_rows(&expected->grid, AZNM_GRID, nullptr, 0, &beats);
+    int rc = read_rows(&expected->grid, AZNM_GRID, NULL, 0, &beats);
     if (rc != AZ_OK) return rc;
-    rc = read_rows(&expected->phrases, AZNM_PHRASES, nullptr, 0, &phrases);
+    rc = read_rows(&expected->phrases, AZNM_PHRASES, NULL, 0, &phrases);
     if (rc != AZ_OK) return rc;
     if (phrases) return AZ_NOT_FOUND;
-    const auto *pssi = static_cast<const uint8_t *>(data);
+    __auto_type pssi = ((const uint8_t *) (data));
     if (!analysis_pssi(pssi, size, beats)) return AZ_INVALID;
     if (analysis_current(deck, load, expected) != AZ_OK) return AZ_STALE;
-    AnalysisPhrase made;
-    try {
-        AnalysisAtom atom;
-        atom.mood = uint16_t(analysis_u16(pssi + 18));
-        atom.end = uint16_t(analysis_u16(pssi + 26));
-        atom.count = analysis_u16(pssi + 16);
-        analysis_ops.memory(&atom.rows, pssi + 32, size - 32);
-        analysis_ops.memory(&atom.raw, pssi, size);
-        const AnalysisAtomRef ref {&atom, 0};
-        made = analysis_ops.make(&ref);
-    } catch (...) { return AZ_FAILED; }
-    if (!made.content || !typed(made.content, profile->phrase_content) ||
-        read_value<uint32_t>(made.content, 0x48) != analysis_u16(pssi + 16)) return AZ_FAILED;
-    std::lock_guard<std::recursive_mutex> mutation(map_mutation);
-    azn_pack_view view {};
+    struct AnalysisMake call = {.pssi = pssi, .size = size};
+    if (!az_native_try(analysis_make, &call)) {
+        analysis_drop(call.content);
+        return AZ_FAILED;
+    }
+    uintptr_t made __attribute__((cleanup(analysis_phrase_drop))) = call.content;
+    if (!made || !typed(made, profile->phrase_content) ||
+        read_u32(made, 0x48) != analysis_u16(pssi + 16)) return AZ_FAILED;
+    MAP_MUTATION(mutation);
+    struct azn_pack_view view = {0};
     if (!azn_pack_acquire(deck, &view)) return AZ_STALE;
-    struct Drop { uint64_t pin; ~Drop() { azn_pin_drop(pin); } } drop {view.token};
-    if (view.load != load || !current_identity(deck, view, *expected)) return AZ_STALE;
+    PIN_DROP(drop, view.token);
+    if (view.load != load || !current_identity(deck, &view, expected)) return AZ_STALE;
     uintptr_t holder = 0, prior = 0;
-    Drop holder_pin {0};
+    PIN_DROP(holder_pin, 0);
     {
-        Slot &slot = cache[bucket(view.object)];
-        Lock lock(slot);
+        Slot *slot = &(cache[bucket(view.object)]);
+        SLOT_LOCK(lock, (*slot));
         if (!lock.held) return AZ_BUSY;
-        const Pair &pair = slot.pair;
-        if (pair.pack.address != view.object || pair.packet.owner != expected->owner ||
-            !azn_pin_hold(pair.holder[1].token, &holder)) return AZ_STALE;
-        holder_pin.pin = pair.holder[1].token;
+        const Pair *pair = &(slot->pair);
+        if (pair->pack.address != view.object || pair->packet.owner != expected->owner ||
+            !azn_pin_hold(pair->holder[1].token, &holder)) return AZ_STALE;
+        holder_pin = pair->holder[1].token;
     }
     if (!typed(holder, profile->phrase_holder) || !azn_pin_hold(expected->phrases.content, &prior)) return AZ_STALE;
-    Drop prior_pin {expected->phrases.content};
-    if (read_value<uintptr_t>(holder, 0x28) != prior || read_value<uint32_t>(prior, 0x48)) return AZ_STALE;
-    HolderEdit edit(1, holder);
-    if (!(edit.mask & (1u << deck)) || !edit.bracket || !current_identity(deck, view, *expected)) return AZ_BUSY;
-    if (!analysis_ops.grant(made.content)) return AZ_FAILED;
+    PIN_DROP(prior_pin, expected->phrases.content);
+    if (read_ptr(holder, 0x28) != prior || read_u32(prior, 0x48)) return AZ_STALE;
+    HOLDER_EDIT(edit, 1, holder);
+    if (!(edit.mask & (1u << deck)) || !edit.bracket || !current_identity(deck, &view, expected)) return AZ_BUSY;
+    if (!analysis_ops.grant(made)) return AZ_FAILED;
     uintptr_t compare = prior;
-    if (!__atomic_compare_exchange_n(reinterpret_cast<uintptr_t *>(holder + 0x28), &compare, made.content,
-                                      false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-        analysis_drop(made.content);
+    if (!__atomic_compare_exchange_n(((uintptr_t *) (holder + 0x28)), &compare, made,
+                                     false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        analysis_drop(made);
         return AZ_STALE;
     }
     analysis_drop(prior); /* release the holder's replaced reference */
-    edit.finish(made.content);
+    holder_finish(&edit, made, false);
     /* Native listeners schedule their own owner-thread work. The firmware's
      * normal registry invokes the same broadcast from its repository worker. */
-    reinterpret_cast<uintptr_t (*)(uintptr_t, uintptr_t)>(map_writer_original[3])(holder, 0);
+    ((uintptr_t (*)(uintptr_t, uintptr_t))(map_writer_original[3]))(holder, 0);
     return AZ_OK;
 }

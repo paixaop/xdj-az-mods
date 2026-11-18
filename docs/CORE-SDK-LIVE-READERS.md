@@ -1,8 +1,8 @@
 # Native live-state reader evidence
 
-The private `sdk_live_observer.cpp` bridge captures four native change notifications: raw
+The private `sdk_live_observer.c` bridge captures four native change notifications: raw
 play-state flags, quantize, key lock and Sync mode. It is not a completed public live-state service.
-The source uses the GNU C++ build and existing owned unit constructor/destructor hooks.
+The source uses GNU C11 and the existing owned unit constructor/destructor hooks.
 It starts by default unless `azmod.native-live.off` or `azmod.track-data.off` exists
 at startup, and requires the default constructor hook address and a successfully
 installed destructor hook. No new firmware
@@ -105,7 +105,7 @@ association. A registration with no later change can remain unavailable indefini
 
 ## Integration and remaining delivery work
 
-The existing GNU C++ build localizes C++ symbols using the same map as the loop reader.
+The C build keeps native ABI helpers private using the same symbol map as the loop reader.
 Registration runs from the owned post-constructor hook after unit-vtable and slot checks;
 retirement runs before the native destructor. `azsdk_live_capabilities` and the versioned
 `azstem_live_observer_mask_v1` report submitted deck bits, not functional acceptance.
@@ -143,7 +143,7 @@ GNU weak/shared ownership, native vtable slots, and native-style indirect callba
 It runs without firmware or a device. `SAN=asan` selects AddressSanitizer plus UBSan;
 `SAN=tsan` selects ThreadSanitizer. Other hosts explicitly skip the Linux ELF fixture.
 
-The fixture covers early ELF-constructor registration before C++ initialization, all four
+The fixture covers early ELF-constructor registration before ordinary startup initialization, all four
 logical decks, both admitted build IDs, disabled/unknown builds,
 wrong RTTI and nonexecutable methods, absent initial replay, callback 2, wrong players,
 every valid play-bit combination, zero scalar values, invalid high bits, exact borrowed

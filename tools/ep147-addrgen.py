@@ -258,7 +258,7 @@ def reject_assembly_addresses(text, known, assembly_file=False):
 def used_names(source, library, known_addresses=None):
     names = set()
     for path in sorted((source / library).rglob('*')):
-        if path.name in ('ep147addr.h', 'sdk_cache_targets.h','sdk_slip_targets.h') or path.suffix not in ('.c', '.h', '.cpp', '.S'):
+        if path.name in ('ep147addr.h', 'sdk_cache_targets.h','sdk_slip_targets.h') or path.suffix not in ('.c', '.h', '.S'):
             continue
         text = path.read_text()
         if known_addresses:

@@ -5,11 +5,11 @@ cd "$(dirname "$0")/.."
 [ "$(uname -s)" = Linux ] || { echo 'SKIP: Linux required';exit 77; }
 task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/az-message-bridge.XXXXXX")
 trap 'rm -rf "$task_tmp"' EXIT
-flags=(-std=c++11 -O1 -g -Wall -Wextra -Werror -pthread -Isrc/common)
+flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread -Isrc/common -Itests/unit)
 case ${SAN:-plain} in plain|'') ;;asan)flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer);;tsan)flags+=(-fsanitize=thread -fno-omit-frame-pointer);;*)exit 2;;esac
-sources=(tests/unit/sdkcachemessagebridge_test.cpp)
-[ ! -f src/azmod/sdk_cache_message.cpp ] || sources+=(src/azmod/sdk_cache_message.cpp)
-"${HOST_CXX:-g++}" "${flags[@]}" "${sources[@]}" -o "$task_tmp/test"
+sources=(tests/unit/sdkcachemessagebridge_test.c)
+[ ! -f src/azmod/sdk_cache_message.c ] || sources+=(src/azmod/sdk_cache_message.c)
+"${HOST_CC:-gcc}" "${flags[@]}" "${sources[@]}" src/common/aznative_guard.S src/common/azcache_scopes.c -lstdc++ -o "$task_tmp/test"
 status=0
 (ulimit -c 0;"$task_tmp/test") >"$task_tmp/run.log" 2>&1 || status=$?
 cat "$task_tmp/run.log"

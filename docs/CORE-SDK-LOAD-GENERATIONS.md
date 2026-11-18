@@ -1,6 +1,6 @@
 # Native load-generation observer
 
-`sdk_load_observer.cpp` is an opt-in private observer of native load attempts and
+`sdk_load_observer.c` is an opt-in private observer of native load attempts and
 matching terminal receipts. It does not start a load, decode TrackInfo/LTI,
 qualify a library/source/media session, or enable SDK commands. No public
 capability is claimed by this module. Device acceptance is still required.
@@ -148,7 +148,7 @@ Run the parent installer's checks separately with `bash tests/sdk-vtable.sh`
 `src/azstem/sdk_vtable_patch.h`'s expected-original comparison, ordered replacement,
 protection restoration and forward-only rollback, plus redirect-lint coverage.
 
-Run `bash tests/sdk-load.sh` in GNU/Linux with g++ and the core's native C++ map;
+Run `bash tests/sdk-load.sh` in GNU/Linux with GCC and the core's native symbol map;
 `SAN=asan` adds ASan/UBSan and `SAN=tsan` requests TSan. macOS skips the ELF fixture.
 The private header also receives a C11 compilation check. These fixtures perform
 real virtual dispatch through synthetic native classes; they never load EP147.

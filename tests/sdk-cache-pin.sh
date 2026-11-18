@@ -5,9 +5,14 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/az-cache-pin.XXXXXX")
 trap 'rm -rf "$task_tmp"' EXIT
-compiler=${HOST_CXX:-g++}
-if [ "$(uname -s)" = Darwin ] && [ -z "${HOST_CXX:-}" ]; then compiler=/usr/local/bin/g++-15; fi
-"$compiler" -std=c++11 -O1 -g -Wall -Wextra -Werror -pthread tests/unit/sdkcachepin_test.cpp -o "$task_tmp/test"
+flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread)
+case ${SAN:-plain} in
+plain|'') ;;
+asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer) ;;
+tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
+*) exit 2;; esac
+if [ -n "${PIN_HEADER:-}" ]; then flags+=("-DAZCACHE_PIN_HEADER=\"${PIN_HEADER}\""); fi
+"${HOST_CC:-gcc}" "${flags[@]}" tests/unit/sdkcachepin_test.c src/common/aznative_guard.S -lstdc++ -o "$task_tmp/test"
 status=0
 (ulimit -c 0; "$task_tmp/test") >"$task_tmp/run.log" 2>&1 || status=$?
 cat "$task_tmp/run.log"

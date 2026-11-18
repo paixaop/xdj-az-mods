@@ -6,14 +6,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 if [ "$(uname -s)" != Linux ]; then
-    echo 'SKIP: connection-epoch fixture requires Linux and GNU libstdc++'
+    echo 'SKIP: connection-epoch fixture requires Linux'
     exit 77
 fi
 task_parent=${EVIDENCE_DIR:-${TMPDIR:-/tmp}}
 mkdir -p "$task_parent"
 task_tmp=$(mktemp -d "$task_parent/az-sdk-connection-epoch.XXXXXX")
 if [ -z "${EVIDENCE_DIR:-}" ]; then trap 'rm -rf "$task_tmp"' EXIT; fi
-flags=(-std=c++11 -O1 -g -Wall -Wextra -Werror -pthread)
+flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread)
 case ${SAN:-plain} in
 plain|'') ;;
 asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer) ;;
@@ -24,11 +24,11 @@ esac
 if [ -n "${EPOCH_HEADER:-}" ]; then flags+=("-DAZCONNECTION_EPOCH_HEADER=\"${EPOCH_HEADER}\""); fi
 {
     uname -a
-    "${HOST_CXX:-c++}" --version
-    sha256sum tests/unit/sdkconnectionepoch_test.cpp tests/sdk-connection-epoch.sh
+    "${HOST_CC:-cc}" --version
+    sha256sum tests/unit/sdkconnectionepoch_test.c tests/sdk-connection-epoch.sh
     if [ -e src/common/azconnectionepoch.h ]; then sha256sum src/common/azconnectionepoch.h; else echo 'PRODUCTION_HEADER_MISSING'; fi
 } >"$task_tmp/inputs.txt"
-"${HOST_CXX:-c++}" "${flags[@]}" tests/unit/sdkconnectionepoch_test.cpp -o "$task_tmp/connection-epoch"
+"${HOST_CC:-cc}" "${flags[@]}" tests/unit/sdkconnectionepoch_test.c src/common/aznative_guard.S -lstdc++ -o "$task_tmp/connection-epoch"
 failures=0
 for profile in 1 2; do
     status=0

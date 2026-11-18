@@ -18,6 +18,18 @@ if [ "${MODE:-all}" != run ]; then
         echo 'FAIL: preserve earlier build attempts; choose a new OUT_DIR' >&2
         exit 2
     fi
+    cat >"$task_out/opaque-profile.c" <<'C'
+#include "azconnectionhooks.h"
+const struct az_sql_profile *profile_pointer;
+C
+    "${HOST_CC:-cc}" -std=gnu11 -Wall -Wextra -Werror -Isrc/common -fsyntax-only "$task_out/opaque-profile.c"
+    cat >>"$task_out/opaque-profile.c" <<'C'
+char fabricated_profile[sizeof(struct az_sql_profile)];
+C
+    if "${HOST_CC:-cc}" -std=gnu11 -Isrc/common -fsyntax-only "$task_out/opaque-profile.c" >"$task_out/opaque-profile.log" 2>&1; then
+        echo 'FAIL: private native module proof became constructible' >&2; exit 1
+    fi
+    grep -q 'incomplete type' "$task_out/opaque-profile.log" || { cat "$task_out/opaque-profile.log"; exit 1; }
     cat >"$task_out/wrong-profile.c" <<'C'
 /* Version-compatible names deliberately lack the exact native module layout. */
 #include <stddef.h>
@@ -33,14 +45,14 @@ int sqlite3_close_v2(void *p) { (void)p; ++profile_forbidden_calls; return 21; }
 const void *EVP_sha256(void) { ++profile_forbidden_calls; return 0; }
 int EVP_Digest(const void *p, size_t n, unsigned char *o, unsigned *l, const void *m, void *e) { (void)p;(void)n;(void)o;(void)l;(void)m;(void)e; ++profile_forbidden_calls; return 0; }
 C
-    "${HOST_CXX:-c++}" -std=c++11 -O1 -g -Wall -Wextra -Werror -pthread \
-        tests/unit/sdkconnectionprofile_test.cpp src/azmod/sdk_connection_hooks.cpp -ldl -o "$task_out/connection-profile"
+    "${HOST_CC:-cc}" -std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread \
+        tests/unit/sdkconnectionprofile_test.c src/azmod/sdk_connection_hooks.c src/common/aznative_guard.S -lstdc++ -ldl -o "$task_out/connection-profile"
     "${HOST_CC:-cc}" -std=c11 -O1 -g -Wall -Wextra -Werror -shared -fPIC \
         -Wl,-soname,libsqlcipher.so.0 "$task_out/wrong-profile.c" -o "$task_out/wrong-profile.so"
     {
-        "${HOST_CXX:-c++}" --version
-        sha256sum tests/unit/sdkconnectionprofile_test.cpp tests/sdk-connection-profile.sh \
-            src/common/azconnectionepoch.h src/common/azconnectionhooks.h src/azmod/sdk_connection_hooks.cpp \
+        "${HOST_CC:-cc}" --version
+        sha256sum tests/unit/sdkconnectionprofile_test.c tests/sdk-connection-profile.sh \
+            src/common/azconnectionepoch.h src/common/azconnectionhooks.h src/azmod/sdk_connection_hooks.c \
             "$task_out/connection-profile" "$task_out/wrong-profile.c" "$task_out/wrong-profile.so"
     } >"$task_out/build-inputs.txt"
     if command -v readelf >/dev/null 2>&1; then

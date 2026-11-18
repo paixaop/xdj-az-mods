@@ -5,13 +5,14 @@ cd "$(dirname "$0")/.."
 [ "$(uname -s)" = Linux ] || { echo 'SKIP: message lifetime fixture requires Linux protected mappings'; exit 77; }
 task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/az-cache-message.XXXXXX")
 trap 'rm -rf "$task_tmp"' EXIT
-flags=(-std=c++11 -O1 -g -Wall -Wextra -Werror -pthread)
+flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread)
 case ${SAN:-plain} in
 plain|'') ;;
 asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer) ;;
 tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 *) exit 2;; esac
-"${HOST_CXX:-g++}" "${flags[@]}" tests/unit/sdkcachemessage_test.cpp -o "$task_tmp/test"
+if [ -n "${MESSAGE_HEADER:-}" ]; then flags+=("-DAZCACHE_MESSAGE_HEADER=\"${MESSAGE_HEADER}\""); fi
+"${HOST_CC:-gcc}" "${flags[@]}" tests/unit/sdkcachemessage_test.c src/common/azcache_scopes.c src/common/aznative_guard.S -lstdc++ -o "$task_tmp/test"
 failures=0
 for profile in 1 2; do
  status=0

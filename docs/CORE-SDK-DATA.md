@@ -242,8 +242,8 @@ The native loop listener starts by default unless `azmod.track-data.off` or
 `azmod.native-loop.off` exists at startup. The existing player constructor/destructor
 hooks must both install at their expected entries. It registers through
 the owned native notification server's virtual interface, with both-build layout/RTTI guards
-and GNU `std::weak_ptr` ownership. No additional absolute hook address is introduced.
-The isolated C++ translation unit requires GNU libstdc++, which EP147 already uses.
+and explicit C strong/weak ownership matching the native ABI. No additional absolute hook address is introduced.
+The C implementation uses an assembly boundary for native unwinding and the firmware's existing ABI runtime.
 
 When available, `AZ_LIVE_LOOP_ENGAGED` and `loop.valid & AZ_LOOP_ENGAGED` describe the
 native notification's current working-loop validity. Registration may be asynchronous and

@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/az-cue-commands.XXXXXX")
 trap 'rm -rf "$task_tmp"' EXIT
-flags=(-DAZSDK_CUE_COMMANDS_TESTING -std=c++11 -O1 -g -Wall -Wextra -Werror -pthread)
+flags=(-DAZSDK_CUE_COMMANDS_TESTING -std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread)
 selection=()
 case ${1:-all} in
 all) ;;
@@ -23,6 +23,6 @@ asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-f
 tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 *) exit 2 ;;
 esac
-"${HOST_CXX:-c++}" "${flags[@]}" src/azstem/sdk_cue_commands.cpp tests/unit/sdkcuecommands_test.cpp -o "$task_tmp/commands"
+"${HOST_CC:-cc}" "${flags[@]}" src/azstem/sdk_cue_commands.c tests/unit/sdkcuecommands_test.c -o "$task_tmp/commands"
 if [[ ${1:-all} == all ]]; then "$task_tmp/commands" clock; "$task_tmp/commands" create; "$task_tmp/commands" priority; "$task_tmp/commands" admission; "$task_tmp/commands" selection; "$task_tmp/commands" refresh; fi
 "$task_tmp/commands" "${selection[@]}"

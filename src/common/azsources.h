@@ -4,12 +4,7 @@
 #define AZSOURCES_H
 #include <stddef.h>
 #include <stdint.h>
-#ifdef __cplusplus
-extern "C" {
-#define AZS_NOTHROW noexcept
-#else
 #define AZS_NOTHROW
-#endif
 
 enum azsdk_source_result {
     AZS_OK = 1,
@@ -122,8 +117,5 @@ typedef int (*azsdk_source_connection_installer)(uintptr_t, void *, void **, voi
 __attribute__((visibility("hidden"))) int azsdk_sources_install_connections(
     azsdk_source_connection_installer installer, void *context) AZS_NOTHROW;
 
-#ifdef __cplusplus
-}
-#endif
 #undef AZS_NOTHROW
 #endif

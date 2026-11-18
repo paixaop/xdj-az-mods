@@ -6,16 +6,16 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 if [ "$(uname -s)" != Linux ]; then
-    echo 'SKIP: connection-hooks requires Linux and GNU libstdc++'
+    echo 'SKIP: connection-hooks requires Linux'
     exit 77
 fi
 task_parent=${EVIDENCE_DIR:-${TMPDIR:-/tmp}}
 mkdir -p "$task_parent"
 task_tmp=$(mktemp -d "$task_parent/az-sdk-connection-hooks.XXXXXX")
 if [ -z "${EVIDENCE_DIR:-}" ]; then trap 'rm -rf "$task_tmp"' EXIT; fi
-flags=(-std=c++11 -O1 -g -Wall -Wextra -Werror -pthread -DAZSDK_CONNECTION_HOOKS_TESTING)
-sources=(tests/unit/sdkconnectionhooks_test.cpp)
-if [ -f src/azmod/sdk_connection_hooks.cpp ]; then sources+=(src/azmod/sdk_connection_hooks.cpp); fi
+flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread -DAZSDK_CONNECTION_HOOKS_TESTING)
+sources=(tests/unit/sdkconnectionhooks_test.c)
+if [ -f src/azmod/sdk_connection_hooks.c ]; then sources+=(src/azmod/sdk_connection_hooks.c); fi
 case ${SAN:-plain} in
 plain|'') ;;
 asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer) ;;
@@ -25,13 +25,13 @@ tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 esac
 {
     uname -a
-    "${HOST_CXX:-c++}" --version
-    sha256sum tests/unit/sdkconnectionhooks_test.cpp tests/sdk-connection-hooks.sh src/common/azconnectionepoch.h
-    for input in src/common/azconnectionhooks.h src/azmod/sdk_connection_hooks.cpp; do
+    "${HOST_CC:-cc}" --version
+    sha256sum tests/unit/sdkconnectionhooks_test.c tests/sdk-connection-hooks.sh src/common/azconnectionepoch.h
+    for input in src/common/azconnectionhooks.h src/azmod/sdk_connection_hooks.c; do
         if [ -f "$input" ]; then sha256sum "$input"; else echo "MISSING $input"; fi
     done
 } >"$task_tmp/inputs.txt"
-"${HOST_CXX:-c++}" "${flags[@]}" "${sources[@]}" -ldl -o "$task_tmp/connection-hooks"
+"${HOST_CC:-cc}" "${flags[@]}" "${sources[@]}" src/common/aznative_guard.S -lstdc++ -ldl -o "$task_tmp/connection-hooks"
 failures=0
 scenarios=(ordinary close-fails open-fails empty-close empty-open failures)
 if [ "${EXPECT_RED:-0}" = 1 ]; then scenarios=(ordinary); fi

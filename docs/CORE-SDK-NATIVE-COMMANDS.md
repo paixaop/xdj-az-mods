@@ -118,8 +118,8 @@ disables cue commands even if the old `.on` flag remains. Firmware identity,
 constructor/destructor admission and per-operation capability checks still apply.
 MAIN_SET, MAIN_RECALL and HOT_TRIGGER use the native
 control facade. HOT_SET/CLEAR, MEMORY_SET/DELETE, SAVED_SAVE/DELETE/AUTO and cue
-comment/color updates use `sdk_cue_commands.cpp` and `sdk_cue_persist.cpp`;
-saved/memory recall uses `sdk_cue_recall.cpp`. The public bridge dispatches these
+comment/color updates use `sdk_cue_commands.c` and `sdk_cue_persist.c`;
+saved/memory recall uses `sdk_cue_recall.c`. The public bridge dispatches these
 paths through `submit_cue`, not the obsolete general adapter.
 
 When a public cue request is admitted, queued internal snapshots on all decks
@@ -226,16 +226,16 @@ first DSP stage. Existing callers without that optional fence remain valid.
 
 `azsdk_native_commands_adapter` is an unsupported fixture stub, and its separate
 capabilities function returns zero. It is not the production route and must not
-be enabled or developed as a parallel command backend. The `OwnerGate` class in
+be enabled or developed as a parallel command backend. The `az_owner_gate` C structure in
 the same source file is used by the production asynchronous backend and remains
 required. Keep existing ownership and deferred-completion protections.
 
-`src/common/aznativecommands.h` is a private C/C++ boundary. Mods use the versioned
+`src/common/aznativecommands.h` is a private C boundary. Mods use the versioned
 public library service; firmware objects and entry points stay inside the core.
 
 ## Implemented admission primitive
 
-`OwnerGate` supplies the owner-thread lifetime lease used by the native backend:
+`az_owner_gate` supplies the owner-thread lifetime lease used by the native backend:
 
 - Publication assigns a nonzero generation and refuses replacement while live.
   Generations are never reused; exhaustion refuses further publication.

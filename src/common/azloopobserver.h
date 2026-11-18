@@ -1,14 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
-/* Private C boundary for the isolated GNU C++ loop listener. No native pointers escape. */
+/* Private C boundary for the C implementation of the native loop listener. No native pointers escape. */
 #ifndef AZLOOPOBSERVER_H
 #define AZLOOPOBSERVER_H
 #include <stdint.h>
-#ifdef __cplusplus
-extern "C" {
-#define AZSDK_LOOP_NOTHROW noexcept
-#else
 #define AZSDK_LOOP_NOTHROW
-#endif
 
 struct azsdk_loop_sample {
     uint64_t unit_generation; /* Core registration lifetime, NOT a track-load generation. */
@@ -48,8 +43,5 @@ __attribute__((visibility("hidden"))) int azsdk_loop_read(int deck, struct azsdk
  * promise of initial replay, completeness, freshness or track/load association. */
 __attribute__((visibility("hidden"))) unsigned azsdk_loop_capabilities(void) AZSDK_LOOP_NOTHROW;
 
-#ifdef __cplusplus
-}
-#endif
 #undef AZSDK_LOOP_NOTHROW
 #endif

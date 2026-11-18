@@ -5,9 +5,9 @@ cd "$(dirname "$0")/.."
 [ "$(uname -s)" = Linux ] || exit 77
 task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/az-message-hook.XXXXXX")
 trap 'rm -rf "$task_tmp"' EXIT
-flags=(-std=c++11 -O1 -g -ffunction-sections -Wl,--gc-sections -Wall -Wextra -Werror -pthread -Isrc/common)
+flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -ffunction-sections -Wl,--gc-sections -Wall -Wextra -Werror -pthread -Isrc/common -Itests/unit)
 case ${SAN:-plain} in plain|'') ;;asan)flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer);;tsan)flags+=(-fsanitize=thread -fno-omit-frame-pointer);;*)exit 2;;esac
-python3 - src/azmod/playlist_editor.c tests/unit/sdkcachemessagehook_fixture.cpp "$task_tmp/test.cpp" <<'PY'
+python3 - src/azmod/playlist_editor.c tests/unit/sdkcachemessagehook_fixture.c "$task_tmp/test.c" <<'PY'
 from pathlib import Path
 import sys
 s=Path(sys.argv[1]).read_text();a=s.index('static void mlserver_onmsg_hook(');b=s.index('\n}',a)+2;body=s[a:b]
@@ -17,7 +17,7 @@ tail=body[a:]
 fixture=Path(sys.argv[2]).read_text();assert fixture.count('/* ACTUAL_NATIVE_HOOK_TAIL */')==1
 Path(sys.argv[3]).write_text(fixture.replace('/* ACTUAL_NATIVE_HOOK_TAIL */',tail))
 PY
-"${HOST_CXX:-g++}" "${flags[@]}" "$task_tmp/test.cpp" src/azmod/sdk_cache_message.cpp -o "$task_tmp/test"
+"${HOST_CC:-gcc}" "${flags[@]}" "$task_tmp/test.c" src/azmod/sdk_cache_message.c src/common/aznative_guard.S src/common/azcache_scopes.c -lstdc++ -o "$task_tmp/test"
 status=0
 (ulimit -c 0;"$task_tmp/test") >"$task_tmp/run.log" 2>&1 || status=$?
 cat "$task_tmp/run.log"

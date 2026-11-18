@@ -2,9 +2,6 @@
 #ifndef AZSTATUS_OWNED_H
 #define AZSTATUS_OWNED_H
 #include <stdint.h>
-#ifdef __cplusplus
-extern "C" {
-#endif
 /* Internal to native azstem producers. A successful acquire owns one token
  * and keeps its nominal PlayMusicPack alive until azn_pin_drop(token). The
  * immutable native object address may be used only under that lease. Current
@@ -24,7 +21,4 @@ __attribute__((visibility("hidden"))) int azn_pack_observe(azn_pack_observer obs
 __attribute__((visibility("hidden"))) uint64_t azn_owned_pin(uintptr_t owned);
 __attribute__((visibility("hidden"))) int azn_pin_hold(uint64_t token,uintptr_t *object);
 __attribute__((visibility("hidden"))) void azn_pin_drop(uint64_t token);
-#ifdef __cplusplus
-}
-#endif
 #endif

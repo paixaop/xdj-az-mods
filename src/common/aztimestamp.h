@@ -51,32 +51,6 @@ static inline int az_compare_wide_timestamps(__uint128_t first, __uint128_t seco
     return first < second ? AZ_TIME_BEFORE : AZ_TIME_AFTER;
 }
 
-#ifdef __cplusplus
-#include <type_traits>
-/* Source/cache clock conversion can produce wider intermediate ticks. Avoid
- * multiplying an already-wide delta past 128 bits; an overflowing product is
- * necessarily outside the at-most-128-bit observation window. */
-static inline int compare_timestamps(__uint128_t first, __uint128_t second,
-                                     uint64_t units_per_second, uint64_t sample_rate,
-                                     uint64_t window_samples) {
-    return az_compare_wide_timestamps(first, second, units_per_second, sample_rate, window_samples);
-}
-template <class First, class Second>
-static inline int compare_timestamps(First first, Second second,
-                                     uint64_t units_per_second,
-                                     uint64_t sample_rate,
-                                     uint64_t window_samples) {
-    static_assert(std::is_arithmetic<First>::value && std::is_arithmetic<Second>::value,
-                  "timestamps must be arithmetic values");
-    if (std::is_integral<First>::value && std::is_integral<Second>::value) {
-        if ((std::is_signed<First>::value && first < 0) ||
-            (std::is_signed<Second>::value && second < 0)) return AZ_TIME_INVALID;
-        return az_compare_integer_timestamps(static_cast<uint64_t>(first), static_cast<uint64_t>(second),
-                                             units_per_second, sample_rate, window_samples);
-    }
-    return az_compare_floating_timestamps(first, second, units_per_second, sample_rate, window_samples);
-}
-#else
 /* Preserve each operand's signedness before the usual arithmetic conversions.
  * The selected constructor evaluates its argument once. Floating comparisons
  * deliberately retain signed coordinates, including mixed integer/float calls. */
@@ -129,5 +103,4 @@ static inline int az_compare_timestamp_operands(struct az_timestamp_operand firs
 #define compare_timestamps(first, second, units, rate, window)                               \
     az_compare_timestamp_operands(AZ_TIMESTAMP_OPERAND(first), AZ_TIMESTAMP_OPERAND(second), \
                                   (units), (rate), (window))
-#endif
 #endif

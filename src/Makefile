@@ -10,7 +10,6 @@
 # built with. The export tool checks that (make -n) every time it runs.
 
 CC ?= gcc
-CXX ?= g++
 
 # `-mno-outline-atomics` is a GCC 10+ flag. Older GCCs (e.g. Ubuntu 18.04's
 # 7.5) error out on it. Probe and add it only if the compiler accepts it.
@@ -22,6 +21,7 @@ OUT := out
 AZMOD := $(OUT)/azmod.so
 AZSTEM := $(OUT)/azstem.so
 AZHANDOFF := $(OUT)/az-handoff-guard
+AZNATIVE_GUARD := $(OUT)/aznative_guard.o
 
 .PHONY: all azmod azstem azhandoff clean
 all: azmod azstem azhandoff
@@ -78,20 +78,24 @@ endif
 # menu.c #includes the Mod Menu's parts (ui_draw.c ... menu_composite.c, listed there): they are
 # not translation units of their own, and the azmod/*.c wildcard below makes them prerequisites.
 AZMOD_SRCS := azmod/azmod.c azmod/menu.c azmod/text.c azmod/azconf.c
-AZMOD_HDRS := $(wildcard azmod/*.h azmod/*.c azmod/*.cpp azmod/*.inc azmod/*.S azmod/*.def) $(wildcard common/*.h) azstem/sdk_native_cpp.map
-AZSDK_NATIVE_CXXFLAGS := $(AZ_UNWIND) -std=c++11 -O2 $(AZ_WARN) -fPIC $(NO_OUTLINE_ATOMICS) -fvisibility=hidden -fvisibility-inlines-hidden
-$(AZMOD): $(AZMOD_SRCS) $(AZMOD_HDRS) | $(OUT)
-	$(CXX) $(AZSDK_NATIVE_CXXFLAGS) -c -o $(OUT)/sdk_native_sources.o azmod/sdk_native_sources.cpp
-	$(CXX) $(AZSDK_NATIVE_CXXFLAGS) -c -o $(OUT)/sdk_connection_hooks.o azmod/sdk_connection_hooks.cpp
-	$(CXX) $(AZSDK_NATIVE_CXXFLAGS) -c -o $(OUT)/sdk_cache_message.o azmod/sdk_cache_message.cpp
-	$(CXX) $(AZSDK_NATIVE_CXXFLAGS) -c -o $(OUT)/sdk_native_slip.o azmod/sdk_native_slip.cpp
-	$(CXX) $(AZSDK_NATIVE_CXXFLAGS) -c -o $(OUT)/sdk_slip_hooks.o azmod/sdk_slip_hooks.cpp
-	$(CXX) $(AZSDK_NATIVE_CXXFLAGS) -c -o $(OUT)/sdk_slip_getters.o azmod/sdk_slip_getters.cpp
+AZMOD_HDRS := $(wildcard azmod/*.h azmod/*.c azmod/*.inc azmod/*.S azmod/*.def) $(wildcard common/*.h common/*.c common/*.S) azstem/sdk_native.map
+AZSDK_NATIVE_CFLAGS := $(AZ_UNWIND) -std=gnu11 -O2 $(AZ_WARN) -fPIC $(NO_OUTLINE_ATOMICS) -fvisibility=hidden
+$(AZNATIVE_GUARD): common/aznative_guard.S | $(OUT)
+	$(CC) $(AZ_UNWIND) -fPIC -c -o $@ $<
+
+$(AZMOD): $(AZMOD_SRCS) $(AZMOD_HDRS) $(AZNATIVE_GUARD) | $(OUT)
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/azcache_scopes.o common/azcache_scopes.c
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/sdk_native_sources.o azmod/sdk_native_sources.c
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/sdk_connection_hooks.o azmod/sdk_connection_hooks.c
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/sdk_cache_message.o azmod/sdk_cache_message.c
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/sdk_native_slip.o azmod/sdk_native_slip.c
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/sdk_slip_hooks.o azmod/sdk_slip_hooks.c
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/sdk_slip_getters.o azmod/sdk_slip_getters.c
 	$(CC) $(AZ_UNWIND) -O2 $(AZ_WARN) -fPIC $(NO_OUTLINE_ATOMICS) -fvisibility=hidden -c -o $(OUT)/sdk_cache_entry.o azmod/sdk_cache_entry.c
 	$(CC) $(AZ_UNWIND) -fPIC -c -o $(OUT)/sdk_cache_entry_asm.o azmod/sdk_cache_entry.S
 	$(CC) $(AZ_UNWIND) -fPIC -c -o $(OUT)/sdk_slip_entry_asm.o azmod/sdk_slip_entry.S
 	$(CC) $(AZ_UNWIND) -fPIC -c -o $(OUT)/sdk_slip_getter_entry.o azmod/sdk_slip_getter_entry.S
-	$(CC) $(AZMOD_CFLAGS) -Wl,--version-script=azstem/sdk_native_cpp.map -o $@.full $(AZMOD_SRCS) $(OUT)/sdk_native_sources.o $(OUT)/sdk_connection_hooks.o $(OUT)/sdk_cache_message.o $(OUT)/sdk_native_slip.o $(OUT)/sdk_slip_hooks.o $(OUT)/sdk_cache_entry.o $(OUT)/sdk_cache_entry_asm.o $(OUT)/sdk_slip_entry_asm.o $(OUT)/sdk_slip_getters.o $(OUT)/sdk_slip_getter_entry.o -ldl -lpthread -Wl,-Bstatic -lXtst -Wl,-Bdynamic -Wl,--exclude-libs,libXtst.a -lX11 -lXext -lfreetype -lm -lstdc++
+	$(CC) $(AZMOD_CFLAGS) -Wl,--version-script=azstem/sdk_native.map -o $@.full $(AZMOD_SRCS) $(OUT)/aznative_guard.o $(OUT)/azcache_scopes.o $(OUT)/sdk_native_sources.o $(OUT)/sdk_connection_hooks.o $(OUT)/sdk_cache_message.o $(OUT)/sdk_native_slip.o $(OUT)/sdk_slip_hooks.o $(OUT)/sdk_cache_entry.o $(OUT)/sdk_cache_entry_asm.o $(OUT)/sdk_slip_entry_asm.o $(OUT)/sdk_slip_getters.o $(OUT)/sdk_slip_getter_entry.o -ldl -lpthread -Wl,-Bstatic -lXtst -Wl,-Bdynamic -Wl,--exclude-libs,libXtst.a -lX11 -lXext -lfreetype -lm -lstdc++
 	$(call az_strip_keep_assets,$@)
 	@echo "Built: $@"
 
@@ -99,25 +103,26 @@ $(AZMOD): $(AZMOD_SRCS) $(AZMOD_HDRS) | $(OUT)
 # stb_vorbis.c (public domain / MIT, vendored) is its own translation unit.
 AZSTEM_CFLAGS := -DAZ_STATUS_MAPS_PRODUCER -DAZ_STATUS_MEMORY_PRODUCER -DAZ_STATUS_NATIVE_PRODUCER $(AZ_UNWIND) -O2 $(AZ_WARN) -fPIC -shared -static-libgcc $(NO_OUTLINE_ATOMICS) -Iazstem -DAZMOD_RELEASE
 AZSTEM_STB_CFLAGS := $(AZ_UNWIND) -O2 -w -fPIC $(NO_OUTLINE_ATOMICS) -Iazstem -fvisibility=hidden
-AZSTEM_OBSERVER_CXXFLAGS := -DAZ_STATUS_MAPS_PRODUCER -DAZ_STATUS_MEMORY_PRODUCER -DAZ_STATUS_NATIVE_PRODUCER $(AZ_UNWIND) -std=c++11 -O2 $(AZ_WARN) -fPIC $(NO_OUTLINE_ATOMICS) -fvisibility=hidden -fvisibility-inlines-hidden
-$(AZSTEM): $(wildcard azstem/*.c azstem/*.h azstem/*.cpp azstem/*.map azstem/*.inc) $(wildcard common/*.h) | $(OUT)
+AZSTEM_OBSERVER_CFLAGS := -DAZ_STATUS_MAPS_PRODUCER -DAZ_STATUS_MEMORY_PRODUCER -DAZ_STATUS_NATIVE_PRODUCER $(AZSDK_NATIVE_CFLAGS)
+$(AZSTEM): $(wildcard azstem/*.c azstem/*.h azstem/*.map azstem/*.inc azstem/*.S) $(wildcard common/*.h common/*.c common/*.S) $(AZNATIVE_GUARD) | $(OUT)
 	$(CC) $(AZSTEM_STB_CFLAGS) -c -o $(OUT)/stb_vorbis.o azstem/stb_vorbis.c
-	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_loop_observer.o azstem/sdk_loop_observer.cpp
-	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_status_memory.o azstem/sdk_status_memory.cpp
-	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_status_maps.o azstem/sdk_status_maps.cpp
-	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_live_observer.o azstem/sdk_live_observer.cpp
-	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_native_commands.o azstem/sdk_native_commands.cpp
-	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_exit.o azstem/sdk_exit.cpp
-	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_cue_actor.o azstem/sdk_cue_actor.cpp
-	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_cue_store.o azstem/sdk_cue_store.cpp
-	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_cue_persist.o azstem/sdk_cue_persist.cpp
-	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_cue_lifecycle.o azstem/sdk_cue_lifecycle.cpp
-	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_cue_commands.o azstem/sdk_cue_commands.cpp
-	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_cue_recall.o azstem/sdk_cue_recall.cpp
-	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_load_observer.o azstem/sdk_load_observer.cpp
-	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_analysis_source.o azstem/sdk_analysis_source.cpp
-	$(CXX) $(AZSTEM_OBSERVER_CXXFLAGS) -c -o $(OUT)/sdk_cue_observer.o azstem/sdk_cue_observer.cpp
-	$(CC) $(AZSTEM_CFLAGS) -Wl,--version-script=azstem/sdk_native_cpp.map -o $@.full azstem/azstem.c azstem/overview_lease.c azstem/sdk_status_capture.c $(OUT)/stb_vorbis.o $(OUT)/sdk_loop_observer.o $(OUT)/sdk_status_memory.o $(OUT)/sdk_status_maps.o $(OUT)/sdk_live_observer.o $(OUT)/sdk_native_commands.o $(OUT)/sdk_exit.o $(OUT)/sdk_cue_actor.o $(OUT)/sdk_cue_store.o $(OUT)/sdk_cue_persist.o $(OUT)/sdk_cue_lifecycle.o $(OUT)/sdk_cue_commands.o $(OUT)/sdk_cue_recall.o $(OUT)/sdk_load_observer.o $(OUT)/sdk_analysis_source.o $(OUT)/sdk_cue_observer.o -lm -ldl -lpthread -lstdc++
+	$(CC) $(AZSTEM_OBSERVER_CFLAGS) -c -o $(OUT)/sdk_loop_observer.o azstem/sdk_loop_observer.c
+	$(CC) $(AZSTEM_OBSERVER_CFLAGS) -c -o $(OUT)/sdk_status_memory.o azstem/sdk_status_memory.c
+	$(CC) $(AZ_UNWIND) -fPIC -c -o $(OUT)/sdk_status_memory_entry.o azstem/sdk_status_memory_entry.S
+	$(CC) $(AZSTEM_OBSERVER_CFLAGS) -c -o $(OUT)/sdk_status_maps.o azstem/sdk_status_maps.c
+	$(CC) $(AZSTEM_OBSERVER_CFLAGS) -c -o $(OUT)/sdk_live_observer.o azstem/sdk_live_observer.c
+	$(CC) $(AZSTEM_OBSERVER_CFLAGS) -c -o $(OUT)/sdk_native_commands.o azstem/sdk_native_commands.c
+	$(CC) $(AZSTEM_OBSERVER_CFLAGS) -c -o $(OUT)/sdk_exit.o azstem/sdk_exit.c
+	$(CC) $(AZSTEM_OBSERVER_CFLAGS) -c -o $(OUT)/sdk_cue_actor.o azstem/sdk_cue_actor.c
+	$(CC) $(AZSTEM_OBSERVER_CFLAGS) -c -o $(OUT)/sdk_cue_store.o azstem/sdk_cue_store.c
+	$(CC) $(AZSTEM_OBSERVER_CFLAGS) -c -o $(OUT)/sdk_cue_persist.o azstem/sdk_cue_persist.c
+	$(CC) $(AZSTEM_OBSERVER_CFLAGS) -c -o $(OUT)/sdk_cue_lifecycle.o azstem/sdk_cue_lifecycle.c
+	$(CC) $(AZSTEM_OBSERVER_CFLAGS) -c -o $(OUT)/sdk_cue_commands.o azstem/sdk_cue_commands.c
+	$(CC) $(AZSTEM_OBSERVER_CFLAGS) -c -o $(OUT)/sdk_cue_recall.o azstem/sdk_cue_recall.c
+	$(CC) $(AZSTEM_OBSERVER_CFLAGS) -c -o $(OUT)/sdk_load_observer.o azstem/sdk_load_observer.c
+	$(CC) $(AZSTEM_OBSERVER_CFLAGS) -c -o $(OUT)/sdk_analysis_source.o azstem/sdk_analysis_source.c
+	$(CC) $(AZSTEM_OBSERVER_CFLAGS) -c -o $(OUT)/sdk_cue_observer.o azstem/sdk_cue_observer.c
+	$(CC) $(AZSTEM_CFLAGS) -Wl,--version-script=azstem/sdk_native.map -o $@.full azstem/azstem.c azstem/overview_lease.c azstem/sdk_status_capture.c $(OUT)/aznative_guard.o $(OUT)/stb_vorbis.o $(OUT)/sdk_loop_observer.o $(OUT)/sdk_status_memory.o $(OUT)/sdk_status_memory_entry.o $(OUT)/sdk_status_maps.o $(OUT)/sdk_live_observer.o $(OUT)/sdk_native_commands.o $(OUT)/sdk_exit.o $(OUT)/sdk_cue_actor.o $(OUT)/sdk_cue_store.o $(OUT)/sdk_cue_persist.o $(OUT)/sdk_cue_lifecycle.o $(OUT)/sdk_cue_commands.o $(OUT)/sdk_cue_recall.o $(OUT)/sdk_load_observer.o $(OUT)/sdk_analysis_source.o $(OUT)/sdk_cue_observer.o -lm -ldl -lpthread -lstdc++
 	$(call az_strip,$@)
 	@echo "Built: $@"
 

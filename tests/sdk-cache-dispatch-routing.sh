@@ -5,11 +5,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/az-cache-routing.XXXXXX")
 trap 'rm -rf "$task_tmp"' EXIT
-"${HOST_CC:-clang}" -std=c11 -O0 -g -Wall -Wextra -Werror -fexceptions \
-    -c src/azmod/sdk_cache_entry.c -o "$task_tmp/entry.o"
-"${HOST_CXX:-clang++}" -std=c++11 -O0 -g -Wall -Wextra -Werror -pthread \
-    tests/unit/sdkcachedispatchrouting_test.cpp src/azmod/sdk_cache_message.cpp \
-    "$task_tmp/entry.o" -o "$task_tmp/test"
+flags=(-std=gnu11 -O1 -g -Wall -Wextra -Werror -pthread -fexceptions -fasynchronous-unwind-tables)
+case ${SAN:-plain} in
+plain|'') ;;
+asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer) ;;
+tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
+*) exit 2;; esac
+"${HOST_CC:-gcc}" "${flags[@]}" tests/unit/sdkcachedispatchrouting_test.c src/azmod/sdk_cache_message.c \
+    src/azmod/sdk_cache_entry.c src/common/aznative_guard.S src/common/azcache_scopes.c -lstdc++ -o "$task_tmp/test"
+
 status=0
 (ulimit -c 0; "$task_tmp/test") >"$task_tmp/run.log" 2>&1 || status=$?
 cat "$task_tmp/run.log"

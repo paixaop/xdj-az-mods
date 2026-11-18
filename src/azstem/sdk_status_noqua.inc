@@ -13,54 +13,66 @@ struct NoQuaOrigin {
     Slot *owner;
     uint64_t fence, load;
 };
-static thread_local NoQuaOrigin beat_origin {};
-static NoQuaOrigin beat_owner(void *self, int direction, uint32_t beat) noexcept {
-    auto &s = state();
-    auto slot = processing;
-    const uintptr_t owner = reinterpret_cast<uintptr_t>(self);
-    if (slot && (direction == 0 || direction == 1) && (beat & 0xffffu) && (beat >> 16) && s.build >= 1 && s.build <= 2 &&
-        table(owner, s.bias + noqua_profiles[s.build - 1].owner) && coherent(*slot)) {
+static _Thread_local NoQuaOrigin beat_origin = {0};
+static NoQuaOrigin beat_owner(void *self, int direction, uint32_t beat) {
+    __auto_type s = &(state());
+    __auto_type slot = processing;
+    const uintptr_t owner = ((uintptr_t) (self));
+    if (slot && (direction == 0 || direction == 1) && (beat & 0xffffu) && (beat >> 16) && s->build >= 1 && s->build <= 2 &&
+        table(owner, s->bias + noqua_profiles[s->build - 1].owner) && coherent(slot)) {
         uintptr_t pause = word(slot->facade + 0x58), q = word(slot->facade + 0x50);
-        azsdk_load_sample load {};
-        if (table(pause, s.profile.play_pause_table) && table(q, s.profile.quantize) &&
-            word(owner + 8) == pause && word(pause + 0x58) == slot->core.load(std::memory_order_acquire) &&
-            word(owner + 0x10) == q && word(owner + 0x20) == q + 0x20 && azsdk_load_read(int(slot - s.decks), &load))
-            return {slot, load.invalidation_epoch, load.load_generation};
+        azsdk_load_sample load = {0};
+        if (table(pause, s->profile.play_pause_table) && table(q, s->profile.quantize) &&
+            word(owner + 8) == pause && word(pause + 0x58) == atomic_load_explicit(&(slot->core), memory_order_acquire) &&
+            word(owner + 0x10) == q && word(owner + 0x20) == q + 0x20 && azsdk_load_read((int) (slot - s->decks), &load))
+            return (NoQuaOrigin) {slot, load.invalidation_epoch, load.load_generation};
     }
-    return {};
+    return (NoQuaOrigin) {0};
 }
+typedef struct BeatOwnerFrame BeatOwnerFrame;
 struct BeatOwnerFrame {
     NoQuaOrigin prior;
-    BeatOwnerFrame(void *self, int direction, uint32_t beat) noexcept : prior(beat_origin) {
-        beat_origin = beat_owner(self, direction, beat);
-    }
-    ~BeatOwnerFrame() { beat_origin = prior; }
 };
+static void beat_owner_frame_init(BeatOwnerFrame *ctx, void *self, int direction, uint32_t beat);
+static void beat_owner_frame_drop(BeatOwnerFrame *ctx);
+static void beat_owner_frame_init(BeatOwnerFrame *ctx, void *self, int direction, uint32_t beat) {
+    (void) ctx;
+    *ctx = (BeatOwnerFrame) {.prior = beat_origin};
+
+    beat_origin = beat_owner(self, direction, beat);
+}
+static void beat_owner_frame_drop(BeatOwnerFrame *ctx) {
+    (void) ctx;
+    beat_origin = ctx->prior;
+}
+
 static bool noqua_hook(void *self, int direction, uint32_t beat, const void *ref) {
-    BeatOwnerFrame frame(self, direction, beat);
-    return trampoline<bool (*)(void *, int, uint32_t, const void *)>(&noqua_original)(self, direction, beat, ref);
+    BeatOwnerFrame frame __attribute__((cleanup(beat_owner_frame_drop)));
+    beat_owner_frame_init(&frame, self, direction, beat);
+    return ((bool (*)(void *, int, uint32_t, const void *)) trampoline_address(&noqua_original))(self, direction, beat, ref);
 }
 static bool beat_grid_hook(void *self, int direction, uint32_t beat, const void *ref, bool option) {
-    BeatOwnerFrame frame(self, direction, beat);
-    return trampoline<bool (*)(void *, int, uint32_t, const void *, bool)>(&beat_grid_original)(self, direction, beat, ref, option);
+    BeatOwnerFrame frame __attribute__((cleanup(beat_owner_frame_drop)));
+    beat_owner_frame_init(&frame, self, direction, beat);
+    return ((bool (*)(void *, int, uint32_t, const void *, bool)) trampoline_address(&beat_grid_original))(self, direction, beat, ref, option);
 }
-static void status_noqua_request(StatusActionScope &out, const void *position, int mode, uintptr_t caller) noexcept {
-    auto &s = state();
-    auto slot = beat_origin.owner;
-    if (!slot || slot != processing || !out.controller || out.callback || mode != 2 || s.build < 1 || s.build > 2) return;
-    const auto &p = noqua_profiles[s.build - 1];
-    uintptr_t pos = reinterpret_cast<uintptr_t>(position);
-    if (!pointer(pos) || (caller != s.bias + p.jump_returns[0] && caller != s.bias + p.jump_returns[1])) return;
-    std::memcpy(out.beat_source, reinterpret_cast<const void *>(pos + 8), 12);
-    out.beat = azn_load_track_matches(unsigned(slot - s.decks), beat_origin.fence, beat_origin.load, out.beat_source);
-    out.beat_sample = word(pos + 0x18);
+static void status_noqua_request(StatusActionScope *out, const void *position, int mode, uintptr_t caller) {
+    __auto_type s = &(state());
+    __auto_type slot = beat_origin.owner;
+    if (!slot || slot != processing || !out->controller || out->callback || mode != 2 || s->build < 1 || s->build > 2) return;
+    __auto_type p = &(noqua_profiles[s->build - 1]);
+    uintptr_t pos = ((uintptr_t) (position));
+    if (!pointer(pos) || (caller != s->bias + p->jump_returns[0] && caller != s->bias + p->jump_returns[1])) return;
+    memcpy(out->beat_source, ((const void *) (pos + 8)), 12);
+    out->beat = azn_load_track_matches((unsigned) (slot - s->decks), beat_origin.fence, beat_origin.load, out->beat_source);
+    out->beat_sample = word(pos + 0x18);
 }
-static bool status_install_noqua(State &s, int build, azexit_install_fn install) {
-    const auto &p = noqua_profiles[build - 1];
-    static constexpr uint32_t grid_first[] = {0xa9a97bfd, 0x910003fd, 0xa90573fb, 0x2a0103fb};
-    uintptr_t entry = s.bias + p.entry, grid = s.bias + p.grid_entry;
-    if (std::memcmp(reinterpret_cast<const void *>(entry), p.first, 16) ||
-        std::memcmp(reinterpret_cast<const void *>(grid), grid_first, sizeof grid_first)) return false;
-    return install(entry, reinterpret_cast<void *>(noqua_hook), &noqua_original) && noqua_original &&
-           install(grid, reinterpret_cast<void *>(beat_grid_hook), &beat_grid_original) && beat_grid_original;
+static bool status_install_noqua(State *s, int build, azexit_install_fn install) {
+    __auto_type p = &(noqua_profiles[build - 1]);
+    static const uint32_t grid_first[] = {0xa9a97bfd, 0x910003fd, 0xa90573fb, 0x2a0103fb};
+    uintptr_t entry = s->bias + p->entry, grid = s->bias + p->grid_entry;
+    if (memcmp(((const void *) (entry)), p->first, 16) ||
+        memcmp(((const void *) (grid)), grid_first, sizeof grid_first)) return false;
+    return install(entry, ((void *) (noqua_hook)), &noqua_original) && noqua_original &&
+           install(grid, ((void *) (beat_grid_hook)), &beat_grid_original) && beat_grid_original;
 }

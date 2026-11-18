@@ -5,16 +5,16 @@ cd "$(dirname "$0")/.."
 [ "$(uname -s)" = Linux ] || { echo 'SKIP: GNU Linux ELF fixture required'; exit 77; }
 task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/az-sdk-cue.XXXXXX")
 trap 'rm -rf "$task_tmp"' EXIT
-flags=(-std=c++11 -O1 -g -Wall -Wextra -Werror -pthread -rdynamic -Isrc/common -DAZSDK_CUE_TESTING)
+flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread -rdynamic -Isrc/common -DAZSDK_CUE_TESTING)
 case ${SAN:-plain} in
 plain|'') ;;
 asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer) ;;
 tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 *) echo 'SAN must be plain, asan or tsan' >&2; exit 2 ;;
 esac
-sources=(tests/unit/sdkcue_test.cpp)
-[ ! -f src/azstem/sdk_cue_observer.cpp ] || sources+=(src/azstem/sdk_cue_observer.cpp)
-"${HOST_CXX:-g++}" "${flags[@]}" "${sources[@]}" -o "$task_tmp/test"
+sources=(tests/unit/sdkcue_test.c)
+[ ! -f src/azstem/sdk_cue_observer.c ] || sources+=(src/azstem/sdk_cue_observer.c)
+"${HOST_CC:-gcc}" "${flags[@]}" "${sources[@]}" src/common/aznative_guard.S -lstdc++ -o "$task_tmp/test"
 failures=0
 for profile in 1 2; do
     modes=(ordinary capacity)

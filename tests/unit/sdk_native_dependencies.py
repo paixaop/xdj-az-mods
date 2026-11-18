@@ -14,7 +14,7 @@ OPAQUE_INPUTS = [
     "src/azmod/sdk_deck.c", "src/azmod/sdk_track.c", "src/azmod/playlist_editor.c",
     "src/azstem/sdk_export.c", "src/azstem/deck_track_map.c",
     "src/azstem/stem_playback.c", "src/azstem/azstem.c", "tests/integration/sdk-loop-probe.c",
-    "src/azstem/sdk_native_cpp.map",
+    "src/azstem/sdk_native.map",
     "tests/unit/sdk_observation_extract.py", "tests/unit/sdk_review_controls.py",
     "tests/unit/sdk_live_extract.py", "tests/unit/sdkdata_deck_run.sh",
     "tests/unit/sdk_source_identity_extract.py",

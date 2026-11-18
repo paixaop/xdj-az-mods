@@ -4,8 +4,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 work=$(mktemp -d "${TMPDIR:-/tmp}/az-cache-admission.XXXXXX")
 trap 'rm -rf "$work"' EXIT
-"${HOST_CC:-clang}" -std=c11 -O1 -g -Wall -Wextra -Werror -c src/azmod/sdk_cache_entry.c -o "$work/entry.o"
-"${HOST_CXX:-clang++}" -std=c++11 -O1 -g -Wall -Wextra -Werror tests/unit/sdkcacheadmission_test.cpp "$work/entry.o" -o "$work/test"
+"${HOST_CC:-gcc}" -std=c11 -O1 -g -Wall -Wextra -Werror -c src/azmod/sdk_cache_entry.c -o "$work/entry.o"
+"${HOST_CC:-gcc}" -std=gnu11 -O1 -g -Wall -Wextra -Werror tests/unit/sdkcacheadmission_test.c "$work/entry.o" -o "$work/test"
 status=0
 (ulimit -c 0; "$work/test") >"$work/run.log" 2>&1 || status=$?
 cat "$work/run.log"

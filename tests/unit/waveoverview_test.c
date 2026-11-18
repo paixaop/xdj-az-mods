@@ -63,7 +63,7 @@ static void *overview_dlsym(void *handle, const char *name) {
 #undef dlsym
 #if defined(__linux__) && defined(__aarch64__)
 /* Test caller owns its Content for the complete call. Unwind information is required here
- * too: the actual production entry shim is traversed by the throwing C++ fixtures. */
+ * too: the actual production entry shim is traversed by the C native-unwind fixtures. */
 __asm__(".text\n.align 2\n.globl overview_test_native_call\n"
         ".type overview_test_native_call,%function\noverview_test_native_call:\n.cfi_startproc\n"
         "stp x29,x30,[sp,#-32]!\n.cfi_def_cfa_offset 32\n.cfi_offset 29,-32\n.cfi_offset 30,-24\n"
@@ -366,7 +366,7 @@ int main(void) {
     return 0;
 }
 
-/* Called by the C++ driver. The C hook itself is compiled with the release unwind flags. */
+/* Called by the C fixture. The C hook itself is compiled with the release unwind flags. */
 static unsigned char *throw_widget, *throw_shared, *throw_content, *throw_original;
 static int throw_mode;
 static long throw_acquired;

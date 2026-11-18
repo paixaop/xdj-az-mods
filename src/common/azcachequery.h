@@ -2,17 +2,21 @@
 #ifndef AZCACHEQUERY_H
 #define AZCACHEQUERY_H
 #include "azcachebirth.h"
-
-/* Private copied evidence for the synchronous native reply path. A raw tag23
- * value is not a TrackID or committed load. No native result/row is retained.
- * The reader succeeds only within the same owned MusicLibraryServer message,
- * after its supported selected-cache/adapter query, with unchanged source,
- * selected storage and cache provenance. No source/command capability. */
-namespace azsdk_cache_query {
-struct Evidence {
-    azsdk_cache_birth::Observation cache;
-    std::uint32_t sequence = 0, client = 0, selector = 0, start = 0, count = 0;
+/* Copied evidence within the same owned MusicLibraryServer callback, following
+ * its selected-cache query with unchanged source/storage/provenance. Raw tag23
+ * is no TrackID or committed load. No native result/row is retained. */
+struct azcq_evidence {
+    struct azcb_observation cache;
+    uint32_t sequence, client, selector, start, count;
 };
-__attribute__((visibility("hidden"))) bool current_owned(Evidence &) noexcept;
+static inline void azcq_evidence_drop(struct azcq_evidence *e) { azcb_observation_drop(&e->cache); }
+static inline void azcq_evidence_copy(struct azcq_evidence *dst, const struct azcq_evidence *src) {
+    azcb_observation_copy(&dst->cache, &src->cache);
+    dst->sequence = src->sequence;
+    dst->client = src->client;
+    dst->selector = src->selector;
+    dst->start = src->start;
+    dst->count = src->count;
 }
+__attribute__((visibility("hidden"))) bool azcq_current_owned(struct azcq_evidence *);
 #endif

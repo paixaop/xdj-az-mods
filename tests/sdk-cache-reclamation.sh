@@ -6,20 +6,20 @@ cd "$(dirname "$0")/.."
 [ "$(uname -s)" = Linux ] || exit 77
 task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/az-cache-reclamation.XXXXXX")
 trap 'rm -rf "$task_tmp"' EXIT
-flags=(-std=c++11 -O1 -g -Wall -Wextra -Werror -pthread -Isrc/common -DAZSDK_CACHE_BIRTH_TESTING -DAZSDK_CACHE_RECLAIM_TESTING)
+flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread -Isrc/common -DAZSDK_CACHE_BIRTH_TESTING -DAZSDK_CACHE_RECLAIM_TESTING)
 case ${SAN:-plain} in plain|'') ;;asan)flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer);;tsan)flags+=(-fsanitize=thread -fno-omit-frame-pointer);;*)exit 2;;esac
-python3 - src/azmod/sdk_native_sources.cpp "$task_tmp/source.cpp" <<'PY'
+python3 - src/azmod/sdk_native_sources.c "$task_tmp/source.c" <<'PY'
 from pathlib import Path
 import sys
 s=Path(sys.argv[1]).read_text()
-before='        CacheBinding *slot = nullptr;'
-after='        if (!slot || s.next_cache_birth == UINT64_MAX) return AZS_LIMIT;'
+before='    CacheBinding *slot = NULL;'
+after='    if (!slot || s->next_cache_birth == UINT64_MAX) return AZS_LIMIT;'
 assert s.count(before)==s.count(after)==1
 s=s.replace(before,before+'\n        if (cache_reclaim_test_boundary) cache_reclaim_test_boundary(0);')
 s=s.replace(after,'        if (cache_reclaim_test_boundary) cache_reclaim_test_boundary(1);\n'+after)
 Path(sys.argv[2]).write_text(s.replace('"../common/','"'))
 PY
-"${HOST_CXX:-g++}" "${flags[@]}" -DSOURCES_INC="\"$task_tmp/source.cpp\"" tests/unit/sdkcachebirth_test.cpp src/azmod/sdk_connection_hooks.cpp -ldl -o "$task_tmp/test"
+"${HOST_CC:-gcc}" "${flags[@]}" -DSOURCES_INC="\"$task_tmp/source.c\"" tests/unit/sdkcachebirth_test.c src/azmod/sdk_connection_hooks.c tests/unit/sdkcachebirth_return.S src/common/aznative_guard.S src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/test"
 for profile in 1 2;do
  status=0
  (ulimit -c 0;"$task_tmp/test" "$profile") >"$task_tmp/$profile.log" 2>&1 || status=$?

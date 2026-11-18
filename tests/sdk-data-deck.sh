@@ -35,8 +35,8 @@ ssh_args=(-i "$key" -p "$port" -o IdentitiesOnly=yes -o BatchMode=yes -o LogLeve
 python3 tests/unit/sanitizer_preflight_test.py >"$logs/controller-regressions.log" 2>&1
 python3 tests/unit/sdk_native_integration_test.py >"$logs/native-runner-regressions.log" 2>&1
 docker image inspect "$image" >/dev/null || { echo 'Build the image described by tests/run-linux.sh first' >&2; exit 2; }
-docker run --rm --platform=linux/arm64 "$image" sh -c 'command -v g++ >/dev/null' >/dev/null || {
-    echo 'The native listener fixture requires the updated test image with GNU g++' >&2; exit 2;
+docker run --rm --platform=linux/arm64 "$image" sh -c 'command -v gcc >/dev/null' >/dev/null || {
+    echo 'The native listener fixture requires the updated test image with GNU gcc' >&2; exit 2;
 }
 mkdir "$tmp/bin"
 python3 tests/unit/sdk_native_bundle.py snapshot "$original" "$tmp/source" "$logs/source-manifest.json"
@@ -59,25 +59,25 @@ python3 - "$tmp" <<'PY'
 from pathlib import Path
 import sys
 root = Path(sys.argv[1])
-s = Path('src/azstem/sdk_loop_observer.cpp').read_text()
+s = Path('src/azstem/sdk_loop_observer.c').read_text()
 old = 'player != deck'
 assert s.count(old) == 1
-(root / 'loop-player.cpp').write_text(s.replace(old, 'false'))
-old = 'p.active_generation.load(std::memory_order_acquire) != generation'
+(root / 'loop-player.c').write_text(s.replace(old, 'false'))
+old = 'atomic_load_explicit(&(p->active_generation), memory_order_acquire) != generation'
 assert s.count(old) == 2
-(root / 'loop-generation.cpp').write_text(s.replace(old, 'false'))
+(root / 'loop-generation.c').write_text(s.replace(old, 'false'))
 old = 'bool engaged = working_loop_engaged(notification);'
 assert s.count(old) == 1
-(root / 'loop-byte-zero.cpp').write_text(s.replace(old, 'bool engaged = *reinterpret_cast<const unsigned char *>(&notification) != 0;'))
+(root / 'loop-byte-zero.c').write_text(s.replace(old, 'bool engaged = *(const unsigned char *)notification != 0;'))
 old = 'position != UINT64_C(0x7fffffffffffffff)'
 assert s.count(old) == 1
-(root / 'loop-zero-time.cpp').write_text(s.replace(old, old + ' && position != 0'))
-old = 'p.bounds_reason.store(bounds.reason, std::memory_order_relaxed);'
+(root / 'loop-zero-time.c').write_text(s.replace(old, old + ' && position != 0'))
+old = 'atomic_store_explicit(&(p->bounds_reason), bounds.reason, memory_order_relaxed);'
 assert s.count(old) == 1
-(root / 'loop-reason.cpp').write_text(s.replace(old, 'p.bounds_reason.store(0, std::memory_order_relaxed);'))
-old = 'p.check_in_samples.store(bounds.check_in_samples, std::memory_order_relaxed);'
+(root / 'loop-reason.c').write_text(s.replace(old, 'atomic_store_explicit(&(p->bounds_reason), 0, memory_order_relaxed);'))
+old = 'atomic_store_explicit(&(p->check_in_samples), bounds.check_in_samples, memory_order_relaxed);'
 assert s.count(old) == 1
-(root / 'loop-numeric.cpp').write_text(s.replace(old, 'p.check_in_samples.store(bounds.check_in_samples ^ 1u, std::memory_order_relaxed);'))
+(root / 'loop-numeric.c').write_text(s.replace(old, 'atomic_store_explicit(&(p->check_in_samples), bounds.check_in_samples ^ 1u, memory_order_relaxed);'))
 s = Path('src/azmod/sdk_data_engine.h').read_text()
 for name, condition in [('first', 's->wave_query.first_column == wave->first_column'), ('count', 's->wave_query.column_count == wave->column_count')]:
     assert s.count(condition) == 1
@@ -93,8 +93,8 @@ docker run --rm --platform=linux/arm64 -v "$PWD:/src:ro" -v "$tmp:/work" "$image
     HOST_CC=gcc bash tests/sanitizer-preflight.sh --output /work/bin/preflight --compile-only --static-runtimes
     if [ "$1" = 1 ]; then
     flags=(-std=gnu11 -O1 -g -pthread -I/work -I/src/src/azmod -I/src/tests/unit)
-    cxxflags=(-std=c++11 -O1 -g -pthread -I/src/src/common -I/src/src/azstem -fvisibility=hidden -fvisibility-inlines-hidden)
-    cppmap=-Wl,--version-script=/src/src/azstem/sdk_native_cpp.map
+    observer_flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -pthread -I/src/src/common -I/src/src/azstem -fvisibility=hidden)
+    nativemap=-Wl,--version-script=/src/src/azstem/sdk_native.map
     for pass in plain asan tsan; do
         san=()
         case "$pass" in
@@ -111,8 +111,8 @@ docker run --rm --platform=linux/arm64 -v "$PWD:/src:ro" -v "$tmp:/work" "$image
         gcc "${flags[@]}" "${san[@]}" -DDECK_DATA_INC=\"/work/deck.inc\" /src/tests/unit/sdkdeckdata_test.c -o /work/bin/deck-$pass
         gcc "${flags[@]}" "${san[@]}" -DOBS_INC=\"/work/observation.inc\" /src/tests/unit/sdkobservation_test.c -o /work/bin/observation-$pass
         gcc "${flags[@]}" "${san[@]}" -DLOOP_EXPORT_INC=\"/work/loop-export.inc\" /src/tests/unit/sdkloopexport_test.c -o /work/bin/loop-export-$pass
-        g++ "${cxxflags[@]}" "${san[@]}" "$cppmap" /src/src/azstem/sdk_loop_observer.cpp \
-            /src/tests/unit/sdkloopobserver_test.cpp -ldl -o /work/bin/loop-$pass
+        gcc "${observer_flags[@]}" "${san[@]}" "$nativemap" /src/src/azstem/sdk_loop_observer.c \
+            /src/tests/unit/sdkloopobserver_test.c /src/src/common/aznative_guard.S -lstdc++ -lm -ldl -o /work/bin/loop-$pass
     done
     for control in observation-size observation-padding; do
         gcc "${flags[@]}" -DOBS_INC=\"/work/$control.inc\" /src/tests/unit/sdkobservation_test.c -o /work/bin/$control-control
@@ -131,7 +131,7 @@ docker run --rm --platform=linux/arm64 -v "$PWD:/src:ro" -v "$tmp:/work" "$image
     done
     gcc "${flags[@]}" -DDECK_DATA_INC=\"/work/deck-control.inc\" /src/tests/unit/sdkdeckdata_test.c -o /work/bin/prefix-control
     for control in player generation byte-zero zero-time reason numeric; do
-        g++ "${cxxflags[@]}" "$cppmap" /work/loop-$control.cpp /src/tests/unit/sdkloopobserver_test.cpp -ldl -o /work/bin/loop-$control-control
+        gcc "${observer_flags[@]}" "$nativemap" /work/loop-$control.c /src/tests/unit/sdkloopobserver_test.c /src/src/common/aznative_guard.S -lstdc++ -lm -ldl -o /work/bin/loop-$control-control
     done
     for control in first count; do
         gcc "${flags[@]}" -DST_ENGINE_HEADER=\"wave-$control.h\" /src/tests/unit/sdkdata_test.c -lm -o /work/bin/wave-$control-control
@@ -142,7 +142,7 @@ docker run --rm --platform=linux/arm64 -v "$PWD:/src:ro" -v "$tmp:/work" "$image
     gcc "${flags[@]}" -DTEST_RACE -fsanitize=thread -static-libtsan \
         /src/tests/unit/sdkdata_sanitizer_control.c -o /work/bin/tsan-control
     fi
-    HOST_CC=gcc HOST_CXX=g++ python3 tests/unit/sdk_completion_prepare.py /src /work/extensions /work/bin --jobs "$2"
+    HOST_CC=gcc python3 tests/unit/sdk_completion_prepare.py /src /work/extensions /work/bin --jobs "$2"
     dependency_args=(); [ "$1" = 0 ] || dependency_args+=(--foundation)
     python3 tests/unit/sdk_native_dependencies.py /src /work /work/source-manifest.json \
         /work/bin/sdk-extension-manifest.json /work/bin/used-inputs.json --jobs "$2" "${dependency_args[@]}"

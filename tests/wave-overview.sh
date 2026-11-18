@@ -60,8 +60,8 @@ compile() {
         -c tests/unit/waveoverview_test.c -o "$task_target-c.o"
     ${HOST_CC:-cc} -std=c11 "${flags[@]}" -DAZOV_LEASE_UNIT -Isrc/azstem \
         -c "$task_broker" -o "$task_target-broker.o"
-    ${HOST_CXX:-c++} -std=c++11 "${flags[@]}" tests/unit/waveoverview_exception_test.cpp \
-        "$task_target-c.o" "$task_target-broker.o" -o "$task_target"
+    ${HOST_CC:-cc} -std=gnu11 "${flags[@]}" tests/unit/waveoverview_unwind_test.c \
+        "$task_target-c.o" "$task_target-broker.o" src/common/aznative_guard.S -lstdc++ -o "$task_target"
 }
 python3 - "$task_tmp" <<'PY'
 from pathlib import Path
@@ -117,10 +117,10 @@ import hashlib,json,os,shlex,subprocess,sys
 root=Path(sys.argv[1])
 sources=['src/azmod/waveform.c','src/azmod/drum_roll_display.c','src/azstem/overview_lease.c',
          'src/common/azoverviewlease.h','tests/unit/waveoverview_test.c',
-         'tests/unit/waveoverview_exception_test.cpp','tests/wave-overview.sh']
+         'tests/unit/waveoverview_unwind_test.c','tests/wave-overview.sh']
 digest=lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
 compiler={}
-for name,default in [('HOST_CC','cc'),('HOST_CXX','c++')]:
+for name,default in [('HOST_CC','cc')]:
     command=shlex.split(os.environ.get(name,default))
     compiler[name]=subprocess.run(command+['--version'],check=True,stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE,universal_newlines=True).stdout

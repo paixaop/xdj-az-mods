@@ -14,7 +14,7 @@ if [ "${MODE:-all}" != run ]; then
         echo 'FAIL: preserve earlier packet attempts; choose a new OUT_DIR' >&2; exit 2
     fi
     # Compile the real C installer as C11. No copied installer model or source
-    # edits, and no forwarding/profile testing seam in the C++ dependency.
+    # edits, and no forwarding/profile testing seam in the C dependency.
     python3 - "$task_out" <<'PY'
 from pathlib import Path
 import json,sys
@@ -48,15 +48,15 @@ unsigned azsdk_test_connection_island_count(void) {
 PY
     "${HOST_CC:-cc}" -std=c11 -O1 -g -Wall -Wextra -Werror -Wno-unused-function -pthread \
         -c "$task_out/island-wrapper.c" -o "$task_out/island-wrapper.o"
-    flags=(-std=c++11 -O1 -g -Wall -Wextra -Werror -pthread)
-    "${HOST_CXX:-c++}" "${flags[@]}" tests/unit/sdkconnectionnative_test.cpp \
-        src/azmod/sdk_connection_hooks.cpp "$task_out/island-wrapper.o" -ldl -o "$task_out/connection-native"
-    "${HOST_CXX:-c++}" "${flags[@]}" -DAZSDK_NATIVE_UNREDIRECTED_CONTROL tests/unit/sdkconnectionnative_test.cpp \
-        src/azmod/sdk_connection_hooks.cpp "$task_out/island-wrapper.o" -ldl -o "$task_out/connection-native-unredirected"
+    flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread)
+    "${HOST_CC:-cc}" "${flags[@]}" tests/unit/sdkconnectionnative_test.c \
+        src/azmod/sdk_connection_hooks.c "$task_out/island-wrapper.o" src/common/aznative_guard.S -lstdc++ -ldl -o "$task_out/connection-native"
+    "${HOST_CC:-cc}" "${flags[@]}" -DAZSDK_NATIVE_UNREDIRECTED_CONTROL tests/unit/sdkconnectionnative_test.c \
+        src/azmod/sdk_connection_hooks.c "$task_out/island-wrapper.o" src/common/aznative_guard.S -lstdc++ -ldl -o "$task_out/connection-native-unredirected"
     {
-        "${HOST_CXX:-c++}" --version
-        sha256sum tests/unit/sdkconnectionnative_test.cpp tests/sdk-connection-native.sh \
-            src/common/azconnectionepoch.h src/common/azconnectionhooks.h src/azmod/sdk_connection_hooks.cpp \
+        "${HOST_CC:-cc}" --version
+        sha256sum tests/unit/sdkconnectionnative_test.c tests/sdk-connection-native.sh \
+            src/common/azconnectionepoch.h src/common/azconnectionhooks.h src/azmod/sdk_connection_hooks.c \
             src/azmod/inline_hooks.c src/common/azprot.h "$task_out/island-wrapper.c" \
             "$task_out/island-wrapper.o" "$task_out/connection-native" "$task_out/connection-native-unredirected"
     } >"$task_out/build-inputs.txt"

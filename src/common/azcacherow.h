@@ -1,9 +1,10 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #ifndef AZCACHEROW_H
 #define AZCACHEROW_H
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
 
 /* Private raw schema reader for the proved primary7/standard16 row families.
  * The caller already owns the complete original 24-byte result, its pointer
@@ -17,45 +18,46 @@
  * meaning to that scalar. The scoped native cache-query observer uses it
  * without assigning a TrackID or committed-load meaning.
  */
-namespace azsdk_cache_row {
-namespace detail {
-constexpr std::size_t carrier_bytes = 24, slot_bytes = 8, row_bytes = 0x98, row_quota = 16;
-inline bool address(std::uintptr_t value, std::size_t bytes = 1) noexcept {
-    const std::uint64_t maximum = UINT64_C(0x0000ffffffffffff);
+
+
+static const size_t azcrow_carrier_bytes = 24, azcrow_slot_bytes = 8, azcrow_row_bytes = 0x98, azcrow_row_quota = 16;
+static inline bool azcrow_address(uintptr_t value, size_t bytes) {
+    const uint64_t maximum = UINT64_C(0x0000ffffffffffff);
     return value >= 0x10000 && !(value & 7u) && value <= maximum &&
            bytes && bytes - 1 <= maximum - value;
 }
-template<class T> inline T scalar(std::uintptr_t value) noexcept {
-    T out; std::memcpy(&out, reinterpret_cast<const void *>(value), sizeof out); return out;
-}
-} // namespace detail
-inline bool copy_owned_tag23(const void *owned_carrier, std::uint32_t &out) noexcept {
+#define scalar(T, value) ({ T scalar_value;memcpy(&scalar_value,(const void *)(uintptr_t)(value),sizeof scalar_value);scalar_value; })
+static inline bool azcrow_copy_owned_tag23(const void *owned_carrier, uint32_t *out) {
 #if !defined(__BYTE_ORDER__) || __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__ || UINTPTR_MAX != UINT64_MAX
-    (void)owned_carrier; (void)out; return false;
+    (void) owned_carrier;
+    (void) (*out);
+    return false;
 #else
-    const auto carrier = reinterpret_cast<std::uintptr_t>(owned_carrier);
-    if (!detail::address(carrier, detail::carrier_bytes)) return false;
-    std::uintptr_t span[3]; std::memcpy(span, owned_carrier, sizeof span);
-    const auto begin = span[0], end = span[1], capacity = span[2];
-    if (!detail::address(begin) || !detail::address(end) || !detail::address(capacity) ||
-        end <= begin || capacity < end || (end - begin) % detail::slot_bytes || (capacity - begin) % detail::slot_bytes) return false;
-    const auto count = (end - begin) / detail::slot_bytes;
+    __auto_type carrier = ((uintptr_t) (owned_carrier));
+    if (!azcrow_address(carrier, azcrow_carrier_bytes)) return false;
+    uintptr_t span[3];
+    memcpy(span, owned_carrier, sizeof span);
+    uintptr_t begin = span[0], end = span[1], capacity = span[2];
+    if (!azcrow_address(begin, 1) || !azcrow_address(end, 1) || !azcrow_address(capacity, 1) ||
+        end <= begin || capacity < end || (end - begin) % azcrow_slot_bytes || (capacity - begin) % azcrow_slot_bytes) return false;
+    __auto_type count = (end - begin) / azcrow_slot_bytes;
     /* Observation quota for the proved families, not a global native maximum. */
-    if (count > detail::row_quota) return false;
+    if (count > azcrow_row_quota) return false;
     bool found = false;
-    std::uint32_t value = 0;
-    for (std::uintptr_t i = 0; i < count; ++i) {
-        const auto row = detail::scalar<std::uintptr_t>(begin + i * detail::slot_bytes);
-        if (!detail::address(row, detail::row_bytes)) return false;
-        if (detail::scalar<std::uint8_t>(row + 4) != 0x23) continue;
+    uint32_t value = 0;
+    for (uintptr_t i = 0; i < count; ++i) {
+        __auto_type row = scalar(uintptr_t, begin + i * azcrow_slot_bytes);
+        if (!azcrow_address(row, azcrow_row_bytes)) return false;
+        if (scalar(uint8_t, row + 4) != 0x23) continue;
         if (found) return false;
-        value = detail::scalar<std::uint32_t>(row);
+        value = scalar(uint32_t, row);
         found = true;
     }
     if (!found) return false;
-    out = value;
+    (*out) = value;
     return true;
+#undef scalar
 #endif
 }
-} // namespace azsdk_cache_row
+
 #endif

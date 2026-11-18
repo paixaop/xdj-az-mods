@@ -3,90 +3,60 @@
 #define AZCACHEPIN_H
 #include "azcachebirth.h"
 #include "azsources.h"
-#include <cstring>
-#include <utility>
-#if !defined(__GLIBCXX__)
-#error "Native cache pins require real GNU libstdc++ shared ownership"
-#endif
-
-/* Private pre-forward owner snapshots, not native liveness acquisition.
- * The caller already owns/serializes the complete supported source scope,
- * Collector and Creator holder through every read made by the constructor.
- * Source/Collector holder references are real GNU shared_ptrs. creator_holder
- * is the actual live one-word owning raw-pointer reference, NOT a shared_ptr.
- * Its Creator contains the real DB shared_ptr at+0x30; Collector+0x40 contains
- * its actual pool pointer. No raw native receiver/holder is read after this
- * constructor, and no Creator owner is fabricated. Native callback admission,
- * exact type/build, source freshness and mutation fences remain caller duties.
- */
-namespace azsdk_cache_pin {
-class Pins {
-    std::shared_ptr<music_library::MountPoint> mount_;
-    std::shared_ptr<music_library::SqliteDataBase> database_, creator_database_;
-    std::shared_ptr<music_library::ListCacheCollector> collector_;
-    azsdk_cache_birth::SourceBorrow source_;
-    const void *creator_ = nullptr, *pool_ = nullptr;
-    int status_ = AZS_GUARD;
-public:
-    Pins(const azsdk_cache_birth::SourceBorrow &source,
-         const std::shared_ptr<music_library::ListCacheCollector> *actual_collector,
-         const void *receiver_collector, const void *creator_holder) noexcept
-        : source_ {source.server, source.build, source.source_epoch, &mount_, &database_} {
-        static_assert(sizeof(std::shared_ptr<music_library::SqliteDataBase>) == 16,
-                      "reviewed GNU native DB shared-owner width");
-        if (!source.server || !source.source_epoch || source.build < 1 || source.build > 2 ||
-            !source.mount || !source.database || !actual_collector || !creator_holder) return;
-        mount_ = *source.mount;
-        database_ = *source.database;
-        collector_ = *actual_collector;
-        if (!mount_ || !database_ || !collector_ || collector_.get() != receiver_collector) return;
-        std::memcpy(&creator_, creator_holder, sizeof creator_);
-        const auto creator_address = reinterpret_cast<std::uintptr_t>(creator_);
-        const auto collector_address = reinterpret_cast<std::uintptr_t>(collector_.get());
-        if (!creator_ || creator_address > UINTPTR_MAX - 0x30 || collector_address > UINTPTR_MAX - 0x40) return;
-        creator_database_ = *reinterpret_cast<const std::shared_ptr<music_library::SqliteDataBase> *>(creator_address + 0x30);
-        if (!creator_database_ || creator_database_.get() != database_.get() ||
-            creator_database_.owner_before(database_) || database_.owner_before(creator_database_)) return;
-        std::memcpy(&pool_, reinterpret_cast<const void *>(collector_address + 0x40), sizeof pool_);
-        if (pool_) status_ = AZS_OK;
-    }
-    Pins(const Pins &) = delete;
-    Pins &operator=(const Pins &) = delete;
-    Pins(Pins &&) = delete;
-    Pins &operator=(Pins &&) = delete;
-    bool ready() const noexcept { return status_ == AZS_OK; }
-    int status() const noexcept { return status_; }
-    /* native_result is the genuine original-X8 shared_ptr destination. It is
-     * not read here: native forwarding must construct it before the existing
-     * birth helper reads it. Every owner-holder pointer below belongs to this
-     * immovable local object. The two raw receiver aliases/pool are comparison
-     * scalars only, never post-native dereference permissions.
-     * The Borrow and all snapshots end with Pins; nothing may retain them.
-     */
-    azsdk_cache_birth::BirthBorrow borrow(
-        const std::shared_ptr<music_library::ListCache> *native_result) const noexcept {
-        return {source_, &collector_, &creator_database_, collector_.get(), creator_, pool_, native_result};
-    }
+#include <string.h>
+/* Pre-forward snapshots from an ALREADY owned/serialized source, Collector and
+ * Creator holder. Creator's holder is a real one-word owning raw pointer, not a
+ * shared owner; its database at+0x30 and Collector's pool at+0x40 have independently
+ * proved layouts. No raw native holder is reread after initialization. */
+struct azcp_pins {
+    struct az_native_owner mount, database, creator_database, collector;
+    struct azcb_source_borrow source;
+    const void *creator, *pool;
+    int status;
 };
-
-/* Observe synchronously invokes the existing birth implementation with its
- * already validated Build profile and the supplied original exactly once.
- * It must neither retain Borrow nor catch/translate native exceptions. The
- * helper owns no result carrier/cache; normal native cache/pool lifetime after
- * return remains with the caller. No SDK lock spans the original here.
- */
-template<class Observe>
-int forward_owned(const azsdk_cache_birth::SourceBorrow &source,
-                  const std::shared_ptr<music_library::ListCacheCollector> *actual_collector,
-                  const void *receiver_collector, const void *creator_holder,
-                  const std::shared_ptr<music_library::ListCache> *native_result,
-                  azsdk_cache_birth::Forward original, Observe &&observe) {
-    if (!original.call) return AZS_INVALID;
-    if (!native_result) { original.call(original.context); return AZS_GUARD; }
-    Pins pins(source, actual_collector, receiver_collector, creator_holder);
-    if (!pins.ready()) { original.call(original.context); return pins.status(); }
-    const auto borrow = pins.borrow(native_result);
-    return std::forward<Observe>(observe)(borrow, original);
+static inline void azcp_pins_drop(struct azcp_pins *p) {
+    az_native_owner_reset(&p->collector);
+    az_native_owner_reset(&p->creator_database);
+    az_native_owner_reset(&p->database);
+    az_native_owner_reset(&p->mount);
 }
-} // namespace azsdk_cache_pin
+static inline void azcp_pins_init(struct azcp_pins *p, const struct azcb_source_borrow *source,
+                                  const struct az_native_owner *actual_collector, const void *receiver_collector, const void *creator_holder) {
+    *p = (struct azcp_pins) {.source = {source->server, source->build, source->source_epoch, &p->mount, &p->database}, .status = AZS_GUARD};
+    if (!source->server || !source->source_epoch || source->build < 1 || source->build > 2 || !source->mount || !source->database || !actual_collector || !creator_holder) return;
+    az_native_owner_copy(&p->mount, source->mount);
+    az_native_owner_copy(&p->database, source->database);
+    az_native_owner_copy(&p->collector, actual_collector);
+    if (!p->mount.object || !p->database.object || !p->collector.object || p->collector.object != receiver_collector) return;
+    memcpy(&p->creator, creator_holder, sizeof p->creator);
+    uintptr_t creator = (uintptr_t) p->creator, collector = (uintptr_t) p->collector.object;
+    if (!creator || creator > UINTPTR_MAX - 0x30 || collector > UINTPTR_MAX - 0x40) return;
+    az_native_owner_copy(&p->creator_database, (const struct az_native_owner *) (creator + 0x30));
+    if (!p->creator_database.object || p->creator_database.object != p->database.object || p->creator_database.control != p->database.control) return;
+    memcpy(&p->pool, (const void *) (collector + 0x40), sizeof p->pool);
+    if (p->pool) p->status = AZS_OK;
+}
+static inline bool azcp_pins_ready(const struct azcp_pins *p) { return p->status == AZS_OK; }
+static inline struct azcb_birth_borrow azcp_pins_borrow(const struct azcp_pins *p, const struct az_native_owner *native_result) {
+    return (struct azcb_birth_borrow) {p->source, &p->collector, &p->creator_database, p->collector.object, p->creator, p->pool, native_result};
+}
+/* Observer synchronously forwards once; it cannot retain the borrow or catch
+ * native unwind. Pins stay in their immovable caller scope and own no result. */
+static inline int azcp_forward_owned(const struct azcb_source_borrow *source, const struct az_native_owner *collector,
+                                     const void *receiver, const void *creator, const struct az_native_owner *result,
+                                     struct azcb_forward original, int (*observe)(const struct azcb_birth_borrow *, struct azcb_forward, void *), void *context) {
+    if (!original.call) return AZS_INVALID;
+    if (!result) {
+        original.call(original.context);
+        return AZS_GUARD;
+    }
+    struct azcp_pins pins __attribute__((cleanup(azcp_pins_drop)));
+    azcp_pins_init(&pins, source, collector, receiver, creator);
+    if (!azcp_pins_ready(&pins)) {
+        original.call(original.context);
+        return pins.status;
+    }
+    const struct azcb_birth_borrow borrow = azcp_pins_borrow(&pins, result);
+    return observe(&borrow, original, context);
+}
 #endif

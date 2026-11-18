@@ -9,8 +9,8 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class NativeTimestampTests(unittest.TestCase):
     def test_wrap_and_beat_targets_use_the_shared_comparator(self):
-        source = (ROOT / "src/azstem/sdk_exit.cpp").read_text()
-        action = source.split("static unsigned status_action(Slot &slot", 1)[1].split("\n#endif", 1)[0]
+        source = (ROOT / "src/azstem/sdk_exit.c").read_text()
+        action = source.split("static unsigned status_action(Slot *slot", 1)[1].split("\n#endif", 1)[0]
         for endpoint in ("in", "out"):
             self.assertRegex(
                 action,

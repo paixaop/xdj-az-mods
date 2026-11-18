@@ -14,13 +14,14 @@ tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 esac
 compiler=${HOST_CC:-cc}
 "$compiler" "${flags[@]}" -Isrc/azmod tests/unit/sdkcommand_test.c -lm -o "$task_tmp/real"
-cpp=${HOST_CXX:-c++}
-if command -v "$cpp" >/dev/null 2>&1; then
-    printf '#include "sdk_command_engine.h"\n#include <type_traits>\nstatic_assert(std::is_standard_layout<scmd_adapter>::value, "native adapter must have C layout");\nint main() { return 0; }\n' > "$task_tmp/adapter.cpp"
-    "$cpp" -std=c++11 -Wall -Wextra -Werror -Isrc/azmod -fsyntax-only "$task_tmp/adapter.cpp"
-else
-    echo 'SKIP: C++11 adapter-header check requires a C++ compiler'
-fi
+cat > "$task_tmp/adapter.c" <<'C'
+#include "sdk_command_engine.h"
+#include <stddef.h>
+_Static_assert(offsetof(struct scmd_adapter, context) == 0, "adapter context offset");
+static struct scmd_adapter adapter;
+int main(void) { return adapter.context != 0; }
+C
+"$compiler" -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -Isrc/azmod -fsyntax-only "$task_tmp/adapter.c"
 case ${SAN:-plain} in
 asan)
     nm "$task_tmp/real" | grep '__asan_init' >/dev/null || { echo 'FAIL: ASan instrumentation missing'; exit 1; }

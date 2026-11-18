@@ -2,7 +2,6 @@
 #ifndef AZCUERECALLBRIDGE_H
 #define AZCUERECALLBRIDGE_H
 #include "azexit.h"
-#ifdef __cplusplus
 /* Copied on the DSP owner frame, published with its exact terminal token.
  * No native object or counted source reference crosses this handoff. */
 struct azexit_cue_stage_sample {
@@ -10,15 +9,14 @@ struct azexit_cue_stage_sample {
     uint32_t sample_rate, out_valid;
     unsigned char source_id[12];
 };
-extern "C" {
-int azsdk_exit_recall_submit(const azexit_cue_request *) noexcept;
-int azsdk_exit_cue_stage_submit(const azexit_cue_request *) noexcept;
-int azsdk_exit_cue_stage_capture(unsigned, uint64_t, azexit_cue_stage_sample *) noexcept;
-int azsdk_exit_recall_cancel(unsigned, uint64_t) noexcept;
-int azsdk_exit_recall_quiescent(unsigned, uint64_t) noexcept;
-int azsdk_exit_recall_take(unsigned, azexit_result *) noexcept;
-int azsdk_exit_recall_poll(unsigned, azexit_result *) noexcept;
-int azsdk_exit_recall_release(unsigned, uint64_t) noexcept;
-}
-#endif
+#define AZ_RECALL_NOEXCEPT
+int azsdk_exit_recall_submit(const struct azexit_cue_request *) AZ_RECALL_NOEXCEPT;
+int azsdk_exit_cue_stage_submit(const struct azexit_cue_request *) AZ_RECALL_NOEXCEPT;
+int azsdk_exit_cue_stage_capture(unsigned, uint64_t, struct azexit_cue_stage_sample *) AZ_RECALL_NOEXCEPT;
+int azsdk_exit_recall_cancel(unsigned, uint64_t) AZ_RECALL_NOEXCEPT;
+int azsdk_exit_recall_quiescent(unsigned, uint64_t) AZ_RECALL_NOEXCEPT;
+int azsdk_exit_recall_take(unsigned, struct azexit_result *) AZ_RECALL_NOEXCEPT;
+int azsdk_exit_recall_poll(unsigned, struct azexit_result *) AZ_RECALL_NOEXCEPT;
+int azsdk_exit_recall_release(unsigned, uint64_t) AZ_RECALL_NOEXCEPT;
+#undef AZ_RECALL_NOEXCEPT
 #endif

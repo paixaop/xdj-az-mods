@@ -36,6 +36,6 @@ awk '/^\/\* X input can start an early frame/,/^}$/' src/azmod/mod_menu_overlay.
     -DSDK_OWNER_INC="\"$task_tmp/owner.inc\"" -DSDK_SUBMIT_INC="\"$task_tmp/submit.inc\"" \
     -DSDK_LIBRARY_INC="\"$task_tmp/library.inc\"" -DSDK_OVERLAY_INC="\"$task_tmp/overlay.inc\"" \
     -c tests/unit/sdk_command_delivery_test.c -o "$task_tmp/core.o"
-"${HOST_CXX:-c++}" -std=c++11 "${flags[@]}" tests/unit/sdk_command_delivery_native.cpp "$task_tmp/core.o" \
+"${HOST_CC:-cc}" -std=gnu11 "${flags[@]}" tests/unit/sdk_command_delivery_native.c "$task_tmp/core.o" \
     "${link[@]}" -o "$task_tmp/delivery"
 "$task_tmp/delivery"

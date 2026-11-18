@@ -4,9 +4,6 @@
 #ifndef AZSTATUS_MAPS_H
 #define AZSTATUS_MAPS_H
 #include <stdint.h>
-#ifdef __cplusplus
-extern "C" {
-#endif
 enum {
     AZNM_GRID = 1,
     AZNM_PHRASES = 2,
@@ -51,8 +48,5 @@ struct azn_maps_api {
 #ifdef AZ_STATUS_MAPS_PRODUCER
 __attribute__((visibility("hidden"))) const struct azn_maps_api *azn_maps_service(void);
 __attribute__((visibility("hidden"))) int azn_maps_configure(int build);
-#endif
-#ifdef __cplusplus
-}
 #endif
 #endif

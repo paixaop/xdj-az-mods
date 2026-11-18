@@ -15,17 +15,25 @@ class ExitPrivateLinkTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory(prefix="az-exit-link-") as temporary:
             folder = Path(temporary)
-            stub = folder / "load.cpp"
+            stub = folder / "load.c"
             stub.write_text('#include "azloadobserver.h"\n'
-                            'extern "C" int azsdk_load_read(int, azsdk_load_sample *) noexcept { return 0; }\n')
+                            'int azsdk_load_read(int deck, struct azsdk_load_sample *out) { (void)deck; (void)out; return 0; }\n')
             library = folder / "exit.so"
-            command = [os.environ.get("HOST_CXX", "c++"), "-std=c++11", "-O1", "-fPIC", "-shared",
-                       "-fvisibility=hidden", "-fvisibility-inlines-hidden", "-pthread",
-                       "-I" + str(root / "src/common"), "-I" + str(root / "src/azmod"),
-                       str(root / "src/azstem/sdk_exit.cpp"), str(root / "src/azstem/sdk_native_commands.cpp"),
-                       *[str(root / ("src/azstem/sdk_cue_" + name + ".cpp")) for name in
-                         ("actor", "store", "lifecycle", "persist", "recall", "commands", "observer")],
-                       str(stub), "-o", str(library)]
+            shared = ["-O1", "-fPIC", "-fvisibility=hidden", "-pthread", "-fexceptions", "-fasynchronous-unwind-tables",
+                      "-I" + str(root / "src/common"), "-I" + str(root / "src/azmod")]
+            sources = [root / "src/azstem/sdk_exit.c", root / "src/azstem/sdk_native_commands.c"]
+            for name in ("actor", "store", "lifecycle", "persist", "recall", "commands", "observer"):
+                source = root / ("src/azstem/sdk_cue_" + name + ".c")
+                sources.append(source)
+            sources += [stub, root / "src/common/aznative_guard.S"]
+            objects = []
+            for index, source in enumerate(sources):
+                obj = folder / (str(index) + ".o")
+                compiler = os.environ.get("HOST_CC", "cc")
+                command = [compiler, "-std=gnu11"] + shared
+                subprocess.run(command + ["-c", str(source), "-o", str(obj)], check=True, capture_output=True, text=True)
+                objects.append(str(obj))
+            command = [os.environ.get("HOST_CC", "cc"), "-shared", "-pthread"] + objects + ["-lstdc++", "-lm", "-o", str(library)]
             if sys.platform.startswith("linux"):
                 command.append("-ldl")
             subprocess.run(command, check=True, capture_output=True, text=True)
@@ -55,8 +63,9 @@ assert core.obtain(ctypes.cast(get, ctypes.c_void_p), ctypes.byref(version))
 assert version.value == 1
 assert get() is None
 '''
-            subprocess.run([sys.executable, "-c", code, str(library), str(core_path)], check=True,
-                           capture_output=True, text=True, timeout=10)
+            result = subprocess.run([sys.executable, "-c", code, str(library), str(core_path)],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* Included after the real island installer and source configuration state.
  * Startup-only opt-in dependency; no source/load capability is advertised.
- * The canonical C++ bridge validates/pins the exact loaded module before the
+ * The canonical C bridge validates/pins the exact loaded module before the
  * first redirect and retains close retirement independently of diagnostics.
  */
 #include "../common/azsources.h"

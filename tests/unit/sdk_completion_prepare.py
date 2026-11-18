@@ -21,7 +21,7 @@ import sys
 ASSERTION = r"Assertion.*failed|assertion.*failed"
 BASE_FAMILIES = ("command", "stored", "live", "sources", "native-commands")
 FAMILIES = BASE_FAMILIES + ("time",)
-TIME_CPP = ("strict", "fixed", "boundary", "narrow")
+TIME_SAMPLES = ("strict", "fixed", "boundary", "narrow")
 TIME_INPUT = ("input-clock", "input-budget", "input-elapsed")
 TIME_ENGINE = ("clock", "grid", "interval")
 LOOP_DECK = tuple("loop-strict-slot-" + str(deck) for deck in range(4))
@@ -30,7 +30,7 @@ WRAPPERS = "wrapper-submit-owner wrapper-poll-owner wrapper-cancel-owner wrapper
 STORED = "short-cue cue-header active-status active-identity memory-color preview-clock preview-stride preview-header preview-validity preview-capacity phrase-version phrase-unknown preview-request".split()
 MONO_STORED = "mono-count mono-word mono-clock".split()
 LIVE_C = "live-export-size live-export-version sync-export-size sync-export-version live-deck-prefix live-deck-clock live-deck-valid live-deck-normalized live-deck-master-tempo-valid live-deck-master-tempo-source live-deck-sync-valid live-deck-sync-source live-lifetime-register live-lifetime-retire live-config-required live-probe-clock live-probe-age live-probe-bound".split()
-LIVE_CPP = "player generation slot boolean invalid-retention allocation-rollback sync-slot sync-mode sync-legacy-leak".split()
+LIVE_NATIVE = "player generation slot boolean invalid-retention allocation-rollback sync-slot sync-mode sync-legacy-leak".split()
 LIVE_FLAGS = ["observer-loop-race", "observer-live-race"]
 SOURCES = "worker-marker worker-present worker-affinity raw-owner-reuse expired-owner candidate-result forgotten-ambiguity physical-profile fdinfo-bound descriptor-recheck native-fd-dup-close vfs-short-name rtti-short-name".split()
 NATIVE_COMMANDS = "capability owner-thread thread-reuse foreign-release generation retirement-wait reentrant-close predicate-release exhaustion".split()
@@ -91,20 +91,20 @@ def generate(root, work):
     inventories = {
         "command": ({name for name in COMMAND + WRAPPERS + ["request-growth"]}, None),
         "stored": (set(STORED + MONO_STORED), None),
-        "live": (None, set(LIVE_CPP + list(LOOP_DECK) + ["payload-overread", "rtti-overread", "loop-rtti-overread", "allocator-nothrow-bypass"])),
+        "live": (None, set(LIVE_NATIVE + list(LOOP_DECK) + ["payload-overread", "rtti-overread", "loop-rtti-overread", "allocator-bypass"])),
         "sources": (None, set(SOURCES + ["sample-boundary", "constructor-order", "bridge", "bridge-control"])),
         "native-commands": (None, set(NATIVE_COMMANDS)),
         "time": (set(TIME_ENGINE) | {"common"}, None),
     }
-    for family, (directories, cpp_files) in inventories.items():
+    for family, (directories, c_files) in inventories.items():
         target = work / family
         if directories is not None and {path.name for path in target.iterdir() if path.is_dir()} != directories:
             raise ValueError("unreviewed native mutation directory inventory: " + family)
-        if cpp_files is not None and {path.stem for path in target.glob("*.cpp")} != cpp_files:
+        if c_files is not None and {path.stem for path in target.glob("*.c")} != c_files:
             raise ValueError("unreviewed native mutation source inventory: " + family)
     if {path.stem for path in (work / "live").glob("*.inc")} != set(LIVE_C + LIVE_FLAGS + ["live-export", "sync-export", "live-deck", "live-lifetime", "live-config", "live-probe", "observer-flags"]):
         raise ValueError("unreviewed native live C mutation inventory")
-    if {path.stem for path in (work / "time").glob("*.inc")} != set(TIME_CPP + TIME_INPUT + ("sample", "input-time")):
+    if {path.stem for path in (work / "time").glob("*.inc")} != set(TIME_SAMPLES + TIME_INPUT + ("sample", "input-time")):
         raise ValueError("unreviewed native timing mutation inventory")
     return evidence
 
@@ -114,11 +114,10 @@ class Build:
         self.root, self.work, self.output = root, work, output
         self.actions, self.runs, self.controls = [], [], []
         self.cc = os.environ.get("HOST_CC", "gcc")
-        self.cxx = os.environ.get("HOST_CXX", "g++")
         self.common = ["-O1", "-g", "-Wall", "-Wextra", "-Werror", "-pthread"]
 
-    def flags(self, mode, cpp=False):
-        result = ["-std=c++11" if cpp else "-std=c11"] + self.common
+    def flags(self, mode):
+        result = ["-std=gnu11", "-fexceptions", "-fasynchronous-unwind-tables"] + self.common
         if mode == "asan":
             result += ["-fsanitize=address,undefined", "-static-libasan", "-static-libubsan",
                        "-fno-sanitize-recover=all", "-fno-omit-frame-pointer"]
@@ -126,16 +125,10 @@ class Build:
             result += ["-fsanitize=thread", "-static-libtsan", "-fno-omit-frame-pointer"]
         return result
 
-    def compile(self, name, sources, mode="plain", cpp=False, extra=(), links=(), run=True,
+    def compile(self, name, sources, mode="plain", extra=(), links=(), run=True,
                 argument="-", diagnostic=None, label=None):
         output = self.output / name
-        command = [self.cxx if cpp else self.cc] + self.flags(mode, cpp)
-        if cpp and mode in ("asan", "tsan") and any(pathlib.Path(source).name == "sdkliveobserver_test.cpp" for source in sources):
-            # GNU7 forces static sanitizer archives whole, whose strong new/delete
-            # definitions conflict with this fixture's real allocation-failure injector.
-            # Private shared runtimes preserve both instrumentation and the injector.
-            command = [value for value in command if value not in ("-static-libasan", "-static-libubsan", "-static-libtsan")]
-            command.append("-Wl,-rpath,$ORIGIN/runtime")
+        command = [self.cc] + self.flags(mode)
         command += list(extra) + [str(source) for source in sources] + list(links) + ["-o", str(output)]
         self.actions.append((name, command, None))
         if diagnostic is not None:
@@ -157,8 +150,8 @@ class Build:
         timing = self.work / "time"
         mod_inc = ["-I" + str(azmod)]
         common_inc = ["-I" + str(common)]
-        hidden = ["-fvisibility=hidden", "-fvisibility-inlines-hidden"]
-        live_flags = common_inc + hidden + ["-Wl,--version-script=" + str(self.root / "src/azstem/sdk_native_cpp.map")]
+        hidden = ["-fvisibility=hidden"]
+        live_flags = common_inc + ["-I" + str(self.root / "tests/unit"), "-fexceptions", "-fasynchronous-unwind-tables", "-fvisibility=hidden", "-Wl,--version-script=" + str(self.root / "src/azstem/sdk_native.map")]
         c_live_flags = mod_inc + ["-I" + str(self.root / "tests/unit"), "-Wno-unused-function", "-Wno-unused-variable"]
         owner = self.macro("SDK_COMMAND_OWNER_INC", command / "owner.inc")
         submit = self.macro("SDK_COMMAND_SUBMIT_INC", command / "submit.inc")
@@ -170,7 +163,7 @@ class Build:
                       "probe": ("sdkliveprobe_test.c", "LIVE_PROBE_INC", "live-probe"),
                       "flags": ("sdkobserverflags_test.c", "OBSERVER_FLAGS_INC", "observer-flags")}
         for mode in ("plain", "asan", "tsan"):
-            self.compile("ext-time-samples-" + mode, [self.fixture("sdksampletime_test.cpp")], mode, cpp=True,
+            self.compile("ext-time-samples-" + mode, [self.fixture("sdksampletime_test.c")], mode,
                          extra=common_inc + [self.macro("SAMPLE_TIME_IMPL", timing / "sample.inc")], links=["-lm"])
             binary = self.compile("ext-time-contract-" + mode, [self.fixture("sdktime_test.c")], mode,
                                   extra=mod_inc + [self.macro("INPUT_TIME_IMPL", timing / "input-time.inc")], links=["-lm"], run=False)
@@ -188,23 +181,23 @@ class Build:
                              extra=c_live_flags + [live_config, self.macro(macro, live / (inc + ".inc"))], links=["-lm"])
             for service in ("live", "loop"):
                 self.compile("ext-" + service + "-observer-" + mode,
-                             [self.root / ("src/azstem/sdk_" + service + "_observer.cpp"), self.fixture("sdk" + service + "observer_test.cpp")],
-                             mode, cpp=True, extra=live_flags, links=["-ldl"])
-            binary = self.compile("ext-sources-" + mode, [self.fixture("sdknativesources_test.cpp"), self.root / "src/azmod/sdk_connection_hooks.cpp"], mode,
-                                  cpp=True, extra=common_inc + ["-DAZS_SAMPLE_BOUNDARY", self.macro("SOURCES_INC", sources / "sample-boundary.cpp")], links=["-ldl"], run=False)
+                             [self.root / ("src/azstem/sdk_" + service + "_observer.c"), self.fixture("sdk" + service + "observer_test.c")],
+                             mode, extra=live_flags + (["-DAZ_NATIVE_LISTENER_TESTING"] if service == "live" else []), links=[str(common / "aznative_guard.S"), "-lstdc++", "-ldl", "-lm"])
+            binary = self.compile("ext-sources-" + mode, [self.fixture("sdknativesources_test.c"), self.root / "src/azmod/sdk_connection_hooks.c", common / "azcache_scopes.c", common / "aznative_guard.S"], mode,
+                                  extra=common_inc + ["-DAZS_SAMPLE_BOUNDARY", self.macro("SOURCES_INC", sources / "sample-boundary.c")], links=["-ldl", "-lstdc++"], run=False)
             for profile in ("1", "2"):
                 self.runs.append(("ext-sources-profile" + profile + "-" + mode, binary, profile))
-            self.compile("ext-sources-constructor-" + mode, [self.fixture("sdknativesources_test.cpp"), self.root / "src/azmod/sdk_connection_hooks.cpp"], mode,
-                         cpp=True, extra=common_inc + ["-DAZS_CONSTRUCTOR_REGRESSION", "-DAZS_SAMPLE_BOUNDARY", self.macro("SOURCES_INC", sources / "sample-boundary.cpp")], links=["-ldl"], argument="1")
-            self.compile("ext-sources-bridge-" + mode, [sources / "bridge.cpp", self.root / "src/azmod/sdk_cache_message.cpp"], mode, cpp=True, extra=common_inc)
-            self.compile("sources-production-" + mode + ".o", [self.root / "src/azmod/sdk_native_sources.cpp"], mode,
-                         cpp=True, extra=common_inc + ["-c"], run=False)
+            self.compile("ext-sources-constructor-" + mode, [self.fixture("sdknativesources_test.c"), self.root / "src/azmod/sdk_connection_hooks.c", common / "azcache_scopes.c", common / "aznative_guard.S"], mode,
+                         extra=common_inc + ["-DAZS_CONSTRUCTOR_REGRESSION", "-DAZS_SAMPLE_BOUNDARY", self.macro("SOURCES_INC", sources / "sample-boundary.c")], links=["-ldl", "-lstdc++"], argument="1")
+            self.compile("ext-sources-bridge-" + mode, [sources / "bridge.c", self.root / "src/azmod/sdk_cache_message.c", common / "azcache_scopes.c"], mode, extra=common_inc)
+            self.compile("sources-production-" + mode + ".o", [self.root / "src/azmod/sdk_native_sources.c"], mode,
+                         extra=common_inc + ["-c"], run=False)
             for testing in (False, True):
                 self.compile("ext-native-commands-" + ("testing-" if testing else "production-") + mode,
-                             [self.root / "src/azstem/sdk_native_commands.cpp", self.fixture("sdknativecommands_test.cpp")], mode,
-                             cpp=True, extra=common_inc + mod_inc + hidden + (["-DAZSDK_NATIVE_COMMANDS_TESTING"] if testing else []))
-        for name in TIME_CPP:
-            self.compile("ext-time-" + name + "-control", [self.fixture("sdksampletime_test.cpp")], cpp=True,
+                             [self.root / "src/azstem/sdk_native_commands.c", self.fixture("sdknativecommands_test.c")], mode,
+                             extra=common_inc + mod_inc + ["-fexceptions", "-fasynchronous-unwind-tables", "-fvisibility=hidden"] + (["-DAZSDK_NATIVE_COMMANDS_TESTING"] if testing else []), links=[str(common / "aznative_guard.S"), "-lstdc++", "-lm"])
+        for name in TIME_SAMPLES:
+            self.compile("ext-time-" + name + "-control", [self.fixture("sdksampletime_test.c")],
                          extra=common_inc + [self.macro("SAMPLE_TIME_IMPL", timing / (name + ".inc"))], links=["-lm"], diagnostic=ASSERTION)
         for name in TIME_INPUT + TIME_ENGINE:
             include = mod_inc if name in TIME_INPUT else ["-I" + str(timing / name)]
@@ -212,8 +205,8 @@ class Build:
                          extra=include + [self.macro("INPUT_TIME_IMPL", timing / ((name if name in TIME_INPUT else "input-time") + ".inc"))],
                          links=["-lm"], diagnostic=ASSERTION, argument=name.replace("input-", ""))
         for name in LOOP_DECK:
-            self.compile("ext-" + name + "-control", [live / (name + ".cpp"), self.fixture("sdkloopobserver_test.cpp")],
-                         cpp=True, extra=live_flags, links=["-ldl"], diagnostic=ASSERTION)
+            self.compile("ext-" + name + "-control", [live / (name + ".c"), self.fixture("sdkloopobserver_test.c")],
+                         extra=live_flags, links=[str(common / "aznative_guard.S"), "-lstdc++", "-ldl", "-lm"], diagnostic=ASSERTION)
         for name in COMMAND:
             self.compile("ext-command-" + name + "-control", [self.fixture("sdkcommand_test.c")],
                          extra=["-I" + str(command / name)] + mod_inc, links=["-lm"], diagnostic=ASSERTION)
@@ -238,37 +231,37 @@ class Build:
                 extra = [self.macro("LIVE_EXPORT_INC", live / "live-export.inc"), self.macro("LIVE_CONFIG_INC", live / (name + ".inc"))]
             self.compile("ext-" + name + "-control", [self.fixture(fixture)], extra=c_live_flags + extra, links=["-lm"],
                          diagnostic=ASSERTION + "|FAIL  lifetime")
-        for name in LIVE_CPP:
-            self.compile("ext-live-" + name + "-control", [live / (name + ".cpp"), self.fixture("sdkliveobserver_test.cpp")],
-                         cpp=True, extra=live_flags, links=["-ldl"], diagnostic="FAIL live:")
+        for name in LIVE_NATIVE:
+            self.compile("ext-live-" + name + "-control", [live / (name + ".c"), self.fixture("sdkliveobserver_test.c")],
+                         extra=live_flags + ["-DAZ_NATIVE_LISTENER_TESTING"], links=[str(common / "aznative_guard.S"), "-lstdc++", "-ldl", "-lm"], diagnostic="FAIL live:")
         self.controls.append(("ext-live-sync-payload-short-control", "ext-live-observer-asan",
                               "AddressSanitizer: heap-buffer-overflow", "--sync-payload-short"))
-        self.compile("ext-live-allocator-nothrow-bypass-control",
-                     [self.root / "src/azstem/sdk_live_observer.cpp", live / "allocator-nothrow-bypass.cpp"],
-                     cpp=True, extra=live_flags, links=["-ldl"], diagnostic="FAIL live:")
+        self.compile("ext-live-allocator-bypass-control",
+                     [self.root / "src/azstem/sdk_live_observer.c", live / "allocator-bypass.c"],
+                     extra=live_flags + ["-DAZ_NATIVE_LISTENER_TESTING"], links=[str(common / "aznative_guard.S"), "-lstdc++", "-ldl", "-lm"], diagnostic="FAIL live:")
         for name in LIVE_FLAGS:
             self.compile("ext-" + name + "-control", [self.fixture("sdkobserverflags_test.c")], "tsan",
                          extra=c_live_flags + [self.macro("OBSERVER_FLAGS_INC", live / (name + ".inc"))],
                          links=["-lm"], diagnostic="WARNING: ThreadSanitizer: data race")
         for name in ("payload-overread", "rtti-overread", "loop-rtti-overread"):
-            fixture = "sdkloopobserver_test.cpp" if name.startswith("loop-") else "sdkliveobserver_test.cpp"
+            fixture = "sdkloopobserver_test.c" if name.startswith("loop-") else "sdkliveobserver_test.c"
             diagnostic = "AddressSanitizer: " + ("heap" if name == "payload-overread" else "global") + "-buffer-overflow"
-            self.compile("ext-live-" + name + "-control", [live / (name + ".cpp"), self.fixture(fixture)], "asan",
-                         cpp=True, extra=live_flags, links=["-ldl"], diagnostic=diagnostic)
+            self.compile("ext-live-" + name + "-control", [live / (name + ".c"), self.fixture(fixture)], "asan",
+                         extra=live_flags + ([] if name.startswith("loop-") else ["-DAZ_NATIVE_LISTENER_TESTING"]), links=[str(common / "aznative_guard.S"), "-lstdc++", "-ldl", "-lm"], diagnostic=diagnostic)
         for name in SOURCES + ["constructor-order"]:
-            extra = common_inc + ["-DAZS_SAMPLE_BOUNDARY", self.macro("SOURCES_INC", sources / (name + ".cpp"))]
+            extra = common_inc + ["-DAZS_SAMPLE_BOUNDARY", self.macro("SOURCES_INC", sources / (name + ".c"))]
             if name == "worker-affinity":
                 extra.append("-Wno-unused-local-typedefs")
             if name == "constructor-order":
                 extra.append("-DAZS_CONSTRUCTOR_REGRESSION")
-            self.compile("ext-sources-" + name + "-control", [self.fixture("sdknativesources_test.cpp"), self.root / "src/azmod/sdk_connection_hooks.cpp"], cpp=True,
-                         extra=extra, links=["-ldl"], diagnostic=("Assertion.*vfs_name_child_status.*failed" if name == "vfs-short-name" else
+            self.compile("ext-sources-" + name + "-control", [self.fixture("sdknativesources_test.c"), self.root / "src/azmod/sdk_connection_hooks.c", common / "azcache_scopes.c", common / "aznative_guard.S"],
+                         extra=extra, links=["-ldl", "-lstdc++"], diagnostic=("Assertion.*vfs_name_child_status.*failed" if name == "vfs-short-name" else
                                                                "Assertion.*rtti_name_child_status.*failed" if name == "rtti-short-name" else ASSERTION), argument="1")
-        self.compile("ext-sources-bridge-control", [sources / "bridge-control.cpp", self.root / "src/azmod/sdk_cache_message.cpp"], cpp=True,
+        self.compile("ext-sources-bridge-control", [sources / "bridge-control.c", self.root / "src/azmod/sdk_cache_message.c", common / "azcache_scopes.c"],
                      extra=common_inc, diagnostic=ASSERTION)
         for name in NATIVE_COMMANDS:
-            self.compile("ext-native-commands-" + name + "-control", [native / (name + ".cpp"), self.fixture("sdknativecommands_test.cpp")],
-                         cpp=True, extra=common_inc + mod_inc + hidden + ["-DAZSDK_NATIVE_COMMANDS_TESTING"], diagnostic="FAIL nativecommands:")
+            self.compile("ext-native-commands-" + name + "-control", [native / (name + ".c"), self.fixture("sdknativecommands_test.c")],
+                         extra=common_inc + mod_inc + ["-DAZSDK_NATIVE_COMMANDS_TESTING", "-fexceptions", "-fasynchronous-unwind-tables", "-fvisibility=hidden"], links=[str(common / "aznative_guard.S"), "-lstdc++", "-lm"], diagnostic="FAIL nativecommands:")
         for name, mode, macro, extra, diagnostic in [
                 ("heap", "asan", "SCMD_TEST_HEAP", "-fno-sanitize=undefined", "AddressSanitizer: heap-buffer-overflow"),
                 ("signed", "asan", "SCMD_TEST_SIGNED", "-fno-sanitize=address", "runtime error: signed integer overflow"),
@@ -278,10 +271,10 @@ class Build:
         growth = [self.cc] + self.flags("plain") + ["-I" + str(command / "request-growth")] + mod_inc
         growth += [str(self.fixture("sdkcommand_test.c")), "-lm", "-o", str(self.work / "request-growth-rejected")]
         self.actions.append(("command-request-growth", growth, "command request grew"))
-        adapter = self.work / "adapter.cpp"
-        adapter.write_text('#include "sdk_command_engine.h"\n#include <type_traits>\nstatic_assert(std::is_standard_layout<scmd_adapter>::value, "adapter C layout");\n')
-        self.actions.append(("command-cpp-header", [self.cxx, "-std=c++11", "-Wall", "-Wextra", "-Werror"] + mod_inc + ["-fsyntax-only", str(adapter)], None))
-        self.actions.append(("native-commands-c-header", [self.cc, "-std=c11", "-Wall", "-Wextra", "-Werror"] + common_inc + ["-x", "c", "-fsyntax-only", str(common / "aznativecommands.h")], None))
+        adapter = self.work / "adapter.c"
+        adapter.write_text('#include "sdk_command_engine.h"\nstatic struct scmd_adapter adapter;\nint main(void) { return adapter.context != 0; }\n')
+        self.actions.append(("command-c-header", [self.cc, "-std=c11", "-D_POSIX_C_SOURCE=200809L", "-Wall", "-Wextra", "-Werror"] + mod_inc + ["-fsyntax-only", str(adapter)], None))
+        self.actions.append(("native-commands-c-header", [self.cc, "-std=c11", "-D_POSIX_C_SOURCE=200809L", "-Wall", "-Wextra", "-Werror"] + common_inc + ["-x", "c", "-fsyntax-only", str(common / "aznativecommands.h")], None))
 
     def execute(self, jobs):
         logdir = self.work / "compile-logs"
@@ -369,7 +362,7 @@ def main():
     evidence = generate(args.root, args.work)
     build = Build(args.root, args.work, args.output)
     build.plan()
-    runtimes = stage_shared_runtimes(args.root, args.work, args.output, build.cxx)
+    runtimes = stage_shared_runtimes(args.root, args.work, args.output, build.cc)
     build.execute(args.jobs)
     (args.output / "sdk-extension-manifest.json").write_text(json.dumps({
         "scope": "six standalone SDK extensions; synthetic native objects, no EP147 native calls",
@@ -377,7 +370,7 @@ def main():
         "generator_sha256": evidence,
         "private_shared_sanitizer_runtimes": runtimes,
         "compilers": [subprocess.check_output([compiler, "--version"], universal_newlines=True).splitlines()[0]
-                      for compiler in (build.cc, build.cxx)],
+                      for compiler in (build.cc,)],
         "compile_commands": [{"label": name, "argv": command, "required_compile_rejection": rejection}
                              for name, command, rejection in build.actions]}, indent=2) + "\n")
     print("SDK EXTENSIONS COMPILED: %d runs, %d diagnostic controls; runtime NOT RUN" % (len(build.runs), len(build.controls)))

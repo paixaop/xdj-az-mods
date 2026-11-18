@@ -2,9 +2,6 @@
 #ifndef AZANALYSIS_NATIVE_H
 #define AZANALYSIS_NATIVE_H
 #include <stdint.h>
-#ifdef __cplusplus
-extern "C" {
-#endif
 /* Private core service. Native epochs and successful-load generations are
  * required together. No library row or USB identity is inferred for streaming. */
 struct azn_analysis_source {
@@ -24,7 +21,4 @@ struct azn_analysis_source_api {
     void (*close)(uint64_t token);
 };
 __attribute__((visibility("hidden"))) const struct azn_analysis_source_api *azn_analysis_sources(void);
-#ifdef __cplusplus
-}
-#endif
 #endif

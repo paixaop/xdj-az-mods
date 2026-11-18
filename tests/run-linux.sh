@@ -31,13 +31,13 @@ python3 tests/unit/sdk_native_integration_test.py
 python3 tests/unit/sdk_completion_test.py
 python3 tests/unit/sdk_exit_link_test.py
 if ! docker image inspect azmod-build:18.04 >/dev/null 2>&1 ||
-   ! docker run --rm --platform=linux/arm64 azmod-build:18.04 sh -c 'command -v g++ >/dev/null' >/dev/null 2>&1; then
+   ! docker run --rm --platform=linux/arm64 azmod-build:18.04 sh -c 'command -v gcc >/dev/null' >/dev/null 2>&1; then
     docker build --platform=linux/arm64 -f docker/azmod-build.Dockerfile -t azmod-build:18.04 .
 fi
 IMG=${AZ_TEST_IMAGE:-azmod-test:18.04}
 has() { docker run --rm --platform=linux/arm64 "$IMG" sh -c "$1" >/dev/null 2>&1; }
 if ! docker image inspect "$IMG" >/dev/null 2>&1 ||
-   ! has 'command -v g++ >/dev/null' ||
+   ! has 'command -v gcc >/dev/null' ||
    ! has 'clang-format --version | grep -q "clang-format version 21\.1\.8$"' ||
    ! has 'clang-10 --version && ls /usr/lib/llvm-10/lib/clang/10.0.0/lib/linux/libclang_rt.fuzzer-aarch64.a' ||
    ! has 'clang-tidy-10 --version | grep -q "LLVM version 10\.0\.0" && cppcheck --version | grep -q "^Cppcheck 1\.82$"'; then

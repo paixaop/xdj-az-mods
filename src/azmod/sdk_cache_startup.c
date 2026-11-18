@@ -2,7 +2,7 @@
 /* Included after the native installers and source startup configuration.
  * One canonical process-lifetime batch; no reset/uninstall or late retry.
  * Complete installation admits only cache capture. Source/connection/load
- * qualification remains in the separately owned C++ observer scopes.
+ * qualification remains in the separately owned C observer scopes.
  */
 #include "sdk_cache_hooks.c"
 #include <stdatomic.h>

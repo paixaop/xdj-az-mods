@@ -4,9 +4,6 @@
 #define AZLOADEXPORT_H
 #include "azloadobserver.h"
 #include <stdint.h>
-#ifdef __cplusplus
-extern "C" {
-#endif
 struct azstem_load_observation_v1 {
     uint32_t size, version;
     struct azsdk_load_sample sample;
@@ -17,10 +14,5 @@ typedef int (*azstem_load_observation_v1_fn)(int, struct azstem_load_observation
  * are rejected before version/sample reads. Failure changes no output byte;
  * success preserves caller size and any unknown tail beyond this version. */
 __attribute__((visibility("default"))) int azstem_load_observation_v1(int deck, struct azstem_load_observation_v1 *out);
-#ifdef __cplusplus
-}
-static_assert(sizeof(struct azstem_load_observation_v1) == 48, "private load export ABI");
-#else
 _Static_assert(sizeof(struct azstem_load_observation_v1) == 48, "private load export ABI");
-#endif
 #endif

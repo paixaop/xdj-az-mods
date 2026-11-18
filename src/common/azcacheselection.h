@@ -1,281 +1,226 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #ifndef AZCACHESELECTION_H
 #define AZCACHESELECTION_H
-#include <atomic>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <memory>
-#include <utility>
-#if !defined(__GLIBCXX__)
-#error "Native selected-owner resolution requires GNU libstdc++ shared ownership"
-#endif
-
-/* Private GNU-owner resolver, not a native entry prototype or public SDK API.
- * The caller ALREADY owns the complete native object and serializes its member
- * access for the actual callback. Readiness/epochs do not acquire that lifetime
- * or close a concurrent free-after-check window. State is embedded/caller-owned
- * (for example in existing SourceState), never a separate registry/service.
- * Atomic bookkeeping permits conservative shared fencing; it does not make a
- * native root/vector concurrently readable or make native data races safe.
- */
-namespace azsdk_cache_selection {
-enum Status { Ok = 0, Unavailable = 1, Guard = 2, Changed = 3, Limit = 4 };
-enum Event { SelectionChange = 1, ScopeLoss = 2 };
-struct Position { std::uint32_t outer, selector; };
-struct Borrow {
+#include "aznative_c.h"
+#include <stdatomic.h>
+#include <string.h>
+/* The caller already owns and serializes the complete native objects. Fences
+ * qualify observations; they never acquire a native object's lifetime. */
+enum {
+    AZSEL_OK = 0,
+    AZSEL_UNAVAILABLE = 1,
+    AZSEL_GUARD = 2,
+    AZSEL_CHANGED = 3,
+    AZSEL_LIMIT = 4
+};
+enum {
+    AZSEL_SELECTION_CHANGE = 1,
+    AZSEL_SCOPE_LOSS = 2
+};
+struct azsel_position {
+    uint32_t outer, selector;
+};
+struct azsel_borrow {
     unsigned build;
     const void *root;
     void *context;
-    /* Must inspect caller-owned scope state, not follow an unowned root.
-     * It certifies the actual supported native layout/worker and serialization.
-     * The mount proof is called only with a genuine scoped Mount owner pinned.
-     * Proof callbacks are read-only. Any synchronous native mutation/release
-     * instead requires a positive Mutation fence before it can occur. */
     bool (*already_owned)(void *);
     bool (*supported_sqlite_mount)(void *, const void *);
 };
-class Invocation;
-class Mutation;
-class State {
-    static constexpr unsigned max_depth = 32;
-    const unsigned limit_;
-    std::atomic<unsigned> active_ {0}, mutating_ {0};
-    std::atomic<std::uint64_t> revision_ {1}, next_ {0};
-    std::atomic<bool> saturated_ {false};
-    friend class Invocation;
-    friend class Mutation;
-    bool stamp(std::uint64_t &revision) const noexcept {
-        if (saturated_.load(std::memory_order_acquire) || mutating_.load(std::memory_order_acquire)) return false;
-        revision = revision_.load(std::memory_order_acquire);
-        return revision && !mutating_.load(std::memory_order_acquire) &&
-               !saturated_.load(std::memory_order_acquire) &&
-               revision_.load(std::memory_order_acquire) == revision;
-    }
-    bool stamp_is(std::uint64_t revision) const noexcept {
-        std::uint64_t current = 0;
-        return stamp(current) && current == revision;
-    }
-    bool enter(std::uint64_t &id, std::uint64_t &revision) noexcept {
-        if (!stamp(revision)) return false;
-        unsigned active = active_.load(std::memory_order_acquire);
-        while (active < limit_) {
-            if (active_.compare_exchange_weak(active, active + 1, std::memory_order_acq_rel,
-                                              std::memory_order_acquire)) {
-                auto next = next_.load(std::memory_order_acquire);
-                while (next != UINT64_MAX) {
-                    if (next_.compare_exchange_weak(next, next + 1, std::memory_order_acq_rel,
-                                                   std::memory_order_acquire)) {
-                        id = next + 1;
-                        if (stamp_is(revision)) return true;
-                        active_.fetch_sub(1, std::memory_order_release);
-                        return false;
+struct azsel_state {
+    unsigned limit;
+    _Atomic unsigned active, mutating;
+    _Atomic uint64_t revision, next;
+    _Atomic bool saturated;
+};
+#define AZSEL_STATE_INIT {.limit = 32, .revision = 1}
+static inline void azsel_state_init(struct azsel_state *s, unsigned depth, uint64_t revision, uint64_t next) {
+    *s = (struct azsel_state) {.limit = depth, .revision = revision, .next = next, .saturated = !depth || depth > 32 || !revision};
+}
+static inline bool azsel_stamp(const struct azsel_state *s, uint64_t *revision) {
+    if (atomic_load_explicit(&s->saturated, memory_order_acquire) || atomic_load_explicit(&s->mutating, memory_order_acquire)) return false;
+    *revision = atomic_load_explicit(&s->revision, memory_order_acquire);
+    return *revision && !atomic_load_explicit(&s->mutating, memory_order_acquire) && !atomic_load_explicit(&s->saturated, memory_order_acquire) && atomic_load_explicit(&s->revision, memory_order_acquire) == *revision;
+}
+static inline bool azsel_stamp_is(const struct azsel_state *s, uint64_t revision) {
+    uint64_t current = 0;
+    return azsel_stamp(s, &current) && current == revision;
+}
+struct azsel_invocation {
+    struct azsel_state *state;
+    uint64_t id, revision;
+    bool entered;
+};
+static inline void azsel_invocation_init(struct azsel_invocation *i, struct azsel_state *s) {
+    *i = (struct azsel_invocation) {.state = s};
+    if (!azsel_stamp(s, &i->revision)) return;
+    unsigned active = atomic_load_explicit(&s->active, memory_order_acquire);
+    while (active < s->limit) {
+        if (atomic_compare_exchange_weak_explicit(&s->active, &active, active + 1, memory_order_acq_rel, memory_order_acquire)) {
+            uint64_t next = atomic_load_explicit(&s->next, memory_order_acquire);
+            while (next != UINT64_MAX) {
+                if (atomic_compare_exchange_weak_explicit(&s->next, &next, next + 1, memory_order_acq_rel, memory_order_acquire)) {
+                    i->id = next + 1;
+                    if (azsel_stamp_is(s, i->revision)) {
+                        i->entered = true;
+                        return;
                     }
+                    atomic_fetch_sub_explicit(&s->active, 1, memory_order_release);
+                    return;
                 }
-                saturated_.store(true, std::memory_order_release);
-                active_.fetch_sub(1, std::memory_order_release);
-                return false;
             }
-        }
-        saturated_.store(true, std::memory_order_release);
-        return false;
-    }
-public:
-    explicit State(unsigned depth = max_depth) noexcept : limit_(depth) {
-        if (!depth || depth > max_depth) saturated_.store(true, std::memory_order_relaxed);
-    }
-    State(const State &) = delete;
-    State &operator=(const State &) = delete;
-    unsigned active() const noexcept { return active_.load(std::memory_order_acquire); }
-    bool saturated() const noexcept { return saturated_.load(std::memory_order_acquire); }
-#if defined(AZSDK_CACHE_SELECTION_TESTING)
-    struct TestingSeed { unsigned depth; std::uint64_t revision, next; };
-    explicit State(TestingSeed seed) noexcept : State(seed.depth) {
-        revision_.store(seed.revision, std::memory_order_relaxed);
-        next_.store(seed.next, std::memory_order_relaxed);
-        if (!seed.revision) saturated_.store(true, std::memory_order_relaxed);
-    }
-#endif
-};
-class Invocation {
-    State *state_;
-    std::uint64_t id_ = 0, revision_ = 0;
-    bool entered_ = false;
-public:
-    explicit Invocation(State &state) noexcept : state_(&state) { entered_ = state.enter(id_, revision_); }
-    ~Invocation() { if (entered_) state_->active_.fetch_sub(1, std::memory_order_release); }
-    Invocation(const Invocation &) = delete;
-    Invocation &operator=(const Invocation &) = delete;
-    bool ready() const noexcept { return entered_ && state_->stamp_is(revision_); }
-    const State *state() const noexcept { return state_; }
-    std::uint64_t id() const noexcept { return entered_ ? id_ : 0; }
-    std::uint64_t revision() const noexcept { return revision_; }
-};
-/* Positive fence BEFORE selection-storage changes or synchronous scope loss.
- * Retain through actual native mutation/normal return/unwind. A changed-back
- * owner remains rejected in every invocation that preceded this fence. New
- * invocations still require independent actual ownership/serialization proof.
- */
-class Mutation {
-    State *state_;
-    bool entered_ = false;
-public:
-    Mutation(State &state, unsigned event) noexcept : state_(&state) {
-        if (event != SelectionChange && event != ScopeLoss) state.saturated_.store(true, std::memory_order_release);
-        unsigned depth = state.mutating_.load(std::memory_order_acquire);
-        while (depth < state.limit_) {
-            if (state.mutating_.compare_exchange_weak(depth, depth + 1, std::memory_order_acq_rel,
-                                                      std::memory_order_acquire)) { entered_ = true; break; }
-        }
-        if (!entered_) state.saturated_.store(true, std::memory_order_release);
-        auto revision = state.revision_.load(std::memory_order_acquire);
-        for (;;) {
-            if (revision == UINT64_MAX) { state.saturated_.store(true, std::memory_order_release); break; }
-            if (state.revision_.compare_exchange_weak(revision, revision + 1, std::memory_order_acq_rel,
-                                                      std::memory_order_acquire)) break;
+            atomic_store_explicit(&s->saturated, true, memory_order_release);
+            atomic_fetch_sub_explicit(&s->active, 1, memory_order_release);
+            return;
         }
     }
-    ~Mutation() { if (entered_) state_->mutating_.fetch_sub(1, std::memory_order_release); }
-    Mutation(const Mutation &) = delete;
-    Mutation &operator=(const Mutation &) = delete;
+    atomic_store_explicit(&s->saturated, true, memory_order_release);
+}
+static inline void azsel_invocation_drop(struct azsel_invocation *i) {
+    if (i->entered) {
+        i->entered = false;
+        atomic_fetch_sub_explicit(&i->state->active, 1, memory_order_release);
+    }
+}
+static inline bool azsel_ready(const struct azsel_invocation *i) { return i->entered && azsel_stamp_is(i->state, i->revision); }
+struct azsel_mutation {
+    struct azsel_state *state;
+    bool entered;
 };
-namespace detail {
-inline bool add(std::uintptr_t base, std::uintptr_t offset, std::uintptr_t &out) noexcept {
+static inline void azsel_mutation_init(struct azsel_mutation *m, struct azsel_state *s, unsigned event) {
+    *m = (struct azsel_mutation) {.state = s};
+    if (event != AZSEL_SELECTION_CHANGE && event != AZSEL_SCOPE_LOSS) atomic_store_explicit(&s->saturated, true, memory_order_release);
+    unsigned depth = atomic_load_explicit(&s->mutating, memory_order_acquire);
+    while (depth < s->limit)
+        if (atomic_compare_exchange_weak_explicit(&s->mutating, &depth, depth + 1, memory_order_acq_rel, memory_order_acquire)) {
+            m->entered = true;
+            break;
+        }
+    if (!m->entered) atomic_store_explicit(&s->saturated, true, memory_order_release);
+    uint64_t revision = atomic_load_explicit(&s->revision, memory_order_acquire);
+    for (;;) {
+        if (revision == UINT64_MAX) {
+            atomic_store_explicit(&s->saturated, true, memory_order_release);
+            break;
+        }
+        if (atomic_compare_exchange_weak_explicit(&s->revision, &revision, revision + 1, memory_order_acq_rel, memory_order_acquire)) break;
+    }
+}
+static inline void azsel_mutation_drop(struct azsel_mutation *m) {
+    if (m->entered) {
+        m->entered = false;
+        atomic_fetch_sub_explicit(&m->state->mutating, 1, memory_order_release);
+    }
+}
+static inline bool azsel_add(uintptr_t base, uintptr_t offset, uintptr_t *out) {
     if (offset > UINTPTR_MAX - base) return false;
-    out = base + offset; return true;
+    *out = base + offset;
+    return true;
 }
-struct VectorView { std::uintptr_t begin, end, capacity; };
-static_assert(sizeof(std::uintptr_t) == 8 && sizeof(VectorView) == 24, "reviewed native 64-bit GNU vector prefix");
-inline bool count(const VectorView &view, std::uintptr_t stride, std::uintptr_t &out) noexcept {
+struct azsel_vector {
+    uintptr_t begin, end, capacity;
+};
+_Static_assert(sizeof(uintptr_t) == 8 && sizeof(struct azsel_vector) == 24, "native GNU vector prefix");
+static inline bool azsel_count(const struct azsel_vector *v, uintptr_t stride, uintptr_t *out) {
     if (!stride) return false;
-    if (!view.begin) { out = 0; return !view.end && !view.capacity; }
-    if ((view.begin | view.end | view.capacity) & 7u || view.end < view.begin || view.capacity < view.end ||
-        (view.end - view.begin) % stride || (view.capacity - view.begin) % stride) return false;
-    out = (view.end - view.begin) / stride; return true;
+    if (!v->begin) {
+        *out = 0;
+        return !v->end && !v->capacity;
+    }
+    if ((v->begin | v->end | v->capacity) & 7u || v->end < v->begin || v->capacity < v->end || (v->end - v->begin) % stride || (v->capacity - v->begin) % stride) return false;
+    *out = (v->end - v->begin) / stride;
+    return true;
 }
-inline VectorView view(std::uintptr_t address) noexcept {
-    VectorView result; std::memcpy(&result, reinterpret_cast<const void *>(address), sizeof result); return result;
+static inline struct azsel_vector azsel_view(uintptr_t address) {
+    struct azsel_vector v;
+    memcpy(&v, (const void *) address, sizeof v);
+    return v;
 }
-template<class T> std::shared_ptr<T> owner(std::uintptr_t address) noexcept {
-    /* This is a genuine C++ strong copy from the actual live GNU shared_ptr
-     * field, never memcpy of ownership words or owner construction from self. */
-    return *reinterpret_cast<const std::shared_ptr<T> *>(address);
-}
-template<class T> bool same(const std::shared_ptr<T> &a, const std::shared_ptr<T> &b) noexcept {
-    return a && b && a.get() == b.get() && !a.owner_before(b) && !b.owner_before(a);
-}
-inline bool allowed(const Invocation &scope, const Borrow &borrow) noexcept {
-    /* Fence readiness is deliberately first: after scope loss do not even ask
-     * a native-accessing validator to inspect formerly owned root storage. */
-    if (!scope.ready() || (borrow.build != 1 && borrow.build != 2) || !borrow.root ||
-        (reinterpret_cast<std::uintptr_t>(borrow.root) & 7u) || !borrow.already_owned ||
-        !borrow.supported_sqlite_mount) return false;
-    try { return borrow.already_owned(borrow.context) && scope.ready(); }
-    catch (...) { return false; }
-}
-} // namespace detail
-template<class Mount, class Database, class Collector, class Cache>
-class Pins {
-    /* Reverse destruction is mandatory: cache before Collector/pool, then DB
-     * and Mount. Default memberwise assignment would not preserve this order. */
-    std::shared_ptr<Mount> mount_;
-    std::shared_ptr<Database> database_;
-    std::shared_ptr<Collector> collector_;
-    std::shared_ptr<Cache> cache_;
-public:
-    Pins() noexcept = default;
-    Pins(std::shared_ptr<Mount> mount, std::shared_ptr<Database> database,
-         std::shared_ptr<Collector> collector, std::shared_ptr<Cache> cache) noexcept
-        : mount_(std::move(mount)), database_(std::move(database)), collector_(std::move(collector)), cache_(std::move(cache)) {}
-    Pins(Pins &&) noexcept = default;
-    Pins(const Pins &) = delete;
-    Pins &operator=(const Pins &) = delete;
-    Pins &operator=(Pins &&) = delete;
-    const std::shared_ptr<Mount> &mount() const noexcept { return mount_; }
-    const std::shared_ptr<Database> &database() const noexcept { return database_; }
-    const std::shared_ptr<Collector> &collector() const noexcept { return collector_; }
-    const std::shared_ptr<Cache> &cache() const noexcept { return cache_; }
+static inline bool azsel_same(const struct az_native_owner *a, const struct az_native_owner *b) { return a->object && b->object && a->object == b->object && a->control == b->control; }
+struct azsel_proof {
+    const struct azsel_borrow *borrow;
+    const void *mount;
+    bool result;
 };
-template<class Mount, class Database, class Collector, class Cache>
-struct Resolution {
+static inline void azsel_owned_proof(void *opaque) {
+    struct azsel_proof *p = opaque;
+    p->result = p->borrow->already_owned(p->borrow->context);
+}
+static inline void azsel_mount_proof(void *opaque) {
+    struct azsel_proof *p = opaque;
+    p->result = p->borrow->supported_sqlite_mount(p->borrow->context, p->mount);
+}
+static inline bool azsel_allowed(const struct azsel_invocation *i, const struct azsel_borrow *b) {
+    if (!azsel_ready(i) || (b->build != 1 && b->build != 2) || !b->root || ((uintptr_t) b->root & 7u) || !b->already_owned || !b->supported_sqlite_mount) return false;
+    struct azsel_proof p = {.borrow = b};
+    return az_native_try(azsel_owned_proof, &p) && p.result && azsel_ready(i);
+}
+struct azsel_pins {
+    struct az_native_owner mount, database, collector, cache;
+};
+static inline void azsel_pins_drop(struct azsel_pins *p) {
+    az_native_owner_reset(&p->cache);
+    az_native_owner_reset(&p->collector);
+    az_native_owner_reset(&p->database);
+    az_native_owner_reset(&p->mount);
+}
+struct azsel_resolution {
     int status;
-    const State *state = nullptr;
-    std::uint64_t invocation = 0, revision = 0;
-    const void *root = nullptr;
-    Position position {0, 0};
-    Pins<Mount, Database, Collector, Cache> pins;
-    explicit Resolution(int value) noexcept : status(value) {}
-    Resolution(const Invocation &scope, const Borrow &borrow, Position selected,
-               Pins<Mount, Database, Collector, Cache> owners) noexcept
-        : status(Ok), state(scope.state()), invocation(scope.id()), revision(scope.revision()), root(borrow.root),
-          position(selected), pins(std::move(owners)) {}
-    Resolution(Resolution &&) noexcept = default;
-    Resolution(const Resolution &) = delete;
-    Resolution &operator=(const Resolution &) = delete;
-    Resolution &operator=(Resolution &&) = delete;
+    const struct azsel_state *state;
+    uint64_t invocation, revision;
+    const void *root;
+    struct azsel_position position;
+    struct azsel_pins pins;
 };
-/* No holder pointer survives this function. Actual ListServer/Mount complete
- * object lifetime and serialization must already cover each read. A valid
- * vector shape is not proof that fabricated/unowned memory may be followed.
- * Returned pins must stay inside the actual owned callback; only weak/copy
- * evidence may be retained afterwards. No source epoch/tuple registry lives here.
- */
-template<class Mount, class Database, class Collector, class Cache>
-Resolution<Mount, Database, Collector, Cache> resolve_owned(const Invocation &scope, const Borrow &borrow,
-                                                           Position position) noexcept {
-    using Result = Resolution<Mount, Database, Collector, Cache>;
-    static_assert(sizeof(std::shared_ptr<Mount>) == 16 && sizeof(std::weak_ptr<Mount>) == 16,
-                  "reviewed native GNU two-word shared/weak ABI");
-    if (!detail::allowed(scope, borrow)) return Result(Guard);
-    if (position.selector < 1 || position.selector > 9) return Result(Unavailable);
-    std::uintptr_t mount_address = 0, collector_address = 0, outer_address = 0;
-    const auto root = reinterpret_cast<std::uintptr_t>(borrow.root);
-    if (!detail::add(root, 0x28, mount_address) || !detail::add(root, 0x40, collector_address) ||
-        !detail::add(root, 0x50, outer_address)) return Result(Guard);
-    std::shared_ptr<Mount> mount;
-    std::shared_ptr<Database> database;
-    std::shared_ptr<Collector> collector;
-    std::shared_ptr<Cache> cache;
-    mount = detail::owner<Mount>(mount_address);
-    collector = detail::owner<Collector>(collector_address);
-    if (!mount || !collector || !scope.ready()) return Result(Unavailable);
-    try { if (!borrow.supported_sqlite_mount(borrow.context, mount.get())) return Result(Guard); }
-    catch (...) { return Result(Guard); }
-    if (!detail::allowed(scope, borrow)) return Result(Changed);
-    std::uintptr_t database_address = 0;
-    if (!detail::add(reinterpret_cast<std::uintptr_t>(mount.get()), 0x30, database_address)) return Result(Guard);
-    database = detail::owner<Database>(database_address);
-    const auto outer = detail::view(outer_address);
-    std::uintptr_t outer_count = 0;
-    if (!detail::count(outer, 24, outer_count) || position.outer >= outer_count) return Result(Unavailable);
-    std::uintptr_t inner_address = 0;
-    if (position.outer > (UINTPTR_MAX - outer.begin) / 24 ||
-        !detail::add(outer.begin, std::uintptr_t(position.outer) * 24, inner_address)) return Result(Guard);
-    const auto inner = detail::view(inner_address);
-    std::uintptr_t inner_count = 0;
-    // Both reviewed native selector tables are exactly 0,1,...,8.
-    const std::uintptr_t slot = position.selector - 1;
-    if (!detail::count(inner, 16, inner_count) || slot >= inner_count) return Result(Unavailable);
-    std::uintptr_t cache_address = 0;
-    if (slot > (UINTPTR_MAX - inner.begin) / 16 || !detail::add(inner.begin, slot * 16, cache_address)) return Result(Guard);
-    cache = detail::owner<Cache>(cache_address);
-    if (!database || !cache || !detail::allowed(scope, borrow)) return Result(Changed);
-    return Result(scope, borrow, position,
-                  Pins<Mount, Database, Collector, Cache>(std::move(mount), std::move(database),
-                                                        std::move(collector), std::move(cache)));
+static inline void azsel_resolution_drop(struct azsel_resolution *r) { azsel_pins_drop(&r->pins); }
+/* Zero-initialize output; returned pins stay within the already-owned callback. */
+static inline void azsel_resolve_owned(const struct azsel_invocation *i, const struct azsel_borrow *b, struct azsel_position pos, struct azsel_resolution *r) {
+    azsel_resolution_drop(r);
+    *r = (struct azsel_resolution) {.status = AZSEL_GUARD};
+    if (!azsel_allowed(i, b)) return;
+    r->status = AZSEL_UNAVAILABLE;
+    if (pos.selector < 1 || pos.selector > 9) return;
+    uintptr_t ma = 0, ca = 0, oa = 0;
+    r->status = AZSEL_GUARD;
+    if (!azsel_add((uintptr_t) b->root, 0x28, &ma) || !azsel_add((uintptr_t) b->root, 0x40, &ca) || !azsel_add((uintptr_t) b->root, 0x50, &oa)) return;
+    struct azsel_pins p __attribute__((cleanup(azsel_pins_drop))) = {0};
+    az_native_owner_copy(&p.mount, (const struct az_native_owner *) ma);
+    az_native_owner_copy(&p.collector, (const struct az_native_owner *) ca);
+    r->status = AZSEL_UNAVAILABLE;
+    if (!p.mount.object || !p.collector.object || !azsel_ready(i)) return;
+    struct azsel_proof proof = {b, p.mount.object, false};
+    r->status = AZSEL_GUARD;
+    if (!az_native_try(azsel_mount_proof, &proof) || !proof.result) return;
+    r->status = AZSEL_CHANGED;
+    if (!azsel_allowed(i, b)) return;
+    uintptr_t da = 0;
+    r->status = AZSEL_GUARD;
+    if (!azsel_add((uintptr_t) p.mount.object, 0x30, &da)) return;
+    az_native_owner_copy(&p.database, (const struct az_native_owner *) da);
+    struct azsel_vector outer = azsel_view(oa);
+    uintptr_t n = 0;
+    r->status = AZSEL_UNAVAILABLE;
+    if (!azsel_count(&outer, 24, &n) || pos.outer >= n) return;
+    uintptr_t ia = 0;
+    r->status = AZSEL_GUARD;
+    if (pos.outer > (UINTPTR_MAX - outer.begin) / 24 || !azsel_add(outer.begin, (uintptr_t) pos.outer * 24, &ia)) return;
+    struct azsel_vector inner = azsel_view(ia);
+    uintptr_t slot = pos.selector - 1;
+    r->status = AZSEL_UNAVAILABLE;
+    if (!azsel_count(&inner, 16, &n) || slot >= n) return;
+    uintptr_t cache = 0;
+    r->status = AZSEL_GUARD;
+    if (slot > (UINTPTR_MAX - inner.begin) / 16 || !azsel_add(inner.begin, slot * 16, &cache)) return;
+    az_native_owner_copy(&p.cache, (const struct az_native_owner *) cache);
+    r->status = AZSEL_CHANGED;
+    if (!p.database.object || !p.cache.object || !azsel_allowed(i, b)) return;
+    *r = (struct azsel_resolution) {AZSEL_OK, i->state, i->entered ? i->id : 0, i->revision, b->root, pos, p};
+    p = (struct azsel_pins) {0};
 }
-template<class Mount, class Database, class Collector, class Cache>
-bool validate_fresh(const Invocation &scope, const Borrow &borrow, Position position,
-                    const Resolution<Mount, Database, Collector, Cache> &selected) noexcept {
-    if (selected.status != Ok || selected.state != scope.state() || selected.invocation != scope.id() ||
-        selected.revision != scope.revision() || selected.root != borrow.root ||
-        selected.position.outer != position.outer || selected.position.selector != position.selector ||
-        !detail::allowed(scope, borrow)) return false;
-    auto fresh = resolve_owned<Mount, Database, Collector, Cache>(scope, borrow, position);
-    return fresh.status == Ok && detail::same(selected.pins.mount(), fresh.pins.mount()) &&
-           detail::same(selected.pins.database(), fresh.pins.database()) &&
-           detail::same(selected.pins.collector(), fresh.pins.collector()) &&
-           detail::same(selected.pins.cache(), fresh.pins.cache()) && detail::allowed(scope, borrow);
+static inline bool azsel_validate_fresh(const struct azsel_invocation *i, const struct azsel_borrow *b, struct azsel_position p, const struct azsel_resolution *selected) {
+    if (selected->status != AZSEL_OK || selected->state != i->state || selected->invocation != (i->entered ? i->id : 0) || selected->revision != i->revision || selected->root != b->root || selected->position.outer != p.outer || selected->position.selector != p.selector || !azsel_allowed(i, b)) return false;
+    struct azsel_resolution fresh __attribute__((cleanup(azsel_resolution_drop))) = {0};
+    azsel_resolve_owned(i, b, p, &fresh);
+    return fresh.status == AZSEL_OK && azsel_same(&selected->pins.mount, &fresh.pins.mount) && azsel_same(&selected->pins.database, &fresh.pins.database) && azsel_same(&selected->pins.collector, &fresh.pins.collector) && azsel_same(&selected->pins.cache, &fresh.pins.cache) && azsel_allowed(i, b);
 }
-} // namespace azsdk_cache_selection
 #endif

@@ -47,9 +47,6 @@
 #ifndef __ASSEMBLER__
 #include <stddef.h>
 #include <stdint.h>
-#ifdef __cplusplus
-extern "C" {
-#endif
 struct azce_vector { uint64_t words[2]; } __attribute__((aligned(16)));
 struct azce_call {
     uint64_t args[9];
@@ -58,7 +55,7 @@ struct azce_call {
     uint32_t kind, reserved;
     uint64_t caller_link;
     struct azce_vector vector_args[8], vector_results[4];
-    /* Original incoming callee-saved X21, before a C++ dispatcher can reuse it.
+    /* Original incoming callee-saved X21, before a C dispatcher can reuse it.
      * This is only an ABI observation. A native ownership witness additionally
      * requires the exact checked promotion call site and a genuine weak owner. */
     uint64_t caller_x21, caller_reserved;
@@ -77,14 +74,5 @@ __attribute__((visibility("hidden"))) void azsdk_cache_invoke_original(struct az
 /* Strong production dispatcher supplies ownership scopes; tests may override
  * the forwarding-only weak default. It must let native exceptions propagate. */
 __attribute__((visibility("hidden"))) void azsdk_cache_dispatch_call(struct azce_call *);
-#ifdef __cplusplus
-}
-static_assert(sizeof(azce_call) == AZCE_SIZE && offsetof(azce_call, args[8]) == AZCE_X8 &&
-              offsetof(azce_call, result) == AZCE_RESULTS && offsetof(azce_call, original) == AZCE_ORIGINAL &&
-              offsetof(azce_call, kind) == AZCE_KIND && offsetof(azce_call, caller_link) == AZCE_CALLER_LINK &&
-              offsetof(azce_call, vector_args) == AZCE_VARGS && offsetof(azce_call, vector_results) == AZCE_VRESULTS &&
-              offsetof(azce_call, caller_x21) == AZCE_CALLER_X21 &&
-              alignof(azce_call) == 16, "cache observer register-frame ABI");
-#endif
 #endif
 #endif

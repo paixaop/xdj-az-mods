@@ -6,8 +6,8 @@ cd "$(dirname "$0")/.."
 if [ "$(uname -s)" != Linux ]; then echo 'SKIP: cache selection requires Linux GNU ownership'; exit 77; fi
 task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/az-cache-selection.XXXXXX")
 trap 'rm -rf "$task_tmp"' EXIT
-flags=(-std=c++11 -O1 -g -Wall -Wextra -Werror -pthread -DAZSDK_CACHE_SELECTION_TESTING)
-if [ -f src/common/azcacheselection.h ]; then flags+=(-DAZSDK_HAVE_CACHE_SELECTION); fi
+flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread -DAZSDK_CACHE_SELECTION_TESTING)
+if [ "${DISABLE_SELECTION_HEADER:-0}" != 1 ] && [ -f src/common/azcacheselection.h ]; then flags+=(-DAZSDK_HAVE_CACHE_SELECTION); fi
 case ${SAN:-plain} in
 plain|'') ;;
 asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer) ;;
@@ -15,7 +15,7 @@ ubsan) flags+=(-fsanitize=undefined -fno-sanitize-recover=all -fno-omit-frame-po
 tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 *) echo 'SAN must be plain, asan, ubsan or tsan' >&2; exit 2 ;;
 esac
-"${HOST_CXX:-g++}" "${flags[@]}" tests/unit/sdkcacheselection_test.cpp -o "$task_tmp/test"
+"${HOST_CC:-gcc}" "${flags[@]}" tests/unit/sdkcacheselection_test.c src/common/aznative_guard.S -lstdc++ -o "$task_tmp/test"
 failures=0
 for profile in 1 2; do
     status=0

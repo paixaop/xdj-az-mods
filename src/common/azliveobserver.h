@@ -3,12 +3,7 @@
 #ifndef AZLIVEOBSERVER_H
 #define AZLIVEOBSERVER_H
 #include <stdint.h>
-#ifdef __cplusplus
-extern "C" {
-#define AZSDK_LIVE_NOTHROW noexcept
-#else
 #define AZSDK_LIVE_NOTHROW
-#endif
 
 enum {
     AZSDK_LIVE_PLAY = 1u,
@@ -62,8 +57,5 @@ __attribute__((visibility("hidden"))) int azsdk_sync_read(int deck, struct azsdk
 __attribute__((visibility("hidden"))) int azsdk_tempo_lock_read(int deck, struct azsdk_tempo_lock_sample *out) AZSDK_LIVE_NOTHROW;
 /* Deck bits whose registration was submitted; not firmware/runtime certification. */
 __attribute__((visibility("hidden"))) unsigned azsdk_live_capabilities(void) AZSDK_LIVE_NOTHROW;
-#ifdef __cplusplus
-}
-#endif
 #undef AZSDK_LIVE_NOTHROW
 #endif

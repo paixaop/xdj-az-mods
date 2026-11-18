@@ -2,89 +2,68 @@
 #ifndef AZCONNECTIONHOOKS_H
 #define AZCONNECTIONHOOKS_H
 #include "azconnectionepoch.h"
-#include <cstddef>
-#include <cstdint>
-
 struct sqlite3;
-namespace azsdk_connection_hooks {
-using EpochState = azsdk_connection_epoch::State<32>;
-using NativeOpen = int (*)(const char *, sqlite3 **, int, const char *);
-using NativeClose = int (*)(sqlite3 *, int);
-using FileControl = int (*)(sqlite3 *, const char *, int, void *);
-struct Range { std::uintptr_t begin, end; unsigned flags; };
-namespace detail { class ProfileBuilder; }
-
-/* Immutable, privately minted proof of the already loaded exact module.
- * Preparation precedes the first code redirect. The retained module reference
- * and this proof deliberately live through process teardown; consumers reuse
- * the proof rather than rehashing code modified by their own installed hooks.
- * This owns code lifetime, never a SQLite connection or C++ database owner. */
-class SqlProfile {
-    friend class detail::ProfileBuilder;
-    std::uintptr_t base_ = 0;
-    Range ranges_[32] = {};
-    unsigned count_ = 0;
-    FileControl control_ = nullptr;
-    void *handle_ = nullptr;
-    SqlProfile() noexcept = default;
-    ~SqlProfile() = default;
-    SqlProfile(const SqlProfile &) = delete;
-    SqlProfile &operator=(const SqlProfile &) = delete;
-public:
-    std::uintptr_t base() const noexcept { return base_; }
-    unsigned range_count() const noexcept { return count_; }
-    const Range *range(unsigned i) const noexcept { return i < count_ ? &ranges_[i] : nullptr; }
-    bool contains(std::uintptr_t address, std::size_t size, unsigned flags) const noexcept {
-        if (size > UINTPTR_MAX - address) return false;
-        for (unsigned i = 0; i < count_; ++i)
-            if ((ranges_[i].flags & flags) == flags && address >= ranges_[i].begin &&
-                address + size <= ranges_[i].end) return true;
-        return false;
-    }
-    FileControl file_control() const noexcept { return control_; }
-    std::uintptr_t open_entry() const noexcept { return base_ + 0x647b0; }
-    std::uintptr_t close_entry() const noexcept { return base_ + 0x512c0; }
-    std::uintptr_t io_rva(unsigned i) const noexcept {
-        return i == 0 ? 0xb3d98 : i == 1 ? 0xb3e30 : i == 2 ? 0xb3ec8 : 0;
-    }
-    std::uintptr_t vfs_open_rva() const noexcept { return 0x53968; }
-    std::uintptr_t read_rva() const noexcept { return 0x1513c; }
-    std::uintptr_t size_rva() const noexcept { return 0x1bdf4; }
-    std::uintptr_t control_rva() const noexcept { return 0x536b0; }
+typedef int (*az_native_sql_open)(const char *, struct sqlite3 **, int, const char *);
+typedef int (*az_native_sql_close)(struct sqlite3 *, int);
+typedef int (*az_sql_file_control)(struct sqlite3 *, const char *, int, void *);
+struct az_sql_range {
+    uintptr_t begin, end;
+    unsigned flags;
 };
-
-/* Startup-only real loader/byte validation. No caller trust flag, pathname
- * override or injectable production profile. Unsupported/failed preparation
- * is permanently unavailable for this process. No database API is invoked. */
-__attribute__((visibility("hidden"))) const SqlProfile *prepare_profile() noexcept;
-
-struct Installer {
-    /* The main-owned island-only installer must publish the genuine callable
-     * original in this distinct slot BEFORE making the replacement reachable.
-     * Return exactly 1 for an accepted install. Never retain/mutate the slot
-     * later or publish an entry with no callable original. Other returns and
-     * exceptions leave birth tracking unavailable; a live close stays active. */
-    int (*call)(std::uintptr_t entry, void *replacement, void **original, void *context);
+/* Opaque immutable proof of the exact loaded module, prepared before redirects.
+ * The retained module reference and proof live through process teardown.
+ * They own code lifetime, never a database connection or owner. */
+struct az_sql_profile;
+#define AZ_SQL_PRIVATE __attribute__((visibility("hidden")))
+AZ_SQL_PRIVATE uintptr_t az_sql_profile_base(const struct az_sql_profile *);
+AZ_SQL_PRIVATE unsigned az_sql_profile_range_count(const struct az_sql_profile *);
+AZ_SQL_PRIVATE const struct az_sql_range *az_sql_profile_range(const struct az_sql_profile *, unsigned i);
+AZ_SQL_PRIVATE bool az_sql_profile_contains(const struct az_sql_profile *, uintptr_t address, size_t size, unsigned flags);
+AZ_SQL_PRIVATE az_sql_file_control az_sql_profile_file_control(const struct az_sql_profile *);
+AZ_SQL_PRIVATE uintptr_t az_sql_profile_open_entry(const struct az_sql_profile *);
+AZ_SQL_PRIVATE uintptr_t az_sql_profile_close_entry(const struct az_sql_profile *);
+static inline uintptr_t az_sql_profile_io_rva(const struct az_sql_profile *p, unsigned i) {
+    (void) p;
+    return i == 0 ? 0xb3d98 : i == 1 ? 0xb3e30
+                          : i == 2   ? 0xb3ec8
+                                     : 0;
+}
+static inline uintptr_t az_sql_profile_vfs_open_rva(const struct az_sql_profile *p) {
+    (void) p;
+    return 0x53968;
+}
+static inline uintptr_t az_sql_profile_read_rva(const struct az_sql_profile *p) {
+    (void) p;
+    return 0x1513c;
+}
+static inline uintptr_t az_sql_profile_size_rva(const struct az_sql_profile *p) {
+    (void) p;
+    return 0x1bdf4;
+}
+static inline uintptr_t az_sql_profile_control_rva(const struct az_sql_profile *p) {
+    (void) p;
+    return 0x536b0;
+}
+/* Startup-only loader/byte validation. No injected production profile, caller
+ * trust flag or path override. Unsupported preparation remains unavailable.
+ * This calls no database API. */
+AZ_SQL_PRIVATE const struct az_sql_profile *az_connection_prepare_profile(void);
+struct az_connection_installer {
+    /* Publish the callable original BEFORE making its replacement reachable.
+     * Return exactly 1 on acceptance. Never retain or mutate the slot later.
+     * Failure leaves births unavailable; an installed close keeps retiring. */
+    int (*call)(uintptr_t entry, void *replacement, void **original, void *context);
     void *context;
 };
-
-/* Opt-in dependency only: nothing installs at static initialization. A single
- * immutable process-lifetime binding borrows the supplied existing State.
- * The caller MUST keep that State alive through every later hooked native call,
- * including DSO/atexit teardown; ordinary destructor ordering is insufficient.
- * Close installs first, both originals must exist before births are admitted.
- * No disable/reset/unbind API can silently stop observing an installed close.
- */
-__attribute__((visibility("hidden"))) int install(EpochState &, Installer) noexcept;
-__attribute__((visibility("hidden"))) bool ready() noexcept;
-
+/* Opt-in startup dependency. The immutable binding borrows the existing state,
+ * which must outlive every hooked call, including DSO/atexit teardown. Close
+ * installs first; both originals are required before births are admitted.
+ * No disable/reset/unbind operation can stop observing an installed close. */
+AZ_SQL_PRIVATE int az_connection_install(struct az_connection_state *, struct az_connection_installer);
+AZ_SQL_PRIVATE bool az_connection_ready(void);
 #if defined(AZSDK_CONNECTION_HOOKS_TESTING)
-namespace testing {
-/* Synthetic forwarding only. This does not mint/validate a module proof and
- * is absent from ordinary production compilation. One binding per process. */
-int install_forwarding(EpochState &, Installer, std::uintptr_t synthetic_base) noexcept;
-bool ready() noexcept;
-}
+/* Synthetic forwarding only: no module proof is minted, one binding/process. */
+int az_connection_test_install(struct az_connection_state *, struct az_connection_installer, uintptr_t synthetic_base);
 #endif
-} // namespace azsdk_connection_hooks
+#undef AZ_SQL_PRIVATE
 #endif

@@ -15,8 +15,10 @@ awk '/^static int st_mod_owner\(/,/^}/' src/azmod/sdk_track.c > "$task_tmp/owner
 awk '/^static int sdk_command_submit\(/,/^}/' src/azmod/sdk_track.c > "$task_tmp/submit.inc"
 "${HOST_CC:-cc}" -std=c11 "${flags[@]}" -DSDK_EXIT_OWNER_INC="\"$task_tmp/owner.inc\"" -DSDK_EXIT_SUBMIT_INC="\"$task_tmp/submit.inc\"" \
     -c tests/unit/sdkexit_public_test.c -o "$task_tmp/public.o"
-"${HOST_CXX:-c++}" -std=c++11 "${flags[@]}" -DAZSDK_EXIT_TESTING \
-    src/azstem/sdk_exit.cpp src/azstem/sdk_native_commands.cpp tests/unit/sdkexit_test.cpp "$task_tmp/public.o" -o "$task_tmp/exit"
+"${HOST_CC:-cc}" -std=gnu11 -fexceptions -fasynchronous-unwind-tables "${flags[@]}" -c src/azstem/sdk_native_commands.c -o "$task_tmp/native-commands.o"
+"${HOST_CC:-cc}" -fexceptions -fasynchronous-unwind-tables -c src/common/aznative_guard.S -o "$task_tmp/native-guard.o"
+"${HOST_CC:-cc}" -std=gnu11 -fexceptions -fasynchronous-unwind-tables "${flags[@]}" -DAZSDK_EXIT_TESTING \
+    src/azstem/sdk_exit.c "$task_tmp/native-commands.o" "$task_tmp/native-guard.o" tests/unit/sdkexit_test.c "$task_tmp/public.o" ${NATIVE_RUNTIME:--lstdc++} -o "$task_tmp/exit"
 for build in 1 2; do
     "$task_tmp/exit" "$build"
     "$task_tmp/exit" "$build" 1

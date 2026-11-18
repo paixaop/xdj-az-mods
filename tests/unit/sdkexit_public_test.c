@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* Actual authenticated public wrappers and portable engine; native service is
- * the production C++ mailbox, driven separately by genuine fixture owner calls. */
+ * the production C mailbox, driven separately by genuine fixture owner calls. */
 #include "azmod-mod.h"
 #include <assert.h>
 #include <stdint.h>

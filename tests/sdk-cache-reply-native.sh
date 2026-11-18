@@ -5,20 +5,20 @@ cd "$(dirname "$0")/.."
 [ "$(uname -s)" = Linux ] || { echo 'SKIP: actual GNU ELF source integration required'; exit 77; }
 task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/az-cache-reply-native.XXXXXX")
 trap 'rm -rf "$task_tmp"' EXIT
-flags=(-O1 -g -Wall -Wextra -Werror -fexceptions -fno-omit-frame-pointer)
-case ${SAN:-plain} in plain|'') ;; asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all) ;; *) exit 2 ;; esac
-source_cpp=${SDK_CACHE_REPLY_SOURCE_CPP:-"$PWD/src/azmod/sdk_native_sources.cpp"}
-case "$source_cpp" in /*) ;; *) echo 'SDK_CACHE_REPLY_SOURCE_CPP must be absolute' >&2; exit 2 ;; esac
-[ -f "$source_cpp" ] || { echo 'selected SourceCpp is missing' >&2; exit 2; }
+flags=(-O1 -g -Wall -Wextra -Werror -fexceptions -fasynchronous-unwind-tables -fno-omit-frame-pointer)
+case ${SAN:-plain} in plain|'') ;; asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all) ;; tsan) flags+=(-fsanitize=thread) ;; *) exit 2 ;; esac
+source_c=${SDK_CACHE_REPLY_SOURCE_C:-"$PWD/src/azmod/sdk_native_sources.c"}
+case "$source_c" in /*) ;; *) echo 'SDK_CACHE_REPLY_SOURCE_C must be absolute' >&2; exit 2 ;; esac
+[ -f "$source_c" ] || { echo 'selected source implementation is missing' >&2; exit 2; }
 cat >"$task_tmp/hash.c" <<'C'
 #include "azsha256.h"
 void azsdk_reply_fixture_hash(const void *data, size_t n, char *out) { azsha256_hex(data, n, out); }
 C
 "${HOST_CC:-cc}" -std=c11 "${flags[@]}" -Isrc/common -c "$task_tmp/hash.c" -o "$task_tmp/hash.o"
-"${HOST_CXX:-g++}" -std=c++11 "${flags[@]}" -pthread -Isrc/common -rdynamic -DAZSDK_CACHE_BIRTH_TESTING \
-    "-DSOURCES_INC=\"$source_cpp\"" \
-    tests/unit/sdkcachereplynative_test.cpp src/azmod/sdk_cache_message.cpp src/azmod/sdk_connection_hooks.cpp \
-    "$task_tmp/hash.o" -ldl -o "$task_tmp/test"
+"${HOST_CC:-gcc}" -std=gnu11 "${flags[@]}" -pthread -Isrc/common -rdynamic -DAZSDK_CACHE_BIRTH_TESTING \
+    "-DSOURCES_INC=\"$source_c\"" \
+    tests/unit/sdkcachereplynative_test.c src/azmod/sdk_cache_message.c src/azmod/sdk_connection_hooks.c \
+    "$task_tmp/hash.o" tests/unit/sdkcachebirth_return.S src/common/aznative_guard.S src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/test"
 failures=0
 for profile in 1 2; do
     status=0

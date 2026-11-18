@@ -2,12 +2,7 @@
 #ifndef AZCUEACTOR_H
 #define AZCUEACTOR_H
 #include "azexit.h"
-#ifdef __cplusplus
-extern "C" {
-#define AZCUE_NOEXCEPT noexcept
-#else
 #define AZCUE_NOEXCEPT
-#endif
 /* Exact, relocated entries/tables from the verified stock image. No native task
  * is manufactured: memory_producer constructs and owns every queue envelope. */
 struct azcue_actor_profile {
@@ -43,8 +38,5 @@ int azsdk_cue_actor_release(unsigned, uint64_t) AZCUE_NOEXCEPT;
  * management tick. Native reply threads must not wait on an executing frame. */
 int azsdk_cue_actor_resume(unsigned, uint64_t) AZCUE_NOEXCEPT;
 int azsdk_cue_actor_complete(unsigned, uint64_t, const struct azexit_result *) AZCUE_NOEXCEPT;
-#ifdef __cplusplus
-}
-#endif
 #undef AZCUE_NOEXCEPT
 #endif

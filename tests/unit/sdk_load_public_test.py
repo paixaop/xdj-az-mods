@@ -33,10 +33,10 @@ with tempfile.TemporaryDirectory(prefix='az-sdk-public-load-') as tmp:
             raise RuntimeError('--native requires Linux ELF guards and GNU C++ ABI')
         subprocess.run(fixture + ['-c', '-o', str(out / 'public.o')], check=True)
         subprocess.run([cc, '-std=c11'] + common + ['-c', str(root / 'src/azstem/sdk_load_export.c'), '-o', str(out / 'export.o')], check=True)
-        command = [os.environ.get('HOST_CXX', 'g++'), '-std=c++11'] + common + [
-            '-DAZSDK_LOAD_TESTING', '-DAZSDK_LOAD_PUBLIC_TEST', '-fno-devirtualize', '-fno-devirtualize-speculatively',
-            str(root / 'src/azstem/sdk_load_observer.cpp'), str(root / 'tests/unit/sdkloadobserver_test.cpp'),
-            str(out / 'public.o'), str(out / 'export.o'), '-ldl', '-o', str(out / 'native')]
+        command = [cc, '-std=gnu11', '-fexceptions', '-fasynchronous-unwind-tables'] + common + [
+            '-DAZSDK_LOAD_TESTING', '-DAZSDK_LOAD_PUBLIC_TEST',
+            str(root / 'src/azstem/sdk_load_observer.c'), str(root / 'tests/unit/sdkloadobserver_test.c'),
+            str(out / 'public.o'), str(out / 'export.o'), str(root / 'src/common/aznative_guard.S'), '-lstdc++', '-ldl', '-o', str(out / 'native')]
         subprocess.run(command, check=True)
         for build in (1, 2):
             subprocess.run([str(out / 'native'), str(build), 'public'], check=True, timeout=15)

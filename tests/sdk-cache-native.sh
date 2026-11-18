@@ -5,12 +5,12 @@ cd "$(dirname "$0")/.."
 [ "$(uname -s)" = Linux ] || { echo 'SKIP: GNU ELF source integration required'; exit 77; }
 task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/az-cache-native.XXXXXX")
 trap 'rm -rf "$task_tmp"' EXIT
-flags=(-O1 -g -Wall -Wextra -Werror -fexceptions -fno-omit-frame-pointer)
-case ${SAN:-plain} in plain|'') ;; asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all) ;; *) exit 2 ;; esac
+flags=(-O1 -g -Wall -Wextra -Werror -fexceptions -fasynchronous-unwind-tables -fno-omit-frame-pointer)
+case ${SAN:-plain} in plain|'') ;; asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all) ;; tsan) flags+=(-fsanitize=thread) ;; *) exit 2 ;; esac
 "${HOST_CC:-cc}" -std=c11 "${flags[@]}" -Isrc/common -c src/azmod/sdk_cache_entry.c -o "$task_tmp/entry.o"
-"${HOST_CXX:-g++}" -std=c++11 "${flags[@]}" -pthread -Isrc/common -rdynamic -DAZSDK_CACHE_BIRTH_TESTING \
-    tests/unit/sdkcachenative_test.cpp src/azmod/sdk_cache_message.cpp src/azmod/sdk_connection_hooks.cpp \
-    "$task_tmp/entry.o" -ldl -o "$task_tmp/test"
+"${HOST_CC:-gcc}" -std=gnu11 "${flags[@]}" -pthread -Isrc/common -rdynamic -DAZSDK_CACHE_BIRTH_TESTING \
+    tests/unit/sdkcachenative_test.c src/azmod/sdk_cache_message.c src/azmod/sdk_connection_hooks.c \
+    "$task_tmp/entry.o" tests/unit/sdkcachebirth_return.S src/common/aznative_guard.S src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/test"
 for profile in 1 2; do
     result=0
     (ulimit -c 0; "$task_tmp/test" "$profile") >"$task_tmp/$profile.log" 2>&1 || result=$?

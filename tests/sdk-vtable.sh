@@ -35,11 +35,11 @@ for control in expected permissions foreign; do
     grep -qi 'assert' "$task_tmp/$control.log" || { echo "FAIL: $control lacked its assertion" >&2; exit 1; }
     echo "CONTROL caught: vtable-$control"
 done
-# Header and C++ redirects must remain visible to the same linter as C hooks.
+# Header and C redirects must remain visible to the same linter as C hooks.
 mkdir -p "$task_tmp/lint/azmod" "$task_tmp/lint/azstem"
 cp src/azstem/sdk_vtable_patch.h "$task_tmp/lint/azstem/"
 bash tests/unit/redirect-lint.sh "$task_tmp/lint" >"$task_tmp/lint-real.log"
-for extension in h cpp; do
+for extension in h c; do
     printf 'static void unreviewed(void) {\n    azprot_unlock(0, 0, 0);\n}\n' >"$task_tmp/lint/azstem/unreviewed.$extension"
     if bash tests/unit/redirect-lint.sh "$task_tmp/lint" >"$task_tmp/lint-$extension.log" 2>&1; then
         echo "FAIL: redirect lint ignored $extension" >&2; exit 1

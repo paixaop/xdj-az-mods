@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/az-sdk-live.XXXXXX")
 trap 'rm -rf "$task_tmp"' EXIT
-flags=(-std=c++11 -O1 -g -Wall -Wextra -Werror -pthread -Isrc/common -fvisibility=hidden -fvisibility-inlines-hidden)
+flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread -Isrc/common -Itests/unit -fvisibility=hidden)
 cflags=(-std=c11 -O1 -g -Wall -Wextra -Werror -pthread -Isrc/azmod -Itests/unit -Wno-unused-function -Wno-unused-variable)
 csan=()
 case ${SAN:-plain} in
@@ -60,17 +60,17 @@ if [ "$(uname -s)" != Linux ]; then
     echo 'SKIP: live GNU observer fixture requires Linux ELF main-image guards' >&2
     exit 77
 fi
-map=-Wl,--version-script=src/azstem/sdk_native_cpp.map
-${HOST_CXX:-g++} "${flags[@]}" "$map" src/azstem/sdk_live_observer.cpp tests/unit/sdkliveobserver_test.cpp -ldl -o "$task_tmp/real"
+map=-Wl,--version-script=src/azstem/sdk_native.map
+${HOST_CC:-gcc} "${flags[@]}" "$map" src/azstem/sdk_live_observer.c tests/unit/sdkliveobserver_test.c -DAZ_NATIVE_LISTENER_TESTING src/common/aznative_guard.S -lstdc++ -lm -ldl -o "$task_tmp/real"
 "$task_tmp/real"
-${HOST_CXX:-g++} "${flags[@]}" "$map" src/azstem/sdk_loop_observer.cpp tests/unit/sdkloopobserver_test.cpp -ldl -o "$task_tmp/loop"
+${HOST_CC:-gcc} "${flags[@]}" "$map" src/azstem/sdk_loop_observer.c tests/unit/sdkloopobserver_test.c src/common/aznative_guard.S -lstdc++ -lm -ldl -o "$task_tmp/loop"
 "$task_tmp/loop"
 # Controls use a plain build; the real fixture above always uses the requested sanitizer.
-control_flags=(-std=c++11 -O1 -g -Wall -Wextra -Werror -pthread -Isrc/common -fvisibility=hidden -fvisibility-inlines-hidden)
+control_flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread -Isrc/common -Itests/unit -fvisibility=hidden)
 python3 tests/unit/sdk_loop_controls.py "$task_tmp"
 for deck in 0 1 2 3; do
     control=loop-strict-slot-$deck
-    ${HOST_CXX:-g++} "${control_flags[@]}" "$map" "$task_tmp/$control.cpp" tests/unit/sdkloopobserver_test.cpp -ldl -o "$task_tmp/$control"
+    ${HOST_CC:-gcc} "${control_flags[@]}" "$map" "$task_tmp/$control.c" tests/unit/sdkloopobserver_test.c src/common/aznative_guard.S -lstdc++ -lm -ldl -o "$task_tmp/$control"
     if ( ulimit -c 0; "$task_tmp/$control" >"$task_tmp/$control.log" 2>&1 ) 2>/dev/null; then
         echo "FAIL: $control was not caught" >&2; exit 1
     fi
@@ -80,29 +80,24 @@ done
 python3 - "$task_tmp" <<'PY'
 from pathlib import Path
 import re, sys
-source = Path('src/azstem/sdk_live_observer.cpp').read_text().replace('../common/azliveobserver.h', 'azliveobserver.h')
+source = Path('src/azstem/sdk_live_observer.c').read_text().replace('../common/', '')
 variants = [
-    ('player', r'player != deck', 'player != deck && false', 1),
-    ('generation', r'p\.active_generation\.load\(std::memory_order_acquire\) != generation', 'false', 2),
-    ('slot', r'\{15, 19, 21, 2, 5\}', '{14, 19, 21, 2, 5}', 1),
-    ('boolean', r'a <= 1 && b <= 1 && c <= 1', 'true', 1),
-    ('invalid-retention', r'if \(stream == kSync\) valid = a == 0 \|\| a == 2;', 'if (stream == kSync) valid = a == 0 || a == 2;\n    if (!valid) return;', 1),
-    ('allocation-rollback', r'pending\[s\] = std::make_shared<CaptureListener>', 'owners[deck][s] = std::make_shared<CaptureListener>', 1),
-    ('sync-slot', r'\{15, 19, 21, 2, 5\}', '{15, 19, 21, 3, 5}', 1),
-    ('sync-mode', r'if \(stream == kSync\) valid = a == 0 \|\| a == 2;', 'if (stream == kSync) valid = a <= 2;', 1),
-    ('sync-legacy-leak', r'    if \(!value.observed_fields \|\|', '    if (p.components[kSync].generation.load(std::memory_order_relaxed) == active && p.components[kSync].revision.load(std::memory_order_relaxed)) value.observed_fields |= 8u;\n    if (!value.observed_fields ||', 1),
+    ('player', 'player != listener->deck', 'player != listener->deck && false', 1),
+    ('generation', 'atomic_load_explicit(&(p->active_generation), memory_order_acquire) != generation', 'false', 2),
+    ('slot', '{15, 19, 21, 2, 5}', '{14, 19, 21, 2, 5}', 1),
+    ('boolean', 'a <= 1 && b <= 1 && c <= 1', 'true', 1),
+    ('invalid-retention', 'if (stream == kSync) valid = a == 0 || a == 2;', 'if (stream == kSync) valid = a == 0 || a == 2;\n    if (!valid) return;', 1),
+    ('allocation-rollback', 'if (!pending[s].object) return 0;', 'if (!pending[s].object) return 0;\n            az_native_owner_copy(&owners[deck][s], &pending[s]);', 1),
+    ('sync-slot', '{15, 19, 21, 2, 5}', '{15, 19, 21, 3, 5}', 1),
+    ('sync-mode', 'if (stream == kSync) valid = a == 0 || a == 2;', 'if (stream == kSync) valid = a <= 2;', 1),
+    ('sync-legacy-leak', '    if (!value.observed_fields ||', '    if (atomic_load_explicit(&p->components[kSync].generation, memory_order_relaxed) == active && atomic_load_explicit(&p->components[kSync].revision, memory_order_relaxed)) value.observed_fields |= 8u;\n    if (!value.observed_fields ||', 1),
 ]
 for name, pattern, replacement, expected in variants:
-    s, count = re.subn(pattern, replacement, source)
-    assert count == expected, (name, count)
-    if name == 'allocation-rollback':
-        old = 'for (unsigned s = 0; s < kStreams; ++s) owners[deck][s] = pending[s];'
-        assert s.count(old) == 1
-        s = s.replace(old, 'for (unsigned s = 0; s < kStreams; ++s) pending[s] = owners[deck][s];')
-    (Path(sys.argv[1]) / (name + '.cpp')).write_text(s)
+    assert source.count(pattern) == expected, (name, source.count(pattern))
+    (Path(sys.argv[1]) / (name + '.c')).write_text(source.replace(pattern, replacement))
 PY
 for control in player generation slot boolean invalid-retention allocation-rollback sync-slot sync-mode sync-legacy-leak; do
-    ${HOST_CXX:-g++} "${control_flags[@]}" "$map" "$task_tmp/$control.cpp" tests/unit/sdkliveobserver_test.cpp -ldl -o "$task_tmp/$control"
+    ${HOST_CC:-gcc} "${control_flags[@]}" "$map" "$task_tmp/$control.c" tests/unit/sdkliveobserver_test.c -DAZ_NATIVE_LISTENER_TESTING src/common/aznative_guard.S -lstdc++ -lm -ldl -o "$task_tmp/$control"
     status=0
     ( ulimit -c 0; "$task_tmp/$control" >"$task_tmp/$control.log" 2>&1 ) 2>/dev/null || status=$?
     if [ "$status" -eq 0 ]; then
@@ -120,23 +115,26 @@ for control in player generation slot boolean invalid-retention allocation-rollb
     grep -Fq "$required" "$task_tmp/$control.log" || { echo "FAIL: live $control lacked its required assertion" >&2; cat "$task_tmp/$control.log" >&2; exit 1; }
     echo "CONTROL caught: live $control"
 done
-# All replaceable C++11 allocation forms must honor the fixture failure budget,
-# including the nothrow form needed by statically linked GNU sanitizer runtimes.
+# The C allocation injector must fail deterministically, including zero sizes.
 python3 - "$task_tmp" <<'PYA'
 from pathlib import Path
 import sys
-s = Path('tests/unit/sdkliveobserver_test.cpp').read_text()
-a = s.index('void *operator new(std::size_t bytes, const std::nothrow_t &) noexcept {')
-i = s.index('return ::operator new(bytes);', a)
-s = s[:i] + s[i:].replace('return ::operator new(bytes);', 'return std::malloc(bytes ? bytes : 1);', 1)
-(Path(sys.argv[1]) / 'allocator-nothrow-bypass.cpp').write_text(s)
+root = Path(sys.argv[1])
+s = Path('tests/unit/live_native_fixture.h').read_text()
+old = 'if (!count) return NULL;'
+assert s.count(old) == 1
+(root / 'allocator-bypass.h').write_text(s.replace(old, 'if (!count && false) return NULL;'))
+s = Path('tests/unit/sdkliveobserver_test.c').read_text()
+s = s.replace('"live_native_fixture.h"', '"' + str(root / 'allocator-bypass.h') + '"')
+(root / 'allocator-bypass.c').write_text(s)
 PYA
-${HOST_CXX:-g++} "${control_flags[@]}" "$map" src/azstem/sdk_live_observer.cpp "$task_tmp/allocator-nothrow-bypass.cpp" -ldl -o "$task_tmp/allocator-nothrow-bypass"
-if ( ulimit -c 0; "$task_tmp/allocator-nothrow-bypass" >"$task_tmp/allocator-nothrow-bypass.log" 2>&1 ) 2>/dev/null; then
-    echo 'FAIL: live allocator-nothrow-bypass control was not caught' >&2; exit 1
+${HOST_CC:-gcc} "${control_flags[@]}" "$map" -DAZ_NATIVE_LISTENER_TESTING src/azstem/sdk_live_observer.c "$task_tmp/allocator-bypass.c" src/common/aznative_guard.S -lstdc++ -lm -ldl -o "$task_tmp/allocator-bypass"
+if ( ulimit -c 0; "$task_tmp/allocator-bypass" >"$task_tmp/allocator-bypass.log" 2>&1 ) 2>/dev/null; then
+    echo 'FAIL: live allocator-bypass control was not caught' >&2; exit 1
 fi
-grep -q 'FAIL live:' "$task_tmp/allocator-nothrow-bypass.log" || { echo 'FAIL: live allocator control lacked its required assertion' >&2; cat "$task_tmp/allocator-nothrow-bypass.log" >&2; exit 1; }
-echo 'CONTROL caught: live allocator-nothrow-bypass'
+grep -q 'FAIL live:' "$task_tmp/allocator-bypass.log" || { echo 'FAIL: live allocator control lacked its required assertion' >&2; cat "$task_tmp/allocator-bypass.log" >&2; exit 1; }
+echo 'CONTROL caught: live allocator-bypass'
+
 if [ "${SAN:-plain}" = asan ]; then
     # Native Sync borrows exactly four bytes. Three supplied bytes must fail at byte four.
     if ( ulimit -c 0; "$task_tmp/real" --sync-payload-short >"$task_tmp/sync-payload-short.log" 2>&1 ) 2>/dev/null; then
@@ -148,23 +146,24 @@ if [ "${SAN:-plain}" = asan ]; then
     python3 - "$task_tmp" <<'PYX'
 from pathlib import Path
 import sys
-s = Path('src/azstem/sdk_live_observer.cpp').read_text().replace('../common/azliveobserver.h', 'azliveobserver.h')
+s = Path('src/azstem/sdk_live_observer.c').read_text().replace('../common/', '')
 old = 'unsigned char bytes[3];'
 assert s.count(old) == 1
 root = Path(sys.argv[1])
-(root / 'payload-overread.cpp').write_text(s.replace(old, 'unsigned char bytes[4];'))
+(root / 'payload-overread.c').write_text(s.replace(old, 'unsigned char bytes[4];'))
 a = s.index('    const volatile char *actual =')
 b = s.index('    return table;', a) + len('    return table;')
-(root / 'rtti-overread.cpp').write_text(s[:a] + '    return !std::memcmp(reinterpret_cast<const void *>(name), expected, bytes) ? table : 0;' + s[b:])
-s = Path('src/azstem/sdk_loop_observer.cpp').read_text().replace('../common/azloopobserver.h', 'azloopobserver.h')
+(root / 'rtti-overread.c').write_text(s[:a] + '    return !memcmp((const void *)name, expected, bytes) ? table : 0;' + s[b:])
+s = Path('src/azstem/sdk_loop_observer.c').read_text().replace('../common/', '')
 a = s.index('    const volatile char *actual =')
 b = s.index('    return table;', a) + len('    return table;')
-(root / 'loop-rtti-overread.cpp').write_text(s[:a] + '    return !std::memcmp(reinterpret_cast<const void *>(name), expected, length) ? table : 0;' + s[b:])
+(root / 'loop-rtti-overread.c').write_text(s[:a] + '    return !memcmp((const void *)name, expected, length) ? table : 0;' + s[b:])
 PYX
     for control in payload-overread rtti-overread loop-rtti-overread; do
-        fixture=sdkliveobserver_test.cpp
-        [ "$control" != loop-rtti-overread ] || fixture=sdkloopobserver_test.cpp
-        ${HOST_CXX:-g++} "${flags[@]}" "$map" "$task_tmp/$control.cpp" "tests/unit/$fixture" -ldl -o "$task_tmp/$control"
+        fixture=sdkliveobserver_test.c
+        [ "$control" != loop-rtti-overread ] || fixture=sdkloopobserver_test.c
+        testing=(); [ "$control" = loop-rtti-overread ] || testing=(-DAZ_NATIVE_LISTENER_TESTING)
+        ${HOST_CC:-gcc} "${flags[@]}" "${testing[@]}" "$map" "$task_tmp/$control.c" "tests/unit/$fixture" src/common/aznative_guard.S -lstdc++ -lm -ldl -o "$task_tmp/$control"
         if ( ulimit -c 0; "$task_tmp/$control" >"$task_tmp/$control.log" 2>&1 ) 2>/dev/null; then
             echo "FAIL: live $control control was not caught" >&2; exit 1
         fi

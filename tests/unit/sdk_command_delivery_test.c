@@ -178,7 +178,8 @@ int main(void) {
     ui = pthread_self();
     g_cm_on_ui = 1;
     for (int i = 0; i < CM_MAX; ++i) g_cm[i] = (cm_mod) {1, UINTPTR_MAX, AZCM_LOADED};
-    assert(AZ_HAS(&g_cm_core, library_service));
+    const az_core_v1 *core = &g_cm_core;
+    assert(AZ_HAS(core, library_service));
     library = g_cm_core.library_service(AZ_LIBRARY_ABI);
     assert(!sdk_library_service(AZ_LIBRARY_ABI + 1) && AZ_LIB_HAS(library, command_submit_async) &&
            AZ_LIB_HAS(library, command_acknowledge) && library->command_submit == g_cm_core.command_submit);

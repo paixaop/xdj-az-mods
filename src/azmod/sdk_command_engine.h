@@ -21,13 +21,8 @@
 #define SCMD_ALL_COMMANDS ((UINT64_C(1) << (AZ_CMD_CUE_LOOP_SET + 1)) - 2)
 #define SCMD_TARGET_LOAD 1u
 #define SCMD_TARGET_REVISION 2u
-#ifdef __cplusplus
-static_assert(AZ_CMD_CUE_LOOP_SET < 63, "command IDs must fit the capability mask");
-static_assert(offsetof(az_command_request, comment) + sizeof(((az_command_request *) 0)->comment) == sizeof(az_command_request), "command request grew: update validation and retry comparison");
-#else
 _Static_assert(AZ_CMD_CUE_LOOP_SET < 63, "command IDs must fit the capability mask");
 _Static_assert(offsetof(az_command_request, comment) + sizeof(((az_command_request *) 0)->comment) == sizeof(az_command_request), "command request grew: update validation and retry comparison");
-#endif
 
 enum scmd_detail {
     SCMD_DETAIL_NONE,

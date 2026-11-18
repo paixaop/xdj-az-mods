@@ -1,6 +1,6 @@
 # Native library owner and physical-file capture
 
-`sdk_native_sources.cpp` supplies a private source-observation boundary. It assigns a
+`sdk_native_sources.c` supplies a private source-observation boundary. It assigns a
 non-reused core epoch to an observed native MountPoint/SqliteDataBase owner pair, keeps
 genuine GNU weak owners, and can capture the native connection's open-file identity.
 It does not establish that a loaded track or loop callback belongs to that epoch.
@@ -8,21 +8,20 @@ No public source/load capability follows from a matching media number.
 
 ## Integration and lifetime contract
 
-Compile this translation unit with GNU libstdc++, C++11 or later, 64-bit Linux, RTTI and
-exceptions. The production physical adapter is enabled only for little-endian AArch64.
-The private C declarations are in `src/common/azsources.h`; no native pointers or file
-descriptors are present in its output structure.
+Compile this translation unit as GNU C11 for 64-bit Linux, with unwind tables and
+C cleanup support (`-fexceptions -fasynchronous-unwind-tables`). Native ownership is
+represented by explicit C layouts and reference-count operations. The production
+physical adapter is enabled only for little-endian AArch64. The private declarations
+are in `src/common/azsources.h`; no native pointers or file descriptors appear in its output.
 
-All mutable state, including the weak owners, lives in a guarded function-local
-`SourceState`. This matters because the C `azmod_init` ELF constructor can run before
-default-priority C++ global constructors. An early configuration/capture cannot later
-be overwritten by delayed global initialization. Configuration disables and enables
-capture under the same mutex, so an earlier configurator cannot overwrite a disable
-that is still waiting for that mutex. The physical-ready query uses atomic publication.
-GNU7 constant-initialized the current aggregate in a negative-control experiment, so
-an actual current global-state reset was not reproduced. The function-local object is
-constructor-order hardening for future state growth. Its synthetic negative control
-adds an explicitly dynamic test-only member and must fail the early-state assertion.
+All mutable state, including the weak owners, lives in a statically initialized,
+process-lifetime `SourceState`. Its mutex and once controls are ready before the
+`azmod_init` ELF constructor runs. Early configuration/capture cannot be overwritten
+by delayed initialization or invalidated by an automatic shutdown destructor.
+Configuration disables and enables capture under the same mutex, so an earlier
+configurator cannot overwrite a disable waiting for that mutex. The physical-ready
+query uses atomic publication. The constructor-order negative control explicitly
+resets captured state later and must fail the early-state assertion.
 
 Before installing hooks, call:
 
@@ -228,7 +227,7 @@ sdknativesources-test --native-sqlcipher /usr/lib/libsqlcipher.so.0 2
 It opens only unique unkeyed `/tmp/az-source-native.*` scratch databases through public
 SQLite APIs, then runs the production module-profile/physical adapter before and after
 replacing a pathname. It removes and closes its own scratch artifacts on success. Its
-C++ ownership/worker model remains synthetic; passing it validates the actual SQLCipher
+C ownership/worker model remains synthetic; passing it validates the actual SQLCipher
 profile and open-file adapter, not production hook installation or loaded-source binding.
 
 ## Private cache ownership work
@@ -305,7 +304,7 @@ binding. Real close/reopen at the same address requires a fresh source epoch.
 Deterministic actual-State races cover publication, sweep, same-key reuse and
 cache reclamation; host plain/ASan+UBSan/TSan and ARM fixtures pass.
 
-The existing onMessage tail now enters a C++ forwarding bridge when source
+The existing onMessage tail now enters a C forwarding bridge when source
 capture is enabled. It copies a bounded whitelist of scalar arguments before
 the original can destroy the native message, calls the original once, and
 restores scoped context on normal return or native exception. Existing source

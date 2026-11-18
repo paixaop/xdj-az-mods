@@ -15,7 +15,7 @@ does not enable it on another firmware profile.
 
 The loaded USB path combines the reducer's qualified current track reference with
 existing physical USB qualification, read-only library resolution and file signatures.
-The Beatport provider in `sdk_analysis_source.cpp` observes native completed/decrypted
+The Beatport provider in `sdk_analysis_source.c` observes native completed/decrypted
 downloads, retains the genuine native Track resource and an open file descriptor,
 and checks load identity, source revision, file identity and completion state. It does
 not guess filenames or infer USB metadata for streamed tracks. Native resources remain

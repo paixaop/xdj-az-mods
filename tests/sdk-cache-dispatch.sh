@@ -6,18 +6,19 @@ cd "$(dirname "$0")/.."
 task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/az-cache-dispatch.XXXXXX")
 trap 'rm -rf "$task_tmp"' EXIT
 cflags=(-std=c11 -O1 -g -Wall -Wextra -Werror -Isrc/common -fexceptions)
-flags=(-std=c++11 -O1 -g -Wall -Wextra -Werror -pthread -Isrc/common -rdynamic -DAZSDK_CACHE_BIRTH_TESTING)
+flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread -Isrc/common -rdynamic -DAZSDK_CACHE_BIRTH_TESTING)
 case ${SAN:-plain} in
 plain|'') ;;
 asan) cflags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer); flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer) ;;
 ubsan) cflags+=(-fsanitize=undefined -fno-sanitize-recover=all -fno-omit-frame-pointer); flags+=(-fsanitize=undefined -fno-sanitize-recover=all -fno-omit-frame-pointer) ;;
-*) echo 'SAN must be plain, asan or ubsan' >&2; exit 2 ;;
+tsan) cflags+=(-fsanitize=thread -fno-omit-frame-pointer); flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
+*) echo 'SAN must be plain, asan, ubsan or tsan'  >&2; exit 2 ;;
 esac
 # The C forwarding-only weak default is linked unchanged alongside the actual
-# production C++ message/dispatcher module. No test dispatcher overrides it.
+# production C message/dispatcher module. No test dispatcher overrides it.
 "${HOST_CC:-cc}" "${cflags[@]}" -c src/azmod/sdk_cache_entry.c -o "$task_tmp/entry.o"
-"${HOST_CXX:-g++}" "${flags[@]}" tests/unit/sdkcachedispatch_test.cpp \
-    "${CACHE_DISPATCH_SOURCE:-src/azmod/sdk_cache_message.cpp}" src/azmod/sdk_connection_hooks.cpp "$task_tmp/entry.o" -ldl -o "$task_tmp/test"
+"${HOST_CC:-gcc}" "${flags[@]}" tests/unit/sdkcachedispatch_test.c \
+    "${CACHE_DISPATCH_SOURCE:-src/azmod/sdk_cache_message.c}" src/azmod/sdk_connection_hooks.c "$task_tmp/entry.o" tests/unit/sdkcachebirth_return.S src/common/aznative_guard.S src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/test"
 failures=0
 for profile in 1 2; do
     status=0

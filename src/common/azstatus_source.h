@@ -5,9 +5,6 @@
 #define AZSTATUS_SOURCE_H
 #include <stdint.h>
 #include <stddef.h>
-#ifdef __cplusplus
-extern "C" {
-#endif
 struct azjs_origin {
     uint64_t owner;
     uint32_t track_id;
@@ -22,7 +19,4 @@ __attribute__((visibility("hidden"))) void azjs_reception(uintptr_t receiver, ui
 __attribute__((visibility("hidden"))) uint64_t azjs_capture(unsigned deck, uint64_t unit, uint64_t epoch,
                                                             uintptr_t pack, const unsigned char track_id[12]);
 __attribute__((visibility("hidden"))) int azjs_lookup(uint64_t token, struct azjs_origin *out);
-#ifdef __cplusplus
-}
-#endif
 #endif

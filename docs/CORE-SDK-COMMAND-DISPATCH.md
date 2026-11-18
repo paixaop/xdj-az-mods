@@ -2,7 +2,7 @@
 
 `src/azmod/sdk_command_engine.h` supplies bounded command policy and synthetic adapter
 tests. It contains no EP147 addresses, native pointer registry, hook, worker, or advertised
-native capability. The transient loop adapter in `sdk_exit_bridge.c` and `sdk_exit.cpp`
+native capability. The transient loop adapter in `sdk_exit_bridge.c` and `sdk_exit.c`
 connects this engine to the native loop mailbox. Cue operations use the same public
 queue and the native cue control/actor, collection and persistence adapters. All 26
 public operation IDs have development implementation paths; functional correctness
@@ -173,7 +173,7 @@ lease lifetime, malformed native completion, clock/adapter failures, wrong-threa
 retries, quotas, event recovery and concurrent callers.
 Seventeen deliberately broken production variants must fail their regression assertions.
 A compile-time control appends a request argument and must be refused until validation and
-retry comparison are explicitly updated; a C++11 check verifies the native adapter header.
+retry comparison are explicitly updated; a C11 check verifies the native adapter header.
 The separate real-wrapper fixture also has eight controls for bypassed authentication,
 legacy incomplete argument validation and disconnected poll/cancel/release state.
 ASan, UBSan and TSan each have a separately verified planted fault; a compiler that omits

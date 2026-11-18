@@ -1,8 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #include "../common/azcacheentry.h"
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 void *azsdk_cache_entry_originals[AZCE_KIND_COUNT];
 static unsigned cache_capture_ready;
@@ -63,6 +60,3 @@ int azsdk_cache_capture_admit(uint32_t installed_mask) {
 __attribute__((weak)) void azsdk_cache_dispatch_call(struct azce_call *call) {
     azsdk_cache_invoke_original(call);
 }
-#ifdef __cplusplus
-}
-#endif

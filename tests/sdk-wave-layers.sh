@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 task_parent=${EVIDENCE_DIR:-${TMPDIR:-/tmp}}; mkdir -p "$task_parent"
 task_tmp=$(mktemp -d "$task_parent/az-wave-layers.XXXXXX")
 if [ -z "${EVIDENCE_DIR:-}" ];then trap 'rm -rf "$task_tmp"' EXIT;fi
-flags=(-std=c++11 -O1 -g -Wall -Wextra -Werror -Wno-missing-field-initializers)
+flags=(-std=gnu11 -O1 -g -Wall -Wextra -Werror -Wno-missing-field-initializers)
 case ${SAN:-plain} in
 plain|'') ;;
 asan)flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer);;
@@ -45,11 +45,11 @@ print(int(json.loads(Path(sys.argv[1]).read_text())['elf_machine']==183))
 PY
 )
 if [ "${REQUIRE_ARM_ORACLE:-0}" = 1 ] && [ "$leaf_expected" != 1 ];then echo 'FAIL: actual AArch64 oracle object required' >&2;exit 1;fi
-command=("${HOST_CXX:-g++}" "${flags[@]}" tests/unit/sdkwavelayers_test.cpp "$task_tmp/oracle.o" -lm -o "$task_tmp/wave-layers")
+command=("${HOST_CC:-gcc}" "${flags[@]}" tests/unit/sdkwavelayers_test.c "$task_tmp/oracle.o" -lm -o "$task_tmp/wave-layers")
 SDK_WAVE_ORACLE="$SDK_WAVE_ORACLE" python3 - "$task_tmp/command.json" "${command[@]}" <<'PY'
 from pathlib import Path
 import hashlib,json,sys,os
-files=['tests/unit/sdkwavelayers_test.cpp',os.environ['SDK_WAVE_ORACLE'],'tests/sdk-wave-layers.sh','src/azmod/sdk_waveform.h']
+files=['tests/unit/sdkwavelayers_test.c',os.environ['SDK_WAVE_ORACLE'],'tests/sdk-wave-layers.sh','src/azmod/sdk_waveform.h']
 Path(sys.argv[1]).write_text(json.dumps({'argv':sys.argv[2:],'sha256':{p:hashlib.sha256(Path(p).read_bytes()).hexdigest()for p in files},'private_marker_present':'#define SDKW_LAYERED3_VERSION'in Path(files[-1]).read_text()},indent=2)+'\n')
 PY
 if ! "${command[@]}" >"$task_tmp/compile.log" 2>&1;then cat "$task_tmp/compile.log";echo 'FAIL: compilation is not runtime RED' >&2;exit 1;fi

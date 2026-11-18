@@ -2,12 +2,7 @@
 #ifndef AZLOADOBSERVER_H
 #define AZLOADOBSERVER_H
 #include <stdint.h>
-#ifdef __cplusplus
-extern "C" {
-#define AZSDK_LOAD_NOTHROW noexcept
-#else
 #define AZSDK_LOAD_NOTHROW
-#endif
 
 /* Expected native original is already stored in *original. Compare the slot to
  * that value, preserve it, then release-store hook. Decline on mismatch. A
@@ -40,9 +35,6 @@ void azsdk_load_test_before_association(void (*hook)(int)) AZSDK_LOAD_NOTHROW;
 void azsdk_load_test_configure_hook(void (*hook)(int, int)) AZSDK_LOAD_NOTHROW;
 void azsdk_load_test_profile(int build, void *load, void *unload, void *secondary, void *complete) AZSDK_LOAD_NOTHROW;
 void azsdk_load_test_exhaust(int deck, int which) AZSDK_LOAD_NOTHROW;
-#endif
-#ifdef __cplusplus
-}
 #endif
 #undef AZSDK_LOAD_NOTHROW
 #endif

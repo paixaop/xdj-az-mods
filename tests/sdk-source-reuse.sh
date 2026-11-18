@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-only
-# Instrument only a temporary copy of the real Source.cpp. EXPECT_RED requires
+# Instrument only a temporary copy of the real Source.c. EXPECT_RED requires
 # a concrete duplicate source epoch after genuine native forwarding/scheduling.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -13,21 +13,21 @@ task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/az-source-reuse.XXXXXX")
 trap 'rm -rf "$task_tmp"' EXIT
 result_root=${SDK_SOURCE_REUSE_RESULTS:-$task_tmp/results}
 mkdir -p "$task_tmp/src/azmod" "$task_tmp/src/common" "$result_root"
-cp src/common/azsources.h src/common/azcachebirth.h src/common/azconnectionhooks.h src/common/azconnectionepoch.h "$task_tmp/src/common/"
-python3 - src/azmod/sdk_native_sources.cpp "$task_tmp/src/azmod/sdk_native_sources.cpp" "$result_root/source-seams.json" <<'PY'
+cp src/common/*.h "$task_tmp/src/common/"
+python3 - src/azmod/sdk_native_sources.c "$task_tmp/src/azmod/sdk_native_sources.c" "$result_root/source-seams.json" <<'PY'
 from pathlib import Path
 import hashlib,json,sys
 source=Path(sys.argv[1]); original=source.read_text()
-start='    bool was_observed = false;\n    for (auto &e : source_state().entries) {'
-end='    if (!observed_generation && was_observed) {'
+start='    bool was_observed = false, status_was_observed = false;'
+end='    if ((!observed_generation && was_observed) || (!status_generation && status_was_observed)) {'
 if original.count(start)!=1 or original.count(end)!=1:
     raise SystemExit('FAIL: exact real source matching-key loop was not found once; no runtime RED possible')
-instrumented=original.replace(start,'    bool was_observed = false;\n    source_reuse_fixture::lookup_boundary(0);\n    for (auto &e : source_state().entries) {',1)
-instrumented=instrumented.replace(end,'    source_reuse_fixture::lookup_boundary(1);\n'+end,1)
+instrumented=original.replace(start,start+'\n    source_reuse_lookup_boundary(0);',1)
+instrumented=instrumented.replace(end,'    source_reuse_lookup_boundary(1);\n'+end,1)
 Path(sys.argv[2]).write_text(instrumented)
 Path(sys.argv[3]).write_text(json.dumps({'original':str(source),'original_sha256':hashlib.sha256(original.encode()).hexdigest(),'instrumented_sha256':hashlib.sha256(instrumented.encode()).hexdigest(),'seams':2,'scope':'callbacks schedule a genuine EpochState close only; actual lookup/key/receipts untouched'},indent=2)+'\n')
 PY
-flags=(-std=c++11 -O1 -g -Wall -Wextra -Werror -pthread -Isrc/common -rdynamic -DAZSDK_CACHE_BIRTH_TESTING)
+flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread -Isrc/common -rdynamic -DAZSDK_CACHE_BIRTH_TESTING)
 case ${SAN:-plain} in
 plain|'') ;;
 asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer) ;;
@@ -35,7 +35,7 @@ ubsan) flags+=(-fsanitize=undefined -fno-sanitize-recover=all -fno-omit-frame-po
 tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 *) echo 'SAN must be plain, asan, ubsan or tsan' >&2; exit 2 ;;
 esac
-command=("${HOST_CXX:-g++}" "${flags[@]}" "-DSOURCES_INC=\"$task_tmp/src/azmod/sdk_native_sources.cpp\"" tests/unit/sdksourcereuse_test.cpp src/azmod/sdk_connection_hooks.cpp -ldl -o "$task_tmp/source-reuse")
+command=("${HOST_CC:-gcc}" "${flags[@]}" "-DSOURCES_INC=\"$task_tmp/src/azmod/sdk_native_sources.c\"" tests/unit/sdksourcereuse_test.c src/azmod/sdk_connection_hooks.c tests/unit/sdkcachebirth_return.S src/common/aznative_guard.S src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/source-reuse")
 python3 - "$result_root/compile-command.json" "${command[@]}" <<'PY'
 from pathlib import Path
 import json,sys

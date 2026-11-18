@@ -1213,20 +1213,29 @@ suite "sdk deck data independent streams and sizes" "$d/real"
 mutate "$d/real.inc" "$d/control.inc" 's/memcpy\(out, &v, bytes\);/memcpy(out, \&v, bytes + (sizeof v - bytes));/'
 $CC "${CFLAGS[@]}" -Iguest/azmod -DDECK_DATA_INC="\"$d/control.inc\"" -o "$d/control" $T/sdkdeckdata_test.c
 control "sdk deck data: older output buffer overwritten" "$d/control"
-# The reconstructed GNU weak-listener ABI is an isolated C++ module. ELF image guards
-# require Linux; this is a real skip on other hosts, not an ABI pass.
+# Native weak-listener ABI guards require Linux ELF mappings.
 if [ "$(uname -s)" = Linux ]; then
     d="$OUT/sdkloopobserver"; mkdir -p "$d"
-    cp guest/azstem/sdk_loop_observer.cpp "$d/real.cpp"
-    mutate "$d/real.cpp" "$d/ctl-player.cpp" 's/player != deck/false/'
-    mutate "$d/real.cpp" "$d/ctl-generation.cpp" 's/p\.active_generation\.load\(std::memory_order_acquire\) != generation/false/g'
-    mutate "$d/real.cpp" "$d/ctl-reason.cpp" 's/p\.bounds_reason\.store\(bounds.reason, std::memory_order_relaxed\);/p.bounds_reason.store(0, std::memory_order_relaxed);/'
-    mutate "$d/real.cpp" "$d/ctl-numeric.cpp" 's/p\.check_in_samples\.store\(bounds.check_in_samples, std::memory_order_relaxed\);/p.check_in_samples.store(bounds.check_in_samples ^ 1u, std::memory_order_relaxed);/'
+    python3 - "$d" <<'PYOBS'
+from pathlib import Path
+import sys
+out = Path(sys.argv[1]); source = Path('guest/azstem/sdk_loop_observer.c').read_text()
+(out / 'real.c').write_text(source)
+variants = [
+ ('player', 'player != deck', 'false'),
+ ('generation', 'atomic_load_explicit(&(p->active_generation), memory_order_acquire) != generation', 'false'),
+ ('reason', 'atomic_store_explicit(&(p->bounds_reason), bounds.reason, memory_order_relaxed);', 'atomic_store_explicit(&(p->bounds_reason), 0, memory_order_relaxed);'),
+ ('numeric', 'atomic_store_explicit(&(p->check_in_samples), bounds.check_in_samples, memory_order_relaxed);', 'atomic_store_explicit(&(p->check_in_samples), bounds.check_in_samples ^ 1u, memory_order_relaxed);'),
+]
+for name, old, new in variants:
+    assert source.count(old) == (2 if name == 'generation' else 1)
+    (out / ('ctl-' + name + '.c')).write_text(source.replace(old, new))
+PYOBS
     for v in real ctl-player ctl-generation ctl-reason ctl-numeric; do
-        ${HOST_CXX:-c++} -std=c++11 -O1 -g -pthread "${SANFLAGS[@]}" \
-            -Iguest/common -Iguest/azstem -fvisibility=hidden -fvisibility-inlines-hidden \
-            -Wl,--version-script=guest/azstem/sdk_native_cpp.map \
-            "$d/$v.cpp" $T/sdkloopobserver_test.cpp -ldl -o "$d/$v"
+        $CC -std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -pthread "${SANFLAGS[@]}" \
+            -Iguest/common -Iguest/azstem -fvisibility=hidden \
+            -Wl,--version-script=guest/azstem/sdk_native.map \
+            "$d/$v.c" $T/sdkloopobserver_test.c guest/common/aznative_guard.S -lstdc++ -lm -ldl -o "$d/$v"
     done
     suite "sdk GNU loop listener ABI and lifetime" "$d/real"
     control "sdk loop listener: wrong native player accepted" "$d/ctl-player"

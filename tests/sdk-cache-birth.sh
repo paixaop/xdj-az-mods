@@ -20,7 +20,7 @@ aarch64|arm64) ;;
 esac
 task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/az-sdk-cache-birth.XXXXXX")
 trap 'rm -rf "$task_tmp"' EXIT
-flags=(-std=c++11 -O1 -g -Wall -Wextra -Werror -pthread -Isrc/common -rdynamic -DAZSDK_CACHE_BIRTH_TESTING)
+flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread -Isrc/common -rdynamic -DAZSDK_CACHE_BIRTH_TESTING)
 case ${SAN:-plain} in
 plain|'') ;;
 asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer) ;;
@@ -30,7 +30,7 @@ tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 esac
 # The test includes the actual current source implementation unchanged. There
 # is no extract/replacement engine and no weak accessor existence assertion.
-"${HOST_CXX:-c++}" "${flags[@]}" tests/unit/sdkcachebirth_test.cpp src/azmod/sdk_connection_hooks.cpp -ldl -o "$task_tmp/cache-birth"
+"${HOST_CC:-gcc}" "${flags[@]}" tests/unit/sdkcachebirth_test.c src/azmod/sdk_connection_hooks.c tests/unit/sdkcachebirth_return.S src/common/aznative_guard.S src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/cache-birth"
 failures=0
 for profile in 1 2; do
     status=0
