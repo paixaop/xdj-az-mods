@@ -829,6 +829,20 @@ static int wait_answer(unsigned cid, const char *title, int field) {
     return 0;
 }
 
+/* Failure evidence only: keep the worker deadline and acceptance conditions intact. */
+static void worker_diagnostic(pthread_t worker, unsigned cid, const char *title, int field, int answer) {
+    char text[B2_TEXT_MAX] = "";
+    int kind = 0, state = ent_state(cid, title, field, text, &kind), policy = -1;
+    struct sched_param priority = {0};
+    int schedule_rc = pthread_getschedparam(worker, &policy, &priority);
+    fprintf(stderr,
+            "browse worker: cid=%u answer=%d state=%d text=[%s] kind=%d landed=%d opens=%d closes=%d "
+            "schedule_rc=%d policy=%d priority=%d\n",
+            cid, answer, state, text, kind, __atomic_load_n(&g_b2_landed, __ATOMIC_ACQUIRE),
+            __atomic_load_n(&g_open_n, __ATOMIC_ACQUIRE), __atomic_load_n(&g_close_n, __ATOMIC_ACQUIRE),
+            schedule_rc, policy, priority.sched_priority);
+}
+
 int main(void) {
     ut_suite = "browse fields";
     snprintf(g_bf_path, sizeof g_bf_path, "/tmp/bft-fields.%d", (int) getpid());
@@ -1666,12 +1680,20 @@ int main(void) {
     set_stick(1, 0, 0, 0);
     __atomic_store_n(&g_b2_landed, 0, __ATOMIC_RELEASE);
     pthread_t wt;
-    pthread_create(&wt, 0, b2_worker, 0);
+    int worker_rc = pthread_create(&wt, 0, b2_worker, 0);
+    CHECK("worker thread starts", worker_rc == 0);
+    if (worker_rc) {
+        fprintf(stderr, "browse worker: pthread_create: %s (%d)\n", strerror(worker_rc), worker_rc);
+        close(fd1);
+        goto worker_finished;
+    }
     char tx[B2_TEXT_MAX];
     int kk = 0;
-    CHECK("one stick holds it: known, its value",
-          wait_answer(110, "T10", B2_COMMENTS) == 2 && (ent_state(110, "T10", B2_COMMENTS, tx, 0), !strcmp(tx, "4A")) &&
-              __atomic_load_n(&g_b2_landed, __ATOMIC_ACQUIRE) == 1);
+    int answer = wait_answer(110, "T10", B2_COMMENTS);
+    int known = answer == 2 && (ent_state(110, "T10", B2_COMMENTS, tx, 0), !strcmp(tx, "4A")) &&
+                __atomic_load_n(&g_b2_landed, __ATOMIC_ACQUIRE) == 1;
+    if (!known) worker_diagnostic(wt, 110, "T10", B2_COMMENTS, answer);
+    CHECK("one stick holds it: known, its value", known);
     set_stick(1, "4A", 0, 0);
     CHECK("two sticks agree: known", wait_answer(111, "T11", B2_COMMENTS) == 2);
     set_stick(1, "5B", 0, 0);
@@ -1691,13 +1713,15 @@ int main(void) {
     set_stick(1, 0, 0, 0);
     int st = wait_answer(114, "T14", B2_COMMENTS);
     ent_state(114, "T14", B2_COMMENTS, tx, 0);
-    CHECK("stick 1 let go of: its connection closed, stick 0 still answers",
-          st == 2 && !strcmp(tx, "only0") && __atomic_load_n(&g_close_n, __ATOMIC_ACQUIRE) >= 1);
+    int released = st == 2 && !strcmp(tx, "only0") && __atomic_load_n(&g_close_n, __ATOMIC_ACQUIRE) >= 1;
+    if (!released) worker_diagnostic(wt, 114, "T14", B2_COMMENTS, st);
+    CHECK("stick 1 let go of: its connection closed, stick 0 still answers", released);
     __atomic_store_n(&g_b2_stop, 1, __ATOMIC_RELEASE);
     b2_lock();
     pthread_cond_signal(&g_b2_cv);
     b2_unlock();
     pthread_join(wt, 0);
+worker_finished:
     close(fd0);
 
     char cmd[PATH_MAX + 16];
