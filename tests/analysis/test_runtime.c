@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+void analysis_fixture_fail_thread_start(void);
 static const char *audio;
 static atomic_int clock_offset, jump_at_acquire;
 /* Controlled monotonic passage for the real coordinator deadline wait. */
@@ -281,6 +282,8 @@ int main(int argc, char **argv) {
     assert(argc == 3); audio = argv[1];
     az_analysis_capabilities_v1 caps = {.size = sizeof caps};
     assert(analysis_runtime_capabilities(&caps) == AZ_OK && caps.max_workers == 3);
+    analysis_fixture_fail_thread_start();
+    assert(analysis_runtime_start(argv[2]) == AZ_FAILED);
     assert(analysis_runtime_start(argv[2]) == AZ_OK);
     az_analysis_owner owner = analysis_owner_begin(0);
     public_contract(owner);
