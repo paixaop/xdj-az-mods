@@ -25,7 +25,7 @@ int fixture_condition_wait(pthread_cond_t *condition, pthread_mutex_t *mutex, co
     return pthread_cond_timedwait(condition, mutex, &actual);
 }
 #endif
-static atomic_int acquisitions, publications, releases, blocked, entered, pending, link_result, outcomes, acquire_result, with_grid, publish_busy, publish_attempts;
+static atomic_int acquisitions, publications, releases, blocked, entered, pending, link_result, outcomes, acquire_result, with_grid, publish_busy, publish_attempts, publication_blocked, publication_entered;
 static void (*source_wake)(void);
 static atomic_uint_fast64_t cancel_after_publish;
 static void pause_ms(void) { struct timespec t = {0, 1000000}; nanosleep(&t, NULL); }
@@ -55,6 +55,8 @@ int analysis_source_acquire(az_analysis_owner owner, const analysis_source_reque
 int analysis_source_publish(az_analysis_owner owner, const analysis_source_input *input,
                             const az_analysis_result_v1 *result) {
     assert(input->lease && (result->vocals.count || result->phrases.count));
+    atomic_store(&publication_entered, 1);
+    while (atomic_load(&publication_blocked)) pause_ms();
     if (!analysis_owner_current(owner)) return AZ_STALE;
     atomic_fetch_add(&publish_attempts, 1);
     if (atomic_load(&publish_busy) && atomic_fetch_sub(&publish_busy, 1) > 0) return AZ_BUSY;
@@ -250,6 +252,26 @@ static az_analysis_status_v1 wait_deck(unsigned deck, unsigned state) {
     }
     abort();
 }
+static void core_publication_retirement(void) {
+    az_analysis_owner old = analysis_owner_core_begin();
+    atomic_store(&with_grid, 1); atomic_store(&publication_entered, 0);
+    atomic_store(&publication_blocked, 1);
+    int committed = atomic_load(&publications);
+    analysis_runtime_enable(old, 1);
+    analysis_runtime_load(1, 1, 71, 1, NULL);
+    for (unsigned i = 0; i < 10000 && !atomic_load(&publication_entered); i++) pause_ms();
+    assert(atomic_load(&publication_entered));
+    analysis_owner_core_retire(); analysis_runtime_enable(old, 0);
+    az_analysis_owner replacement = analysis_owner_core_begin();
+    assert(replacement.generation != old.generation);
+    analysis_runtime_enable(replacement, 1);
+    atomic_store(&publication_blocked, 0);
+    assert(wait_deck(1, AZ_ANALYSIS_COMPLETE).result == AZ_OK);
+    assert(atomic_load(&publications) == committed + 1); /* only replacement may publish */
+    analysis_owner_core_retire(); analysis_runtime_enable(replacement, 0);
+    analysis_runtime_load(1, 2, 72, 0, NULL);
+    atomic_store(&with_grid, 0);
+}
 static void automatic_operation(void) {
     az_analysis_owner core = analysis_owner_core_begin();
     int count = atomic_load(&acquisitions);
@@ -288,7 +310,7 @@ int main(int argc, char **argv) {
     az_analysis_owner owner = analysis_owner_begin(0);
     public_contract(owner);
     invalid_requests(owner); acquisition_outcomes(owner); busy_publication(owner); pending_deadline(owner); computation(owner); pending_link(owner); cancel_publication_collection(owner);
-    capacity_and_retirement(owner); automatic_operation();
+    capacity_and_retirement(owner); core_publication_retirement(); automatic_operation();
     analysis_runtime_shutdown();
     assert(atomic_load(&releases) <= atomic_load(&acquisitions));
     puts("Core runtime computation, copied results, owner retirement, capacity and link outcomes passed");
