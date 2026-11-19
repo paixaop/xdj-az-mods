@@ -5,6 +5,7 @@
 #endif
 #define AZ_STATUS_NATIVE_PRODUCER
 #include "../../src/common/azanalysis_native.h"
+#include "../../src/common/aznative_calls.h"
 #include "../../src/common/azloadobserver.h"
 #include "../../src/common/azstatus_native.h"
 #include "../../src/azmod/azmod-mod.h"
@@ -51,7 +52,7 @@ int azn_load_track_matches(unsigned deck, uint64_t epoch, uint64_t load, const u
     return deck < 4 && loaded[deck] && epoch == load_epoch && load == load_generation && !memcmp(id, load_id, 12);
 }
 static Track fake_state;
-void fixture_get_state(void);
+struct native_result_storage fixture_get_state(const struct az_native_track *);
 static bool fail_state;
 void fixture_get_state_body(void *out) {
     if (fail_state) fixture_raise();
@@ -59,7 +60,6 @@ void fixture_get_state_body(void *out) {
     memcpy(out, &value, sizeof value);
 }
 static int native_result;
-struct az_native_owner;
 static int wait_result(uintptr_t owner, const struct az_native_owner *weak, int generation) {
     (void) owner;
     (void) weak;
