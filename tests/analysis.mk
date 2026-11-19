@@ -24,7 +24,10 @@ $(OUT)/analysis_probe: tests/analysis/analysis_probe.c $(TEST_ENGINE_OBJ)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
 $(OUT)/test_activation_math: tests/analysis/test_activation_math.c tests/analysis/fixtures/musl-activation-bits.inc $(filter $(OUT)/vendor/analysis/musl-math/%,$(TEST_ENGINE_OBJ))
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $< $(filter %.o,$^) $(LDLIBS) -o $@
-test: $(OUT)/test_phrase_edges $(OUT)/test_phrases $(OUT)/test_execution $(OUT)/test_vocal_kernels $(OUT)/test_vocal_frontend $(OUT)/test_analysis $(OUT)/test_parallel_analysis $(OUT)/test_activation_math
+$(OUT)/test_fft: tests/analysis/test_fft.c $(OUT)/src/analysis/dsp/dsp.o
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
+test: $(OUT)/test_fft $(OUT)/test_phrase_edges $(OUT)/test_phrases $(OUT)/test_execution $(OUT)/test_vocal_kernels $(OUT)/test_vocal_frontend $(OUT)/test_analysis $(OUT)/test_parallel_analysis $(OUT)/test_activation_math
+	$(OUT)/test_fft
 	$(OUT)/test_phrase_edges
 	$(OUT)/test_phrases
 	$(OUT)/test_execution
