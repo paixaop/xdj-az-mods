@@ -11,8 +11,17 @@ static unsigned shared_count;
 #include "sdktrack_fixture.h"
 #include "sdk_status_layout.h"
 #include "sdk_status_proof.h"
-_Thread_local struct ds_proof_context ds_proof_context;
-_Atomic unsigned ds_proof_enabled;
+static _Thread_local struct ds_proof_context ds_proof_context;
+static _Atomic unsigned ds_proof_enabled;
+/* This fixture intercepts publication, so its matching context port owns the
+ * copied diagnostic state consumed by that synthetic reducer boundary. */
+int ds_proof_is_enabled(void) { return atomic_load_explicit(&ds_proof_enabled, memory_order_acquire); }
+struct ds_proof_context ds_proof_enter(const struct ds_proof_context *next) {
+    struct ds_proof_context previous = ds_proof_context;
+    ds_proof_context = *next;
+    return previous;
+}
+void ds_proof_restore(const struct ds_proof_context *previous) { ds_proof_context = *previous; }
 static unsigned proof_database, proof_other, proof_baselines;
 static unsigned publications[4], loss[4], retired[4];
 static unsigned ready[4][AZ_STATUS_TOPIC_COUNT][8], sent[4][AZ_STATUS_TOPIC_COUNT];

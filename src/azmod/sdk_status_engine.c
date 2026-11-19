@@ -14,8 +14,15 @@
 #include <string.h>
 #include <time.h>
 #include <stdatomic.h>
-_Thread_local struct ds_proof_context ds_proof_context;
-_Atomic unsigned ds_proof_enabled;
+static _Thread_local struct ds_proof_context ds_proof_context;
+static _Atomic unsigned ds_proof_enabled;
+int ds_proof_is_enabled(void) { return atomic_load_explicit(&ds_proof_enabled, memory_order_acquire); }
+struct ds_proof_context ds_proof_enter(const struct ds_proof_context *next) {
+    struct ds_proof_context previous = ds_proof_context;
+    ds_proof_context = *next;
+    return previous;
+}
+void ds_proof_restore(const struct ds_proof_context *previous) { ds_proof_context = *previous; }
 #define DS_HISTORY 256u
 #define DS_ACTION_ROUTES (AZ_STATUS_TOPIC(AZ_STATUS_TRANSPORT) | AZ_STATUS_TOPIC(AZ_STATUS_POSITION))
 #define DS_PHRASE_ROUTE AZ_STATUS_TOPIC(AZ_STATUS_PHRASE_TRANSITION)
