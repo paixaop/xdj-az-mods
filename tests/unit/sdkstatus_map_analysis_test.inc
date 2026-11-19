@@ -156,6 +156,12 @@ static void current_retime(void) { grid_retime(replacement_holder + 0x28, 1); }
 static void current_arm_retime(void) { during_current = current_retime; }
 static void make_reload(void) { ++epoch; }
 static void make_retime(void) { grid_retime(replacement_holder + 0x28, 3); }
+static void make_retime_back(void) {
+    int64_t prior = read_i64(replacement_holder, 0x30);
+    grid_retime(replacement_holder + 0x28, prior + 480);
+    grid_retime(replacement_holder + 0x28, prior);
+}
+static void make_replace(void) { grid_assign(replacement_holder + 0x28, (uintptr_t) &replacement_content); }
 struct publish_call {
     const struct azn_maps_api *api;
     const struct aznm_packet *packet;
@@ -166,9 +172,10 @@ static void publish_raising(void *opaque) {
     const struct publish_call *call = opaque;
     (void) call->api->publish_phrases(0, epoch, call->packet, call->data, call->size);
 }
-int test_analysis(const struct azn_maps_api *api) {
+int test_analysis(const struct azn_maps_api *api, uint64_t interest) {
     assert(profile == &profiles[1]);
     test_analysis_bindings();
+    observed_topics = interest;
     struct aznm_packet initial = {0};
     assert(api->capture(0, epoch, &initial) == AZ_UNSUPPORTED);
     analysis_ops.make = test_make;
@@ -179,6 +186,7 @@ int test_analysis(const struct azn_maps_api *api) {
     analysis_ops.trash = test_trash;
     atomic_store_explicit(&(analysis_ready), true, memory_order_seq_cst);
     map_writer_installed = 15;
+    map_writer_original[0] = (void *) test_assign;
     map_writer_original[1] = (void *) test_retime;
     map_writer_original[3] = (void *) test_notify;
     analysis_refs = true;
@@ -250,6 +258,15 @@ int test_analysis(const struct azn_maps_api *api) {
     }
     memory_failure = -1;
     make_failure = false;
+    /* Built-in analysis reserves LOAD only; a public request needs no status
+     * subscription. Neither may rely on incidental map observers. */
+    assert(observed_topics == interest);
+    assert(api->publish_phrases(1, epoch, &initial, pssi, sizeof pssi) == AZ_STALE);
+    assert(api->publish_phrases(0, epoch + 1, &initial, pssi, sizeof pssi) == AZ_STALE);
+    struct aznm_packet foreign = initial;
+    ++foreign.owner;
+    assert(api->publish_phrases(0, epoch, &foreign, pssi, sizeof pssi) == AZ_STALE);
+    assert(!analysis_made && !analysis_notified);
     during_make = make_reload;
     assert(api->publish_phrases(0, epoch, &initial, pssi, sizeof pssi) == AZ_STALE);
     assert(analysis_made == 1 && analysis_freed == 1 && !analysis_notified && read_ptr(((uintptr_t) ph.bytes), 0x28) == ((uintptr_t) pc.bytes));
@@ -260,12 +277,32 @@ int test_analysis(const struct azn_maps_api *api) {
     assert(api->publish_phrases(0, epoch, &initial, pssi, sizeof pssi) == AZ_STALE);
     assert(analysis_made == 2 && analysis_freed == 2 && !analysis_notified);
     api->release(&initial);
+    /* Actual native writer events maintain the retained edition even with
+     * no observer. Recapture needs no GUI rebind or added subscription. */
+    assert(api->capture(0, epoch, &initial) == AZ_OK);
+    during_make = make_retime_back;
+    assert(api->publish_phrases(0, epoch, &initial, pssi, sizeof pssi) == AZ_STALE);
+    assert(analysis_made == 3 && analysis_freed == 3 && !analysis_notified);
+    api->release(&initial);
+    assert(api->capture(0, epoch, &initial) == AZ_OK);
+    Buf80 changed_grid = gc;
+    put((uintptr_t) changed_grid.bytes + 0xc, (uint32_t) 1);
+    replacement_content = (uintptr_t) changed_grid.bytes;
+    during_make = make_replace;
+    assert(api->publish_phrases(0, epoch, &initial, pssi, sizeof pssi) == AZ_STALE);
+    assert(analysis_made == 4 && analysis_freed == 4 && !analysis_notified);
+    api->release(&initial);
+    replacement_content = (uintptr_t) gc.bytes;
+    make_replace();
     assert(api->capture(0, epoch, &initial) == AZ_OK);
     shared_second = true;
     size_t before = observed_count;
+    if (!(interest & routes)) assert(!before);
     assert(api->publish_phrases(0, epoch, &initial, pssi, sizeof pssi) == AZ_OK);
-    assert(analysis_made == 3 && analysis_freed == 2 && analysis_notified == 1 && observed_count == before + 2);
-    assert(observed[before].deck == 0 && observed[before + 1].deck == 1);
+    assert(analysis_made == 5 && analysis_freed == 4 && analysis_notified == 1 && observed_count == before + ((interest & routes) ? 2 : 0));
+    if (interest & routes) assert(observed[before].deck == 0 && observed[before + 1].deck == 1);
+    assert(observed_topics == interest); /* Explicit edits never subscribe. */
+    assert(last_map_mask == 3); /* Both loaded aliases share the native edit. */
     for (size_t i = before; i < observed_count; i++) {
         assert(observed[i].map.grid.provider == initial.grid.provider && observed[i].map.grid.revision == initial.grid.revision);
         assert(observed[i].map.phrases.provider == initial.phrases.provider && observed[i].map.phrases.revision == initial.phrases.revision + 1);
@@ -279,7 +316,7 @@ int test_analysis(const struct azn_maps_api *api) {
     assert(api->read(&refreshed.phrases, AZNM_PHRASES, rows, 2, &count) == AZ_OK && count == 2 &&
            rows[0].start_beat == 0 && rows[0].end_beat == 1 && rows[1].end_beat == 3);
     assert(rows[0].raw_mood == 1 && rows[1].raw_mood == 1);
-    assert(api->publish_phrases(1, epoch + 1, &refreshed, pssi, sizeof pssi) == AZ_NOT_FOUND && analysis_made == 3);
+    assert(api->publish_phrases(1, epoch + 1, &refreshed, pssi, sizeof pssi) == AZ_NOT_FOUND && analysis_made == 5);
     uintptr_t installed = read_ptr(((uintptr_t) ph.bytes), 0x28);
     playing = 0;
     api->retire_pair(138);
@@ -290,6 +327,6 @@ int test_analysis(const struct azn_maps_api *api) {
     for (size_t i = 0; i < refs_count; ++i) assert(!refs[i].count);
     assert(analysis_made == analysis_freed && !gaps);
     for (unsigned i = 0; i < analysis_count; ++i) assert(!analysis_allocated[i]);
-    puts("PASS loaded phrase publication, exact grid/reload fences, shared-pack notifications, immutable snapshots and counted release");
+    printf("PASS loaded phrase publication: interest=%llu, exact grid/ABA/reload/owner fences, shared-pack notifications, immutable snapshots and counted release\n", (unsigned long long) interest);
     return 0;
 }

@@ -17,7 +17,9 @@ azn_pack_observer observer;
 uintptr_t playing;
 uint64_t epoch = 7;
 unsigned gaps;
+static unsigned last_map_mask;
 bool analysis_refs, shared_second;
+static uint64_t observed_topics = AZ_STATUS_ALL_V1;
 void (*during_current)();
 uintptr_t replacement_holder, replacement_content;
 typedef struct {
@@ -74,14 +76,17 @@ int azn_pack_observe(azn_pack_observer o) {
     observer = o;
     return 1;
 }
-uint64_t azn_interest(unsigned deck __attribute__((unused))) { return AZ_STATUS_ALL_V1; }
+uint64_t azn_interest(unsigned deck __attribute__((unused))) { return observed_topics; }
 void azn_map_gap(unsigned deck __attribute__((unused))) { ++gaps; }
 int azn_offer(struct azstatus_native_receipt *r) {
     assert(observed_count < sizeof observed / sizeof *observed);
     observed[observed_count++] = *r;
     return 1;
 }
-uint64_t azn_map_begin_mask(unsigned mask) { return mask; }
+uint64_t azn_map_begin_mask(unsigned mask) {
+    last_map_mask = mask;
+    return mask;
+}
 void azn_map_end_mask(uint64_t ticket) { assert(ticket <= (shared_second ? 3u : 1u)); }
 int azn_offer_map_cut(struct azstatus_native_receipt *r) { return azn_offer(r); }
 static uintptr_t test_retime(uintptr_t dst, int64_t offset) {
@@ -101,12 +106,16 @@ static void current_retire(void) {
 }
 #include "sdkstatus_map_analysis_test.inc"
 int main(int argc, char **argv) {
-    assert(argc == 2 || (argc == 3 && (!strcmp(argv[2], "browse-retain") || !strcmp(argv[2], "analysis"))));
+    assert(argc == 2 || (argc == 3 && (!strcmp(argv[2], "browse-retain") || !strcmp(argv[2], "analysis") || !strcmp(argv[2], "analysis-load-only") || !strcmp(argv[2], "analysis-unobserved"))));
     const int build = argv[1][0] - '0';
     assert(azn_maps_configure(build));
     const struct azn_maps_api *api = azn_maps_service();
     assert(api && observer);
-    if (argc == 3 && !strcmp(argv[2], "analysis")) return test_analysis(api);
+    if (argc == 3 && !strncmp(argv[2], "analysis", 8)) {
+        uint64_t interest = !strcmp(argv[2], "analysis") ? AZ_STATUS_ALL_V1 : !strcmp(argv[2], "analysis-load-only") ? AZ_STATUS_TOPIC(AZ_STATUS_LOAD)
+                                                                                                                     : 0;
+        return test_analysis(api, interest);
+    }
     Buf150 pack = {0};
     Buf80 gh = {0}, ph = {0}, gc = {0}, pc = {0}, wrong = {0};
     const Profile *pr = &(profiles[build - 1]);

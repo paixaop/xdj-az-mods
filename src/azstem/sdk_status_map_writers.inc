@@ -52,7 +52,10 @@ static void holder_begin(struct HolderEdit *edit, unsigned component, uintptr_t 
     if (!holder || !atomic_load_explicit(&enabled, memory_order_acquire)) return;
     for (unsigned d = 0; d < 4; d++) {
         struct azn_pack_view view = {0};
-        if (!(azn_interest(d) & routes) || !azn_pack_acquire(d, &view)) continue;
+        /* Loaded analysis leases use this same retained cache without status
+         * subscriptions. Keep its revision/bracket current on native writer
+         * events; emit() separately gates optional status copies and delivery. */
+        if (!azn_pack_acquire(d, &view)) continue;
         if (read_ptr(view.object, component ? 0x120 : 0xd8) == holder) holder_capture(edit, d, holder, &view);
         azn_pin_drop(view.token);
     }
