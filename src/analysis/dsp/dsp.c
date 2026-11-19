@@ -2,8 +2,8 @@
 #include "PortableDSP.h"
 #include <math.h>
 #include <stdlib.h>
-#define DEFINE_FFT(NAME, TYPE, COS, SIN)                                    \
-void NAME(TYPE *r, TYPE *im, size_t n) {                                   \
+#define DEFINE_FFT(NAME, TYPE)                                    \
+void (NAME)(TYPE (*r), TYPE (*im), size_t n) {                                   \
     for (size_t i = 1, j = 0; i < n; i++) {                               \
         size_t bit = n >> 1;                                              \
         for (; j & bit; bit >>= 1) j ^= bit;                              \
@@ -30,5 +30,5 @@ void NAME(TYPE *r, TYPE *im, size_t n) {                                   \
         }                                                                \
     }                                                                    \
 }
-DEFINE_FFT(ta_fft_f, float, cosf, sinf)
-DEFINE_FFT(ta_fft_d, double, cos, sin)
+DEFINE_FFT(ta_fft_f, float)
+DEFINE_FFT(ta_fft_d, double)
