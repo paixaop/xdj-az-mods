@@ -42,9 +42,36 @@ static struct {
     az_analysis_owner automatic_owner;
     uint64_t serial, notification;
     unsigned next;
-    int started, stopping, enabled, policy;
+    int started, stopping, enabled, policy, condition_ready;
     char assets[1024];
-} ar = {.mutex = PTHREAD_MUTEX_INITIALIZER, .wake = PTHREAD_COND_INITIALIZER};
+} ar = {.mutex = PTHREAD_MUTEX_INITIALIZER};
+static int ar_condition_init(void) {
+    if (ar.condition_ready) return AZ_OK;
+    pthread_condattr_t attributes;
+    if (pthread_condattr_init(&attributes)) return AZ_FAILED;
+    int rc = 0;
+#ifdef __linux__
+    rc = pthread_condattr_setclock(&attributes, CLOCK_MONOTONIC);
+#endif
+    if (!rc) rc = pthread_cond_init(&ar.wake, &attributes);
+    pthread_condattr_destroy(&attributes);
+    if (!rc) ar.condition_ready = 1;
+    return rc ? AZ_FAILED : AZ_OK;
+}
+static void ar_signal(void) {
+    if (ar.condition_ready) pthread_cond_signal(&ar.wake);
+}
+static int ar_wait_seconds(long seconds) {
+#ifdef __APPLE__
+    struct timespec delay = {.tv_sec = seconds};
+    return pthread_cond_timedwait_relative_np(&ar.wake, &ar.mutex, &delay);
+#else
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_MONOTONIC, &deadline)) return ETIMEDOUT;
+    deadline.tv_sec += seconds;
+    return pthread_cond_timedwait(&ar.wake, &ar.mutex, &deadline);
+#endif
+}
 static int ar_owner_equal(az_analysis_owner a, az_analysis_owner b) {
     return a.generation == b.generation && a.slot == b.slot && a.kind == b.kind;
 }
@@ -132,7 +159,7 @@ int analysis_runtime_request(az_analysis_owner owner, const az_analysis_request_
         ar_admit(job, owner, r);
         *id = job->status.request_id;
         ar.notification++;
-    pthread_cond_signal(&ar.wake);
+    ar_signal();
     }
     pthread_mutex_unlock(&ar.mutex);
     return rc;
@@ -251,15 +278,9 @@ static struct ar_job *ar_next(void) {
     }
     return NULL;
 }
-static void ar_retry_deadline(struct timespec *deadline) {
-    clock_gettime(CLOCK_REALTIME, deadline);
-    deadline->tv_sec++;
-}
 static void ar_wait_retry(int retry) {
     if (!retry || ar.stopping) return;
-    struct timespec deadline;
-    ar_retry_deadline(&deadline);
-    pthread_cond_timedwait(&ar.wake, &ar.mutex, &deadline);
+    ar_wait_seconds(1);
     ar.notification++;
 }
 static int ar_advance(struct ar_job *job, char error[160]) {
@@ -299,6 +320,25 @@ static void ar_shutdown_jobs(void) {
     }
     pthread_mutex_lock(&ar.mutex);
 }
+static long ar_saved_deadline(void) {
+    long remaining = -1;
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now)) return 0;
+    for (unsigned i = 0; i < ANALYSIS_SLOTS; i++) {
+        const struct ar_job *job = &ar.jobs[i];
+        if (job->status.state != AZ_ANALYSIS_SAVED) continue;
+        long seconds = 600 - (now.tv_sec - job->started.tv_sec);
+        if (seconds <= 0) return 0;
+        if (remaining < 0 || seconds < remaining) remaining = seconds;
+    }
+    return remaining;
+}
+static void ar_wait_work(void) {
+    long remaining = ar_saved_deadline();
+    if (remaining < 0) { pthread_cond_wait(&ar.wake, &ar.mutex); return; }
+    if (!remaining) { ar.notification++; return; }
+    if (ar_wait_seconds(remaining) == ETIMEDOUT) ar.notification++;
+}
 static void *ar_worker(void *unused) {
     (void)unused;
     ar.policy = ar_policy();
@@ -306,7 +346,7 @@ static void *ar_worker(void *unused) {
     while (!ar.stopping) {
         struct ar_job *job = ar_next();
         if (job) ar_process_job(job);
-        else pthread_cond_wait(&ar.wake, &ar.mutex);
+        else ar_wait_work();
     }
     ar_shutdown_jobs();
     pthread_mutex_unlock(&ar.mutex);
@@ -316,6 +356,8 @@ int analysis_runtime_start(const char *assets) {
     if (!assets || !*assets || strlen(assets) >= sizeof ar.assets) return AZ_INVALID;
     pthread_mutex_lock(&ar.mutex);
     if (ar.started) { pthread_mutex_unlock(&ar.mutex); return AZ_OK; }
+    int condition = ar_condition_init();
+    if (condition) { pthread_mutex_unlock(&ar.mutex); return condition; }
     snprintf(ar.assets, sizeof ar.assets, "%s", assets);
     ar.stopping = 0;
     analysis_source_set_wake(analysis_runtime_wake);
@@ -329,7 +371,7 @@ void analysis_runtime_shutdown(void) {
     int started = ar.started;
     ar.stopping = 1;
     for (unsigned i = 0; i < ANALYSIS_SLOTS; i++) atomic_store(&ar.jobs[i].cancelled, 1);
-    pthread_cond_broadcast(&ar.wake);
+    if (ar.condition_ready) pthread_cond_broadcast(&ar.wake);
     pthread_mutex_unlock(&ar.mutex);
     if (started && pthread_join(ar.worker, NULL)) abort();
     pthread_mutex_lock(&ar.mutex);
@@ -359,7 +401,7 @@ static int ar_cancel_or_release(az_analysis_owner owner, uint64_t id, int releas
     int rc = job ? AZ_OK : AZ_STALE;
     if (job) ar_revoke(job, release);
     ar.notification++;
-    pthread_cond_signal(&ar.wake);
+    ar_signal();
     pthread_mutex_unlock(&ar.mutex);
     return rc;
 }
@@ -374,7 +416,7 @@ void analysis_runtime_retire(az_analysis_owner owner) {
     for (unsigned i = 0; i < ANALYSIS_SLOTS; i++)
         if (ar_owner_equal(ar.jobs[i].owner, owner)) ar_revoke(&ar.jobs[i], 1);
     ar.notification++;
-    pthread_cond_signal(&ar.wake);
+    ar_signal();
     pthread_mutex_unlock(&ar.mutex);
 }
 static int ar_result_ready(const struct ar_job *job, const az_analysis_result_v1 **result) {
@@ -437,7 +479,7 @@ void analysis_runtime_enable(az_analysis_owner owner, int enabled) {
         if (job->status.request_id) ar_revoke(job, 1);
     }
     ar.notification++;
-    pthread_cond_signal(&ar.wake);
+    ar_signal();
     pthread_mutex_unlock(&ar.mutex);
 }
 void analysis_runtime_load(unsigned deck, uint64_t order, uint64_t epoch, int loaded, const az_track_ref *track) {
@@ -455,7 +497,7 @@ void analysis_runtime_load(unsigned deck, uint64_t order, uint64_t epoch, int lo
     load->loaded = loaded;
     load->track = track ? *track : (az_track_ref){0};
     ar.notification++;
-    pthread_cond_signal(&ar.wake);
+    ar_signal();
     pthread_mutex_unlock(&ar.mutex);
 }
 int analysis_runtime_deck_status(unsigned deck, az_analysis_status_v1 *out) {
@@ -471,6 +513,6 @@ int analysis_runtime_deck_status(unsigned deck, az_analysis_status_v1 *out) {
 void analysis_runtime_wake(void) {
     pthread_mutex_lock(&ar.mutex);
     ar.notification++;
-    pthread_cond_signal(&ar.wake);
+    ar_signal();
     pthread_mutex_unlock(&ar.mutex);
 }

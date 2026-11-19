@@ -36,7 +36,10 @@ clean:
 	rm -rf $(OUT)
 -include $(ENGINE_OBJ:.o=.d)
 
-$(OUT)/test_runtime: tests/analysis/test_runtime.c tests/analysis/test_api.inc src/azmod/analysis_api.c src/azmod/analysis_runtime.c src/azmod/analysis_owner.c $(ENGINE_OBJ)
+$(OUT)/analysis_runtime_test.o: src/azmod/analysis_runtime.c src/azmod/analysis_runtime.h src/azmod/analysis_source.h
+	@mkdir -p $(@D)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Dclock_gettime=fixture_clock_gettime -Dpthread_cond_timedwait=fixture_condition_wait -c $< -o $@
+$(OUT)/test_runtime: tests/analysis/test_runtime.c tests/analysis/test_api.inc src/azmod/analysis_api.c $(OUT)/analysis_runtime_test.o src/azmod/analysis_owner.c $(ENGINE_OBJ)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $(filter-out %.inc src/azmod/analysis_api.c,$^) $(LDLIBS) -o $@
 test-runtime: $(OUT)/test_runtime
 	$(OUT)/test_runtime tests/analysis/fixtures/pvdi-voice.wav $(ANALYSIS_ASSETS)

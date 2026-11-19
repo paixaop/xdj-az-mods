@@ -9,6 +9,20 @@
 #include <string.h>
 #include <time.h>
 static const char *audio;
+static atomic_int clock_offset, jump_at_acquire;
+/* Controlled monotonic passage for the real coordinator deadline wait. */
+int fixture_clock_gettime(clockid_t clock, struct timespec *out) {
+    int rc = clock_gettime(clock, out);
+    if (!rc && clock == CLOCK_MONOTONIC) out->tv_sec += atomic_load(&clock_offset);
+    return rc;
+}
+#ifdef __linux__
+int fixture_condition_wait(pthread_cond_t *condition, pthread_mutex_t *mutex, const struct timespec *deadline) {
+    struct timespec actual = *deadline;
+    actual.tv_sec -= atomic_load(&clock_offset);
+    return pthread_cond_timedwait(condition, mutex, &actual);
+}
+#endif
 static atomic_int acquisitions, publications, releases, blocked, entered, pending, link_result, outcomes, acquire_result, with_grid, publish_busy, publish_attempts;
 static void (*source_wake)(void);
 static atomic_uint_fast64_t cancel_after_publish;
@@ -31,6 +45,7 @@ int analysis_source_acquire(az_analysis_owner owner, const analysis_source_reque
         for (unsigned i = 0; i < input->beat_count; i++)
             input->beats[i] = (az_beat){.time_s = i * 0.5, .bpm = 120, .beat_in_bar = i % 4 + 1};
     }
+    if (atomic_exchange(&jump_at_acquire, 0)) atomic_store(&clock_offset, 599);
     return atomic_load(&acquire_result);
 }
 int analysis_source_publish(az_analysis_owner owner, const analysis_source_input *input,
@@ -185,6 +200,18 @@ static void pending_link(az_analysis_owner owner) {
     release_request(owner, id);
     atomic_store(&pending, 0);
 }
+static void pending_deadline(az_analysis_owner owner) {
+    atomic_store(&acquire_result, AZ_PENDING); atomic_store(&link_result, AZ_PENDING);
+    atomic_store(&jump_at_acquire, 1);
+    int queries = atomic_load(&outcomes);
+    az_analysis_request_v1 r = request(1);
+    uint64_t id;
+    assert(submit(owner, &r, &id) == AZ_OK);
+    assert(wait_state(owner, id, AZ_ANALYSIS_FAILED).result == AZ_STALE);
+    assert(atomic_load(&outcomes) == queries); /* deadline ends it without polling source */
+    release_request(owner, id);
+    atomic_store(&acquire_result, AZ_OK); atomic_store(&clock_offset, 0);
+}
 static void busy_publication(az_analysis_owner owner) {
     int opened = atomic_load(&acquisitions), committed = atomic_load(&publications);
     int attempts = atomic_load(&publish_attempts);
@@ -254,7 +281,7 @@ int main(int argc, char **argv) {
     assert(analysis_runtime_start(argv[2]) == AZ_OK);
     az_analysis_owner owner = analysis_owner_begin(0);
     public_contract(owner);
-    invalid_requests(owner); acquisition_outcomes(owner); busy_publication(owner); computation(owner); pending_link(owner); cancel_publication_collection(owner);
+    invalid_requests(owner); acquisition_outcomes(owner); busy_publication(owner); pending_deadline(owner); computation(owner); pending_link(owner); cancel_publication_collection(owner);
     capacity_and_retirement(owner); automatic_operation();
     analysis_runtime_shutdown();
     assert(atomic_load(&releases) <= atomic_load(&acquisitions));
