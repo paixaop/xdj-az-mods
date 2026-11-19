@@ -33,18 +33,8 @@
 #define SDK_LIB_ROWS 20000 /* rows per call (azmod-mod.h states it): more are cut, and the call returns 1 */
 #define SDK_LIB_STR 192    /* bytes kept per text field */
 
-static struct {
-    int (*open_v2)(const char *, void **, int, const char *);
-    int (*key)(void *, const void *, int);
-    int (*close)(void *);
-    int (*prepare)(void *, const char *, int, void **, const char **);
-    int (*bind_int64)(void *, int, long long);
-    int (*step)(void *);
-    long long (*col_int64)(void *, int);
-    const unsigned char *(*col_text)(void *, int);
-    int (*finalize)(void *);
-    int ok;
-} g_sdk_sq;
+#include "library_sql.h"
+static struct az_library_sql g_sdk_sq;
 
 static int sdk_sq_resolve(void) {
     if (g_sdk_sq.ok)
@@ -137,6 +127,10 @@ static int sdk_stick_mount(int stick, char *mount, size_t cap) {
     return snprintf(mount, cap, "%s", found) < (int) cap;
 }
 
+int az_storage_stick_mount(int stick, char *mount, size_t capacity) {
+    return sdk_stick_mount(stick, mount, capacity);
+}
+const struct az_library_sql *az_storage_sql(void) { return &g_sdk_sq; }
 static int sdk_db_sig(const char *db, long long *sig) {
     struct stat st;
     if (stat(db, &st) != 0)
@@ -145,7 +139,7 @@ static int sdk_db_sig(const char *db, long long *sig) {
     return 1;
 }
 
-static void *sdk_db_open(const char *db) {
+void *sdk_db_open(const char *db) {
     /* A filesystem path is not a URI: escape delimiters and existing percent sequences
      * before adding our own immutable parameter. In-source symlink targets can contain
      * these bytes even when the mount point and exported alias use conventional names. */

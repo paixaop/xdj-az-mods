@@ -13,6 +13,8 @@ def variant(name, filename, old, new, count=1):
     text = (source / filename).read_text()
     assert text.count(old) == count, (filename, old)
     (directory / filename).write_text(text.replace(old, new))
+    if filename != "track_storage.c":
+        (directory / "track_storage.c").write_bytes((source / "track_storage.c").read_bytes())
     companion = "sdk_data_engine.h" if filename == "sdk_analysis.h" else "sdk_track.c"
     if companion != filename:
         (directory / companion).write_bytes((source / companion).read_bytes())
@@ -25,7 +27,7 @@ variant("timing-prefix-read", "sdk_analysis.h",
 variant("database-alias", "sdk_track.c",
         'if (!st_source_path(src.mount, "/PIONEER/rekordbox/exportLibrary.db", data->files[0])) return AZ_STALE;',
         'if (snprintf(data->files[0], sizeof data->files[0], "%s/PIONEER/rekordbox/exportLibrary.db", src.mount) >= (int) sizeof data->files[0]) return AZ_FAILED;')
-variant("missing-parent", "sdk_track.c",
+variant("missing-parent", "track_storage.c",
         "if (realpath(prefix, parent)) break;\n        if (errno != ENOENT) return 0;",
         "if (realpath(prefix, parent)) break;\n        return 0;")
 variant("wave-errors", "sdk_wave_provider.h",
@@ -35,7 +37,7 @@ variant("database-uri", "sdk_lib.c",
         "if (*p == '%' || *p == '?' || *p == '#')", "if (0)")
 variant("analysis-binding", "sdk_track.c",
         "if (strcmp(current, data->files[i])) return 0;", "(void) current;")
-variant("track-fifo", "sdk_track.c", "O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK",
+variant("track-fifo", "track_storage.c", "O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK",
         "O_RDONLY | O_CLOEXEC | O_NOFOLLOW")
 variant("wave-fifo", "sdk_wave_provider.h", "O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK",
         "O_RDONLY | O_CLOEXEC | O_NOFOLLOW")

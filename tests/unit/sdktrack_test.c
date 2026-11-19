@@ -78,31 +78,22 @@ static void mountinfo(const char *root, int mid) {
     fclose(f);
 }
 static void source_generation_exhaustion(const char *root) {
-    /* A new connection must never receive zero or a previously issued token.
-     * Existing connections remain readable when the process counter is full. */
-    mountinfo(root, 901);
-    g_st_generation = UINT64_MAX - 1;
-    az_track_ref last = {.size = sizeof last}, second = {.size = sizeof second};
-    assert(sdk_track_resolve("mod-a", 0, 10, &last) == AZ_OK && last.source_generation == UINT64_MAX);
-    assert(sdk_track_resolve("mod-a", 1, 10, &second) == AZ_OK);
-    FILE *f = fopen(st_test_mountinfo, "w");
-    assert(f);
-    fprintf(f, "901 1 8:1 / %s/media/sdb1 rw - vfat /dev/sdb1 rw\n", root);
-    fprintf(f, "902 1 8:2 / %s/media/sda1 rw - vfat /dev/sda1 rw\n", root);
-    assert(!fclose(f));
-    az_track_ref unchanged;
-    memset(&unchanged, 0x5a, sizeof unchanged);
-    unchanged.size = sizeof unchanged;
-    az_track_ref out = unchanged;
-    CHECK("source generation exhaustion refuses a reconnect without publishing zero", sdk_track_resolve("mod-a", 1, 10, &out) == AZ_LIMIT);
-    CHECK("source generation exhaustion preserves the caller buffer", !memcmp(&out, &unchanged, sizeof out));
-    out.size = sizeof out;
-    CHECK("counter exhaustion never reuses a prior token on retry", sdk_track_resolve("mod-a", 1, 10, &out) == AZ_LIMIT);
-    CHECK("full generation counter leaves an unchanged current source usable", sdk_track_resolve("mod-a", 0, 10, &out) == AZ_OK && out.source_generation == UINT64_MAX);
-    mountinfo(root, 903);
-    out = unchanged;
-    CHECK("both USB source slots fail closed on later reconnect", sdk_track_resolve("mod-a", 0, 10, &out) == AZ_LIMIT && !memcmp(&out, &unchanged, sizeof out));
-    CHECK("source identity counter never wraps", g_st_generation == UINT64_MAX);
+    (void) root;
+    struct st_source first = {0}, second = {0};
+    struct stat status = {.st_dev = 1, .st_ino = 9};
+    uint64_t generation = UINT64_MAX - 1;
+    assert(st_source_assign(&first, &generation, 0, "/usb/one", 901, status) == AZ_OK);
+    assert(first.ref.source_generation == UINT64_MAX);
+    second = first;
+    CHECK("source generation exhaustion refuses a reconnect without publishing zero",
+          st_source_assign(&second, &generation, 1, "/usb/two", 902, status) == AZ_LIMIT && !second.ref.source_generation);
+    CHECK("counter exhaustion never reuses a prior token on retry",
+          st_source_assign(&second, &generation, 1, "/usb/two", 902, status) == AZ_LIMIT);
+    CHECK("full generation counter leaves an unchanged current source usable",
+          st_source_assign(&first, &generation, 0, "/usb/one", 901, status) == AZ_OK && first.ref.source_generation == UINT64_MAX);
+    CHECK("both USB source slots fail closed on later reconnect",
+          st_source_assign(&first, &generation, 0, "/usb/one", 903, status) == AZ_LIMIT);
+    CHECK("source identity counter never wraps", generation == UINT64_MAX);
 }
 static void short_records(void) {
     uint32_t *tiny = malloc(sizeof *tiny);

@@ -3,6 +3,7 @@
  * boundary. No library/file backend or independent resource-lifetime model. */
 #define _POSIX_C_SOURCE 200809L
 #include "sdk_data_engine.h"
+#include "analysis_source.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -44,6 +45,12 @@ static uint64_t owned[CM_MAX][ST_PER_OWNER];
 static const az_track_snapshot *held;
 static const az_wave_snapshot *held_wave;
 static unsigned status_retired[CM_MAX];
+static unsigned analysis_retired[CM_MAX];
+void analysis_source_retire(az_analysis_owner owner) {
+    assert(owner.slot < CM_MAX && owner.kind == AZ_ANALYSIS_OWNER_MOD && owner.generation);
+    assert(!analysis_owner_current(owner));
+    ++analysis_retired[owner.slot];
+}
 static void ds_retire(int owner) {
     assert(owner >= 0 && owner < CM_MAX);
     ++status_retired[owner];
@@ -90,6 +97,7 @@ static void reset_lifecycle(void) {
     memset(g_cm, 0, sizeof g_cm);
     memset(owned, 0, sizeof owned);
     memset(status_retired, 0, sizeof status_retired);
+    memset(analysis_retired, 0, sizeof analysis_retired);
     held = NULL;
     held_wave = NULL;
     fail_init = borrow_data = wave_data = g_cm_live = 0;
@@ -114,7 +122,7 @@ int main(void) {
         fail_init = 1;
         wave_data = i & 1;
         run_actual_init(&g_cm[i], &module);
-        assert(status_retired[i] == 1);
+        assert(status_retired[i] == 1 && analysis_retired[i] == 1);
         assert(g_cm[i].state == AZCM_FAILED && !g_cm[i].m && g_cm_loading == -1 && !g_sdk_in_init);
     }
     puts("FAILED_INIT_DATA_BASELINE_OK: actual init/result branch ran for eight failed plugins");
