@@ -2437,7 +2437,9 @@ suite "settings" "$d/real" "$d/scratch-real"
 # Every Mod Menu screen a knob walk reaches, the settings each azmod.cfg loads to, and what a
 # press / a tap does, for a set of real and edge-case files (menudump_test.c), byte-identical
 # to the golden that 1.2.2's code (before the feature-table refactor) produced with the
-# refactor's intended changes applied to it (menudump-golden.sh, menudump-intended.patch).
+# refactor's intended changes applied. The built-in Track Analysis row and its
+# four deck statuses are included; the original upstream snapshot is retained in
+# menudump.golden-rel.orig.gz. The Remote Stems default mutation must still fail.
 d="$OUT/menudump"; mkdir -p "$d"
 cp "$OUT/cfg/real.inc" "$d/cfg.inc"
 mkdir -p "$d/guest"; cp -R guest/azmod guest/common "$d/guest/"
