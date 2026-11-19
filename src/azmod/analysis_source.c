@@ -37,14 +37,13 @@ struct sa_job {
     uint64_t id;
     int owner, needs_link;
     az_analysis_owner lifetime;
-    int reader_fd;
     char reader_path[1024];
     struct st_source source;
     char database[1024], audio[1024], dat[1024], ext[1024], ex2[1024];
     char relative_audio[2048], relative_dat[1024];
     uint64_t signatures[5];
     uint32_t needed;
-    int vocals;
+    int vocals, reader_fd;
     int loaded, deck, streaming;
     uint64_t load, native_epoch, audio_token;
     const struct azn_analysis_source_api *audio_api;
@@ -459,6 +458,7 @@ static int sa_publication_vocals(struct sa_publication *s) {
     if (sa_tag_count(s->ex2, s->vfn, "PVDI") != 0) return AZ_STALE;
     s->newex2 = sa_merge(s->ex2, s->vfn, p->vocal, p->vn, &s->nvn);
     uint8_t marker[32] = {0};
+    // NOLINTNEXTLINE(bugprone-not-null-terminated-result): native FourCC stores exactly four bytes.
     memcpy(marker, "AZVD", 4);
     sa_put32(marker + 4, 32);
     sa_put32(marker + 8, 32);
@@ -651,6 +651,7 @@ static int sa_grid_encode(struct sa_grid_capture *capture) {
     unsigned first = sa_grid_first_bar(capture);
     if (first == capture->count) return AZ_UNSUPPORTED;
     uint8_t *grid = capture->file;
+    // NOLINTNEXTLINE(bugprone-not-null-terminated-result): native FourCC stores exactly four bytes.
     memcpy(grid, "PQTZ", 4);
     sa_put32(grid + 4, 24);
     sa_put32(grid + 8, (uint32_t) capture->tag_size);
@@ -957,9 +958,7 @@ static int sa_loaded_seed(const struct azstatus_native_v1 *api, int deck, uint64
     return api->load_seed && api->load_seed((unsigned) deck, receipt) && receipt->load_generation == load ? AZ_OK : AZ_STALE;
 }
 static void sa_loaded_result(struct sa_open_result *result, struct sa_open_result *out, int rc) {
-    if (!rc) {
-        memcpy(out, result, sizeof *result);
-    } else if (rc == AZ_PENDING) {
+    if (rc == AZ_OK || rc == AZ_PENDING) {
         memcpy(out, result, sizeof *result);
     } else if (rc == ANALYSIS_SOURCE_COMPLETE) {
         result->job = 0;

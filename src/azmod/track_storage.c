@@ -205,7 +205,7 @@ static void st_row_text(void *stmt, az_track_metadata *metadata) {
 }
 static void st_row_timing(void *stmt, struct st_resolution *row) {
     az_track_metadata *metadata = &row->metadata;
-    metadata->original_bpm = az_storage_sql()->col_int64(stmt, 5) / 100.0;
+    metadata->original_bpm = (double) az_storage_sql()->col_int64(stmt, 5) / 100.0;
     row->duration_ticks = az_storage_sql()->col_int64(stmt, 6);
     metadata->duration_s = (double) row->duration_ticks;
     if (metadata->original_bpm > 0) metadata->valid |= AZ_META_TEMPO;

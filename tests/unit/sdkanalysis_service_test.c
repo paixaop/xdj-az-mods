@@ -195,6 +195,9 @@ static void analysis_write(const char *path, const void *bytes, size_t n) {
     assert(f && fwrite(bytes, 1, n, f) == n && !fclose(f));
 }
 static void typed_grid_result_validation(void) {
+    az_analysis_result_v1 empty = {0};
+    struct sa_tags empty_tags = {0};
+    assert(!sa_result_valid(&empty) && !sa_encode_native(&empty, &empty_tags));
     az_beat beats[2] = {{.time_s = 0, .bpm = 120, .beat_in_bar = 1},
                         {.time_s = 0.5, .bpm = 120, .beat_in_bar = 2}};
     az_analysis_phrase_v1 phrase = {.start_beat = 1, .kind = 1};
