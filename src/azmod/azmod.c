@@ -41,6 +41,8 @@
 #define _GNU_SOURCE
 #include "menu.h"
 #include "azconf.h"
+#include "analysis_host.h"
+#include "analysis_settings.h"
 #include "ep147addr.h" /* EP_<v130> -> this build's EP147 address (generated table) */
 #include "ep147png.h"  /* the PNG images in this build's .rodata: where stick art may go */
 #include "bus_cfg.h"   /* settings word, color words and LED blocks the bus threads read */
@@ -1676,6 +1678,7 @@ static void load_settings(azmod_state *s) {
         if (!migrated && r == -3)
             dbg("cfg: azmod.conf is a newer version and there is no azmod.cfg: defaults\n");
     }
+    if (analysis_settings_migrate(c)) dbg("analysis: could not migrate the saved enable setting\n");
     conf_apply(c, s);
     if (!s) {
         azconf_free(c);
@@ -2031,6 +2034,8 @@ static struct plsnap g_grab;
 static void drag_cancel(void);
 static int az_banner_strip(const char *text, int dur_ms); /* banner.c */
 static int az_banner_box(const char *l1, const char *l2, int dur_ms);
+static void analysis_banner(const char *text, int ms) { (void) az_banner_box(text, NULL, ms); }
+static void analysis_diagnostic(const char *text) { dbg("analysis: %s\n", text); }
 #define AZ_BANNER_HOLD INT_MIN /* banner.c: strip stays until replaced or cleared */
 enum {
     BN_NONE,
@@ -2142,6 +2147,7 @@ static void drag_scroll_to(uintptr_t lb, int row);
 static void drag_end_local(void);
 static void msg_tick(void) {
     sdk_ui_msg_drain(); /* banners and post_ui calls the community mods queued */
+    analysis_host_notices(analysis_banner, analysis_diagnostic);
     drag_handoff_drain(); /* a drop or BACK the bus thread recorded: before anything reads the drag */
     fl_tick();
     if (__atomic_load_n(&g_drag_settle, __ATOMIC_ACQUIRE)) {

@@ -289,6 +289,7 @@ int main(int argc, char **argv) {
         azm_install_hook(m + 64, NULL, &o);
     }
     g_cm_on_ui = 1;
+    core_services_init();
     community_init();
     for (int i = 0; i < azcm_count(); i++) {
         azcm_info_t in;

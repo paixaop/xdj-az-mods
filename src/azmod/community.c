@@ -1570,6 +1570,7 @@ static void sdk_ui_tick(void);
 #include "sdk_status.c"
 #ifndef SDK_PROC_IMPL
 #include "sdk_analysis_service.c"
+#include "analysis_api.c"
 #endif
 #ifndef SDK_PROC_IMPL
 #include "sdk_data_callbacks.c"
@@ -1636,16 +1637,6 @@ static const az_library_v1 g_sdk_library = {
     .waveform_request = sdk_waveform_request,
     .waveform_acquire = sdk_waveform_acquire,
     .on_data_event = sdk_on_data_event,
-    .analysis_open = sdk_analysis_open,
-    .analysis_close = sdk_analysis_close,
-    .analysis_open_loaded = sdk_analysis_open_loaded,
-    .analysis_open_v2 = sdk_analysis_open_v2,
-    .analysis_open_loaded_v2 = sdk_analysis_open_loaded_v2,
-    .vocal_intervals = sdk_vocal_intervals,
-    .vocal_intervals_loaded = sdk_vocal_intervals_loaded,
-    .analysis_formats = sdk_analysis_formats,
-    .analysis_grid = sdk_analysis_grid,
-    .analysis_commit_result = sdk_analysis_commit_result,
 #endif
 };
 static const az_library_v1 *sdk_library_service(uint32_t abi) {
@@ -1724,12 +1715,11 @@ static const az_core_v1 g_cm_core = {
     .audio_tap = sdk_audio_tap,
     .claim_vslot = sdk_claim_vslot,
     .lib_spool_kick = sdk_lib_spool_kick,
-#ifndef SDK_PROC_IMPL
-#endif
     .library_service = sdk_library_service,
     .observation_service = sdk_observation_service,
     .command_service = sdk_command_service,
 #ifndef SDK_PROC_IMPL
+    .analysis_service = sdk_analysis_service,
     .beatport_login_service = sdk_beatport_login_service,
     .button_press = cm_button_press,
     .button_poll = cm_button_poll,
@@ -2328,9 +2318,34 @@ static void cm_disable_all(int nen) {
         cm_refuse(&g_cm[i], AZCM_DISABLED, "Community mods are disabled");
     }
 }
-static void community_init(void) {
+/* Host lifecycle: core services start even when the community loader has no
+ * enabled packages. Source observation and automatic analysis are core work. */
+#ifndef SDK_PROC_IMPL
+static int core_analysis_assets(char *assets, size_t size) {
+    char mods[1024];
+    if (!usbmods_find(mods, sizeof mods)) return AZ_NOT_FOUND;
+    int n = snprintf(assets, size, "%s/analysis/assets", mods);
+    return n < 0 || (size_t) n >= size ? AZ_LIMIT : AZ_OK;
+}
+static void core_analysis_start(void) {
+    char assets[1200];
+    int rc = core_analysis_assets(assets, sizeof assets);
+    if (rc == AZ_OK) rc = analysis_host_start(assets, az_on(AZF_TRACK_ANALYSIS));
+    if (rc != AZ_OK) { dbg("analysis: core startup failed (%d)\n", rc); return; }
+    azmod_analysis_enable = analysis_host_enable;
+    rc = sdk_status_analysis_bind(analysis_runtime_load);
+    if (rc == AZ_OK) azmod_analysis_status = analysis_runtime_deck_status;
+    else dbg("analysis: automatic load observation unavailable (%d)\n", rc);
+}
+#endif
+static void core_services_init(void) {
     sdk_status_start();
     cm_services_start();
+#ifndef SDK_PROC_IMPL
+    core_analysis_start();
+#endif
+}
+static void community_init(void) {
     cm_derive_fwtag();
     g_cm_logs_on = access(CM_ROOT "/azmod-logs.on", F_OK) == 0;
     dbg("community: running EP147 tag %s\n", g_cm_fwtag[0] ? g_cm_fwtag : "(not derivable: hooking mods refused)");
