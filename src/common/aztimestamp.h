@@ -15,17 +15,6 @@ enum az_timestamp_order {
  * symmetric and strictly inside that window, including across bucket edges.
  * Missing clocks/identities remain the caller's validity checks. Approximate
  * equality is not transitive: this comparator is not a sorting predicate. */
-static inline int az_compare_integer_timestamps(uint64_t first, uint64_t second,
-                                                uint64_t units_per_second,
-                                                uint64_t sample_rate,
-                                                uint64_t window_samples) {
-    if (!units_per_second || !sample_rate || !window_samples) return AZ_TIME_INVALID;
-    uint64_t difference = first > second ? first - second : second - first;
-    if ((__uint128_t) difference * sample_rate < (__uint128_t) window_samples * units_per_second)
-        return AZ_TIME_EQUAL;
-    return first < second ? AZ_TIME_BEFORE : AZ_TIME_AFTER;
-}
-
 /* Floating timestamps (normally seconds) keep their precision through the
  * difference calculation; integer clocks use the exact wide-integer path. */
 static inline int az_compare_floating_timestamps(long double first, long double second,
@@ -49,6 +38,14 @@ static inline int az_compare_wide_timestamps(__uint128_t first, __uint128_t seco
     if (difference <= ~(__uint128_t) 0 / sample_rate &&
         difference * sample_rate < (__uint128_t) window_samples * units_per_second) return AZ_TIME_EQUAL;
     return first < second ? AZ_TIME_BEFORE : AZ_TIME_AFTER;
+}
+
+/* Keep the uint64_t entry point source-compatible with existing SDK clients. */
+static inline int az_compare_integer_timestamps(uint64_t first, uint64_t second,
+                                                uint64_t units_per_second,
+                                                uint64_t sample_rate,
+                                                uint64_t window_samples) {
+    return az_compare_wide_timestamps(first, second, units_per_second, sample_rate, window_samples);
 }
 
 /* Preserve each operand's signedness before the usual arithmetic conversions.

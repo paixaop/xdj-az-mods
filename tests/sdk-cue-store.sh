@@ -4,7 +4,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/az-sdk-cue-store.XXXXXX")
 trap 'rm -rf "$task_tmp"' EXIT
-flags=(-DAZSDK_CUE_STORE_TESTING -std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror)
+flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror)
+if [[ ${CUE_DIAGNOSTIC:-0} == 1 ]]; then flags+=(-DAZSDK_CUE_DIAGNOSTIC); fi
 case ${SAN:-plain} in
 plain|'') ;;
 asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer) ;;

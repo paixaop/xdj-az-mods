@@ -12,33 +12,45 @@ struct SyncValues {
     int following;
     int locked;
 };
-static SyncValues sync_values(uintptr_t parent, const SyncProfile p, uintptr_t bias) {
-    SyncValues v = {.following = -1, .locked = -1};
-    unsigned role = integer(parent + 0xbc), enabled = byte(parent + 0xb8), member = integer(parent + 0xc0);
-    if (role > 1 || enabled > 1 || !table(word(parent + 0xb0), bias + p.server)) return v;
+static uintptr_t sync_child(uintptr_t parent, const struct SyncProfile *p, uintptr_t bias, unsigned role, unsigned enabled) {
+    if (role > 1 || enabled > 1 || !table(word(parent + 0xb0), bias + p->server)) return 0;
     uintptr_t child = word(parent + 0x1c8 + role * 8);
-    if (!table(child, bias + (role ? p.slave : p.master)) || word(child + 8) != parent) return v;
-    if (!role || !enabled || member == 0xff) {
-        v.following = v.locked = 0;
-        return v;
-    }
+    if (!table(child, bias + (role ? p->slave : p->master)) || word(child + 8) != parent) return 0;
+    return child;
+}
+static bool sync_slave_job(uintptr_t parent, uintptr_t child, unsigned member, const struct SyncProfile *p, uintptr_t bias) {
     uintptr_t job = word(child + 0xb0);
-    if (member >= 70 || child != word(parent + 0x1c0) || !table(job, bias + p.job) || word(job + 0x30) != child) return v;
+    return member < 70 && child == word(parent + 0x1c0) && table(job, bias + p->job) && word(job + 0x30) == child;
+}
+static bool sync_target_valid(unsigned active, unsigned linked, unsigned timing, double target) {
+    return active <= 1 && linked <= 1 && timing <= 1 && isfinite(target) && target >= 0;
+}
+static int sync_phase_locked(uintptr_t parent, uintptr_t child, unsigned timing, unsigned member) {
+    unsigned phase = integer(child + 0x48);
+    if (phase > 2) return -1;
+    return phase == 2 && timing && (unsigned) integer(parent + 0x158) == member && byte(parent + 0x11a) == byte(parent + 0x154);
+}
+static SyncValues sync_audible_values(uintptr_t parent, uintptr_t child, unsigned member) {
+    SyncValues v = {.following = -1, .locked = -1};
     double target;
-    memcpy(&target, ((const void *) (parent + 0x120)), sizeof target);
+    memcpy(&target, (const void *) (parent + 0x120), sizeof target);
     unsigned active = integer(child + 0x10), linked = byte(parent + 0x118), timing = byte(parent + 0x119);
-    if (active > 1 || linked > 1 || timing > 1 || !isfinite(target) || target < 0) return v;
+    if (!sync_target_valid(active, linked, timing, target)) return v;
     /* The slave's tempo job selected the remote tempo calculator, received a
      * usable target and committed its rate. The phase job can still be idle. */
-    if (!active || !linked || target <= 0 || target == DBL_MAX) {
-        v.following = v.locked = 0;
-        return v;
-    }
+    if (!active || !linked || target <= 0 || target == DBL_MAX) return (SyncValues) {0, 0};
     v.following = 1;
-    unsigned phase = integer(child + 0x48);
-    if (phase <= 2) v.locked = phase == 2 && timing && (unsigned) (integer(parent + 0x158)) == member &&
-                               byte(parent + 0x11a) == byte(parent + 0x154);
+    v.locked = sync_phase_locked(parent, child, timing, member);
     return v;
+}
+static SyncValues sync_values(uintptr_t parent, const SyncProfile p, uintptr_t bias) {
+    SyncValues unknown = {.following = -1, .locked = -1};
+    unsigned role = integer(parent + 0xbc), enabled = byte(parent + 0xb8), member = integer(parent + 0xc0);
+    uintptr_t child = sync_child(parent, &p, bias, role, enabled);
+    if (!child) return unknown;
+    if (!role || !enabled || member == 0xff) return (SyncValues) {0, 0};
+    if (!sync_slave_job(parent, child, member, &p, bias)) return unknown;
+    return sync_audible_values(parent, child, member);
 }
 struct SyncRole {
     _Atomic(unsigned) writers;
@@ -69,6 +81,23 @@ static void sync_status_retire(unsigned d, uint64_t owner) {
     azn_emit(&r);
     azn_capability(d, AZN_CAP_SYNC_ROLE, 0);
 }
+static bool sync_owner_current(const struct SyncRole *role, const Setting *setting, uintptr_t parent, uint64_t owner) {
+    return owner && !atomic_load_explicit(&(role->writers), memory_order_acquire) &&
+           atomic_load_explicit(&(setting->provider), memory_order_acquire) == owner &&
+           atomic_load_explicit(&(setting->address), memory_order_acquire) == parent;
+}
+static bool sync_capture_current(const struct SyncRole *role, const Setting *setting, uintptr_t parent,
+                                 uint64_t owner, uint64_t serial, uint64_t fault) {
+    return atomic_load_explicit(&(role->serial), memory_order_acquire) == serial &&
+           atomic_load_explicit(&(role->fault), memory_order_acquire) == fault &&
+           !atomic_load_explicit(&(role->writers), memory_order_acquire) &&
+           atomic_load_explicit(&(setting->provider), memory_order_acquire) == owner &&
+           atomic_load_explicit(&(setting->address), memory_order_acquire) == parent;
+}
+static bool sync_values_unchanged(const struct SyncRole *role, uint64_t owner, uint64_t seed, uint64_t fault, const SyncValues *value) {
+    return role->owner == owner && role->seed == seed && role->fault_seen == fault &&
+           role->following == value->following && role->locked == value->locked;
+}
 static void sync_capture(unsigned d, uintptr_t parent, uint64_t owner) {
     __auto_type role = &(sync_roles[d]);
     __auto_type setting = &(state().decks[d].settings[2]);
@@ -79,15 +108,12 @@ static void sync_capture(unsigned d, uintptr_t parent, uint64_t owner) {
     EXIT_FLAG_GUARD(release, &role->publish);
     uint64_t fault = atomic_load_explicit(&(role->fault), memory_order_acquire), seed = azn_seed_id(d);
     uint64_t serial = atomic_load_explicit(&(role->serial), memory_order_acquire);
-    if (!owner || atomic_load_explicit(&(role->writers), memory_order_acquire) || atomic_load_explicit(&(setting->provider), memory_order_acquire) != owner ||
-        atomic_load_explicit(&(setting->address), memory_order_acquire) != parent) return;
+    if (!sync_owner_current(role, setting, parent, owner)) return;
     State *s = &(state());
     if (!table(parent, s->bias + setting_profiles[s->build - 1].sync_function)) return;
     SyncValues v = sync_values(parent, sync_profiles[s->build - 1], s->bias);
-    if (atomic_load_explicit(&(role->serial), memory_order_acquire) != serial || atomic_load_explicit(&(role->fault), memory_order_acquire) != fault || atomic_load_explicit(&(role->writers), memory_order_acquire) ||
-        atomic_load_explicit(&(setting->provider), memory_order_acquire) != owner || atomic_load_explicit(&(setting->address), memory_order_acquire) != parent) return;
-    if (role->owner == owner && role->seed == seed && role->fault_seen == fault &&
-        role->following == v.following && role->locked == v.locked) return;
+    if (!sync_capture_current(role, setting, parent, owner, serial, fault)) return;
+    if (sync_values_unchanged(role, owner, seed, fault, &v)) return;
     azstatus_native_receipt r = {0};
     r.kind = AZN_SYNC_ROLE;
     r.deck = d;

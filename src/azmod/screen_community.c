@@ -718,33 +718,40 @@ static void cm_textw(const azmod_fb *fb, int x, int y, int w, int h, const char 
 #define CM_CRUMB_MAX 192
 #define CM_SEP "  >  "
 static const char *const CM_TABNAME[4] = {"Installed", "Browse", "Repositories", "Updates"};
-static void cm_crumbs(char *t, size_t n, int w, int px) {
-    const char *page = 0, *sub = 0;
-    azcm_info_t m;
-    int tab = g_cm_tab >= 0 && g_cm_tab < 4 ? g_cm_tab : 0;
+static const char *cm_crumb_page(azcm_info_t *m) {
     switch (g_cm_view) {
-    case CMV_SETTINGS: sub = "Settings"; /* fall through */
-    case CMV_MOD: page = !azcm_info(g_cm_page, &m) ? m.name : 0; break;
-    case CMV_CAT: page = g_cm_cat >= 0 && g_cm_cat < g_ncc ? g_cc[g_cm_cat].name : 0; break;
-    case CMV_TRUST:
-        page = g_cm_cat >= 0 && g_cm_cat < g_ncc ? g_cc[g_cm_cat].name : 0;
-        sub = "Install";
-        break;
-    case CMV_KBD: page = "Add repository"; break;
-    case CMV_RELOAD: snprintf(t, n, "Community Mods" CM_SEP "Reload"); return;
-    default: break;
+    case CMV_SETTINGS:
+    case CMV_MOD: return !azcm_info(g_cm_page, m) ? m->name : 0;
+    case CMV_CAT:
+    case CMV_TRUST: return g_cm_cat >= 0 && g_cm_cat < g_ncc ? g_cc[g_cm_cat].name : 0;
+    case CMV_KBD: return "Add repository";
+    default: return 0;
     }
-    for (int with_tab = 1; with_tab >= 0; with_tab--) {
-        int k = snprintf(t, n, "Community Mods");
-        if (with_tab && k >= 0 && (size_t) k < n)
-            k += snprintf(t + k, n - (size_t) k, CM_SEP "%s", CM_TABNAME[tab]);
-        if (page && page[0] && k >= 0 && (size_t) k < n)
-            k += snprintf(t + k, n - (size_t) k, CM_SEP "%s", page);
-        if (sub && k >= 0 && (size_t) k < n)
-            snprintf(t + k, n - (size_t) k, CM_SEP "%s", sub);
-        if (w <= 0 || cm_tw(t, px) <= w || (!page && !sub))
-            return;
+}
+static int cm_crumb_append(char *t, size_t n, int k, const char *part) {
+    if (!part || !part[0] || k < 0 || (size_t) k >= n) return k;
+    return k + snprintf(t + k, n - (size_t) k, CM_SEP "%s", part);
+}
+static void cm_crumb_format(char *t, size_t n, const char *tab, const char *page, const char *sub) {
+    int k = snprintf(t, n, "Community Mods");
+    k = cm_crumb_append(t, n, k, tab);
+    k = cm_crumb_append(t, n, k, page);
+    cm_crumb_append(t, n, k, sub);
+}
+static int cm_crumb_tab(void) { return g_cm_tab >= 0 && g_cm_tab < 4 ? g_cm_tab : 0; }
+static void cm_crumbs(char *t, size_t n, int w, int px) {
+    azcm_info_t m;
+    const char *page = cm_crumb_page(&m);
+    const char *sub = g_cm_view == CMV_SETTINGS ? "Settings" : g_cm_view == CMV_TRUST ? "Install"
+                                                                                      : 0;
+    int tab = cm_crumb_tab();
+    if (g_cm_view == CMV_RELOAD) {
+        snprintf(t, n, "Community Mods" CM_SEP "Reload");
+        return;
     }
+    cm_crumb_format(t, n, CM_TABNAME[tab], page, sub);
+    if (w <= 0 || cm_tw(t, px) <= w || (!page && !sub)) return;
+    cm_crumb_format(t, n, 0, page, sub);
 }
 static int cm_tw(const char *s, int px) {
     int w = azmod_ttf_menu_width ? azmod_ttf_menu_width(s, (int) strlen(s), px, 2) : 0;
@@ -1641,120 +1648,129 @@ static void cm_layout_home(struct cm_lay *lay) {
 }
 
 /* An installed mod's page. */
-static int cm_layout_mod(struct cm_lay *lay) {
+static int cm_mod_progress(const azcm_info_t *m) {
+    return cm_status_shown() && g_cs.id[0] && !strcmp(g_cs.id, m->id);
+}
+static void cm_mod_button(struct cm_lay *lay, int *x, int width, int height, const char *label,
+                          int primary, int active, int kind, int idx) {
     azmod_state *s = lay->s;
-    const azmod_fb *fb = lay->fb;
     cm_ctl *ctl = lay->ctl;
-    int draw = lay->draw;
-    int bx = lay->bx;
-    int by = lay->by;
-    int bw = lay->bw;
-    int bh = lay->bh;
-    int lh = lay->lh;
-    int dpx = lay->dpx;
-    int pad = lay->pad;
-    int bh3 = lay->bh3;
-    int y = lay->y;
     int n = lay->n;
+    if (lay->draw) cm_button(lay->fb, *x, lay->y, width, height, label, primary, active, CM_FOC);
+    CM_CTL(kind, idx, *x, lay->y, width, height);
+    lay->n = n;
+    *x += width + lay->pad;
+}
+static void cm_mod_heading(struct cm_lay *lay, const azcm_info_t *m) {
+    char t[200], st[160];
+    if (lay->draw) {
+        if (m->author[0]) snprintf(t, sizeof t, "v%s  by %s", m->version, m->author);
+        else snprintf(t, sizeof t, "%s", m->version[0] ? m->version : m->id);
+        c_text(lay->fb, lay->bx + lay->pad, lay->y, 0, lay->lh, t, lay->dpx, C_TEXT_DIM);
+        uint32_t sc;
+        const char *stt = cm_state_text(m, st, sizeof st, &sc);
+        if (!(cm_crashed(m) && cm_pend_get(m->id) != 1))
+            c_text(lay->fb, lay->bx + lay->pad, lay->y + lay->lh, 0, lay->lh, stt, lay->dpx, sc);
+        if (m->hooks) c_text(lay->fb, lay->bx + lay->pad, lay->y + 2 * lay->lh, 0, lay->lh,
+                             "Changes the deck software itself (uses hooks).", lay->dpx, C_TEXT_DIM);
+    }
+    lay->y += (m->hooks ? 3 : 2) * lay->lh;
+    lay->y += cm_wrap(lay->fb, lay->bx + lay->pad, lay->y, lay->bw - 2 * lay->pad, lay->lh,
+                      m->summary, lay->dpx, C_TEXT, g_cm_full ? 2 : 1, lay->draw) *
+                  lay->lh +
+              lay->pad / 2;
+}
+static void cm_mod_pending(struct cm_lay *lay, const azcm_info_t *m) {
+    /* Enabled on this USB, but this exact file is not approved on this deck. */
+    char t[320];
+    if (m->from[0]) snprintf(t, sizeof t, "Enabled on this USB, from %s, but not yet allowed on this deck. It runs with full access to your deck: allow it only if you trust where it came from.", m->from);
+    else snprintf(t, sizeof t, "Enabled on this USB, copied there by hand (no record of where it came from), but not yet allowed on this deck. It runs with full access to your deck: allow it only if you trust it.");
+    lay->y += cm_wrap(lay->fb, lay->bx + lay->pad, lay->y, lay->bw - 2 * lay->pad, lay->lh, t, lay->dpx, C_TEXT, 3, lay->draw) * lay->lh + lay->pad / 2;
+    int width = lay->fb->w * 200 / 1280, x = lay->bx + lay->pad, busy = cm_busy();
+    if (!m->allowed) cm_mod_button(lay, &x, width, lay->bh3, "Allow", 1, 1, CMC_ALLOW, g_cm_page);
+    cm_mod_button(lay, &x, width, lay->bh3, "Remove from USB", 0, !busy, CMC_MODACT, CMA_REMOVE);
+    lay->y += lay->bh3 + lay->pad;
+    if (g_cm_allow_err == g_cm_page) {
+        if (lay->draw) c_text(lay->fb, lay->bx + lay->pad, lay->y, 0, lay->lh, "Could not save that on the deck. Try again.", lay->dpx, CM_BAD);
+        lay->y += lay->lh + lay->pad / 2;
+    }
+    if (lay->draw && cm_mod_progress(m)) cm_progress(lay->fb, lay->bx + lay->pad, lay->y, lay->bw - 2 * lay->pad, lay->lh, lay->dpx);
+}
+static void cm_mod_crash_notice(struct cm_lay *lay, const azcm_info_t *m) {
+    if (lay->draw) {
+        char t[200];
+        snprintf(t, sizeof t, "%s %s, so it was disabled. Your other mods were not affected.", m->name,
+                 strstr(m->reason, "while this mod was starting") ? "stopped the deck while it was starting" : "crashed the deck");
+        cm_wrap(lay->fb, lay->bx + lay->pad, lay->y, lay->bw - 2 * lay->pad, lay->lh, t, lay->dpx, CM_BAD, 2, 1);
+    }
+    lay->y += 2 * lay->lh + lay->pad / 2;
+}
+static void cm_mod_update_button(struct cm_lay *lay, const azcm_info_t *m, int *x, int width, int busy) {
+    int up = cm_update_idx(m->id);
+    if (up < 0) return;
+    char label[40];
+    snprintf(label, sizeof label, "Update to %s", g_cc[up].ver);
+    cm_mod_button(lay, x, width, lay->bh3, label, 1, !busy, CMC_MODUPD, up);
+}
+static void cm_mod_enable_button(struct cm_lay *lay, const azcm_info_t *m, int *x, int width, int busy) {
+    int pend = cm_pend_get(m->id), on = pend >= 0 ? pend : cm_turned_on(m);
+    cm_mod_button(lay, x, width, lay->bh3, on ? "Disable" : "Enable", 0, !busy, CMC_MODACT, on ? CMA_DISABLE : CMA_ENABLE);
+}
+static void cm_mod_actions(struct cm_lay *lay, const azcm_info_t *m, int crashed, int tried, int gone) {
+    int width = lay->fb->w * 200 / 1280, x = lay->bx + lay->pad, busy = cm_busy();
+    if (gone) {
+        if (lay->draw) c_text(lay->fb, x, lay->y, 0, lay->bh3, "Removed. Unloads after Reload.", lay->dpx, C_AVAIL);
+        return;
+    }
+    cm_mod_update_button(lay, m, &x, width, busy);
+    if (crashed && !tried) cm_mod_button(lay, &x, width, lay->bh3, "Try again", 1, 1, CMC_UNSUSPEND, g_cm_page);
+    else if (!crashed && !azcm_suspended()) cm_mod_enable_button(lay, m, &x, width, busy);
+    cm_mod_button(lay, &x, width, lay->bh3, "Remove from USB", 0, !busy, CMC_MODACT, CMA_REMOVE);
+}
+static void cm_mod_installed(struct cm_lay *lay, const azcm_info_t *m) {
+    int gone = cm_removed(m->id), crashed = cm_crashed(m);
+    int tried = (g_cm_page < 16 && g_cm_unsusp[g_cm_page]) || cm_pend_get(m->id) == 1;
+    if (crashed && !tried) cm_mod_crash_notice(lay, m);
+    cm_mod_actions(lay, m, crashed, tried, gone);
+    lay->y += lay->bh3 + lay->pad;
+    if (lay->draw && cm_mod_progress(m)) cm_progress(lay->fb, lay->bx + lay->pad, lay->y, lay->bw - 2 * lay->pad, lay->lh, lay->dpx);
+    if (cm_mod_progress(m)) lay->y += lay->lh + lay->pad / 2;
+}
+static void cm_mod_inline_screen(struct cm_lay *lay) {
+    if (lay->draw) fill_rect(lay->fb, lay->bx, lay->y, lay->bw, 1, C_DIVIDER);
+    lay->y += lay->pad / 2;
+    az_rect area = {lay->bx, lay->y, lay->bw, lay->by + lay->bh - lay->y};
+    g_cm_area = area;
+    if (lay->draw) {
+        az_draw d;
+        azcm_draw_init(&d, lay->fb, area);
+        azcm_screen_draw(g_cm_page, &d, area);
+    }
+}
+static void cm_mod_settings(struct cm_lay *lay, const azcm_info_t *m) {
+    if (m->state != AZCM_LOADED) return;
+    if (!m->has_screen) {
+        if (lay->draw) c_text(lay->fb, lay->bx + lay->pad, lay->y, 0, lay->lh, "This mod has no settings page.", lay->dpx, C_TEXT_DIM);
+        return;
+    }
+    if (g_cm_view == CMV_HOME || (m->screen_flags & AZ_SCREEN_DEDICATED)) {
+        int x = lay->bx + lay->pad, height = c_rrowh(lay->fb);
+        cm_mod_button(lay, &x, lay->fb->w * 200 / 1280, height, "Settings", 1, 1, CMC_SETTINGS, g_cm_page);
+        lay->y += height + lay->pad;
+    } else cm_mod_inline_screen(lay);
+}
+static int cm_layout_mod(struct cm_lay *lay) {
     azcm_info_t m;
     if (azcm_info(g_cm_page, &m)) {
         g_cm_view = CMV_HOME;
         return 0;
     }
-    char t[200];
-    if (draw) {
-        if (m.author[0]) snprintf(t, sizeof t, "v%s  by %s", m.version, m.author);
-        else snprintf(t, sizeof t, "%s", m.version[0] ? m.version : m.id);
-        c_text(fb, bx + pad, y, 0, lh, t, dpx, C_TEXT_DIM);
-        char st[160];
-        uint32_t sc;
-        const char *stt = cm_state_text(&m, st, sizeof st, &sc);
-        if (!(cm_crashed(&m) && cm_pend_get(m.id) != 1)) c_text(fb, bx + pad, y + lh, 0, lh, stt, dpx, sc);
-        if (m.hooks) c_text(fb, bx + pad, y + 2 * lh, 0, lh, "Changes the deck software itself (uses hooks).", dpx, C_TEXT_DIM);
-    }
-    y += (m.hooks ? 3 : 2) * lh;
-    y += cm_wrap(fb, bx + pad, y, bw - 2 * pad, lh, m.summary, dpx, C_TEXT, g_cm_full ? 2 : 1, draw) * lh + pad / 2;
-    if (m.state == AZCM_NEW && !cm_removed(m.id)) {
-        /* found turned on on the USB, but this deck has not approved this exact mod file: put
-         * there by the AZ-MODS app, copied by hand, or a different build of a mod approved before */
-        char t[320];
-        if (m.from[0]) snprintf(t, sizeof t, "Enabled on this USB, from %s, but not yet allowed on this deck. It runs with full access to your deck: allow it only if you trust where it came from.", m.from);
-        else snprintf(t, sizeof t, "Enabled on this USB, copied there by hand (no record of where it came from), but not yet allowed on this deck. It runs with full access to your deck: allow it only if you trust it.");
-        y += cm_wrap(fb, bx + pad, y, bw - 2 * pad, lh, t, dpx, C_TEXT, 3, draw) * lh + pad / 2;
-        int bw2 = fb->w * 200 / 1280, x = bx + pad, busy = cm_busy();
-        if (!m.allowed) {
-            if (draw) cm_button(fb, x, y, bw2, bh3, "Allow", 1, 1, CM_FOC);
-            CM_CTL(CMC_ALLOW, g_cm_page, x, y, bw2, bh3);
-            x += bw2 + pad;
-        }
-        if (draw) cm_button(fb, x, y, bw2, bh3, "Remove from USB", 0, !busy, CM_FOC);
-        CM_CTL(CMC_MODACT, CMA_REMOVE, x, y, bw2, bh3);
-        y += bh3 + pad;
-        if (g_cm_allow_err == g_cm_page) {
-            if (draw) c_text(fb, bx + pad, y, 0, lh, "Could not save that on the deck. Try again.", dpx, CM_BAD);
-            y += lh + pad / 2;
-        }
-        if (draw && cm_status_shown() && g_cs.id[0] && !strcmp(g_cs.id, m.id)) cm_progress(fb, bx + pad, y, bw - 2 * pad, lh, dpx);
-    } else {   /* the actions, on every installed page: Try again (after a crash) or Enable / Disable, and Remove */
-        int bw2 = fb->w * 200 / 1280, x = bx + pad, busy = cm_busy(), gone = cm_removed(m.id);
-        int crashed = cm_crashed(&m), tried = (g_cm_page < 16 && g_cm_unsusp[g_cm_page]) || cm_pend_get(m.id) == 1;
-        if (crashed && draw && !tried) {
-            char t[200];
-            snprintf(t, sizeof t, "%s %s, so it was disabled. Your other mods were not affected.", m.name,
-                     strstr(m.reason, "while this mod was starting") ? "stopped the deck while it was starting" : "crashed the deck");
-            cm_wrap(fb, bx + pad, y, bw - 2 * pad, lh, t, dpx, CM_BAD, 2, 1);
-        }
-        if (crashed && !tried) y += 2 * lh + pad / 2;
-        if (!gone) {
-            int up = cm_update_idx(m.id);
-            if (up >= 0) {
-                char ul[40];
-                snprintf(ul, sizeof ul, "Update to %s", g_cc[up].ver);
-                if (draw) cm_button(fb, x, y, bw2, bh3, ul, 1, !busy, CM_FOC);
-                CM_CTL(CMC_MODUPD, up, x, y, bw2, bh3);
-                x += bw2 + pad;
-            }
-            if (crashed && !tried) {
-                if (draw) cm_button(fb, x, y, bw2, bh3, "Try again", 1, 1, CM_FOC);
-                CM_CTL(CMC_UNSUSPEND, g_cm_page, x, y, bw2, bh3);
-                x += bw2 + pad;
-            } else if (crashed) {
-                /* Try again pressed: the state line above says "Loads again after Reload." */
-            } else if (!azcm_suspended()) {
-                int pend = cm_pend_get(m.id), on = pend >= 0 ? pend : cm_turned_on(&m);
-                if (draw) cm_button(fb, x, y, bw2, bh3, on ? "Disable" : "Enable", 0, !busy, CM_FOC);
-                CM_CTL(CMC_MODACT, on ? CMA_DISABLE : CMA_ENABLE, x, y, bw2, bh3);
-                x += bw2 + pad;
-            }
-            if (draw) cm_button(fb, x, y, bw2, bh3, "Remove from USB", 0, !busy, CM_FOC);
-            CM_CTL(CMC_MODACT, CMA_REMOVE, x, y, bw2, bh3);
-        } else if (draw) c_text(fb, x, y, 0, bh3, "Removed. Unloads after Reload.", dpx, C_AVAIL);
-        y += bh3 + pad;
-        if (draw && cm_status_shown() && g_cs.id[0] && !strcmp(g_cs.id, m.id)) cm_progress(fb, bx + pad, y, bw - 2 * pad, lh, dpx);
-        if (cm_status_shown() && g_cs.id[0] && !strcmp(g_cs.id, m.id)) y += lh + pad / 2;
-    }
-    if (m.state == AZCM_LOADED && m.has_screen &&
-        (g_cm_view == CMV_HOME || (m.screen_flags & AZ_SCREEN_DEDICATED))) {
-        int sw = fb->w * 200 / 1280, sh = c_rrowh(fb);
-        if (draw) cm_button(fb, bx + pad, y, sw, sh, "Settings", 1, 1, CM_FOC);
-        CM_CTL(CMC_SETTINGS, g_cm_page, bx + pad, y, sw, sh);
-        y += sh + pad;
-    } else if (m.state == AZCM_LOADED && m.has_screen) {   /* simple controls on the standard full-width page */
-        if (draw) fill_rect(fb, bx, y, bw, 1, C_DIVIDER);
-        y += pad / 2;
-        az_rect a = {bx, y, bw, by + bh - y};
-        g_cm_area = a;
-        if (draw) {
-            az_draw d;
-            azcm_draw_init(&d, fb, a);
-            azcm_screen_draw(g_cm_page, &d, a);
-        }
-    } else if (m.state == AZCM_LOADED && draw) c_text(fb, bx + pad, y, 0, lh, "This mod has no settings page.", dpx, C_TEXT_DIM);
-    lay->y = y;
-    lay->n = n;
+    cm_mod_heading(lay, &m);
+    if (m.state == AZCM_NEW && !cm_removed(m.id)) cm_mod_pending(lay, &m);
+    else cm_mod_installed(lay, &m);
+    cm_mod_settings(lay, &m);
     return 1;
 }
-
 /* A catalog mod's page. */
 /* the open page's screenshots: which are on disk (re-checked only when the page or g_cm_gen
  * changes), and one `shots` request per visit for the missing ones, sent once the fetcher is free */
@@ -2414,6 +2430,38 @@ static int cm_scroll_clamp(int v, int max) {
     if (v > max) v = max;
     return v < 0 ? 0 : v;
 }
+static void cm_layout_home_page(struct cm_lay *lay) {
+    int top = lay->y;
+    cm_layout_home(lay);
+    int content = lay->y - top;
+    g_cm_smax = cm_scroll_max(content, lay->bh);
+    if (lay->draw) draw_vsb(lay->fb, cm_isplit() ? lay->bx + lay->bw / 2 - lay->pad / 2 : lay->bx + lay->bw + lay->pad,
+                            lay->by, lay->bh, content, lay->bh, g_cm_scroll);
+    if (cm_isplit()) cm_layout_split(lay);
+}
+static void cm_layout_settings(struct cm_lay *lay) {
+    g_cm_area = (az_rect) {lay->bx, lay->by, lay->bw, lay->bh};
+    if (lay->draw) {
+        az_draw d;
+        azcm_draw_init(&d, lay->fb, g_cm_area);
+        azcm_screen_draw(g_cm_page, &d, g_cm_area);
+    }
+}
+static int cm_layout_page(struct cm_lay *lay) {
+    switch (g_cm_view) {
+    case CMV_HOME: cm_layout_home_page(lay); break;
+    case CMV_MOD: return cm_layout_mod(lay);
+    case CMV_SETTINGS: cm_layout_settings(lay); break;
+    case CMV_CAT: return cm_layout_cat(lay);
+    case CMV_TRUST: cm_layout_trust(lay); break;
+    case CMV_RELOAD: cm_layout_reload(lay); break;
+    case CMV_KBD:
+        if (g_cm_full) cm_layout_kbd_full(lay);
+        else cm_layout_kbd(lay);
+        break;
+    }
+    return 1;
+}
 static int cm_layout(azmod_state *s, const azmod_fb *fb, cm_ctl *ctl, int draw) {
     g_cm_area = (az_rect) {0};
     int bx, by, bw, bh;
@@ -2421,36 +2469,7 @@ static int cm_layout(azmod_state *s, const azmod_fb *fb, cm_ctl *ctl, int draw) 
     int rh = c_rrowh(fb), lh = fb->h * 26 / 800, px = rh * 44 / 100, dpx = fb->h * 17 / 800, pad = fb->w / 80;
     int y = by - (g_cm_view == CMV_HOME ? g_cm_scroll : 0), n = 0, bh3 = rh * 3 / 5;
     struct cm_lay lay = {s, fb, ctl, draw, bx, by, bw, bh, rh, lh, px, dpx, pad, bh3, y, n};
-    if (g_cm_view == CMV_HOME) {
-        cm_layout_home(&lay);
-        int content = lay.y - y;   /* the whole page, from its top edge to its last row */
-        g_cm_smax = cm_scroll_max(content, bh);
-        /* EP147's own list scroll bar in the right margin, only while the page overflows (ui_draw.c draw_vsb);
-         * split, at the list's own edge */
-        if (draw) draw_vsb(fb, cm_isplit() ? bx + bw / 2 - pad / 2 : bx + bw + pad, by, bh, content, bh, g_cm_scroll);
-        if (cm_isplit()) cm_layout_split(&lay);
-    } else if (g_cm_view == CMV_MOD) {
-        if (!cm_layout_mod(&lay))
-            return 0;
-    } else if (g_cm_view == CMV_SETTINGS) {
-        g_cm_area = (az_rect) {bx, by, bw, bh};
-        if (draw) {
-            az_draw d;
-            azcm_draw_init(&d, fb, g_cm_area);
-            azcm_screen_draw(g_cm_page, &d, g_cm_area);
-        }
-    } else if (g_cm_view == CMV_CAT) {
-        if (!cm_layout_cat(&lay))
-            return 0;
-    } else if (g_cm_view == CMV_TRUST) {
-        cm_layout_trust(&lay);
-    } else if (g_cm_view == CMV_RELOAD) {
-        cm_layout_reload(&lay);
-    } else if (g_cm_view == CMV_KBD && g_cm_full) {
-        cm_layout_kbd_full(&lay);
-    } else if (g_cm_view == CMV_KBD) {
-        cm_layout_kbd(&lay);
-    }
+    if (!cm_layout_page(&lay)) return 0;
     g_cm_nbody = lay.n;
     if (g_cm_full && g_cm_view == CMV_HOME) {
         if (g_cm_sortpop && g_cm_sortr.on) cm_layout_sortpop(&lay);
@@ -2617,7 +2636,7 @@ static void cm_full_close(azmod_state *s) {
         cm_slide_start(s, -1);
     }
 }
-static void cm_slide_end(azmod_state *s) {
+static void cm_slide_log(void) {
     if (access("/home/root/settings/azmod-logs.on", F_OK) == 0) {
         FILE *f = azlog_fopen_capped("/tmp/azmod-cmslide.log", AZLOG_CAP_BYTES);
         if (f) {
@@ -2627,6 +2646,9 @@ static void cm_slide_end(azmod_state *s) {
             fclose(f);
         }
     }
+}
+static void cm_slide_end(azmod_state *s) {
+    cm_slide_log();
     if (g_cm_dir < 0 && g_cm_slide_base >= 0) {
         cm_open(g_cm_slide_base);
     } else if (g_cm_dir < 0 && g_cm_row >= 0) {   /* back on the Mod Menu, on the SCREEN row that opened the page */
@@ -2642,10 +2664,7 @@ static void cm_slide_end(azmod_state *s) {
     }   /* back on the Mod Menu, Community Mods row */
     g_cm_dir = 0;
 }
-/* one slide frame: the Mod Menu (left list + the card), then the full view shifted right by off */
-static void cm_slide_draw(azmod_state *s, const azmod_fb *fb) {
-    long now = cm_ms(), el = now - g_cm_t0;
-    if (now - g_cm_last > CM_SLIDE_LATE && g_cm_nfr) g_cm_cut = 1;
+static void cm_slide_prepare(azmod_state *s, const azmod_fb *fb) {
     int need = fb->stride * fb->h;
     if (!g_cm_off || g_cm_offsz != need) {
         free(g_cm_off);
@@ -2658,9 +2677,8 @@ static void cm_slide_draw(azmod_state *s, const azmod_fb *fb) {
         azmod_fb o = {g_cm_off, fb->w, fb->h, fb->stride};
         cm_draw(s, &o);
     }
-    float t = el >= CM_SLIDE_MS || g_cm_cut ? 1.f : (float) el / CM_SLIDE_MS, e = 1.f - (1.f - t) * (1.f - t) * (1.f - t);
-    float shown = g_cm_dir > 0 ? e : 1.f - e;           /* share of the full view on screen */
-    int off = (int) ((1.f - shown) * fb->w);
+}
+static void cm_slide_underlay(azmod_state *s, const azmod_fb *fb, int off) {
     if (off > 0) {
         if (g_cm_slide_base >= 0) {
             int view = g_cm_view, page = g_cm_page, cat = g_cm_cat;
@@ -2677,9 +2695,13 @@ static void cm_slide_draw(azmod_state *s, const azmod_fb *fb) {
             g_cm_full = 1;
         }
     }
+}
+static void cm_slide_blit(const azmod_fb *fb, int off) {
     if (off < fb->w && g_cm_off)
         for (int y = dock_y(fb); y < dock_y(fb) + dock_h(fb) && y < fb->h; y++)
             memcpy(fb->px + (long) y * fb->stride + (long) off * 4, g_cm_off + (long) y * fb->stride, (size_t) (fb->w - off) * 4);
+}
+static void cm_slide_record(long now, long el) {
     long dt = cm_ms() - now;
     if (dt > CM_SLIDE_SLOW) g_cm_cut = 1;
     if (g_cm_nfr < 32) {
@@ -2688,6 +2710,18 @@ static void cm_slide_draw(azmod_state *s, const azmod_fb *fb) {
     }
     g_cm_nfr++;
     g_cm_last = now;
+}
+/* one slide frame: the Mod Menu (left list + the card), then the full view shifted right by off */
+static void cm_slide_draw(azmod_state *s, const azmod_fb *fb) {
+    long now = cm_ms(), el = now - g_cm_t0;
+    if (now - g_cm_last > CM_SLIDE_LATE && g_cm_nfr) g_cm_cut = 1;
+    cm_slide_prepare(s, fb);
+    float t = el >= CM_SLIDE_MS || g_cm_cut ? 1.f : (float) el / CM_SLIDE_MS, e = 1.f - (1.f - t) * (1.f - t) * (1.f - t);
+    float shown = g_cm_dir > 0 ? e : 1.f - e;           /* share of the full view on screen */
+    int off = (int) ((1.f - shown) * fb->w);
+    cm_slide_underlay(s, fb, off);
+    cm_slide_blit(fb, off);
+    cm_slide_record(now, el);
     if (t >= 1.f) cm_slide_end(s);
 }
 /* the page's mod screen takes the input while it is open (when it has one) */
@@ -2750,129 +2784,305 @@ static int cm_card_tap_reload(void) {
     return 1;
 }
 static azmod_state *g_cm_s;   /* for CMC_BACK (cm_fire has no state); set by cm_input */
-static void cm_fire(const cm_ctl *c) {
-    /* clang-format off */
-    switch (c->kind) {
-    case CMC_RESUME:  azcm_resume(); g_cm_resumed = 1; g_cm_sel = 0; break;
-    case CMC_KEEPOFF: azcm_set_all_off(1); g_cm_pending_off = 1; g_cm_keptoff = 1; g_cm_sel = 0; break;
-    case CMC_BACK:    if (g_cm_s && !cm_back()) cm_full_close(g_cm_s); break;
-    case CMC_SETTINGS: cm_settings_open(g_cm_s, c->idx); break;
-    case CMC_MOD:     if (cm_isplit() && !g_cm_row_opening) { cm_split_select(CMC_MOD << 16 | c->idx); break; }   /* the split: its page on the right */
-                      if (!g_cm_row_opening) azcm_page_screen(-1, NULL);   /* from the list: the mod's own page */
-                      g_cm_page = c->idx; cm_open(CMV_MOD);
-                      if (g_cm_row_opening) {
-                          azcm_info_t m;
-                          if (!azcm_info(g_cm_page, &m) && (m.screen_flags & AZ_SCREEN_DEDICATED))
-                              cm_open(CMV_SETTINGS);
-                      }
-                      if (cm_page_screen()) azcm_screen_enter(g_cm_page);
-                      break;
-    case CMC_UNSUSPEND: { azcm_info_t m; if (!azcm_info(c->idx, &m)) { azcm_unsuspend(m.id); cm_pend_set(m.id, 1); }
-                          if (c->idx < 16) g_cm_unsusp[c->idx] = 1;
-                          g_cm_sel = 0; } break;
-    case CMC_TAB:     if (g_cm_tab == 0 && c->idx != 0) azcm_flush_settings();   /* leaving the split's page */
-                      g_cm_in = 0;
-                      g_cm_tab = c->idx; g_cm_hfoc = -1; g_cm_scroll = 0; g_cm_sortpop = 0; if (c->idx && !g_ncc && !g_ncr && !cm_busy()) cm_req("refresh", 0, 0); break;
-    case CMC_TILE:    g_cm_cat = c->idx; cm_open(CMV_CAT); break;
-    case CMC_REFRESH: if (!cm_busy()) cm_req("refresh", 0, 0); break;
-    case CMC_ADDREPO: if (!cm_busy()) { g_cm_kbnum = 0; cm_open(CMV_KBD); } break;   /* the draft is kept until a repository is added */
-    case CMC_DELREPO:
-        if (!cm_busy() && c->idx < g_ncr)
-            cm_ask("Remove repository?", g_cr[c->idx].name[0] ? g_cr[c->idx].name : g_cr[c->idx].repo,
-                   "delrepo %s", g_cr[c->idx].repo);
-        break;
-    case CMC_APPLY:   if (azcm_any_loaded()) { g_cm_reload_from = g_cm_view; cm_open(CMV_RELOAD); g_cm_sel = 0; break; }
-                      /* fall through - nothing is playing, reload now */
-    case CMC_RELOAD_OK:
-        cm_do_apply_reload();
-        if (g_cm_view == CMV_RELOAD) cm_open(g_cm_reload_from);
-        break;
-    case CMC_RELOAD_NO: cm_open(g_cm_reload_from); break;
-    case CMC_ALLOW:   g_cm_allow_err = azcm_allow(c->idx) == 0 ? -1 : c->idx; g_cm_sel = 0; break;
-    case CMC_INSTCAT: if (cm_isplit()) { cm_split_select(CMC_INSTCAT << 16 | c->idx); break; }
-                      g_cm_cat = c->idx; cm_open(CMV_CAT); break;
-    case CMC_MODUPD: {   /* Update on an installed mod's page: the same install the catalog page sends */
-        azcm_info_t m; int k;   /* looked up again: the catalog may have been re-read since the draw */
-        if (cm_busy() || azcm_info(g_cm_page, &m) || (k = cm_update_idx(m.id)) < 0) break;
-        cm_req("install %s %s", g_cc[k].repo, g_cc[k].id);
-    } break;
-    case CMC_MODACT: {
-        azcm_info_t m; if (cm_busy() || azcm_info(g_cm_page, &m)) break;
-        if (c->idx == CMA_REMOVE) { char t[96]; snprintf(t, sizeof t, "%s is deleted from this USB.", m.name[0] ? m.name : m.id);
-                                    cm_ask("Remove mod?", t, "remove %s", m.id); }
-        else cm_req(c->idx == CMA_ENABLE ? "enable %s" : "disable %s", m.id, 0);
-    } break;
-    case CMC_ACT: {
-        if (cm_busy() || g_cm_cat < 0 || g_cm_cat >= g_ncc) break;
-        cm_cmod *m = &g_cc[g_cm_cat];
-        if ((c->idx == CMA_INSTALL || c->idx == CMA_UPDATE) && !(cm_works(m) && cm_core_ok(m))) break;
-        if (c->idx == CMA_INSTALL && m->held[0]) break;   /* another mod holds the id: the page says so */
-        if (c->idx == CMA_INSTALL && access(CM_TRUSTED, F_OK) != 0) { cm_open(CMV_TRUST); g_cm_sel = 1; break; }   /* focus on Cancel */
-        if (c->idx == CMA_INSTALL || c->idx == CMA_UPDATE) cm_req("install %s %s", m->repo, m->id);
-        else if (c->idx == CMA_REMOVE)  { char t[96]; snprintf(t, sizeof t, "%s is deleted from this USB.", m->name[0] ? m->name : m->id);
-                                          cm_ask("Remove mod?", t, "remove %s", m->id); }
-        else if (c->idx == CMA_ENABLE)  cm_req("enable %s", m->id, 0);
-        else if (c->idx == CMA_DISABLE) cm_req("disable %s", m->id, 0);
-    } break;
-    case CMC_TRUST_OK: {
-        mkdir("/home/root/settings/azmod-community", 0755);
-        FILE *f = fopen(CM_TRUSTED, "we"); if (f) fclose(f);
-        if (g_cm_cat >= 0 && g_cm_cat < g_ncc) { cm_req("install %s %s", g_cc[g_cm_cat].repo, g_cc[g_cm_cat].id); }
-        cm_open(CMV_CAT);
-    } break;
-    case CMC_TRUST_NO: cm_open(CMV_CAT); break;
-    case CMC_KEY: {   /* into the repository address */
-        char *kb = g_cm_kb;
-        size_t cap = sizeof g_cm_kb, L = strlen(kb);
-        if (c->idx == 0x100) g_cm_kbnum = !g_cm_kbnum;
-        else if (c->idx == 0x101) { if (L + 1 < cap && L) { kb[L] = ' '; kb[L + 1] = 0; } }
-        else if (c->idx == 0x102) { if (L) kb[L - 1] = 0; }
-        else if (c->idx >= 0x110 && c->idx <= 0x112) {
-            static const char *SC[3] = { "https://", "github.com/", "/azmods-repo.json" };
-            snprintf(kb + L, cap - L, "%s", SC[c->idx - 0x110]);
-        }
-        else if (L + 1 < cap) { kb[L] = (char)c->idx; kb[L + 1] = 0; }
-    } break;
-    case CMC_KB_OK:
-        if (g_cm_kb[0]) { cm_req("addrepo %s", g_cm_kb, 0); g_cm_tab = 2; cm_open(CMV_HOME); }
-        break;
-    case CMC_KB_NO:   cm_open(CMV_HOME); break;
-    case CMC_SORT:    g_cm_sort = c->idx; g_cm_scroll = 0; g_cm_sortpop = 0; break;
-    case CMC_SORTBTN: g_cm_sortpop = !g_cm_sortpop; break;
-    case CMC_SORTOFF: g_cm_sortpop = 0; break;
-    case CMC_FCAT:    g_cm_fcat = c->idx; g_cm_scroll = 0; g_cm_sortpop = 0; break;
-    case CMC_STILE:   g_cm_cat = c->idx & 0xff; cm_open(CMV_CAT); break;
-    case CMC_SHOT:    if (c->idx >= 0 && c->idx < CM_NSHOT && g_cm_sh.have[c->idx]) g_cm_zoom = c->idx; break;
-    case CMC_SHOTZ:
-        if (c->idx == 0 || g_cm_zoom < 0) g_cm_zoom = -1;
-        else for (int k = 1; k < CM_NSHOT; k++) {   /* the previous / next one on disk, wrapping */
-            int z = (g_cm_zoom + (c->idx == 2 ? k : CM_NSHOT - k)) % CM_NSHOT;
-            if (g_cm_sh.have[z]) { g_cm_zoom = z; break; }
-        }
-        break;
-    case CMC_UPDALL:  if (!cm_busy()) cm_updall_start(); break;
-    case CMC_CHK: {   /* an Installed row's checkbox: the mod page's Enable / Disable */
-        char id[33]; int on;
-        if (g_cm_flip.at && cm_ms() - g_cm_flip.at > CM_FLIP_MS) g_cm_flip.at = 0;   /* no answer: stop waiting for it */
-        if (!cm_busy() && !g_cm_flip.at && cm_chk(c->idx, id, &on)) {
-            snprintf(g_cm_flip.id, sizeof g_cm_flip.id, "%s", id);
-            g_cm_flip.prev = cm_pend_get(id);
-            g_cm_flip.at = cm_ms();
-            if (!g_cm_flip.at) g_cm_flip.at = 1;
-            cm_pend_set(id, !on);   /* shown at once */
-            cm_req(on ? "disable %s" : "enable %s", id, 0);
-        }
-    } break;
-    case CMC_UPDROW:  /* a row's Update: the same install as the mod page's, looked up again */
-        if (!cm_busy() && c->idx >= 0 && c->idx < g_ncc && cm_upd_cat(g_cc[c->idx].id) == c->idx) {
-            g_cm_ua.result = CMU_OFF;
-            cm_req("install %s %s", g_cc[c->idx].repo, g_cc[c->idx].id);
-        }
-        break;
-    case CMC_SEEALL:  g_cm_fcat = cmb_shelf_cat(c->idx); g_cm_sort = cmb_shelf_sort(c->idx); g_cm_scroll = 0; break;
-    }
-    /* clang-format on */
+static void cm_ask_remove_mod(const char *name, const char *id) {
+    char text[96];
+    snprintf(text, sizeof text, "%s is deleted from this USB.", name[0] ? name : id);
+    cm_ask("Remove mod?", text, "remove %s", id);
 }
+static void cm_fire_install(cm_cmod *m, int action) {
+    if (!(cm_works(m) && cm_core_ok(m))) return;
+    if (action == CMA_INSTALL && m->held[0]) return;
+    if (action == CMA_INSTALL && access(CM_TRUSTED, F_OK) != 0) {
+        cm_open(CMV_TRUST);
+        g_cm_sel = 1;
+        return;
+    }
+    cm_req("install %s %s", m->repo, m->id);
+}
+static void cm_fire_catalog_change(cm_cmod *m, int action) {
+    if (action == CMA_REMOVE) cm_ask_remove_mod(m->name, m->id);
+    else if (action == CMA_ENABLE) cm_req("enable %s", m->id, 0);
+    else if (action == CMA_DISABLE) cm_req("disable %s", m->id, 0);
+}
+static void cm_key_append(char *text, size_t length, char value) {
+    text[length] = value;
+    text[length + 1] = 0;
+}
+static void cm_key_text(int key, char *text, size_t capacity, size_t length) {
+    if (key >= 0x110 && key <= 0x112) {
+        static const char *shortcuts[3] = {"https://", "github.com/", "/azmods-repo.json"};
+        snprintf(text + length, capacity - length, "%s", shortcuts[key - 0x110]);
+    } else if (length + 1 < capacity) cm_key_append(text, length, (char) key);
+}
+static void cm_fire_reload_ok(const cm_ctl *c);
+static void cm_fire_resume(const cm_ctl *c) {
+    (void) c;
+    azcm_resume();
+    g_cm_resumed = 1;
+    g_cm_sel = 0;
+}
+static void cm_fire_keepoff(const cm_ctl *c) {
+    (void) c;
+    azcm_set_all_off(1);
+    g_cm_pending_off = 1;
+    g_cm_keptoff = 1;
+    g_cm_sel = 0;
+}
+static void cm_fire_back(const cm_ctl *c) {
+    (void) c;
+    if (g_cm_s && !cm_back()) cm_full_close(g_cm_s);
+}
+static void cm_fire_settings(const cm_ctl *c) {
+    cm_settings_open(g_cm_s, c->idx);
+}
+static void cm_fire_mod(const cm_ctl *c) {
+    if (cm_isplit() && !g_cm_row_opening) {
+        cm_split_select(CMC_MOD << 16 | c->idx);
+        return;
+    }
+    if (!g_cm_row_opening) azcm_page_screen(-1, NULL);
+    g_cm_page = c->idx;
+    cm_open(CMV_MOD);
+    if (g_cm_row_opening) {
+        azcm_info_t m;
+        if (!azcm_info(g_cm_page, &m) && (m.screen_flags & AZ_SCREEN_DEDICATED)) cm_open(CMV_SETTINGS);
+    }
+    if (cm_page_screen()) azcm_screen_enter(g_cm_page);
+}
+static void cm_fire_unsuspend(const cm_ctl *c) {
+    azcm_info_t m;
+    if (!azcm_info(c->idx, &m)) {
+        azcm_unsuspend(m.id);
+        cm_pend_set(m.id, 1);
+    }
+    if (c->idx < 16) g_cm_unsusp[c->idx] = 1;
+    g_cm_sel = 0;
+}
+static void cm_fire_tab(const cm_ctl *c) {
+    if (g_cm_tab == 0 && c->idx != 0) azcm_flush_settings();
+    g_cm_in = 0;
+    g_cm_tab = c->idx;
+    g_cm_hfoc = -1;
+    g_cm_scroll = 0;
+    g_cm_sortpop = 0;
+    if (c->idx && !g_ncc && !g_ncr && !cm_busy()) cm_req("refresh", 0, 0);
+}
+static void cm_fire_tile(const cm_ctl *c) {
+    g_cm_cat = c->idx;
+    cm_open(CMV_CAT);
+}
+static void cm_fire_refresh(const cm_ctl *c) {
+    (void) c;
+    if (!cm_busy()) cm_req("refresh", 0, 0);
+}
+static void cm_fire_addrepo(const cm_ctl *c) {
+    (void) c;
+    if (!cm_busy()) {
+        g_cm_kbnum = 0;
+        cm_open(CMV_KBD);
+    }
+}
+static void cm_fire_delrepo(const cm_ctl *c) {
+    if (!cm_busy() && c->idx < g_ncr)
+        cm_ask("Remove repository?", g_cr[c->idx].name[0] ? g_cr[c->idx].name : g_cr[c->idx].repo, "delrepo %s", g_cr[c->idx].repo);
+}
+static void cm_fire_apply(const cm_ctl *c) {
+    if (azcm_any_loaded()) {
+        g_cm_reload_from = g_cm_view;
+        cm_open(CMV_RELOAD);
+        g_cm_sel = 0;
+        return;
+    }
+    cm_fire_reload_ok(c);
+}
+static void cm_fire_reload_ok(const cm_ctl *c) {
+    (void) c;
+    cm_do_apply_reload();
+    if (g_cm_view == CMV_RELOAD) cm_open(g_cm_reload_from);
+}
+static void cm_fire_reload_no(const cm_ctl *c) {
+    (void) c;
+    cm_open(g_cm_reload_from);
+}
+static void cm_fire_allow(const cm_ctl *c) {
+    g_cm_allow_err = azcm_allow(c->idx) == 0 ? -1 : c->idx;
+    g_cm_sel = 0;
+}
+static void cm_fire_instcat(const cm_ctl *c) {
+    if (cm_isplit()) {
+        cm_split_select(CMC_INSTCAT << 16 | c->idx);
+        return;
+    }
+    g_cm_cat = c->idx;
+    cm_open(CMV_CAT);
+}
+static void cm_fire_modupd(const cm_ctl *c) {
+    (void) c;
+    azcm_info_t m;
+    int k;
+    if (cm_busy() || azcm_info(g_cm_page, &m) || (k = cm_update_idx(m.id)) < 0) return;
+    cm_req("install %s %s", g_cc[k].repo, g_cc[k].id);
+}
+static void cm_fire_modact(const cm_ctl *c) {
+    azcm_info_t m;
+    if (cm_busy() || azcm_info(g_cm_page, &m)) return;
+    if (c->idx == CMA_REMOVE) cm_ask_remove_mod(m.name, m.id);
+    else cm_req(c->idx == CMA_ENABLE ? "enable %s" : "disable %s", m.id, 0);
+}
+static void cm_fire_act(const cm_ctl *c) {
+    if (cm_busy() || g_cm_cat < 0 || g_cm_cat >= g_ncc) return;
+    cm_cmod *m = &g_cc[g_cm_cat];
+    if (c->idx == CMA_INSTALL || c->idx == CMA_UPDATE) cm_fire_install(m, c->idx);
+    else cm_fire_catalog_change(m, c->idx);
+}
+static void cm_fire_trust_ok(const cm_ctl *c) {
+    (void) c;
+    mkdir("/home/root/settings/azmod-community", 0755);
+    FILE *f = fopen(CM_TRUSTED, "we");
+    if (f) fclose(f);
+    if (g_cm_cat >= 0 && g_cm_cat < g_ncc) cm_req("install %s %s", g_cc[g_cm_cat].repo, g_cc[g_cm_cat].id);
+    cm_open(CMV_CAT);
+}
+static void cm_fire_trust_no(const cm_ctl *c) {
+    (void) c;
+    cm_open(CMV_CAT);
+}
+static void cm_fire_key(const cm_ctl *c) {
+    char *kb = g_cm_kb;
+    size_t cap = sizeof g_cm_kb, length = strlen(kb);
+    if (c->idx == 0x100) g_cm_kbnum = !g_cm_kbnum;
+    else if (c->idx == 0x101) {
+        if (length + 1 < cap && length) cm_key_append(kb, length, ' ');
+    } else if (c->idx == 0x102) {
+        if (length) kb[length - 1] = 0;
+    } else cm_key_text(c->idx, kb, cap, length);
+}
+static void cm_fire_kb_ok(const cm_ctl *c) {
+    (void) c;
+    if (g_cm_kb[0]) {
+        cm_req("addrepo %s", g_cm_kb, 0);
+        g_cm_tab = 2;
+        cm_open(CMV_HOME);
+    }
+}
+static void cm_fire_kb_no(const cm_ctl *c) {
+    (void) c;
+    cm_open(CMV_HOME);
+}
+static void cm_fire_sort(const cm_ctl *c) {
+    g_cm_sort = c->idx;
+    g_cm_scroll = 0;
+    g_cm_sortpop = 0;
+}
+static void cm_fire_sortbtn(const cm_ctl *c) {
+    (void) c;
+    g_cm_sortpop = !g_cm_sortpop;
+}
+static void cm_fire_sortoff(const cm_ctl *c) {
+    (void) c;
+    g_cm_sortpop = 0;
+}
+static void cm_fire_fcat(const cm_ctl *c) {
+    g_cm_fcat = c->idx;
+    g_cm_scroll = 0;
+    g_cm_sortpop = 0;
+}
+static void cm_fire_stile(const cm_ctl *c) {
+    g_cm_cat = c->idx & 0xff;
+    cm_open(CMV_CAT);
+}
+static void cm_fire_shot(const cm_ctl *c) {
+    if (c->idx >= 0 && c->idx < CM_NSHOT && g_cm_sh.have[c->idx]) g_cm_zoom = c->idx;
+}
+static void cm_fire_shotz(const cm_ctl *c) {
+    if (c->idx == 0 || g_cm_zoom < 0) {
+        g_cm_zoom = -1;
+        return;
+    }
+    for (int k = 1; k < CM_NSHOT; k++) {
+        int z = (g_cm_zoom + (c->idx == 2 ? k : CM_NSHOT - k)) % CM_NSHOT;
+        if (g_cm_sh.have[z]) {
+            g_cm_zoom = z;
+            break;
+        }
+    }
+}
+static void cm_fire_updall(const cm_ctl *c) {
+    (void) c;
+    if (!cm_busy()) cm_updall_start();
+}
+static void cm_fire_chk(const cm_ctl *c) {
+    char id[33];
+    int on;
+    if (g_cm_flip.at && cm_ms() - g_cm_flip.at > CM_FLIP_MS) g_cm_flip.at = 0;
+    if (!cm_busy() && !g_cm_flip.at && cm_chk(c->idx, id, &on)) {
+        snprintf(g_cm_flip.id, sizeof g_cm_flip.id, "%s", id);
+        g_cm_flip.prev = cm_pend_get(id);
+        g_cm_flip.at = cm_ms();
+        if (!g_cm_flip.at) g_cm_flip.at = 1;
+        cm_pend_set(id, !on);
+        cm_req(on ? "disable %s" : "enable %s", id, 0);
+    }
+}
+static void cm_fire_updrow(const cm_ctl *c) {
+    if (!cm_busy() && c->idx >= 0 && c->idx < g_ncc && cm_upd_cat(g_cc[c->idx].id) == c->idx) {
+        g_cm_ua.result = CMU_OFF;
+        cm_req("install %s %s", g_cc[c->idx].repo, g_cc[c->idx].id);
+    }
+}
+static void cm_fire_seeall(const cm_ctl *c) {
+    g_cm_fcat = cmb_shelf_cat(c->idx);
+    g_cm_sort = cmb_shelf_sort(c->idx);
+    g_cm_scroll = 0;
+}
+static void cm_fire(const cm_ctl *c) {
+    static const struct {
+        int kind;
+        void (*invoke)(const cm_ctl *);
+    } actions[] = {
+        {CMC_RESUME, cm_fire_resume},
+        {CMC_KEEPOFF, cm_fire_keepoff},
+        {CMC_BACK, cm_fire_back},
+        {CMC_SETTINGS, cm_fire_settings},
+        {CMC_MOD, cm_fire_mod},
+        {CMC_UNSUSPEND, cm_fire_unsuspend},
+        {CMC_TAB, cm_fire_tab},
+        {CMC_TILE, cm_fire_tile},
+        {CMC_REFRESH, cm_fire_refresh},
+        {CMC_ADDREPO, cm_fire_addrepo},
+        {CMC_DELREPO, cm_fire_delrepo},
+        {CMC_APPLY, cm_fire_apply},
+        {CMC_RELOAD_OK, cm_fire_reload_ok},
+        {CMC_RELOAD_NO, cm_fire_reload_no},
+        {CMC_ALLOW, cm_fire_allow},
+        {CMC_INSTCAT, cm_fire_instcat},
+        {CMC_MODUPD, cm_fire_modupd},
+        {CMC_MODACT, cm_fire_modact},
+        {CMC_ACT, cm_fire_act},
+        {CMC_TRUST_OK, cm_fire_trust_ok},
+        {CMC_TRUST_NO, cm_fire_trust_no},
+        {CMC_KEY, cm_fire_key},
+        {CMC_KB_OK, cm_fire_kb_ok},
+        {CMC_KB_NO, cm_fire_kb_no},
+        {CMC_SORT, cm_fire_sort},
+        {CMC_SORTBTN, cm_fire_sortbtn},
+        {CMC_SORTOFF, cm_fire_sortoff},
+        {CMC_FCAT, cm_fire_fcat},
+        {CMC_STILE, cm_fire_stile},
+        {CMC_SHOT, cm_fire_shot},
+        {CMC_SHOTZ, cm_fire_shotz},
+        {CMC_UPDALL, cm_fire_updall},
+        {CMC_CHK, cm_fire_chk},
+        {CMC_UPDROW, cm_fire_updrow},
+        {CMC_SEEALL, cm_fire_seeall},
+    };
+    for (size_t i = 0; i < sizeof actions / sizeof actions[0]; ++i)
+        if (actions[i].kind == c->kind) {
+            actions[i].invoke(c);
+            return;
+        }
+}
+
 /* A mod's SCREEN row in the Mod Menu's main list (register_row, AZ_ROW_SCREEN) opens that mod's
  * page through the same path as Community Mods > Installed > <mod>: the full screen
  * (cm_full_open) and cm_fire's CMC_MOD, so the page is the mod's registered screen with the same
@@ -2902,139 +3112,179 @@ static bool cm_open_row(azmod_state *s, int it) {
     g_cm_row_opening = 0;
     return true;
 }
-static bool cm_back(void) {
-    if (g_cm_view == CMV_HOME && g_cm_sortpop) {   /* the orders are open: BACK closes them first */
+static bool cm_back_overlay(void) {
+    if (g_cm_view == CMV_HOME && g_cm_sortpop) {
         g_cm_sortpop = 0;
         return true;
     }
-    if (cm_isplit() && g_cm_in) {   /* out of the preview's buttons, back to the list */
+    if (cm_isplit() && g_cm_in) {
         g_cm_in = 0;
         g_cm_rsel = -1;
         return true;
     }
-    if (g_cm_view == CMV_HOME) return false;
-    if (g_cm_view == CMV_CAT && g_cm_zoom >= 0) {   /* a large screenshot: BACK closes it first */
+    if (g_cm_view == CMV_CAT && g_cm_zoom >= 0) {
         g_cm_zoom = -1;
         return true;
     }
-    if (cm_page_screen()) {
-        az_event ev = {AZ_EV_BACK, 0, 0, 0};
-        if (azcm_screen_input(g_cm_page, &ev)) return true;
-        azcm_flush_settings();
-    }   /* leaving a mod's page: its settings are saved now */
+    return false;
+}
+static bool cm_back_mod_screen(void) {
+    if (!cm_page_screen()) return false;
+    az_event ev = {AZ_EV_BACK, 0, 0, 0};
+    if (azcm_screen_input(g_cm_page, &ev)) return true;
+    azcm_flush_settings();
+    return false;
+}
+static bool cm_back_page(void) {
     if (g_cm_view == CMV_TRUST) cm_open(CMV_CAT);
     else if (g_cm_view == CMV_RELOAD) cm_open(g_cm_reload_from);
-    else if (g_cm_row >= 0 && (g_cm_view == CMV_MOD || g_cm_view == CMV_SETTINGS)) return false;
-    else if (g_cm_s && (g_cm_view == CMV_MOD || g_cm_view == CMV_SETTINGS)) {
-        g_cm_slide_base = g_cm_view == CMV_SETTINGS ? g_cm_settings_from : CMV_HOME;
-        cm_slide_start(g_cm_s, -1);
-    }
-    else cm_open(CMV_HOME);
+    else if (g_cm_view == CMV_MOD || g_cm_view == CMV_SETTINGS) {
+        if (g_cm_row >= 0) return false;
+        if (g_cm_s) {
+            g_cm_slide_base = g_cm_view == CMV_SETTINGS ? g_cm_settings_from : CMV_HOME;
+            cm_slide_start(g_cm_s, -1);
+        } else cm_open(CMV_HOME);
+    } else cm_open(CMV_HOME);
     return true;
 }
+static bool cm_back(void) {
+    if (cm_back_overlay()) return true;
+    if (g_cm_view == CMV_HOME) return false;
+    if (cm_back_mod_screen()) return true;
+    return cm_back_page();
+}
 static bool cm_list_knob(azmod_state *s, const azmod_fb *fb, int d, bool click);
+struct cm_input_event {
+    azmod_state *s;
+    const azmod_fb *fb;
+    cm_ctl *ctl;
+    int n, tx, ty, d;
+    bool touched, click;
+};
+static int cm_input_hit(const struct cm_input_event *in, int pad) {
+    for (int k = 0; k < in->n; k++)
+        if (in_rect(in->tx, in->ty, in->ctl[k].x - pad, in->ctl[k].y - pad,
+                    in->ctl[k].w + 2 * pad, in->ctl[k].h + 2 * pad)) return k;
+    return -1;
+}
+static az_event cm_screen_event(const struct cm_input_event *in) {
+    az_event ev = {0, 0, 0, 0};
+    if (in->touched) {
+        /* The mod hears only taps inside the area it paints. */
+        if (g_cm_area.w > 0 && in_rect(in->tx, in->ty, g_cm_area.x, g_cm_area.y, g_cm_area.w, g_cm_area.h)) {
+            ev.kind = AZ_EV_TAP;
+            ev.x = in->tx;
+            ev.y = in->ty;
+        }
+    } else if (in->d) {
+        ev.kind = AZ_EV_KNOB;
+        ev.dir = in->d > 0 ? 1 : -1;
+    } else if (in->click) ev.kind = AZ_EV_CLICK;
+    return ev;
+}
+static void cm_input_screen(const struct cm_input_event *in) {
+    if (in->touched) {
+        int k = cm_input_hit(in, 0);
+        if (k >= 0) {
+            cm_fire(&in->ctl[k]);
+            return;
+        }
+    }
+    az_event ev = cm_screen_event(in);
+    if (ev.kind) azcm_screen_input(g_cm_page, &ev);
+}
+static void cm_input_home_touch(const struct cm_input_event *in) {
+    int ctl = cm_home_ctl_at(in->s, in->fb, in->tx, in->ty);
+    g_cm_knob = 0;
+    cm_glide_sync();
+    if (glide_flinging(&g_cm_gl)) {
+        glide_stop(&g_cm_gl);
+        g_cm_scroll = g_cm_glpx = glide_px(&g_cm_gl);
+        if (in->ty >= dock_y(in->fb) + menu_hdrh(in->fb)) ctl = -1;
+    }
+    c_press(in->tx, in->ty, ctl, true, g_cm_scroll);
+}
+static void cm_input_home_scroll(const struct cm_input_event *in) {
+    cm_glide_sync();
+    float from = g_cm_gl.on ? g_cm_gl.goal : (float) g_cm_scroll;
+    glide_to(&g_cm_gl, (float) cm_scroll_clamp((int) (from + 0.5f) + in->d * c_rrowh(in->fb), g_cm_smax), cm_ms());
+    cm_glide_frame();
+}
+static void cm_input_home(const struct cm_input_event *in) {
+    if (in->touched) cm_input_home_touch(in);
+    else if (in->d && g_cm_sortpop) g_cm_sortpop = 0;
+    else if ((in->d || in->click) && cm_list_knob(in->s, in->fb, in->d, in->click)) {
+    } else if (in->d) cm_input_home_scroll(in);
+}
+static int cm_input_knob_count(const struct cm_input_event *in) {
+    int nk = in->n;
+    if (nk > 1 && in->ctl[nk - 1].kind == CMC_BACK) nk--;
+    return nk;
+}
+static bool cm_input_description_knob(const struct cm_input_event *in) {
+    if (g_cm_view != CMV_CAT || g_cm_desc.r.h <= 0) return false;
+    int nk = cm_input_knob_count(in);
+    if (g_cm_sel != nk - 1 || (in->d <= 0 && g_cm_desc.skip <= 0)) return false;
+    int ns = g_cm_desc.skip + in->d * 2;
+    g_cm_desc.skip = ns < 0 ? 0 : ns > g_cm_desc.max ? g_cm_desc.max
+                                                     : ns;
+    return true;
+}
+static bool cm_input_page_knob(struct cm_input_event *in) {
+    if (!in->n) return false;
+    if (in->d && !g_cm_knob) {
+        g_cm_knob = 1;
+        in->d = 0;
+    }
+    if (in->click) g_cm_knob = 1;
+    if (in->d) {
+        if (cm_input_description_knob(in)) return true;
+        int nk = cm_input_knob_count(in);
+        g_cm_sel = ((g_cm_sel + in->d) % nk + nk) % nk;
+    }
+    if (in->click && g_cm_sel < in->n) cm_fire(&in->ctl[g_cm_sel]);
+    return false;
+}
+static bool cm_input_description_touch(const struct cm_input_event *in) {
+    if (g_cm_view != CMV_CAT || g_cm_desc.r.h <= 0) return false;
+    if (!in_rect(in->tx, in->ty, g_cm_desc.r.x, g_cm_desc.r.y, g_cm_desc.r.w, g_cm_desc.r.h)) return false;
+    g_cm_dd.on = true;
+    g_cm_dd.y0 = in->ty;
+    g_cm_dd.s0 = g_cm_desc.skip;
+    return true;
+}
+static void cm_input_page_touch(const struct cm_input_event *in) {
+    if (cm_input_description_touch(in)) return;
+    int pad = g_cm_view == CMV_KBD ? 0 : in->fb->h * 8 / 800;
+    int k = cm_input_hit(in, pad);
+    if (k < 0) return;
+    int v = g_cm_view, pg = g_cm_page, tab = g_cm_tab;
+    g_cm_sel = k;
+    g_cm_knob = 0;
+    g_cm_press = k;
+    cm_fire(&in->ctl[k]);
+    if (g_cm_view != v || g_cm_page != pg || g_cm_tab != tab) g_cm_press = -1;
+}
+static void cm_input_card(azmod_state *s, bool touched, int d, bool click) {
+    if (touched || click) cm_full_open(s);
+    else if (d) s->pane = 0;
+}
 static bool cm_input(azmod_state *s, const azmod_fb *fb, int tx, int ty, bool touched, int d, bool click) {
     cm_load();
     g_cm_s = s;
-    if (cm_animating()) return true;                   /* held only while the slide runs (~220 ms) */
-    if (!g_cm_full) {                                   /* the card: a tap or a press opens; a turn goes back to the list */
-        if (touched || click) cm_full_open(s);
-        else if (d) s->pane = 0;
+    if (cm_animating()) return true;
+    if (!g_cm_full) {
+        cm_input_card(s, touched, d, click);
         return true;
     }
     g_cm_area.w = 0;
     cm_ctl ctl[CM_MAXCTL];
-    int n = cm_layout(s, fb, ctl, 0);
-    if (cm_page_screen()) {   /* controls above the screen first, then the mod */
-        az_event ev = {0, 0, 0, 0};
-        if (touched) {
-            for (int k = 0; k < n; k++)
-                if (in_rect(tx, ty, ctl[k].x, ctl[k].y, ctl[k].w, ctl[k].h)) {
-                    cm_fire(&ctl[k]);
-                    return true;
-                }
-            /* the mod hears only taps inside the area it paints: not the header, its info or the buttons' gaps */
-            if (g_cm_area.w > 0 && in_rect(tx, ty, g_cm_area.x, g_cm_area.y, g_cm_area.w, g_cm_area.h)) {
-                ev.kind = AZ_EV_TAP;
-                ev.x = tx;
-                ev.y = ty;
-            }
-        } else if (d) {
-            ev.kind = AZ_EV_KNOB;
-            ev.dir = d > 0 ? 1 : -1;
-        } else if (click) ev.kind = AZ_EV_CLICK;
-        if (ev.kind) azcm_screen_input(g_cm_page, &ev);
-        return true;
-    }
-    if (g_cm_view == CMV_HOME) {
-        /* The home page works by touch: a press is decided on its release (azmod_pane_drag, as in
-         * the Mod Menu's lists), so a drag scrolls the page and never opens or toggles anything.
-         * The knob scrolls the page a row per detent and focuses nothing; its click does nothing
-         * here (no control is focused for it to press). */
-        if (touched) {
-            int ctl = cm_home_ctl_at(s, fb, tx, ty);
-            g_cm_knob = 0;   /* a touch hides the knob's focus */
-            cm_glide_sync();
-            if (glide_flinging(&g_cm_gl)) {   /* a finger on a flinging list stops it and opens nothing */
-                glide_stop(&g_cm_gl);
-                g_cm_scroll = g_cm_glpx = glide_px(&g_cm_gl);
-                if (ty >= dock_y(fb) + menu_hdrh(fb)) ctl = -1;   /* the header's controls still work */
-            }
-            c_press(tx, ty, ctl, true, g_cm_scroll);
-        } else if (d && g_cm_sortpop) {   /* the orders are open: a turn only closes them */
-            g_cm_sortpop = 0;
-        } else if ((d || click) && cm_list_knob(s, fb, d, click)) {
-            /* the Installed and Updates tabs: the knob moves the focus, its press fires it */
-        } else if (d) {   /* a row per detent, gliding; quick detents add up from where it is heading */
-            cm_glide_sync();
-            float from = g_cm_gl.on ? g_cm_gl.goal : (float) g_cm_scroll;
-            glide_to(&g_cm_gl, (float) cm_scroll_clamp((int) (from + 0.5f) + d * c_rrowh(fb), g_cm_smax), cm_ms());
-            cm_glide_frame();
-        }
-        return true;
-    }
-    if (d && n && !g_cm_knob) { /* after a touch, the first detent shows the focus where it is */
-        g_cm_knob = 1;
-        d = 0;
-    }
-    if (click && n)
-        g_cm_knob = 1;
-    if (d && n && g_cm_view == CMV_CAT && g_cm_desc.r.h > 0) {   /* past the last button the knob scrolls the description */
-        int nk = n;
-        if (nk > 1 && ctl[nk - 1].kind == CMC_BACK) nk--;
-        if (g_cm_sel == nk - 1 && (d > 0 || g_cm_desc.skip > 0)) {
-            int ns = g_cm_desc.skip + d * 2;
-            g_cm_desc.skip = ns < 0 ? 0 : ns > g_cm_desc.max ? g_cm_desc.max
-                                                             : ns;
-            return true;
-        }
-    }
-    if (d && n) {
-        int nk = n;   /* the back square is the last control and the knob skips it (the BACK button goes back) */
-        if (nk > 1 && ctl[nk - 1].kind == CMC_BACK) nk--;
-        g_cm_sel = ((g_cm_sel + d) % nk + nk) % nk;   /* every detent counts (a fast turn arrives as one delta) */
-    }
-    if (click && n && g_cm_sel < n) cm_fire(&ctl[g_cm_sel]);
-    if (touched && g_cm_view == CMV_CAT && g_cm_desc.r.h > 0 &&
-        in_rect(tx, ty, g_cm_desc.r.x, g_cm_desc.r.y, g_cm_desc.r.w, g_cm_desc.r.h)) {   /* a drag starts here */
-        g_cm_dd.on = true;
-        g_cm_dd.y0 = ty;
-        g_cm_dd.s0 = g_cm_desc.skip;
-        return true;
-    }
-    if (touched) {
-        int pad = g_cm_view == CMV_KBD ? 0 : fb->h * 8 / 800;
-        for (int k = 0; k < n; k++)
-            if (in_rect(tx, ty, ctl[k].x - pad, ctl[k].y - pad, ctl[k].w + 2 * pad, ctl[k].h + 2 * pad)) {
-                int v = g_cm_view, pg = g_cm_page, tab = g_cm_tab;
-                g_cm_sel = k;
-                g_cm_knob = 0;
-                g_cm_press = k;   /* lit until the finger lifts (azmod_pane_drag, phase 2) */
-                cm_fire(&ctl[k]);
-                if (g_cm_view != v || g_cm_page != pg || g_cm_tab != tab)
-                    g_cm_press = -1; /* a new page: index k is some other control there */
-                break;
-            }
+    struct cm_input_event in = {s, fb, ctl, cm_layout(s, fb, ctl, 0), tx, ty, d, touched, click};
+    if (cm_page_screen()) cm_input_screen(&in);
+    else if (g_cm_view == CMV_HOME) cm_input_home(&in);
+    else {
+        if (cm_input_page_knob(&in)) return true;
+        if (touched) cm_input_page_touch(&in);
     }
     return true;
 }
@@ -3049,80 +3299,103 @@ static int cm_code(const cm_ctl *c) { return c->kind << 16 | (c->idx & 0xffff); 
  * knob then scrolls the page). */
 /* A turn selects a preview. Press opens the mod's settings full screen when available,
  * otherwise it enters the preview's action buttons. BACK returns to the list. */
-static bool cm_split_knob(azmod_state *s, const azmod_fb *fb, int d, bool click) {
+struct cm_split_controls {
     cm_ctl ctl[CM_MAXCTL];
-    int n = cm_layout(s, fb, ctl, 0), nb = g_cm_nbody < n ? g_cm_nbody : n, list[CM_MAXCTL], nl = 0, cur = -1;
-    int bx, by, bw, bh, pad = fb->h * 8 / 800;
-    cm_box(fb, &bx, &by, &bw, &bh);
-    int rx = bx + bw / 2;
-    if (g_cm_in) {
-        for (int k = 0; k < nb; k++)
-            if (ctl[k].x >= rx && ctl[k].kind != CMC_CHK) {
-                if (k == g_cm_rsel) cur = nl;
-                list[nl++] = k;
-            }
-        if (!nl) {   /* nothing to press there: back in the list */
-            g_cm_in = 0;
-            return true;
-        }
-        if (click && cur >= 0) {
-            g_cm_s = s;
-            cm_fire(&ctl[list[cur]]);
-            return true;
-        }
-        if (cur < 0) cur = 0;
-        else if (d) cur = cur + d < 0 ? 0 : cur + d >= nl ? nl - 1
-                                                          : cur + d;
-        g_cm_knob = 1;
-        g_cm_rsel = list[cur];
+    int nb, list[CM_MAXCTL], nl, cur, bx, by, bw, bh, rx;
+};
+static void cm_split_collect_right(struct cm_split_controls *controls) {
+    for (int k = 0; k < controls->nb; k++) {
+        if (controls->ctl[k].x < controls->rx || controls->ctl[k].kind == CMC_CHK) continue;
+        if (k == g_cm_rsel) controls->cur = controls->nl;
+        controls->list[controls->nl++] = k;
+    }
+}
+static void cm_split_collect_left(struct cm_split_controls *controls) {
+    for (int k = 0; k < controls->nb; k++) {
+        cm_ctl *c = &controls->ctl[k];
+        if (c->x >= controls->rx || c->kind == CMC_CHK) continue;
+        int code = cm_code(c);
+        if (code == g_cm_hfoc || (g_cm_hfoc < 0 && code == g_cm_isel)) controls->cur = controls->nl;
+        controls->list[controls->nl++] = k;
+    }
+}
+static int cm_split_step(int cur, int d, int nl) {
+    if (cur < 0) return 0;
+    if (!d) return cur;
+    return cur + d < 0 ? 0 : cur + d >= nl ? nl - 1
+                                           : cur + d;
+}
+static bool cm_split_right_knob(azmod_state *s, struct cm_split_controls *controls, int d, bool click) {
+    cm_split_collect_right(controls);
+    if (!controls->nl) {
+        g_cm_in = 0;
         return true;
     }
-    for (int k = 0; k < nb; k++) {   /* the list's controls (the checkboxes are touched, not stepped) */
-        if (ctl[k].x >= rx || ctl[k].kind == CMC_CHK) continue;
-        if (cm_code(&ctl[k]) == g_cm_hfoc || (g_cm_hfoc < 0 && cm_code(&ctl[k]) == g_cm_isel)) cur = nl;
-        list[nl++] = k;
-    }
-    if (!nl) return false;
-    if (click) {
-        if (g_cm_knob && cur >= 0) {
-            const cm_ctl *c = &ctl[list[cur]];
-            if (c->kind == CMC_MOD || c->kind == CMC_INSTCAT) {   /* into the page */
-                g_cm_in = 1;
-                g_cm_rsel = -1;
-                azcm_info_t m;
-                if (c->kind == CMC_MOD && !azcm_info(c->idx, &m) && m.state == AZCM_LOADED && m.has_screen) {
-                    g_cm_in = 0;
-                    g_cm_s = s;
-                    cm_settings_open(s, c->idx);
-                    return true;
-                }
-                for (int k = 0; k < nb; k++)
-                    if (ctl[k].x >= rx && ctl[k].kind != CMC_CHK) {
-                        g_cm_rsel = k;
-                        break;
-                    }
-            } else {
-                g_cm_s = s;
-                cm_fire(c);
-            }
-        }
+    if (click && controls->cur >= 0) {
+        g_cm_s = s;
+        cm_fire(&controls->ctl[controls->list[controls->cur]]);
         return true;
     }
-    if (!g_cm_knob || cur < 0) cur = cur < 0 ? 0 : cur;   /* the first detent after a touch shows where it is */
-    else if (d) cur = cur + d < 0 ? 0 : cur + d >= nl ? nl - 1
-                                                      : cur + d;
+    controls->cur = cm_split_step(controls->cur, d, controls->nl);
     g_cm_knob = 1;
-    const cm_ctl *c = &ctl[list[cur]];
-    g_cm_hfoc = cm_code(c);
-    if (c->kind == CMC_MOD || c->kind == CMC_INSTCAT) cm_split_select(cm_code(c));
-    int to = g_cm_scroll;
-    if (c->y < by) to -= by - c->y + pad;
-    else if (c->y + c->h > by + bh) to += c->y + c->h - (by + bh) + pad;
+    g_cm_rsel = controls->list[controls->cur];
+    return true;
+}
+static int cm_split_first_action(const struct cm_split_controls *controls) {
+    for (int k = 0; k < controls->nb; k++)
+        if (controls->ctl[k].x >= controls->rx && controls->ctl[k].kind != CMC_CHK) return k;
+    return -1;
+}
+static void cm_split_enter(azmod_state *s, const struct cm_split_controls *controls, const cm_ctl *c) {
+    g_cm_in = 1;
+    g_cm_rsel = -1;
+    azcm_info_t m;
+    if (c->kind == CMC_MOD && !azcm_info(c->idx, &m) && m.state == AZCM_LOADED && m.has_screen) {
+        g_cm_in = 0;
+        g_cm_s = s;
+        cm_settings_open(s, c->idx);
+        return;
+    }
+    g_cm_rsel = cm_split_first_action(controls);
+}
+static void cm_split_click(azmod_state *s, const struct cm_split_controls *controls) {
+    if (!g_cm_knob || controls->cur < 0) return;
+    const cm_ctl *c = &controls->ctl[controls->list[controls->cur]];
+    if (c->kind == CMC_MOD || c->kind == CMC_INSTCAT) cm_split_enter(s, controls, c);
+    else {
+        g_cm_s = s;
+        cm_fire(c);
+    }
+}
+static void cm_split_scroll(const struct cm_split_controls *controls, const azmod_fb *fb, const cm_ctl *c) {
+    int to = g_cm_scroll, pad = fb->h * 8 / 800;
+    if (c->y < controls->by) to -= controls->by - c->y + pad;
+    else if (c->y + c->h > controls->by + controls->bh) to += c->y + c->h - (controls->by + controls->bh) + pad;
     if (to != g_cm_scroll) {
         cm_glide_sync();
         glide_to(&g_cm_gl, (float) cm_scroll_clamp(to, g_cm_smax), cm_ms());
         cm_glide_frame();
     }
+}
+static bool cm_split_knob(azmod_state *s, const azmod_fb *fb, int d, bool click) {
+    struct cm_split_controls controls = {.cur = -1};
+    int n = cm_layout(s, fb, controls.ctl, 0);
+    controls.nb = g_cm_nbody < n ? g_cm_nbody : n;
+    cm_box(fb, &controls.bx, &controls.by, &controls.bw, &controls.bh);
+    controls.rx = controls.bx + controls.bw / 2;
+    if (g_cm_in) return cm_split_right_knob(s, &controls, d, click);
+    cm_split_collect_left(&controls);
+    if (!controls.nl) return false;
+    if (click) {
+        cm_split_click(s, &controls);
+        return true;
+    }
+    controls.cur = cm_split_step(controls.cur, g_cm_knob ? d : 0, controls.nl);
+    g_cm_knob = 1;
+    const cm_ctl *c = &controls.ctl[controls.list[controls.cur]];
+    g_cm_hfoc = cm_code(c);
+    if (c->kind == CMC_MOD || c->kind == CMC_INSTCAT) cm_split_select(cm_code(c));
+    cm_split_scroll(&controls, fb, c);
     return true;
 }
 static bool cm_list_knob(azmod_state *s, const azmod_fb *fb, int d, bool click) {
@@ -3177,9 +3450,12 @@ static bool cm_home_scroll_to(const azmod_fb *fb, int v, int phase) {
 }
 /* opening a page or switching a tab: a slow tap still counts (as a Mod Menu row's does) */
 static bool cm_home_nav(int ctl) {
-    int k = ctl >> 16;
-    return k == CMC_TAB || k == CMC_TILE || k == CMC_STILE || k == CMC_SEEALL || k == CMC_MOD || k == CMC_INSTCAT || k == CMC_BACK ||
-           k == CMC_SORTBTN || k == CMC_SORT || k == CMC_SORTOFF || k == CMC_SETTINGS;
+    static const int kinds[] = {CMC_TAB, CMC_TILE, CMC_STILE, CMC_SEEALL, CMC_MOD, CMC_INSTCAT, CMC_BACK,
+                                CMC_SORTBTN, CMC_SORT, CMC_SORTOFF, CMC_SETTINGS};
+    int kind = ctl >> 16;
+    for (size_t i = 0; i < sizeof kinds / sizeof kinds[0]; ++i)
+        if (kinds[i] == kind) return true;
+    return false;
 }
 /* Reload (the not-loaded notice's, the header's Reload now): a press under 1 s restarts */
 static bool cm_home_reload(int ctl) { return (ctl >> 16) == CMC_APPLY; }

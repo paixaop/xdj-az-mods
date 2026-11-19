@@ -91,20 +91,23 @@ static uint64_t js_word(const void *p, unsigned offset, unsigned bytes) {
     if (p) memcpy(&value, (const unsigned char *) p + offset, bytes);
     return value;
 }
+static int js_query_kind(unsigned kind) { return kind == 0x2102 || kind == 0x3000; }
+static int js_response_kind(unsigned kind) { return kind == 0x4000 || kind == 0x4201; }
+static int js_arguments(const void *packet, struct js_packet *out) {
+    uintptr_t begin = js_word(packet, 40, 8), end = js_word(packet, 48, 8), cap = js_word(packet, 56, 8);
+    if (!begin || end < begin || cap < end || end - begin < 96 || end - begin > 4096 * 48u ||
+        (end - begin) % 48 || js_word((void *) begin, 0, 4) != 1 || js_word((void *) begin, 48, 4) != 1) return 0;
+    out->field0 = (uint32_t) js_word((void *) begin, 8, 4);
+    out->field1 = (uint32_t) js_word((void *) begin, 56, 4);
+    return 1;
+}
 static int js_packet(const void *p, struct js_packet *out) {
     if (!p || js_word(p, 4, 4) != 0x872349ae) return 0;
     out->kind = (uint32_t) js_word(p, 0, 2);
     out->seq = (uint32_t) js_word(p, 8, 4);
     out->field0 = out->field1 = 0;
-    if (out->kind == 0x2102 || out->kind == 0x3000) {
-        uintptr_t begin = js_word(p, 40, 8), end = js_word(p, 48, 8), cap = js_word(p, 56, 8);
-        if (!begin || end < begin || cap < end || end - begin < 96 || end - begin > 4096 * 48u ||
-            (end - begin) % 48 || js_word((void *) begin, 0, 4) != 1 || js_word((void *) begin, 48, 4) != 1) return 0;
-        out->field0 = (uint32_t) js_word((void *) begin, 8, 4);
-        out->field1 = (uint32_t) js_word((void *) begin, 56, 4);
-        return 1;
-    }
-    return out->kind == 0x4000 || out->kind == 0x4201;
+    if (js_query_kind(out->kind)) return js_arguments(p, out);
+    return js_response_kind(out->kind);
 }
 static struct js_route *js_route(uint32_t seq) {
     struct js_route *r = &js.routes[seq % JS_ROUTES];
@@ -113,61 +116,77 @@ static struct js_route *js_route(uint32_t seq) {
 static int js_reply(const struct js_route *r, unsigned kind) {
     return (r->query.kind == 0x2102 && kind == 0x4000) || (r->query.kind == 0x3000 && kind == 0x4201);
 }
+static void js_query_sent(const struct js_packet *packet, uintptr_t message, uintptr_t sender) {
+    struct js_route *route = &js.routes[packet->seq % JS_ROUTES];
+    if (!packet->seq || route->query.seq == packet->seq || js.next_route == UINT64_MAX) route->dead = 1;
+    else *route = (struct js_route) {.query = *packet, .bits = JS_BIT(JS_SENT), .sent = message, .sender = sender, .incarnation = ++js.next_route};
+}
+static void js_response_sent(const struct js_packet *packet, uintptr_t message, uintptr_t sender) {
+    struct js_route *route = js_route(packet->seq);
+    if (route && js_reply(route, packet->kind) && route->bits == 15 && js_serving.depth == 1 &&
+        js_serving.seq == packet->seq && js_serving.owner == route->source) {
+        route->response = message;
+        route->responder = sender;
+        route->bits |= JS_BIT(JS_RESPONSE);
+    }
+}
 static uint64_t js_data_send(void *self, void *msg, uint32_t peer, void *error) {
     if (azfile_native_transport) azfile_native_transport(AZN_FILE_SEND, (uintptr_t) msg, peer);
-    struct js_packet p;
-    if (!peer && js_packet(msg, &p) && js_lock(js_route_mask(p.seq), 0)) {
-        if (p.kind == 0x2102 || p.kind == 0x3000) {
-            struct js_route *r = &js.routes[p.seq % JS_ROUTES];
-            if (!p.seq || r->query.seq == p.seq || js.next_route == UINT64_MAX) r->dead = 1;
-            else *r = (struct js_route) {.query = p, .bits = JS_BIT(JS_SENT), .sent = (uintptr_t) msg, .sender = (uintptr_t) self, .incarnation = ++js.next_route};
-        } else {
-            struct js_route *r = js_route(p.seq);
-            if (r && js_reply(r, p.kind) && r->bits == 15 && js_serving.depth == 1 &&
-                js_serving.seq == p.seq && js_serving.owner == r->source) {
-                r->response = (uintptr_t) msg;
-                r->responder = (uintptr_t) self;
-                r->bits |= JS_BIT(JS_RESPONSE);
-            }
-        }
+    struct js_packet packet;
+    if (!peer && js_packet(msg, &packet) && js_lock(js_route_mask(packet.seq), 0)) {
+        if (js_query_kind(packet.kind)) js_query_sent(&packet, (uintptr_t) msg, (uintptr_t) self);
+        else js_response_sent(&packet, (uintptr_t) msg, (uintptr_t) self);
         pthread_mutex_unlock(&js.mu);
     }
     return ((uint64_t (*)(void *, void *, uint32_t, void *)) js.original[0])(self, msg, peer, error);
+}
+static void js_wire_record(const struct js_packet *packet, uintptr_t message, uintptr_t wire) {
+    struct js_route *route = js_route(packet->seq);
+    if (route && route->bits == 1 && route->sent == message && route->query.kind == packet->kind) {
+        route->wire = wire;
+        route->bits |= JS_BIT(JS_WIRE);
+    } else if (route && route->bits == 31 && route->response == message && js_reply(route, packet->kind)) {
+        route->reply_wire = wire;
+        route->bits |= JS_BIT(JS_RESPONSE_WIRE);
+    }
 }
 static int js_wire_send(void *self, void *msg) {
     if (azfile_native_transport) azfile_native_transport(AZN_FILE_WIRE, (uintptr_t) msg, (unsigned) js_word(self, 8, 4));
     struct js_packet p;
     int watched = !js_word(self, 8, 4) && js_packet(msg, &p);
     if (watched && js_lock(js_route_mask(p.seq), 0)) {
-        struct js_route *r = js_route(p.seq);
-        if (r && r->bits == 1 && r->sent == (uintptr_t) msg && r->query.kind == p.kind) {
-            r->wire = (uintptr_t) self;
-            r->bits |= JS_BIT(JS_WIRE);
-        } else if (r && r->bits == 31 && r->response == (uintptr_t) msg && js_reply(r, p.kind)) {
-            r->reply_wire = (uintptr_t) self;
-            r->bits |= JS_BIT(JS_RESPONSE_WIRE);
-        }
+        js_wire_record(&p, (uintptr_t) msg, (uintptr_t) self);
         pthread_mutex_unlock(&js.mu);
     }
     int rc = ((int (*)(void *, void *)) js.original[1])(self, msg);
     if (rc < 0 && watched) atomic_fetch_or(&js.lost_routes, js_route_mask(p.seq));
     return rc;
 }
+static int js_query_ingress(const struct js_route *route, const struct js_packet *packet) {
+    return route->bits == 3 && route->query.kind == packet->kind &&
+           route->query.field0 == packet->field0 && route->query.field1 == packet->field1;
+}
+static int js_response_ingress(const struct js_route *route, const struct js_packet *packet) {
+    return route->bits == 63 && js_reply(route, packet->kind);
+}
+static void js_ingress_record(int client, const struct js_packet *packet, uintptr_t message) {
+    struct js_route *route = js_route(packet->seq);
+    if (!route) return;
+    if (!client && js_query_ingress(route, packet)) {
+        route->received = message;
+        route->bits |= JS_BIT(JS_INGRESS);
+    } else if (client && js_response_ingress(route, packet)) {
+        route->client_packet = message;
+        route->bits |= JS_BIT(JS_CLIENT);
+    } else if (route->query.kind == packet->kind || js_reply(route, packet->kind)) route->dead = 1;
+}
 static uint64_t js_ingress(int client, void *self, void *msg, uint32_t peer) {
     if (azfile_native_transport) azfile_native_transport(client ? AZN_FILE_CLIENT : AZN_FILE_SERVER, (uintptr_t) msg, peer);
     struct js_packet p;
     int watched = !peer && js_packet(msg, &p) &&
-                  (client ? (p.kind == 0x4000 || p.kind == 0x4201) : (p.kind == 0x2102 || p.kind == 0x3000));
+                  (client ? js_response_kind(p.kind) : js_query_kind(p.kind));
     if (watched && js_lock(js_route_mask(p.seq), 0)) {
-        struct js_route *r = js_route(p.seq);
-        if (r && !client && r->bits == 3 && r->query.kind == p.kind &&
-            r->query.field0 == p.field0 && r->query.field1 == p.field1) {
-            r->received = (uintptr_t) msg;
-            r->bits |= JS_BIT(JS_INGRESS);
-        } else if (r && client && r->bits == 63 && js_reply(r, p.kind)) {
-            r->client_packet = (uintptr_t) msg;
-            r->bits |= JS_BIT(JS_CLIENT);
-        } else if (r && (r->query.kind == p.kind || js_reply(r, p.kind))) r->dead = 1;
+        js_ingress_record(client, &p, (uintptr_t) msg);
         pthread_mutex_unlock(&js.mu);
     }
     uint64_t accepted = ((uint64_t (*)(void *, void *, uint32_t)) js.original[client ? 3 : 2])(self, msg, peer);
@@ -178,6 +197,15 @@ static uint64_t js_ingress(int client, void *self, void *msg, uint32_t peer) {
 }
 static uint64_t js_server_in(void *self, void *msg, uint32_t peer) { return js_ingress(0, self, msg, peer); }
 static uint64_t js_client_in(void *self, void *msg, uint32_t peer) { return js_ingress(1, self, msg, peer); }
+static void js_server_record(const struct js_packet *packet, uintptr_t message, uint64_t owner) {
+    struct js_route *route = js_route(packet->seq);
+    if (route && route->bits == 7 && route->received == message && route->query.kind == packet->kind) {
+        route->source = owner;
+        route->bits |= JS_BIT(JS_SERVER);
+        js_serving.owner = owner;
+        js_serving.seq = packet->seq;
+    }
+}
 void azjs_server(uintptr_t msg, uint32_t peer, uint64_t owner, int entering) {
     if (!entering) {
         if (js_serving.depth) --js_serving.depth;
@@ -188,14 +216,41 @@ void azjs_server(uintptr_t msg, uint32_t peer, uint64_t owner, int entering) {
     js_serving.owner = 0;
     struct js_packet p;
     if (peer || !owner || !js_packet((void *) msg, &p) || !js_lock(js_route_mask(p.seq), 0)) return;
-    struct js_route *r = js_route(p.seq);
-    if (r && r->bits == 7 && r->received == msg && r->query.kind == p.kind) {
-        r->source = owner;
-        r->bits |= JS_BIT(JS_SERVER);
-        js_serving.owner = owner;
-        js_serving.seq = p.seq;
-    }
+    js_server_record(&p, msg, owner);
     pthread_mutex_unlock(&js.mu);
+}
+static int js_ticket_packet(const struct js_route *route, const struct js_packet *packet, uintptr_t message, const void *ticket) {
+    return route && route->bits == 127 && route->client_packet == message && js_reply(route, packet->kind) &&
+           js_word(ticket, 0x20, 4) == packet->seq && js_word(ticket, 0x80, 1) == 2;
+}
+static void js_ticket_begin(struct js_ticket *seen, uintptr_t ticket, const struct js_route *route, uint32_t seq) {
+    const void *object = (const void *) ticket;
+    *seen = (struct js_ticket) {.ticket = ticket, .receiver = js_word(object, 0x88, 8), .control = js_word(object, 0x90, 8), .req = {js_word(object, 8, 8), js_word(object, 16, 8)}, .source = route->source, .first = seq, .first_incarnation = route->incarnation, .track_id = route->query.field1};
+    if (!seen->track_id || seen->track_id != js_word(object, 0xb0, 4)) seen->ticket = 0;
+}
+static int js_ticket_identity(const struct js_ticket *seen, uintptr_t ticket, const struct js_route *route) {
+    const void *object = (const void *) ticket;
+    return seen->ticket == ticket && !seen->next && seen->source == route->source &&
+           seen->receiver == js_word(object, 0x88, 8) && seen->control == js_word(object, 0x90, 8) &&
+           seen->req[0] == js_word(object, 8, 8) && seen->req[1] == js_word(object, 16, 8) &&
+           seen->track_id == js_word(object, 0xb0, 4);
+}
+static int js_ticket_continuation(const struct js_ticket *seen, const struct js_route *route, uint32_t seq) {
+    const struct js_route *first = js_route(seen->first);
+    return first && first->incarnation == seen->first_incarnation && seen->expected_next == seq &&
+           seen->next_packet == route->sent && first->sender == route->sender && first->wire == route->wire &&
+           first->responder == route->responder && first->reply_wire == route->reply_wire &&
+           first->query.field0 == route->query.field0;
+}
+static void js_ticket_record(uintptr_t ticket, const struct js_packet *packet, struct js_route *route) {
+    struct js_ticket *seen = &js.tickets[(ticket >> 4) % JS_ROUTES];
+    if (packet->kind == 0x4000) js_ticket_begin(seen, ticket, route, packet->seq);
+    else if (js_ticket_identity(seen, ticket, route) && js_ticket_continuation(seen, route, packet->seq)) {
+        seen->next = packet->seq;
+        js_processing.ticket = ticket;
+        js_processing.seq = packet->seq;
+    }
+    route->bits |= JS_BIT(JS_TICKET);
 }
 void azjs_ticket(uintptr_t ticket, uintptr_t packet, int entering) {
     if (!entering) {
@@ -208,40 +263,28 @@ void azjs_ticket(uintptr_t ticket, uintptr_t packet, int entering) {
     struct js_packet p;
     if (!js_packet((void *) packet, &p) || !js_lock(js_route_mask(p.seq), 0)) return;
     struct js_route *r = js_route(p.seq);
-    const void *t = (const void *) ticket;
-    if (r && r->bits == 127 && r->client_packet == packet && js_reply(r, p.kind) && js_word(t, 0x20, 4) == p.seq &&
-        js_word(t, 0x80, 1) == 2) {
-        struct js_ticket *seen = &js.tickets[(ticket >> 4) % JS_ROUTES];
-        if (p.kind == 0x4000) {
-            *seen = (struct js_ticket) {.ticket = ticket, .receiver = js_word(t, 0x88, 8), .control = js_word(t, 0x90, 8), .req = {js_word(t, 8, 8), js_word(t, 16, 8)}, .source = r->source, .first = p.seq, .first_incarnation = r->incarnation, .track_id = r->query.field1};
-            if (!seen->track_id || seen->track_id != js_word(t, 0xb0, 4)) seen->ticket = 0;
-        } else if (seen->ticket == ticket && !seen->next && seen->source == r->source &&
-                   seen->receiver == js_word(t, 0x88, 8) && seen->control == js_word(t, 0x90, 8) &&
-                   seen->req[0] == js_word(t, 8, 8) && seen->req[1] == js_word(t, 16, 8) && seen->track_id == js_word(t, 0xb0, 4)) {
-            struct js_route *first = js_route(seen->first);
-            if (first && first->incarnation == seen->first_incarnation && seen->expected_next == p.seq && seen->next_packet == r->sent && first->sender == r->sender && first->wire == r->wire &&
-                first->responder == r->responder && first->reply_wire == r->reply_wire &&
-                first->query.field0 == r->query.field0) {
-                seen->next = p.seq;
-                js_processing.ticket = ticket;
-                js_processing.seq = p.seq;
-            }
-        }
-        r->bits |= JS_BIT(JS_TICKET);
-    }
+    if (js_ticket_packet(r, &p, packet, (const void *) ticket)) js_ticket_record(ticket, &p, r);
     pthread_mutex_unlock(&js.mu);
+}
+static void js_ticket_returned(uintptr_t ticket, uintptr_t returned) {
+    struct js_ticket *seen = &js.tickets[(ticket >> 4) % JS_ROUTES];
+    if (seen->ticket == ticket && seen->first && !seen->next && !seen->expected_next) {
+        seen->expected_next = (uint32_t) js_word((void *) returned, 8, 4);
+        seen->next_packet = returned;
+    }
 }
 void azjs_ticket_return(uintptr_t ticket, uintptr_t returned) {
     if (!ticket || !returned || js_processing.depth != 1) return;
     /* The ticket constructs arguments 1..7 and assigns its new sequence before
      * returning. The client inserts routing argument zero later, before send. */
     if (js_word((void *) returned, 0, 2) != 0x3000 || js_word((void *) returned, 4, 4) != 0x872349ae || !js_lock(js_route_mask((uint32_t) js_word((void *) returned, 8, 4)), 0)) return;
-    struct js_ticket *t = &js.tickets[(ticket >> 4) % JS_ROUTES];
-    if (t->ticket == ticket && t->first && !t->next && !t->expected_next) {
-        t->expected_next = (uint32_t) js_word((void *) returned, 8, 4);
-        t->next_packet = returned;
-    }
+    js_ticket_returned(ticket, returned);
     pthread_mutex_unlock(&js.mu);
+}
+static int js_reception_matches(const struct js_ticket *ticket, uintptr_t receiver, const void *info) {
+    return js_processing.depth == 1 && js_processing.ticket && ticket->ticket == js_processing.ticket &&
+           ticket->receiver == receiver && ticket->next == js_processing.seq && js_word(info, 0, 1) == 1 &&
+           js_word(info, 16, 4) == ticket->track_id;
 }
 void azjs_reception(uintptr_t receiver, uint64_t pack_id, const void *info) {
     if (!pack_id || pack_id > UINT32_MAX || !js_lock(0, js_pack_mask((uint32_t) pack_id))) return;
@@ -253,15 +296,25 @@ void azjs_reception(uintptr_t receiver, uint64_t pack_id, const void *info) {
     int ambiguous = p->id == pack_id && p->receiver && !p->token;
     memset(p, 0, sizeof *p);
     p->id = (uint32_t) pack_id;
-    if (!ambiguous && js_processing.depth == 1 && js_processing.ticket && t->ticket == js_processing.ticket &&
-        t->receiver == receiver && t->next == js_processing.seq && js_word(info, 0, 1) == 1 &&
-        js_word(info, 16, 4) == t->track_id) {
+    if (!ambiguous && js_reception_matches(t, receiver, info)) {
         p->receiver = receiver;
         p->owner = t->source;
         memcpy(p->track, (const unsigned char *) info + 8, 12);
         t->ticket = 0;
     }
     pthread_mutex_unlock(&js.mu);
+}
+static int js_pack_matches(const struct js_pack *pack, uint32_t id, uintptr_t address) {
+    return pack->id == id && pack->receiver && !pack->token && pack->owner &&
+           js_word((void *) address, 0x78, 1) == 1 && !memcmp((const unsigned char *) address + 0x38, pack->track, 12) &&
+           !memcmp((const unsigned char *) address + 0x80, pack->track, 12) && js.next_token < UINT64_MAX;
+}
+static void js_pack_record(uint32_t id, uintptr_t address) {
+    struct js_pack *pack = &js.packs[id % JS_PACKS];
+    if (js_pack_matches(pack, id, address)) {
+        pack->address = address;
+        pack->token = ++js.next_token;
+    } else if (pack->id == id) memset(pack, 0, sizeof *pack);
 }
 static void js_pack_commit(const void *where, int from_set_data) {
     const struct js_profile *profile = &js_profiles[js.build == 2];
@@ -273,15 +326,7 @@ static void js_pack_commit(const void *where, int from_set_data) {
         /* setData has copied the validated LoadTrackInfo to this actual owned
          * PlayMusicPack. This call precedes any of advance's native listeners,
          * including inline load submission. */
-        {
-            struct js_pack *p = &js.packs[id % JS_PACKS];
-            if (p->id == id && p->receiver && !p->token && p->owner &&
-                js_word((void *) a, 0x78, 1) == 1 && !memcmp((const unsigned char *) a + 0x38, p->track, 12) &&
-                !memcmp((const unsigned char *) a + 0x80, p->track, 12) && js.next_token < UINT64_MAX) {
-                p->address = a;
-                p->token = ++js.next_token;
-            } else if (p->id == id) memset(p, 0, sizeof *p);
-        }
+        js_pack_record(id, a);
         pthread_mutex_unlock(&js.mu);
     }
 }
@@ -300,20 +345,20 @@ static uint64_t js_destroy(void *self, int slot) {
 }
 static uint64_t js_dtor(void *self) { return js_destroy(self, 5); }
 static uint64_t js_delete(void *self) { return js_destroy(self, 6); }
+static uint64_t js_pack_token(uintptr_t address, const unsigned char track_id[12]) {
+    for (unsigned i = 0; i < JS_PACKS; i++) {
+        const struct js_pack *pack = &js.packs[i];
+        if (pack->address == address && pack->token && !memcmp(track_id, pack->track, 12) &&
+            js_word((void *) address, 0, 8) == js_profiles[js.build == 2].pack_vptr &&
+            js_word((void *) address, 0x30, 4) == pack->id) return pack->token;
+    }
+    return 0;
+}
 uint64_t azjs_capture(unsigned deck, uint64_t unit, uint64_t epoch, uintptr_t pack, const unsigned char track_id[12]) {
     if (deck >= 4 || !unit || !epoch || !pack || !track_id || !js_lock(0, 0)) return 0;
-    uint64_t result = 0;
-    /* The facade still owns its Wherefrom. We compare the opaque address and
-     * the exact native identity copied under that same ownership. */
-    for (unsigned i = 0; i < JS_PACKS; i++) {
-        const struct js_pack *p = &js.packs[i];
-        if (p->address == pack && p->token && !memcmp(track_id, p->track, 12) &&
-            js_word((void *) pack, 0, 8) == js_profiles[js.build == 2].pack_vptr &&
-            js_word((void *) pack, 0x30, 4) == p->id) {
-            result = p->token;
-            break;
-        }
-    }
+    /* The facade still owns its Wherefrom. Compare the opaque address and
+     * exact native identity copied under that same ownership. */
+    uint64_t result = js_pack_token(pack, track_id);
     pthread_mutex_unlock(&js.mu);
     return result;
 }
@@ -332,20 +377,27 @@ int azjs_lookup(uint64_t token, struct azjs_origin *out) {
     pthread_mutex_unlock(&js.mu);
     return found;
 }
-int azjs_install(int build, azjs_installer install) {
-    if (!install || (build != 1 && build != 2)) return 0;
-    const struct js_profile *p = &js_profiles[build == 2];
+static int js_targets_valid(const struct js_profile *profile) {
+    for (unsigned i = 0; i < 7; i++)
+        if (memcmp((void *) profile->target[i].entry, profile->target[i].bytes, 16) ||
+            (profile->target[i].slot && js_word((void *) profile->target[i].slot, 0, 8) != profile->target[i].entry)) return 0;
+    return 1;
+}
+static int js_install_targets(const struct js_profile *profile, azjs_installer install) {
     void *hooks[] = {js_data_send, js_wire_send, js_server_in, js_client_in, js_advance, js_dtor, js_delete};
     for (unsigned i = 0; i < 7; i++) {
-        if (memcmp((void *) p->target[i].entry, p->target[i].bytes, 16) ||
-            (p->target[i].slot && js_word((void *) p->target[i].slot, 0, 8) != p->target[i].entry)) return 0;
-    }
-    js.build = (unsigned) build;
-    for (unsigned i = 0; i < 7; i++) {
-        uintptr_t slot = p->target[i].slot;
-        if (!install(slot ? slot : p->target[i].entry, p->target[i].entry, hooks[i], &js.original[i], slot != 0) ||
+        uintptr_t slot = profile->target[i].slot;
+        if (!install(slot ? slot : profile->target[i].entry, profile->target[i].entry, hooks[i], &js.original[i], slot != 0) ||
             !js.original[i]) return 0;
     }
+    return 1;
+}
+int azjs_install(int build, azjs_installer install) {
+    if (!install || (build != 1 && build != 2)) return 0;
+    const struct js_profile *profile = &js_profiles[build == 2];
+    if (!js_targets_valid(profile)) return 0;
+    js.build = (unsigned) build;
+    if (!js_install_targets(profile, install)) return 0;
     atomic_store_explicit(&js.ready, 1, memory_order_release);
     return 1;
 }

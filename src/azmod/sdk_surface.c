@@ -511,37 +511,37 @@ static void sdk_surf_free_buf(struct az_surface *p) {
     p->bw = p->bh = 0;
 }
 
-/* Place, map and stack one layer of surfaces. OVER_EP147 runs before the core's windows are
- * placed, TOP after the foreign windows, so each layer is raised in order. */
+static void sdk_surf_create_window(struct overlay_ctx *c, struct az_surface *p) {
+    XSetWindowAttributes a;
+    memset(&a, 0, sizeof a);
+    a.override_redirect = True;
+    a.background_pixmap = None;
+    a.event_mask = ButtonPressMask | ButtonReleaseMask | ExposureMask;
+    p->w.id = ov_create_window(c, &a, -16, -16, 1, 1, p->d.on_input == NULL);
+}
+static void sdk_surf_place_window(struct overlay_ctx *c, struct az_surface *p, int want) {
+    if (want && p->w.id == None) sdk_surf_create_window(c, p);
+    if (p->w.id == None) return;
+    p->w.wanted = want;
+    if (want) {
+        if (p->r.w != p->w.w || p->r.h != p->w.h) p->redraw = 1;
+        ov_window_place(c, &p->w, p->r.x, p->r.y, p->r.w, p->r.h);
+        if (!p->w.mapped) c->need_raise = 1;
+    } else if (g_sdk_focus_surf == p) {
+        g_sdk_focus_surf = NULL;
+        __atomic_store_n(&g_sdk_focus, 0, __ATOMIC_RELEASE);
+    }
+    ov_window_show(c, &p->w);
+}
+/* Place, map and stack one layer of surfaces. OVER_EP147 runs before the core's
+ * windows, and TOP after foreign windows, preserving the layer order. */
 static void sdk_overlay_place(struct overlay_ctx *c, int layer) {
     int view = __atomic_load_n(&g_sdk_view, __ATOMIC_RELAXED);
     for (int i = 0; i < SDK_SURF_ALL; i++) {
         struct az_surface *p = &g_sdk_surf[i];
-        if (!p->used || p->d.layer != layer)
-            continue;
+        if (!p->used || p->d.layer != layer) continue;
         int want = p->show && sdk_mod_live(p->mod) && sdk_surface_matches_view(p->d.views, view, g_four_deck);
-        if (want && p->w.id == None) {
-            XSetWindowAttributes a;
-            memset(&a, 0, sizeof a);
-            a.override_redirect = True;
-            a.background_pixmap = None;
-            a.event_mask = ButtonPressMask | ButtonReleaseMask | ExposureMask;
-            p->w.id = ov_create_window(c, &a, -16, -16, 1, 1, p->d.on_input == NULL);
-        }
-        if (p->w.id == None)
-            continue;
-        p->w.wanted = want;
-        if (want) {
-            if (p->r.w != p->w.w || p->r.h != p->w.h)
-                p->redraw = 1;
-            ov_window_place(c, &p->w, p->r.x, p->r.y, p->r.w, p->r.h);
-            if (!p->w.mapped)
-                c->need_raise = 1; /* everything above this layer goes back on top */
-        } else if (g_sdk_focus_surf == p) {
-            g_sdk_focus_surf = NULL;
-            __atomic_store_n(&g_sdk_focus, 0, __ATOMIC_RELEASE);
-        }
-        ov_window_show(c, &p->w);
+        sdk_surf_place_window(c, p, want);
     }
 }
 

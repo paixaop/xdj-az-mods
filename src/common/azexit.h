@@ -4,6 +4,7 @@
 #define AZEXIT_H
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <math.h>
 #include "azexitprofile.h"
 #define AZEXIT_NOEXCEPT
@@ -31,28 +32,44 @@ struct azexit_cue_target {
     uint64_t revision, persistent_commands, revision_commands;
     uint32_t revision_valid, reserved;
 };
+struct azexit_fraction {
+    double value;
+    uint64_t n0, n1, d0, d1;
+};
+static inline bool azexit_fraction_step(const struct azexit_fraction *fraction, uint64_t *n, uint64_t *d) {
+    double value = fraction->value;
+    if (!isfinite(value) || value < 0 || value > 65535.0) return false;
+    uint64_t whole = (uint64_t) value;
+    *n = whole * fraction->n1 + fraction->n0;
+    *d = whole * fraction->d1 + fraction->d0;
+    return *n <= 65535 && *d <= 65535;
+}
+static inline bool azexit_fraction_matches(uint64_t n, uint64_t d, double beats) {
+    return n && d && (double) n / (double) d == beats;
+}
+static inline bool azexit_fraction_advance(struct azexit_fraction *state, uint64_t n, uint64_t d) {
+    double fraction = state->value - (double) (uint64_t) state->value;
+    if (fraction == 0) return false;
+    state->n0 = state->n1;
+    state->n1 = n;
+    state->d0 = state->d1;
+    state->d1 = d;
+    state->value = 1.0 / fraction;
+    return true;
+}
 /* Bounded continued fractions avoid arbitrary rounding into native Beat values.
  * Accept only a rational whose conversion reproduces the caller's double. */
 static inline int azexit_pack_beat(double beats, uint32_t *packed) {
     if (!packed || !isfinite(beats) || beats < 1.0 / 65535.0 || beats > 65535.0) return 0;
-    double value = beats;
-    uint64_t n0 = 0, n1 = 1, d0 = 1, d1 = 0;
+    struct azexit_fraction fraction = {.value = beats, .n1 = 1, .d0 = 1};
     for (unsigned i = 0; i < 32; ++i) {
-        if (!isfinite(value) || value < 0 || value > 65535.0) return 0;
-        uint64_t whole = (uint64_t) value;
-        uint64_t n = whole * n1 + n0, d = whole * d1 + d0;
-        if (n > 65535 || d > 65535) return 0;
-        if (n && d && (double) n / (double) d == beats) {
+        uint64_t n, d;
+        if (!azexit_fraction_step(&fraction, &n, &d)) return 0;
+        if (azexit_fraction_matches(n, d, beats)) {
             *packed = (uint32_t) n | ((uint32_t) d << 16);
             return 1;
         }
-        double fraction = value - (double) whole;
-        if (fraction == 0) return 0;
-        n0 = n1;
-        n1 = n;
-        d0 = d1;
-        d1 = d;
-        value = 1.0 / fraction;
+        if (!azexit_fraction_advance(&fraction, n, d)) return 0;
     }
     return 0;
 }

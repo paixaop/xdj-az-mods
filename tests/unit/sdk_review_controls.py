@@ -26,8 +26,8 @@ variant("database-alias", "sdk_track.c",
         'if (!st_source_path(src.mount, "/PIONEER/rekordbox/exportLibrary.db", data->files[0])) return AZ_STALE;',
         'if (snprintf(data->files[0], sizeof data->files[0], "%s/PIONEER/rekordbox/exportLibrary.db", src.mount) >= (int) sizeof data->files[0]) return AZ_FAILED;')
 variant("missing-parent", "sdk_track.c",
-        "if (realpath(prefix, parent)) break;\n            if (errno != ENOENT) return 0;",
-        "if (realpath(prefix, parent)) break;\n            return 0;")
+        "if (realpath(prefix, parent)) break;\n        if (errno != ENOENT) return 0;",
+        "if (realpath(prefix, parent)) break;\n        return 0;")
 variant("wave-errors", "sdk_wave_provider.h",
         "if (fd < 0) return errno == ENOENT || errno == ENOTDIR ? AZ_UNSUPPORTED : AZ_FAILED;",
         "if (fd < 0) return AZ_UNSUPPORTED;")
@@ -40,6 +40,6 @@ variant("track-fifo", "sdk_track.c", "O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONB
 variant("wave-fifo", "sdk_wave_provider.h", "O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK",
         "O_RDONLY | O_CLOEXEC | O_NOFOLLOW")
 variant("analysis-path-limit", "sdk_track.c",
-        "(mask & ~AZ_DATA_METADATA)) rc = AZ_LIMIT;", "0) rc = AZ_LIMIT;")
+        "(mask & ~AZ_DATA_METADATA)) rc = AZ_LIMIT;", "((void) mask, 0)) rc = AZ_LIMIT;")
 variant("preview-extension", "sdk_track.c",
         "file_encoding == AZ_WAVE_PWV6_PREVIEW", "0")

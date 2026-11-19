@@ -1,0 +1,64 @@
+/* SPDX-License-Identifier: GPL-3.0-only */
+static unsigned construction_calls;
+static uintptr_t unrelated_pad_construct(uintptr_t self, unsigned deck) {
+    assert(self == 0x1234 && deck == 2);
+    ++construction_calls;
+    return 43;
+}
+static int gui_model_recovery(void) {
+    assert(ds_publish(1, 1, DS_BOUNDARY, ds_now(), NULL, 0, NULL, NULL, 0, 0) == AZ_OK);
+    struct ds_gui_record record = {.kind = DS_GUI_EFFECTIVE_KEY, .deck = 1, .owner = 55, .epoch = 1, .revision = 1, .original_key_revision = 1, .observed = ds_now(), .availability = AZ_AVAIL_READY, .original_key_availability = AZ_AVAIL_READY, .original_key = "8A", .value.key = "8A"};
+    assert(ds_model_apply(DS_MODEL_KEY, &record, 0) == AZ_OK);
+    const struct ds_image *image = &ds.deck[1].current;
+    assert(!strcmp(ds_value(image, AZ_STATUS_KEY, AZ_STATUS_KEY_EFFECTIVE), "8A"));
+    struct ds_gui_record lost = {.deck = 1, .revision = 2, .observed = ds_now()};
+    assert(ds_model_apply(DS_MODEL_KEY, &lost, 0) == AZ_OK);
+    assert(ds_value(image, AZ_STATUS_KEY, AZ_STATUS_KEY_EFFECTIVE));
+    assert(ds_model_apply(DS_MODEL_KEY, &lost, 1) == AZ_OK);
+    assert(!ds_value(image, AZ_STATUS_KEY, AZ_STATUS_KEY_EFFECTIVE));
+    assert(!ds_value(image, AZ_STATUS_KEY, AZ_STATUS_KEY_ORIGINAL));
+    assert(ds.deck[1].current.field[AZ_STATUS_KEY][AZ_STATUS_KEY_ORIGINAL]->info.provider_id == 55);
+    struct ds_field file_key = {.topic = AZ_STATUS_KEY, .field = AZ_STATUS_KEY_ORIGINAL, .info = {.info = {AZ_AVAIL_READY, AZ_PROV_FILE, 9, ds_now()}, .scope = AZ_STATUS_LOAD_SCOPE, .scope_id = 1, .provider_id = 77, .count = 2}, .value = "9A"};
+    assert(ds_publish(1, 1, 0, ds_now(), &file_key, 1, NULL, NULL, 0, 0) == AZ_OK);
+    lost.revision++;
+    assert(ds_model_apply(DS_MODEL_KEY, &lost, 1) == AZ_OK);
+    assert(!strcmp(ds_value(image, AZ_STATUS_KEY, AZ_STATUS_KEY_ORIGINAL), "9A"));
+    assert(store_reseeds == 2);
+    record.kind = DS_GUI_SLIDER;
+    record.value.slider = 4.25;
+    record.epoch = 0;
+    assert(ds_model_apply(DS_MODEL_SLIDER, &record, 0) == AZ_OK);
+    assert(*(const double *) ds_value(image, AZ_STATUS_TEMPO, AZ_STATUS_TEMPO_SLIDER_PERCENT) == 4.25);
+    assert(ds_model_apply(DS_MODEL_SLIDER, &lost, 1) == AZ_OK);
+    assert(!ds_value(image, AZ_STATUS_TEMPO, AZ_STATUS_TEMPO_SLIDER_PERCENT));
+    record = (struct ds_gui_record) {.kind = DS_GUI_PAD, .deck = 0, .owner = 66, .revision = 1, .observed = ds_now(), .availability = AZ_AVAIL_READY, .master = 2};
+    ds_pad_apply(&record, 0);
+    assert(*(const int *) ds_value(&ds.deck[0].current, AZ_STATUS_SETTINGS, AZ_STATUS_SETTINGS_PAD_MODE) == 2);
+    record.availability = AZ_AVAIL_STALE;
+    record.revision++;
+    ds_pad_apply(&record, 1);
+    assert(!ds_value(&ds.deck[0].current, AZ_STATUS_SETTINGS, AZ_STATUS_SETTINGS_PAD_MODE));
+    g_master_state.deck = 2;
+    g_master_state.revision = 1;
+    g_master_state.observed_ns = ds_now();
+    atomic_store(&g_master_event, 1);
+    ds_tempo_slots[1].latest = (struct ds_gui_record) {.kind = DS_GUI_TEMPO, .deck = 1, .owner = 5, .epoch = 1, .revision = 1, .observed = ds_now(), .availability = AZ_AVAIL_READY, .bpm = 123.25};
+    g_bpmstate_generation[1] = 5;
+    atomic_store(&ds_pad_slots[0].owner, 66);
+    atomic_store(&ds_pad_slots[0].revision, 3);
+    atomic_store(&ds_pad_slots[0].observed, ds_now());
+    atomic_store(&ds_pad_slots[0].availability, AZ_AVAIL_READY);
+    atomic_store(&ds_pad_slots[0].value, 3);
+    struct ds_gui_cursor cursor = {0};
+    ds_gui_reseed(1 | (2u << 1) | ds_pad_bit(0) | ds_model_bit(DS_MODEL_SLIP, 2), &cursor);
+    assert(*(const int *) ds_value(&ds.deck[2].current, AZ_STATUS_SYNC, AZ_STATUS_SYNC_MASTER) == 1);
+    assert(*(const double *) ds_value(image, AZ_STATUS_TEMPO, AZ_STATUS_TEMPO_CURRENT_BPM) == 123.25);
+    assert(*(const int *) ds_value(&ds.deck[0].current, AZ_STATUS_SETTINGS, AZ_STATUS_SETTINGS_PAD_MODE) == 3);
+    struct ds_pad_profile profile = {0};
+    ds_pad_profile = &profile;
+    ds_pad_original[0] = unrelated_pad_construct;
+    assert(ds_pad_construct(0x1234, 2) == 43 && construction_calls == 1);
+    assert(!atomic_load(&ds_pad_slots[2].self));
+    puts("PASS missing GUI owner withdraws only native evidence, preserves FILE key fallback, recovers master/tempo/pad seeds and rejects unrelated pad construction");
+    return 0;
+}

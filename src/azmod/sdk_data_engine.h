@@ -112,70 +112,74 @@ static inline void st_publish_event(struct st_engine *e, const struct st_ticket 
     ev->value.observed_ns = st_now();
     ev->value.revision = s->state == AZ_OK && s->data ? s->data->view.revision : 0;
 }
-static inline int st_request_with_wave(struct st_engine *e, int owner, const az_track_ref *ref, uint32_t mask, const az_wave_query *wave, uint64_t *ticket) {
-    if (!ref || st_record_size(ref) < sizeof *ref || ref->version != AZ_DATA_VERSION || !ref->source_id ||
-        !ref->source_generation || !ref->library_id || !ref->track_id || !ticket || !mask ||
-        (wave ? mask != ST_DETAIL : (mask & ~31u))) return AZ_INVALID;
-    if (wave) {
-        if (st_record_size(wave) < sizeof *wave || wave->version != AZ_DATA_VERSION || wave->reserved ||
-            !wave->column_count) return AZ_INVALID;
-        if (wave->encoding < AZ_WAVE_PWV3_MONO || wave->encoding > AZ_WAVE_PWV7_LAYERED_RAW) return AZ_UNSUPPORTED;
-        if (wave->column_count > AZ_WAVE_WINDOW_MAX) return AZ_LIMIT;
-    }
-    if (pthread_mutex_trylock(&e->mu)) return AZ_BUSY;
-    st_reap_retired_locked(e);
-    if (st_owner_retired(e, owner)) {
-        pthread_mutex_unlock(&e->mu);
-        return AZ_STALE;
-    }
-    /* Each request consumes a cache stamp and a ticket ID. Zero denotes an
-     * unused slot/ticket, so neither counter increment may wrap. Existing
-     * consumers retain their immutable data after terminal exhaustion. */
-    if (e->next > UINT64_MAX - 2) {
-        pthread_mutex_unlock(&e->mu);
-        return AZ_LIMIT;
-    }
-    int nt = 0, ti = -1, slot = -1;
+static inline int st_request_ref_valid(const az_track_ref *ref) {
+    return ref && st_record_size(ref) >= sizeof *ref && ref->version == AZ_DATA_VERSION && ref->source_id &&
+           ref->source_generation && ref->library_id && ref->track_id;
+}
+static inline int st_wave_query_valid(const az_wave_query *wave) {
+    if (!wave) return AZ_OK;
+    if (st_record_size(wave) < sizeof *wave || wave->version != AZ_DATA_VERSION || wave->reserved ||
+        !wave->column_count) return AZ_INVALID;
+    if (wave->encoding < AZ_WAVE_PWV3_MONO || wave->encoding > AZ_WAVE_PWV7_LAYERED_RAW) return AZ_UNSUPPORTED;
+    return wave->column_count > AZ_WAVE_WINDOW_MAX ? AZ_LIMIT : AZ_OK;
+}
+static inline int st_ticket_slot(struct st_engine *e, int owner) {
+    int count = 0, slot = -1;
     for (int i = 0; i < ST_TICKETS; i++) {
-        if (!e->tickets[i].id) ti = i;
-        else if (e->tickets[i].owner == owner) nt++;
+        if (!e->tickets[i].id) slot = i;
+        else if (e->tickets[i].owner == owner) count++;
     }
-    if (nt >= ST_PER_OWNER || ti < 0) {
-        pthread_mutex_unlock(&e->mu);
-        return AZ_LIMIT;
-    }
-    for (int i = 0; i < ST_SLOTS; i++) {
-        struct st_slot *s = &e->slots[i];
-        if (s->stamp && (s->state == AZ_OK || s->state == AZ_PENDING) && st_ref_equal(&s->ref, ref) && s->mask == mask &&
-            (!wave || (s->wave_query.encoding == wave->encoding &&
-                       s->wave_query.first_column == wave->first_column &&
-                       s->wave_query.column_count == wave->column_count))) {
+    return count >= ST_PER_OWNER ? -1 : slot;
+}
+static inline int st_wave_query_equal(const struct st_slot *s, const az_wave_query *wave) {
+    return !wave || (s->wave_query.encoding == wave->encoding &&
+                     s->wave_query.first_column == wave->first_column &&
+                     s->wave_query.column_count == wave->column_count);
+}
+static inline int st_slot_matches(const struct st_slot *s, const az_track_ref *ref, uint32_t mask, const az_wave_query *wave) {
+    return s->stamp && (s->state == AZ_OK || s->state == AZ_PENDING) && st_ref_equal(&s->ref, ref) &&
+           s->mask == mask && st_wave_query_equal(s, wave);
+}
+static inline int st_matching_slot(struct st_engine *e, const az_track_ref *ref, uint32_t mask, const az_wave_query *wave) {
+    for (int i = 0; i < ST_SLOTS; i++)
+        if (st_slot_matches(&e->slots[i], ref, mask, wave)) return i;
+    return -1;
+}
+static inline int st_oldest_slot(struct st_engine *e) {
+    int slot = -1;
+    uint64_t oldest = UINT64_MAX;
+    for (int i = 0; i < ST_SLOTS; i++)
+        if (!e->slots[i].refs && !e->slots[i].running && e->slots[i].stamp < oldest) {
+            oldest = e->slots[i].stamp;
             slot = i;
-            break;
         }
+    return slot;
+}
+static inline void st_prepare_slot(struct st_slot *s, const az_track_ref *ref, uint32_t mask, const az_wave_query *wave) {
+    /* Old data is freed by st_work, never on this consumer's thread. */
+    s->ref = *ref;
+    s->ref.size = sizeof s->ref;
+    s->mask = mask;
+    memset(&s->wave_query, 0, sizeof s->wave_query);
+    if (wave) {
+        s->wave_query = *wave;
+        s->wave_query.size = sizeof s->wave_query;
     }
+    s->state = AZ_PENDING;
+}
+static inline int st_request_locked(struct st_engine *e, int owner, const az_track_ref *ref, uint32_t mask,
+                                    const az_wave_query *wave, uint64_t *ticket) {
+    st_reap_retired_locked(e);
+    if (st_owner_retired(e, owner)) return AZ_STALE;
+    /* Both cache stamp and ticket ID must leave zero reserved. */
+    if (e->next > UINT64_MAX - 2) return AZ_LIMIT;
+    int ti = st_ticket_slot(e, owner);
+    if (ti < 0) return AZ_LIMIT;
+    int slot = st_matching_slot(e, ref, mask, wave);
     if (slot < 0) {
-        uint64_t oldest = UINT64_MAX;
-        for (int i = 0; i < ST_SLOTS; i++)
-            if (!e->slots[i].refs && !e->slots[i].running && e->slots[i].stamp < oldest) {
-                oldest = e->slots[i].stamp;
-                slot = i;
-            }
-        if (slot < 0) {
-            pthread_mutex_unlock(&e->mu);
-            return AZ_LIMIT;
-        }
-        /* Old data is freed by st_work, never on this consumer's thread. */
-        struct st_slot *s = &e->slots[slot];
-        s->ref = *ref;
-        s->ref.size = sizeof s->ref; /* immutable records describe the stored layout */
-        s->mask = mask;
-        memset(&s->wave_query, 0, sizeof s->wave_query);
-        if (wave) {
-            s->wave_query = *wave;
-            s->wave_query.size = sizeof s->wave_query;
-        }
-        s->state = AZ_PENDING;
+        slot = st_oldest_slot(e);
+        if (slot < 0) return AZ_LIMIT;
+        st_prepare_slot(&e->slots[slot], ref, mask, wave);
     }
     struct st_slot *s = &e->slots[slot];
     s->stamp = ++e->next;
@@ -184,8 +188,16 @@ static inline int st_request_with_wave(struct st_engine *e, int owner, const az_
     *t = (struct st_ticket) {++e->next, owner, slot, 0, 0};
     *ticket = t->id;
     if (s->state != AZ_PENDING) st_publish_event(e, t, AZ_CHANGE_TRACK_DATA, s->state);
-    pthread_mutex_unlock(&e->mu);
     return AZ_OK;
+}
+static inline int st_request_with_wave(struct st_engine *e, int owner, const az_track_ref *ref, uint32_t mask, const az_wave_query *wave, uint64_t *ticket) {
+    if (!st_request_ref_valid(ref) || !ticket || !mask || (wave ? mask != ST_DETAIL : (mask & ~31u))) return AZ_INVALID;
+    int rc = st_wave_query_valid(wave);
+    if (rc != AZ_OK) return rc;
+    if (pthread_mutex_trylock(&e->mu)) return AZ_BUSY;
+    rc = st_request_locked(e, owner, ref, mask, wave, ticket);
+    pthread_mutex_unlock(&e->mu);
+    return rc;
 }
 static inline int st_request(struct st_engine *e, int owner, const az_track_ref *ref, uint32_t mask, uint64_t *ticket) {
     return st_request_with_wave(e, owner, ref, mask, NULL, ticket);
@@ -251,32 +263,35 @@ static inline int st_release(struct st_engine *e, int owner, uint64_t id, int ca
     pthread_mutex_unlock(&e->mu);
     return rc;
 }
+static inline int st_find_event(struct st_engine *e, int owner, uint64_t after, uint64_t first, int missed, az_data_change *out) {
+    if (after > e->sequence) return AZ_INVALID;
+    for (uint64_t seq = after < first ? first : after + 1; seq <= e->sequence; seq++) {
+        const struct st_event *event = &e->events[(seq - 1) % ST_EVENTS];
+        if (event->owner != owner) continue;
+        uint32_t size = out->size;
+        *out = event->value;
+        out->size = size;
+        out->missed = missed;
+        return AZ_OK;
+    }
+    return e->events_exhausted ? AZ_LIMIT : AZ_EMPTY;
+}
+static inline void st_event_recovery(const struct st_engine *e, az_data_change *out) {
+    uint32_t size = out->size;
+    memset(out, 0, sizeof *out);
+    out->size = size;
+    out->version = AZ_DATA_VERSION;
+    out->missed = 1;
+    out->sequence = e->sequence;
+}
 static inline int st_event_read(struct st_engine *e, int owner, uint64_t after, az_data_change *out) {
     if (!out || st_record_size(out) < sizeof *out || after == UINT64_MAX) return AZ_INVALID;
     if (pthread_mutex_trylock(&e->mu)) return AZ_BUSY;
     uint64_t first = e->sequence >= ST_EVENTS ? e->sequence - ST_EVENTS + 1 : 1;
-    int missed = after < first - 1, rc = AZ_EMPTY;
-    if (after > e->sequence) rc = AZ_INVALID;
-    else
-        for (uint64_t seq = after < first ? first : after + 1; seq <= e->sequence; seq++) {
-            struct st_event *ev = &e->events[(seq - 1) % ST_EVENTS];
-            if (ev->owner == owner) {
-                uint32_t size = out->size;
-                *out = ev->value;
-                out->size = size;
-                out->missed = missed;
-                rc = AZ_OK;
-                break;
-            }
-        }
-    if (rc == AZ_EMPTY && e->events_exhausted) rc = AZ_LIMIT;
+    int missed = after < first - 1;
+    int rc = st_find_event(e, owner, after, first, missed, out);
     if (rc == AZ_EMPTY && missed) {
-        uint32_t size = out->size;
-        memset(out, 0, sizeof *out);
-        out->size = size;
-        out->version = AZ_DATA_VERSION;
-        out->missed = 1;
-        out->sequence = e->sequence;
+        st_event_recovery(e, out);
         rc = AZ_OK;
     }
     pthread_mutex_unlock(&e->mu);
@@ -284,66 +299,88 @@ static inline int st_event_read(struct st_engine *e, int owner, uint64_t after, 
 }
 typedef int (*st_load_fn)(const az_track_ref *, uint32_t, struct st_data *, void *);
 typedef int (*st_fresh_fn)(const az_track_ref *, const struct st_data *, void *);
-/* One job or a freshness sweep. Only this worker can replace/free data; running prevents
- * a consumer from evicting the slot while the worker is outside the lock. */
+struct st_job {
+    int slot, pending;
+    az_track_ref ref;
+    uint32_t mask;
+    az_wave_query wave;
+    struct st_data *data;
+};
+/* Under mu. The running pin prevents eviction while the worker is unlocked. */
+static inline int st_claim_job(struct st_engine *e, int slot, struct st_job *job) {
+    struct st_slot *s = &e->slots[slot];
+    if (!s->stamp || s->running || (s->state != AZ_PENDING && s->state != AZ_OK)) return 0;
+    s->running = 1;
+    *job = (struct st_job) {slot, s->state == AZ_PENDING, s->ref, s->mask, s->wave_query, s->data};
+    if (job->pending) s->data = NULL; /* Cancellation must not inspect a retiring allocation. */
+    return 1;
+}
+static inline int st_load_job(struct st_job *job, st_load_fn load, st_fresh_fn fresh, void *ctx) {
+    int rc = AZ_OK;
+    if (job->pending) {
+        free(job->data);
+        struct st_data *data = malloc(sizeof *data);
+        job->data = data;
+        if (!data) return AZ_FAILED;
+        st_data_init(data);
+        data->view.track = job->ref;
+        data->wave_view.track = job->ref;
+        data->wave_query = job->wave;
+        rc = load(&job->ref, job->mask, data, ctx);
+    }
+    if (rc == AZ_OK && fresh && !fresh(&job->ref, job->data, ctx)) rc = AZ_STALE;
+    return rc;
+}
+static inline void st_stamp_wave(struct st_data *data, uint32_t encoding) {
+    data->wave_view.revision = data->view.revision;
+    data->wave_view.observed_ns = data->view.observed_ns;
+    data->wave_view.info.revision = data->view.revision;
+    data->wave_view.info.observed_ns = data->view.observed_ns;
+    data->wave_view.info.provenance = encoding == AZ_WAVE_PWV7_LAYERED_RAW ? AZ_PROV_DERIVED : AZ_PROV_FILE;
+}
+static inline void st_stamp_components(struct st_data *data, uint32_t mask) {
+    az_component_info *ci[] = {&data->view.metadata_info, &data->view.cues_info, &data->view.grid_info,
+                               &data->view.phrases_info, &data->view.waveform_info};
+    for (unsigned i = 0; i < 5; i++) {
+        if (!(mask & (1u << i))) continue;
+        ci[i]->revision = data->view.revision;
+        if (ci[i]->availability == AZ_AVAIL_READY || ci[i]->availability == AZ_AVAIL_EMPTY) ci[i]->provenance = AZ_PROV_FILE;
+        ci[i]->observed_ns = data->view.observed_ns;
+    }
+}
+static inline void st_job_events(struct st_engine *e, const struct st_job *job, int rc) {
+    for (int i = 0; i < ST_TICKETS; i++)
+        if (e->tickets[i].id && e->tickets[i].slot == job->slot && !e->tickets[i].cancelled)
+            st_publish_event(e, &e->tickets[i], job->pending ? AZ_CHANGE_TRACK_DATA : AZ_CHANGE_INVALIDATED, rc);
+}
+static inline void st_stamp_job(struct st_engine *e, const struct st_job *job) {
+    job->data->view.revision = ++e->revision;
+    job->data->view.observed_ns = st_now();
+    if (job->mask == ST_DETAIL) st_stamp_wave(job->data, job->wave.encoding);
+    st_stamp_components(job->data, job->mask);
+}
+static inline void st_publish_job(struct st_engine *e, const struct st_job *job, int rc) {
+    struct st_slot *s = &e->slots[job->slot];
+    s->data = job->data;
+    s->running = 0;
+    if (job->pending && rc == AZ_OK && e->revision == UINT64_MAX) rc = AZ_LIMIT;
+    if (!job->pending && rc == AZ_OK) return;
+    s->state = rc;
+    if (job->pending && rc == AZ_OK) st_stamp_job(e, job);
+    st_job_events(e, job, rc);
+}
+/* One job or a freshness sweep. Only this worker can replace or free data. */
 static inline void st_work(struct st_engine *e, st_load_fn load, st_fresh_fn fresh, void *ctx) {
-    for (int k = 0; k < ST_SLOTS; k++) {
+    for (int slot = 0; slot < ST_SLOTS; slot++) {
         pthread_mutex_lock(&e->mu);
-        if (!k) st_reap_retired_locked(e);
-        struct st_slot *s = &e->slots[k];
-        if (!s->stamp || s->running || (s->state != AZ_PENDING && s->state != AZ_OK)) {
-            pthread_mutex_unlock(&e->mu);
-            continue;
-        }
-        s->running = 1;
-        int pending = s->state == AZ_PENDING;
-        az_track_ref ref = s->ref;
-        uint32_t mask = s->mask;
-        az_wave_query wave = s->wave_query;
-        struct st_data *data = s->data;
-        if (pending) s->data = NULL; /* cancellation must not inspect a retiring allocation */
+        if (!slot) st_reap_retired_locked(e);
+        struct st_job job;
+        int claimed = st_claim_job(e, slot, &job);
         pthread_mutex_unlock(&e->mu);
-        int rc = AZ_OK;
-        if (pending) {
-            free(data);
-            data = malloc(sizeof *data);
-            if (data) {
-                st_data_init(data);
-                data->view.track = ref;
-                data->wave_view.track = ref;
-                data->wave_query = wave;
-                rc = load(&ref, mask, data, ctx);
-            } else rc = AZ_FAILED;
-            if (rc == AZ_OK && fresh && !fresh(&ref, data, ctx)) rc = AZ_STALE;
-        } else if (fresh && !fresh(&ref, data, ctx)) rc = AZ_STALE;
+        if (!claimed) continue;
+        int rc = st_load_job(&job, load, fresh, ctx);
         pthread_mutex_lock(&e->mu);
-        s->data = data;
-        s->running = 0;
-        if (pending && rc == AZ_OK && e->revision == UINT64_MAX) rc = AZ_LIMIT;
-        if (pending || rc != AZ_OK) {
-            s->state = rc;
-            if (pending && rc == AZ_OK) {
-                data->view.revision = ++e->revision;
-                data->view.observed_ns = st_now();
-                if (mask == ST_DETAIL) {
-                    data->wave_view.revision = data->view.revision;
-                    data->wave_view.observed_ns = data->view.observed_ns;
-                    data->wave_view.info.revision = data->view.revision;
-                    data->wave_view.info.observed_ns = data->view.observed_ns;
-                    data->wave_view.info.provenance = wave.encoding == AZ_WAVE_PWV7_LAYERED_RAW ? AZ_PROV_DERIVED : AZ_PROV_FILE;
-                }
-                az_component_info *ci[] = {&data->view.metadata_info, &data->view.cues_info, &data->view.grid_info, &data->view.phrases_info, &data->view.waveform_info};
-                for (unsigned i = 0; i < 5; i++)
-                    if (mask & (1u << i)) {
-                        ci[i]->revision = data->view.revision;
-                        if (ci[i]->availability == AZ_AVAIL_READY || ci[i]->availability == AZ_AVAIL_EMPTY) ci[i]->provenance = AZ_PROV_FILE;
-                        ci[i]->observed_ns = data->view.observed_ns;
-                    }
-            }
-            for (int i = 0; i < ST_TICKETS; i++)
-                if (e->tickets[i].id && e->tickets[i].slot == k && !e->tickets[i].cancelled)
-                    st_publish_event(e, &e->tickets[i], pending ? AZ_CHANGE_TRACK_DATA : AZ_CHANGE_INVALIDATED, rc);
-        }
+        st_publish_job(e, &job, rc);
         pthread_mutex_unlock(&e->mu);
     }
 }

@@ -3059,6 +3059,27 @@ enum {
     OV_WAKE_FRAME = 1,
     OV_WAKE_COMMAND = 2
 };
+static int ov_wait_frame(const struct pollfd *p, int pending_x, long deadline) {
+    int order = compare_timestamps(now_ms(), deadline, 1000, 1000, 1);
+    if (pending_x || p[0].revents || order == AZ_TIME_EQUAL || order == AZ_TIME_AFTER || order == AZ_TIME_INVALID) return 1;
+    return ((p[1].revents | p[2].revents | p[3].revents) & (POLLERR | POLLHUP | POLLNVAL)) != 0;
+}
+static unsigned ov_wait_ready(const struct pollfd *p, int pending_x, long deadline) {
+    unsigned wake = p[1].revents & POLLIN ? OV_WAKE_COMMAND : 0;
+    if ((p[2].revents | p[3].revents) & POLLIN) sdk_status_ui_drain();
+    if (ov_wait_frame(p, pending_x, deadline)) wake |= OV_WAKE_FRAME;
+    return wake;
+}
+static int ov_wait_timeout(struct overlay_ctx *c, long deadline, int *pending_x, int *timeout) {
+    long now = now_ms();
+    int order = compare_timestamps(now, deadline, 1000, 1000, 1);
+    if (order == AZ_TIME_INVALID) return 0;
+    int before = order == AZ_TIME_BEFORE;
+    long left = before ? deadline - now : 0;
+    *pending_x = XEventsQueued(c->dpy, QueuedAlready) > 0;
+    *timeout = before && !*pending_x ? (int) left : 0;
+    return 1;
+}
 static unsigned ov_wait(struct overlay_ctx *c, useconds_t us, long start_ms) {
     const long deadline = start_ms + (long) (us / 1000);
     struct pollfd p[4] = {
@@ -3067,21 +3088,34 @@ static unsigned ov_wait(struct overlay_ctx *c, useconds_t us, long start_ms) {
         {.fd = ds_event_fd, .events = POLLIN},
         {.fd = ds_timer_fd, .events = POLLIN}};
     for (;;) {
-        long now = now_ms();
-        int deadline_order = compare_timestamps(now, deadline, 1000, 1000, 1);
-        if (deadline_order == AZ_TIME_INVALID) return OV_WAKE_FRAME;
-        int before_deadline = deadline_order == AZ_TIME_BEFORE;
-        long left = before_deadline ? deadline - now : 0;
-        int pending_x = XEventsQueued(c->dpy, QueuedAlready) > 0;
-        int ready = poll(p, 4, before_deadline && !pending_x ? (int) left : 0);
+        int pending_x, timeout;
+        if (!ov_wait_timeout(c, deadline, &pending_x, &timeout)) return OV_WAKE_FRAME;
+        int ready = poll(p, 4, timeout);
         if (ready < 0 && errno == EINTR) continue;
         if (ready <= 0) return OV_WAKE_FRAME;
-        unsigned wake = p[1].revents & POLLIN ? OV_WAKE_COMMAND : 0;
-        if ((p[2].revents | p[3].revents) & POLLIN) sdk_status_ui_drain();
-        int order = compare_timestamps(now_ms(), deadline, 1000, 1000, 1);
-        if (pending_x || p[0].revents || order == AZ_TIME_EQUAL || order == AZ_TIME_AFTER || order == AZ_TIME_INVALID ||
-            ((p[1].revents | p[2].revents | p[3].revents) & (POLLERR | POLLHUP | POLLNVAL))) wake |= OV_WAKE_FRAME;
+        unsigned wake = ov_wait_ready(p, pending_x, deadline);
         if (wake) return wake;
+    }
+}
+
+static void ov_frame(struct overlay_ctx *c, long *tick_start) {
+    long elapsed_us = (now_ms() - *tick_start) * 1000;
+    if (elapsed_us < OV_MIN_TICK_US)
+        usleep((useconds_t) (OV_MIN_TICK_US - elapsed_us));
+    *tick_start = now_ms();
+    bus_cfg_publish(); /* this tick's Mod Menu settings -> the bus threads */
+    vs_save_flush(); /* a Vinyl Speed Adjust value posted by EP147's message thread */
+    wz_tick(*tick_start); /* persist waveform zoom after it settles */
+    if (ov_reload_banner(c)) sdk_status_ui_drain();
+    else {
+        ov_poll_inputs(c);
+        ov_update_state(c);
+        ov_place_windows(c);
+        if (c->dirty) ov_present(c);
+        if (c->dirty || sdk_any_redraw()) sdk_overlay_present(c, c->dirty);
+        c->need_raise = 0;
+        XFlush(c->dpy);
+        c->dirty = 0;
     }
 }
 
@@ -3102,24 +3136,7 @@ static void *overlay_thread(void *arg) {
     for (;;) {
         if (wake & OV_WAKE_COMMAND) (void) sdk_command_ui_drain(8);
         if (wake & OV_WAKE_FRAME) {
-            long elapsed_us = (now_ms() - tick_start) * 1000;
-            if (elapsed_us < OV_MIN_TICK_US)
-                usleep((useconds_t) (OV_MIN_TICK_US - elapsed_us));
-            tick_start = now_ms();
-            bus_cfg_publish(); /* this tick's Mod Menu settings -> the bus threads */
-            vs_save_flush(); /* a Vinyl Speed Adjust value posted by EP147's message thread */
-            wz_tick(tick_start); /* persist waveform zoom after it settles */
-            if (ov_reload_banner(c)) sdk_status_ui_drain();
-            else {
-                ov_poll_inputs(c);
-                ov_update_state(c);
-                ov_place_windows(c);
-                if (c->dirty) ov_present(c);
-                if (c->dirty || sdk_any_redraw()) sdk_overlay_present(c, c->dirty);
-                c->need_raise = 0;
-                XFlush(c->dpy);
-                c->dirty = 0;
-            }
+            ov_frame(c, &tick_start);
         }
         wake = ov_wait(c, ov_tick_us(), tick_start);
     }

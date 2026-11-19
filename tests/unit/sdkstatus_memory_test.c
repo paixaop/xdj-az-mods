@@ -599,4 +599,5 @@ int main(int argc, char **argv) {
     puts("PASS memory: matched cached pack, immutable UTF-8 rows A/B/A, empty, holder change, competing commits, stale load, balanced refs");
     puts("PASS FILE input: fresh native open/fd, partial input refusal, original cached-atom custody, changed bytes and balanced owners");
     puts("PASS FILE common input: repeated-open physical proof, ambiguous retries rejected, cached DAT/EXT custody, address reuse and weak-only retention");
+    return 0;
 }

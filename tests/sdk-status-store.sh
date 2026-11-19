@@ -19,3 +19,6 @@ tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer);;
 esac
 "${HOST_CC:-cc}" "${flags[@]}" tests/unit/sdkstatus_store_test.c "${libs[@]}" -o "$task_tmp/test"
 "$task_tmp/test" "$task_tmp"
+if [ "$(uname -s)" = Linux ] && [ "${SAN:-plain}" != tsan ]; then
+    "$task_tmp/test" install
+fi

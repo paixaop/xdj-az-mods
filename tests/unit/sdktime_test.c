@@ -25,23 +25,23 @@ static void expect_clock(uint64_t expected) {
 #endif
 }
 static void clock_cases(void) {
-    clock_value = (struct timespec){12, 345};
+    clock_value = (struct timespec) {12, 345};
     clock_status = 0;
     expect_clock(UINT64_C(12000000345));
     clock_status = -1;
     expect_clock(0); /* Never use timespec contents after a failed call. */
     clock_status = 0;
-    clock_value = (struct timespec){-1, 0};
+    clock_value = (struct timespec) {-1, 0};
     expect_clock(0);
-    clock_value = (struct timespec){0, -1};
+    clock_value = (struct timespec) {0, -1};
     expect_clock(0);
-    clock_value = (struct timespec){0, 1000000000L};
+    clock_value = (struct timespec) {0, 1000000000L};
     expect_clock(0);
-    clock_value = (struct timespec){18446744073LL, 709551615L};
+    clock_value = (struct timespec) {18446744073LL, 709551615L};
     expect_clock(UINT64_MAX);
     clock_value.tv_nsec++;
     expect_clock(0); /* Addition must not wrap. */
-    clock_value = (struct timespec){18446744074LL, 0};
+    clock_value = (struct timespec) {18446744074LL, 0};
     expect_clock(0); /* Multiplication must not wrap. */
 }
 static void budget_cases(void) {
@@ -65,8 +65,8 @@ static void elapsed_cases(void) {
 #endif
 }
 static void grid_cases(void) {
-    az_beat beats[] = {{0,120,1,0},{.5,120,2,0},{1.5,60,3,0}};
-    az_track_snapshot s = {.size=sizeof s, .version=AZ_DATA_VERSION, .beat_count=3, .beats=beats};
+    az_beat beats[] = {{0, 120, 1, 0}, {.5, 120, 2, 0}, {1.5, 60, 3, 0}};
+    az_track_snapshot s = {.size = sizeof s, .version = AZ_DATA_VERSION, .beat_count = 3, .beats = beats};
     s.grid_info.availability = AZ_AVAIL_READY;
     double out = 123;
     /* Stored grids have their own time resolution; preserve fractional beats
@@ -79,22 +79,27 @@ static void grid_cases(void) {
     double back = 0;
     assert(st_time_to_beat(&s, out, &back) == AZ_OK && fabs(back - 1.25) < 1e-15);
     const double invalid[] = {NAN, INFINITY, -INFINITY};
-    for (unsigned i=0; i<3; i++) for (unsigned j=0; j<3; j++) {
-        beats[0].time_s=0; beats[1].time_s=.5; beats[2].time_s=1.5;
-        beats[i].time_s=invalid[j];
-        out=123;
-        assert(st_beat_to_time(&s, i == 2 ? 2 : i + .25, &out) == AZ_FAILED && out == 123);
-    }
-    beats[0].time_s=0; beats[1].time_s=.5; beats[2].time_s=INFINITY;
-    out=123;
+    for (unsigned i = 0; i < 3; i++)
+        for (unsigned j = 0; j < 3; j++) {
+            beats[0].time_s = 0;
+            beats[1].time_s = .5;
+            beats[2].time_s = 1.5;
+            beats[i].time_s = invalid[j];
+            out = 123;
+            assert(st_beat_to_time(&s, i == 2 ? 2 : i + .25, &out) == AZ_FAILED && out == 123);
+        }
+    beats[0].time_s = 0;
+    beats[1].time_s = .5;
+    beats[2].time_s = INFINITY;
+    out = 123;
     assert(st_time_to_beat(&s, .25, &out) == AZ_FAILED && out == 123);
-    beats[2].time_s=.5; /* A zero-length selected beat is unusable. */
+    beats[2].time_s = .5; /* A zero-length selected beat is unusable. */
     assert(st_beat_to_time(&s, 1.5, &out) == AZ_FAILED && out == 123);
-    beats[2].time_s=.25; /* A reversed selected beat must not interpolate backwards. */
+    beats[2].time_s = .25; /* A reversed selected beat must not interpolate backwards. */
     assert(st_beat_to_time(&s, 1.5, &out) == AZ_FAILED && out == 123);
 }
 static void interval_cases(void) {
-    az_time_interval out = {.size=sizeof out};
+    az_time_interval out = {.size = sizeof out};
     assert(st_interval(NULL, 0, DBL_MIN, DBL_MAX, &out) == AZ_OK);
     assert((out.valid & AZ_INTERVAL_SOURCE) && compare_timestamps(out.source_s, 0., 1, 1000, 1) == AZ_TIME_EQUAL);
     assert((out.valid & AZ_INTERVAL_PLAYBACK) && compare_timestamps(out.playback_s, 0., 1, 1000, 1) == AZ_TIME_EQUAL); /* Sub-window endpoints form a zero interval. */
@@ -110,6 +115,9 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "budget")) budget_cases();
     else if (!strcmp(argv[1], "elapsed")) elapsed_cases();
     else if (!strcmp(argv[1], "grid")) grid_cases();
-    else { assert(!strcmp(argv[1], "interval")); interval_cases(); }
+    else {
+        assert(!strcmp(argv[1], "interval"));
+        interval_cases();
+    }
     printf("SDK time: %s passed\n", argv[1]);
 }

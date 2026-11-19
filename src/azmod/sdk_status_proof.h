@@ -4,10 +4,19 @@
 #include <stdatomic.h>
 /* Private, optional diagnostics. Context is copied synchronously by the reducer;
  * it never changes admission, publication, or source ownership. */
-enum { DS_PROOF_GAP = 1, DS_PROOF_BASELINE, DS_PROOF_RETIRE, DS_PROOF_RESYNC };
 enum {
-    DS_PROOF_DATABASE = 1, DS_PROOF_FILESYSTEM = 2, DS_PROOF_FILE_CHANGE = 4,
-    DS_PROOF_READ = 8, DS_PROOF_SOURCE = 16, DS_PROOF_BOUNDARY = 32
+    DS_PROOF_GAP = 1,
+    DS_PROOF_BASELINE,
+    DS_PROOF_RETIRE,
+    DS_PROOF_RESYNC
+};
+enum {
+    DS_PROOF_DATABASE = 1,
+    DS_PROOF_FILESYSTEM = 2,
+    DS_PROOF_FILE_CHANGE = 4,
+    DS_PROOF_READ = 8,
+    DS_PROOF_SOURCE = 16,
+    DS_PROOF_BOUNDARY = 32
 };
 struct ds_proof_context {
     unsigned kind, cause;

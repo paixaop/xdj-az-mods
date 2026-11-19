@@ -27,10 +27,16 @@ static _Atomic(azstem_load_observation_v1_fn) g_sd_load_observation;
 static _Atomic(azstem_cue_observation_v1_fn) g_sd_cue_observation, g_sd_cue_take;
 static _Atomic(azstem_cue_observer_mask_v1_fn) g_sd_cue_mask;
 static int master_state_read(int *d, uint64_t *r, uint64_t *ns) {
-    (void) d; (void) r; (void) ns; return 0;
+    (void) d;
+    (void) r;
+    (void) ns;
+    return 0;
 }
 static int cm_tempo_read(int d, double *bpm, uint64_t *g, uint64_t *r, uint64_t *ns) {
-    (void) d; *bpm = 0; *g = *r = *ns = 0; return 0;
+    (void) d;
+    *bpm = 0;
+    *g = *r = *ns = 0;
+    return 0;
 }
 #define RTLD_DEFAULT ((void *) 0)
 static void *sdk_test_dlsym(void *handle, const char *name) {
@@ -57,11 +63,12 @@ void sdk_test_public_load(int deck, const struct azsdk_load_sample *expected) {
     } else assert(!(s.valid & AZ_LIVE_NATIVE_LOAD) && !s.native_load_generation &&
                   !s.native_load_unit_generation && !s.native_load_invalidation_epoch && !s.native_load_observed_ns);
     const size_t prefixes[] = {offsetof(az_deck_snapshot, loop_unit_generation),
-                              offsetof(az_deck_snapshot, native_load_generation), sizeof s};
+                               offsetof(az_deck_snapshot, native_load_generation), sizeof s};
     for (unsigned i = 0; i < sizeof prefixes / sizeof prefixes[0]; ++i) {
         _Alignas(az_deck_snapshot) unsigned char bytes[sizeof s + 16];
         memset(bytes, 0xa5, sizeof bytes);
-        uint32_t size = prefixes[i]; memcpy(bytes, &size, sizeof size);
+        uint32_t size = prefixes[i];
+        memcpy(bytes, &size, sizeof size);
         assert(sd_deck_snapshot_v1(deck, (az_deck_snapshot *) bytes) == AZ_OK);
         for (size_t p = size; p < sizeof bytes; ++p) assert(bytes[p] == 0xa5);
     }
@@ -77,10 +84,15 @@ static struct azsdk_load_sample samples[4];
 static unsigned ready;
 int azsdk_load_read(int deck, struct azsdk_load_sample *out) {
     if (!(ready & (1u << deck))) return 0;
-    *out = samples[deck]; return 1;
+    *out = samples[deck];
+    return 1;
 }
 static int loaded(int deck, struct azstem_deck_observation_v1 *out) {
-    (void) deck; out->loaded = 1; out->revision = 91; out->observed_ns = 92; return 0;
+    (void) deck;
+    out->loaded = 1;
+    out->revision = 91;
+    out->observed_ns = 92;
+    return 0;
 }
 int main(void) {
     atomic_store(&g_sd_observation, loaded);

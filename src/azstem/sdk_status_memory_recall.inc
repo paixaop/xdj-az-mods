@@ -40,6 +40,46 @@ static struct PointerScope pointer_scope(void *address, const void *next) {
 }
 static void pointer_restore(struct PointerScope *scope) { memcpy(scope->address, &scope->previous, sizeof scope->previous); }
 #define POINTER_SCOPE(name, address, next) struct PointerScope name __attribute__((cleanup(pointer_restore))) = pointer_scope(&(address), next)
+static bool selected_row_bounds(uintptr_t start, uintptr_t end, unsigned entry) {
+    return ptr(start) && end >= start && !((end - start) % 0x80) && (end - start) / 0x80 <= AZ_NATIVE_CUE_LIMIT && entry && entry <= (end - start) / 0x80;
+}
+static bool selected_objects_current(Pin *binding, uintptr_t holder, uintptr_t content, const Hold *h, const Hold *c) {
+    return object_word(binding->object + 0xe8) == holder && object_word(holder + 0x28) == content &&
+           atomic_load_explicit(&(binding->latest_pin), memory_order_acquire) == c->token &&
+           atomic_load_explicit(&(binding->holder_pin), memory_order_acquire) == h->token;
+}
+static bool selected_writes_current(const Writing *replacement, const Writing *writes, uint64_t rc, uint64_t wc) {
+    return atomic_load_explicit(&(replacement->interference), memory_order_acquire) == rc &&
+           atomic_load_explicit(&(writes->interference), memory_order_acquire) == wc &&
+           !atomic_load_explicit(&(replacement->count), memory_order_acquire) && !atomic_load_explicit(&(writes->count), memory_order_acquire);
+}
+static bool selected_loop_row(uintptr_t row) {
+    __auto_type times = azcue_read_timestamps((const void *) row);
+    double start_s = 0, end_s = 0;
+    const int interval = compare_timestamps(times.out_sample, times.in_sample, times.sample_rate, times.sample_rate, 1);
+    return !SCALAR(unsigned char, row) && coordinate(times.in_sample, times.in_us, times.sample_rate, &start_s) &&
+           coordinate(times.out_sample, times.out_us, times.sample_rate, &end_s) && interval != AZ_TIME_INVALID && interval == AZ_TIME_AFTER;
+}
+static bool selected_binding_current(unsigned d, const Hold *pack, Pin *binding) {
+    return atomic_load_explicit(&(active[d]), memory_order_acquire) == pack->token && current(d, binding);
+}
+static MemoryEdition selected_published_edition(unsigned d, const Hold *active_pack, const Hold *h, const Hold *c, uintptr_t content, unsigned entry) {
+    Pin *binding = pin_for(active_pack->token);
+    uintptr_t holder = pin_for(h->token)->object;
+    Writing *replacement = &holder_writers[cache_slot(binding->object)];
+    Writing *writes = &writers[cache_slot(holder)];
+    uint64_t rc = atomic_load_explicit(&(replacement->interference), memory_order_acquire), wc = atomic_load_explicit(&(writes->interference), memory_order_acquire);
+    if (atomic_load_explicit(&(replacement->count), memory_order_acquire) || atomic_load_explicit(&(writes->count), memory_order_acquire) ||
+        atomic_flag_test_and_set_explicit(&(binding->publishing), memory_order_acquire)) return (MemoryEdition) {0};
+    PUBLISHING_GUARD(guard, binding);
+    uintptr_t start = object_word(content + 0x28), end = object_word(content + 0x30);
+    if (!selected_row_bounds(start, end, entry) || !selected_objects_current(binding, holder, content, h, c)) return (MemoryEdition) {0};
+    if (!selected_binding_current(d, active_pack, binding) ||
+        !selected_writes_current(replacement, writes, rc, wc)) return (MemoryEdition) {0};
+    if (!selected_loop_row(start + (entry - 1) * 0x80u)) return (MemoryEdition) {0};
+    return (MemoryEdition) {binding->epoch, binding->load, binding->unit, atomic_load_explicit(&(binding->provider), memory_order_relaxed),
+                            atomic_load_explicit(&(binding->serial), memory_order_relaxed), active_pack->token, c->token, entry};
+}
 /* Match an original caller-held Content reference against the active binding.
  * Both this immutable content and the holder are live during the checks. */
 static MemoryEdition selected_edition(unsigned d, uintptr_t pack, uintptr_t content, unsigned entry) {
@@ -50,29 +90,16 @@ static MemoryEdition selected_edition(unsigned d, uintptr_t pack, uintptr_t cont
     HOLD(h, atomic_load_explicit(&(binding->holder_pin), memory_order_acquire));
     HOLD(c, atomic_load_explicit(&(binding->latest_pin), memory_order_acquire));
     if (!h.token || !c.token || pin_for(c.token)->object != content || !typed(content, profile.content)) return (MemoryEdition) {0};
-    __auto_type holder = pin_for(h.token)->object;
-    __auto_type replacement = &(holder_writers[cache_slot(pack)]);
-    __auto_type writes = &(writers[cache_slot(holder)]);
-    uint64_t rc = atomic_load_explicit(&(replacement->interference), memory_order_acquire), wc = atomic_load_explicit(&(writes->interference), memory_order_acquire);
-    if (atomic_load_explicit(&(replacement->count), memory_order_acquire) || atomic_load_explicit(&(writes->count), memory_order_acquire) ||
-        atomic_flag_test_and_set_explicit(&(binding->publishing), memory_order_acquire)) return (MemoryEdition) {0};
-    PUBLISHING_GUARD(guard, binding);
-    uintptr_t start = object_word(content + 0x28), end = object_word(content + 0x30);
-    if (!ptr(start) || end < start || ((end - start) % 0x80) || (end - start) / 0x80 > AZ_NATIVE_CUE_LIMIT ||
-        !entry || entry > (end - start) / 0x80 || object_word(pack + 0xe8) != holder || object_word(holder + 0x28) != content ||
-        atomic_load_explicit(&(binding->latest_pin), memory_order_acquire) != c.token || atomic_load_explicit(&(binding->holder_pin), memory_order_acquire) != h.token ||
-        atomic_load_explicit(&(active[d]), memory_order_acquire) != active_pack.token || !current(d, binding) ||
-        atomic_load_explicit(&(replacement->interference), memory_order_acquire) != rc || atomic_load_explicit(&(writes->interference), memory_order_acquire) != wc ||
-        atomic_load_explicit(&(replacement->count), memory_order_acquire) || atomic_load_explicit(&(writes->count), memory_order_acquire)) return (MemoryEdition) {0};
-    const uintptr_t row = start + (entry - 1) * 0x80u;
-    __auto_type times = azcue_read_timestamps(((const void *) (row)));
-    double start_s = 0, end_s = 0;
-    const int interval = compare_timestamps(times.out_sample, times.in_sample, times.sample_rate, times.sample_rate, 1);
-    if (SCALAR(unsigned char, row) || !coordinate(times.in_sample, times.in_us, times.sample_rate, &(start_s)) ||
-        !coordinate(times.out_sample, times.out_us, times.sample_rate, &(end_s)) ||
-        interval == AZ_TIME_INVALID || interval != AZ_TIME_AFTER) return (MemoryEdition) {0};
-    return (MemoryEdition) {binding->epoch, binding->load, binding->unit, atomic_load_explicit(&(binding->provider), memory_order_relaxed),
-                            atomic_load_explicit(&(binding->serial), memory_order_relaxed), active_pack.token, c.token, entry};
+    return selected_published_edition(d, &active_pack, &h, &c, content, entry);
+}
+static void recall_select(RecallCandidates *candidates, uintptr_t caller, uintptr_t caller_sp, uintptr_t pack, uintptr_t index) {
+    for (unsigned n = 0; n < 4; ++n) {
+        if (caller != recall_bias + recall_profile->calls[n]) continue;
+        if (!typed(pack, profile.pack)) return;
+        uintptr_t content = object_word(caller_sp + (n < 2 ? 0x78 : 0x90));
+        for (unsigned d = 0; d < 4; ++d) candidates->deck[d] = selected_edition(d, pack, content, (unsigned) index + 1);
+        return;
+    }
 }
 __attribute__((visibility("hidden"))) void azn_recall_accept(uintptr_t manager, uintptr_t track, uintptr_t pack,
                                                              uintptr_t name, uintptr_t row, uintptr_t option, uintptr_t caller_sp, uintptr_t index) {
@@ -80,13 +107,7 @@ __attribute__((visibility("hidden"))) void azn_recall_accept(uintptr_t manager, 
     uintptr_t caller = ((uintptr_t) (__builtin_return_address(0)));
     if (atomic_load_explicit(&(recall_ready), memory_order_acquire) && ptr(caller_sp) && row == caller_sp + 0xa0 &&
         index < AZ_NATIVE_CUE_LIMIT) {
-        for (unsigned n = 0; n < 4; ++n)
-            if (caller == recall_bias + recall_profile->calls[n]) {
-                if (!typed(pack, profile.pack)) break;
-                uintptr_t content = object_word(caller_sp + (n < 2 ? 0x78 : 0x90));
-                for (unsigned d = 0; d < 4; ++d) candidates.deck[d] = selected_edition(d, pack, content, (unsigned) (index) + 1);
-                break;
-            }
+        recall_select(&candidates, caller, caller_sp, pack, index);
     }
     bool selected = false;
     for (unsigned deck_index = 0; deck_index < sizeof(candidates.deck) / sizeof(candidates.deck)[0]; ++deck_index) {
@@ -102,7 +123,7 @@ __attribute__((visibility("hidden"))) void azn_recall_accept(uintptr_t manager, 
  * row at sp+0xa0 in x4 and keep the originating intrusive reference on stack.
  * x0..x5 and the original LR are forwarded unchanged. */
 void azn_recall_accept_entry();
-__asm__(".text\n.p2align 2\n.hidden azn_recall_accept_entry\n.type azn_recall_accept_entry,%function\n"
+__asm__(".text\n.p2align 2\n.global azn_recall_accept_entry\n.hidden azn_recall_accept_entry\n.type azn_recall_accept_entry,%function\n"
         "azn_recall_accept_entry:\nmov x6,sp\nmov x7,x22\nb azn_recall_accept\n.size azn_recall_accept_entry,.-azn_recall_accept_entry\n");
 #endif
 struct RecallJob {
@@ -150,6 +171,11 @@ static void memory_call(uintptr_t facade, unsigned kind, uintptr_t property) {
     POINTER_SCOPE(scope, recall_frame, frame.candidates ? &frame : NULL);
     ((void (*)(uintptr_t, unsigned, uintptr_t))(recall_original[1]))(facade, kind, property);
 }
+static void recall_seal_task(uintptr_t dst, const RecallFrame *f) {
+    uintptr_t task = dst - 0x28;
+    if (typed(task, recall_bias + recall_profile->task_table) && object_word(task + 0x18) == f->facade &&
+        SCALAR(unsigned, task + 0x20) == 0 && object_word(task + 0x10)) seal_job(task, f);
+}
 static uintptr_t recall_ctor(uintptr_t dst, uintptr_t src) {
     __auto_type caller = ((uintptr_t) (__builtin_return_address(0)));
     uintptr_t result = ((uintptr_t (*)(uintptr_t, uintptr_t))(recall_original[2]))(dst, src);
@@ -159,9 +185,7 @@ static uintptr_t recall_ctor(uintptr_t dst, uintptr_t src) {
     if (caller == recall_bias + pc[0] && src == f->property) f->first = dst;
     else if (caller == recall_bias + pc[1] && src == f->first) f->owned = dst;
     else if (caller == recall_bias + pc[2] && src == f->owned && dst >= 0x10028) {
-        uintptr_t task = dst - 0x28;
-        if (typed(task, recall_bias + recall_profile->task_table) && object_word(task + 0x18) == f->facade &&
-            SCALAR(unsigned, task + 0x20) == 0 && object_word(task + 0x10)) seal_job(task, f);
+        recall_seal_task(dst, f);
     }
     return result;
 }
@@ -197,10 +221,10 @@ static void install_recall(int build, uintptr_t bias, azexit_install_fn install)
                      ((void *) (recall_destroy_4)), ((void *) (recall_destroy_5))};
     for (unsigned entry_index = 0; entry_index < sizeof(recall_profile->entries) / sizeof(recall_profile->entries)[0]; ++entry_index) {
         const Entry *entry = &(recall_profile->entries[entry_index]);
-        if (memcmp(((const void *) (bias + entry->address)), entry->prologue, sizeof entry->prologue)) return;
+        if (!recall_original[entry_index] && memcmp(((const void *) (bias + entry->address)), entry->prologue, sizeof entry->prologue)) return;
     }
     for (unsigned i = 0; i < 6; ++i)
-        if (!install(bias + recall_profile->entries[i].address, hooks[i], &recall_original[i]) || !recall_original[i]) return;
+        if (!recall_original[i] && (!install(bias + recall_profile->entries[i].address, hooks[i], &recall_original[i]) || !recall_original[i])) return;
     atomic_store_explicit(&(recall_ready), true, memory_order_release);
 #else
     (void) build;

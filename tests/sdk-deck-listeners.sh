@@ -6,11 +6,13 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/az-deck-listeners.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 python3 - "$work/deck.inc" <<'PY'
 from pathlib import Path
-import sys
+import json,sys
 text=Path('src/azmod/sdk_deck.c').read_text()
 prefix=text[:text.index('/* az_core_v1.deck_info */')]
 events=text[text.index('/* ---- on_deck_event'):text.index('static int sd_native_load_read')]
-Path(sys.argv[1]).write_text(prefix+'\n'+events)
+path=json.dumps(str(Path('src/azmod/sdk_deck.c').resolve()))
+line=text[:text.index('/* ---- on_deck_event')].count('\n')+1
+Path(sys.argv[1]).write_text('#line 1 '+path+'\n'+prefix+'\n#line '+str(line)+' '+path+'\n'+events)
 PY
 flags=(-std=c11 -O1 -g -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable -Isrc -Isrc/azmod)
 case ${SAN:-plain} in plain|'') ;; asan)flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all);;tsan)flags+=(-fsanitize=thread);;*)exit 2;;esac

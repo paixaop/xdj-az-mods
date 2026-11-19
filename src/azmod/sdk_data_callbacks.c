@@ -37,40 +37,49 @@ static int sdk_on_command_complete(const char *id, void (*fn)(const az_command_r
     g_sdk_callbacks[owner].command = fn;
     return AZ_OK;
 }
+static int sdk_data_owner_active(int owner) {
+    return g_cm[owner].state == AZCM_LOADED && !st_owner_retired(&g_st, owner);
+}
+static void sdk_data_owner_callbacks(int owner) {
+    if (!sdk_data_owner_active(owner) || !g_sdk_callbacks[owner].data) return;
+    for (int n = 0; n < 16; ++n) {
+        az_data_change event = {.size = sizeof event};
+        int rc = st_event_read(&g_st, owner, g_sdk_callbacks[owner].after, &event);
+        if (rc != AZ_OK) break; /* Contention retries on the next UI turn. */
+        g_sdk_callbacks[owner].after = event.sequence;
+        g_sdk_callbacks[owner].data(&event, g_sdk_callbacks[owner].data_user);
+        if (!sdk_data_owner_active(owner)) break;
+    }
+}
+static int sdk_command_callback_ready(const struct scmd_record *record, int slot) {
+    return record->phase == SCMD_FINAL && !record->retired && !record->asynchronous && !record->pinned &&
+           !record->awaiting && record->token != g_sdk_command_notified[slot];
+}
+static int sdk_command_callback_owner(const struct scmd_record *record) {
+    int owner = record->owner;
+    return owner >= 0 && owner < g_cm_n && record->owner_lifetime == g_sdk_commands.owner_lifetime[owner] &&
+           sdk_data_owner_active(owner) && g_sdk_callbacks[owner].command;
+}
+/* Retained records provide exactly-once completion despite journal overruns.
+ * Copy under the lock, then release it before entering mod code. */
+static int sdk_command_record_callback(int slot) {
+    if (pthread_mutex_trylock(&g_sdk_commands.mu)) return 0;
+    const struct scmd_record *record = &g_sdk_commands.records[slot];
+    int owner = record->owner;
+    int deliver = sdk_command_callback_ready(record, slot) && sdk_command_callback_owner(record);
+    az_command_result result;
+    if (deliver) {
+        result = record->result;
+        g_sdk_command_notified[slot] = record->token;
+    }
+    pthread_mutex_unlock(&g_sdk_commands.mu);
+    if (deliver) g_sdk_callbacks[owner].command(&result, g_sdk_callbacks[owner].command_user);
+    return 1;
+}
 static void sdk_data_callbacks_tick(void) {
-    for (int owner = 0; owner < g_cm_n; ++owner) {
-        if (g_cm[owner].state != AZCM_LOADED || st_owner_retired(&g_st, owner)) continue;
-        if (g_sdk_callbacks[owner].data) {
-            for (int n = 0; n < 16; ++n) {
-                az_data_change event = {.size = sizeof event};
-                int rc = st_event_read(&g_st, owner, g_sdk_callbacks[owner].after, &event);
-                if (rc != AZ_OK) break; /* contention retries on the next UI turn */
-                g_sdk_callbacks[owner].after = event.sequence;
-                g_sdk_callbacks[owner].data(&event, g_sdk_callbacks[owner].data_user);
-                if (g_cm[owner].state != AZCM_LOADED || st_owner_retired(&g_st, owner)) break;
-            }
-        }
-    }
-    /* Read retained records instead of a lossy journal: completion is delivered
-     * exactly once even if unrelated commands overrun their event ring. Copy one
-     * result under the lock and release it before entering mod code. */
-    for (int i = 0; i < SCMD_SLOTS; ++i) {
-        if (pthread_mutex_trylock(&g_sdk_commands.mu)) break;
-        const struct scmd_record *r = &g_sdk_commands.records[i];
-        int owner = r->owner;
-        int deliver = r->phase == SCMD_FINAL && !r->retired && !r->asynchronous && !r->pinned && !r->awaiting &&
-                      r->token != g_sdk_command_notified[i] && owner >= 0 && owner < g_cm_n &&
-                      r->owner_lifetime == g_sdk_commands.owner_lifetime[owner] &&
-                      g_cm[owner].state == AZCM_LOADED && !st_owner_retired(&g_st, owner) &&
-                      g_sdk_callbacks[owner].command;
-        az_command_result result;
-        if (deliver) {
-            result = r->result;
-            g_sdk_command_notified[i] = r->token;
-        }
-        pthread_mutex_unlock(&g_sdk_commands.mu);
-        if (deliver) g_sdk_callbacks[owner].command(&result, g_sdk_callbacks[owner].command_user);
-    }
+    for (int owner = 0; owner < g_cm_n; ++owner) sdk_data_owner_callbacks(owner);
+    for (int slot = 0; slot < SCMD_SLOTS; ++slot)
+        if (!sdk_command_record_callback(slot)) break;
 }
 
 /* Autonomous command delivery is drained by the overlay loop, not by

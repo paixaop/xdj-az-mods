@@ -71,23 +71,36 @@ static void ds_master_apply(const struct ds_gui_record *r, int gap) {
 #include "sdk_status_tempo.c"
 #include "sdk_status_gui_models.c"
 #include "sdk_status_pad.c"
+static int ds_gui_dispatch(const struct ds_gui_record *record, int gap) {
+    switch (record->kind) {
+    case DS_GUI_MASTER: ds_master_apply(record, gap); break;
+    case DS_GUI_TEMPO: ds_tempo_apply(record, gap); break;
+    case DS_GUI_PAD: ds_pad_apply(record, gap); break;
+    case DS_GUI_EFFECTIVE_KEY: return ds_model_apply(DS_MODEL_KEY, record, gap);
+    case DS_GUI_SLIP: return ds_model_apply(DS_MODEL_SLIP, record, gap);
+    case DS_GUI_SLIDER: return ds_model_apply(DS_MODEL_SLIDER, record, gap);
+    default: return AZ_INVALID;
+    }
+    return AZ_OK;
+}
+static int ds_gui_delivered(const struct ds_gui_record *record, int gap, const uint64_t delivered[21], unsigned index) {
+    return record->deck >= 4 || index >= 21 || (!gap && delivered[index] && record->revision <= delivered[index]);
+}
 static int ds_gui_commit(const struct ds_gui_record *r, int gap, uint64_t delivered[21]) {
     unsigned i = r->kind == DS_GUI_MASTER ? 0 : (r->kind - 1) * 4 + r->deck + 1;
-    if (r->deck >= 4 || i >= 21 || (!gap && delivered[i] && r->revision <= delivered[i])) return AZ_OK;
-    int rc = AZ_OK;
-    if (r->kind == DS_GUI_MASTER) ds_master_apply(r, gap);
-    else if (r->kind == DS_GUI_TEMPO) ds_tempo_apply(r, gap);
-    else if (r->kind == DS_GUI_PAD) ds_pad_apply(r, gap);
-    else if (r->kind == DS_GUI_EFFECTIVE_KEY) rc = ds_model_apply(DS_MODEL_KEY, r, gap);
-    else if (r->kind == DS_GUI_SLIP) rc = ds_model_apply(DS_MODEL_SLIP, r, gap);
-    else if (r->kind == DS_GUI_SLIDER) rc = ds_model_apply(DS_MODEL_SLIDER, r, gap);
-    else return AZ_INVALID;
+    if (ds_gui_delivered(r, gap, delivered, i)) return AZ_OK;
+    int rc = ds_gui_dispatch(r, gap);
     if ((rc == AZ_OK || rc == AZ_LIMIT) && r->revision > delivered[i]) delivered[i] = r->revision;
     return rc;
 }
-enum { DS_GUI_PENDING = 32 };
+enum {
+    DS_GUI_PENDING = 32
+};
 struct ds_gui_pending {
-    struct { struct ds_gui_record record; int gap; } entries[DS_GUI_PENDING];
+    struct {
+        struct ds_gui_record record;
+        int gap;
+    } entries[DS_GUI_PENDING];
     unsigned count;
 };
 struct ds_gui_cursor {
@@ -138,6 +151,40 @@ static void ds_gui_load(unsigned deck) {
     if (deck < 4 && (atomic_load_explicit(&ds_gui_armed, memory_order_acquire) & ds_model_bit(DS_MODEL_KEY, deck)))
         ds_gui_signal();
 }
+static void ds_gui_reseed_models(unsigned gap, struct ds_gui_cursor *cursor) {
+    for (unsigned model = 0; model < DS_MODEL_COUNT; model++)
+        for (unsigned deck = 0; deck < 4; deck++)
+            if (gap & ds_model_bit(model, deck)) {
+                struct ds_gui_record record = ds_model_seed(model, deck);
+                ds_gui_apply(&record, 1, cursor);
+            }
+}
+static void ds_gui_reseed(unsigned gap, struct ds_gui_cursor *cursor) {
+    if (gap & 1) {
+        pthread_mutex_lock(&g_master_state_mu);
+        struct ds_gui_record record = ds_master_seed();
+        pthread_mutex_unlock(&g_master_state_mu);
+        ds_gui_apply(&record, 1, cursor);
+    }
+    for (unsigned deck = 0; deck < 4; deck++)
+        if (gap & (2u << deck)) {
+            struct ds_gui_record record = ds_tempo_seed(deck);
+            ds_gui_apply(&record, 1, cursor);
+        }
+    ds_gui_reseed_models(gap, cursor);
+    for (unsigned deck = 0; deck < 4; deck++)
+        if (gap & ds_pad_bit(deck)) {
+            struct ds_gui_record record = ds_pad_seed(deck);
+            ds_gui_apply(&record, 1, cursor);
+        }
+}
+static void ds_gui_drain(struct ds_gui_cursor *cursor) {
+    struct ds_gui_record record;
+    while (read(ds_gui_pipe[0], &record, sizeof record) == (ssize_t) sizeof record) ds_gui_apply(&record, 0, cursor);
+    unsigned gap = atomic_exchange_explicit(&ds_gui_gap, 0, memory_order_acq_rel);
+    ds_gui_reseed(gap, cursor);
+    for (unsigned deck = 0; deck < 4; ++deck) ds_gui_flush(deck, cursor);
+}
 static void *ds_gui_run(void *unused) {
     (void) unused;
     struct pollfd fd = {.fd = ds_gui_wake, .events = POLLIN};
@@ -148,81 +195,80 @@ static void *ds_gui_run(void *unused) {
         if (rc <= 0 || !(fd.revents & POLLIN)) break;
         uint64_t signal;
         if (read(fd.fd, &signal, sizeof signal) < 0 && errno != EAGAIN && errno != EINTR) break;
-        struct ds_gui_record r;
-        while (read(ds_gui_pipe[0], &r, sizeof r) == (ssize_t) sizeof r) ds_gui_apply(&r, 0, &cursor);
-        unsigned gap = atomic_exchange_explicit(&ds_gui_gap, 0, memory_order_acq_rel);
-        if (gap & 1) {
-            pthread_mutex_lock(&g_master_state_mu);
-            r = ds_master_seed();
-            pthread_mutex_unlock(&g_master_state_mu);
-            ds_gui_apply(&r, 1, &cursor);
-        }
-        for (unsigned d = 0; d < 4; d++)
-            if (gap & (2u << d)) {
-                r = ds_tempo_seed(d);
-                ds_gui_apply(&r, 1, &cursor);
-            }
-        for (unsigned m = 0; m < DS_MODEL_COUNT; m++)
-            for (unsigned d = 0; d < 4; d++)
-                if (gap & ds_model_bit(m, d)) {
-                    r = ds_model_seed(m, d);
-                    ds_gui_apply(&r, 1, &cursor);
-                }
-        for (unsigned d = 0; d < 4; d++)
-            if (gap & ds_pad_bit(d)) {
-                r = ds_pad_seed(d);
-                ds_gui_apply(&r, 1, &cursor);
-            }
-        for (unsigned d = 0; d < 4; ++d) ds_gui_flush(d, &cursor);
+        ds_gui_drain(&cursor);
     }
     return NULL;
 }
-static void ds_gui_interest(uint64_t topics) {
+static unsigned ds_gui_models_wanted(uint64_t topics) {
+    unsigned wanted = 0;
+    for (unsigned model = 0; model < DS_MODEL_COUNT; model++)
+        if ((topics & AZ_STATUS_TOPIC(ds_models[model].topic)) && atomic_load(&ds_model_ready[model]))
+            wanted |= 15u * ds_model_bit(model, 0);
+    return wanted;
+}
+static unsigned ds_gui_wanted(uint64_t topics) {
     unsigned wanted = (topics & AZ_STATUS_TOPIC(AZ_STATUS_SYNC)) && master_state_supported() ? 1u : 0u;
     if ((topics & AZ_STATUS_TOPIC(AZ_STATUS_TEMPO)) && atomic_load(&ds_tempo_ready)) wanted |= 30u;
-    for (unsigned m = 0; m < DS_MODEL_COUNT; m++)
-        if ((topics & AZ_STATUS_TOPIC(ds_models[m].topic)) && atomic_load(&ds_model_ready[m])) wanted |= 15u * ds_model_bit(m, 0);
+    wanted |= ds_gui_models_wanted(topics);
     if ((topics & AZ_STATUS_TOPIC(AZ_STATUS_SETTINGS)) && atomic_load(&ds_pad_ready)) wanted |= 15u << 9;
-    unsigned before = atomic_load(&ds_gui_armed);
-    if (!(wanted & ~before)) return;
-    if (!before) {
-        if (pipe2(ds_gui_pipe, O_NONBLOCK | O_CLOEXEC) < 0) return;
-        ds_gui_wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-        pthread_t worker;
-        if (ds_gui_wake < 0 || az_thread_create(&worker, NULL, ds_gui_run, NULL)) {
-            close(ds_gui_pipe[0]);
-            close(ds_gui_pipe[1]);
-            if (ds_gui_wake >= 0) close(ds_gui_wake);
-            return;
-        }
-        pthread_detach(worker);
+    return wanted;
+}
+static int ds_gui_start(void) {
+    if (pipe2(ds_gui_pipe, O_NONBLOCK | O_CLOEXEC) < 0) return 0;
+    ds_gui_wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    pthread_t worker;
+    if (ds_gui_wake < 0 || az_thread_create(&worker, NULL, ds_gui_run, NULL)) {
+        close(ds_gui_pipe[0]);
+        close(ds_gui_pipe[1]);
+        if (ds_gui_wake >= 0) close(ds_gui_wake);
+        return 0;
     }
-    if ((wanted & ~before) & 1) {
-        pthread_mutex_lock(&g_master_state_mu);
-        atomic_fetch_or_explicit(&ds_gui_armed, 1, memory_order_release);
-        struct ds_gui_record seed = ds_master_seed();
-        ds_gui_send(&seed, 1, 1);
-        pthread_mutex_unlock(&g_master_state_mu);
-    }
-    for (unsigned d = 0; d < 4; d++)
-        if (wanted & ~before & (2u << d)) {
-            atomic_fetch_or_explicit(&ds_gui_armed, 2u << d, memory_order_release);
-            struct ds_gui_record seed = ds_tempo_seed(d);
-            if (seed.availability != AZ_AVAIL_STALE || seed.revision) ds_gui_send(&seed, 2u << d, 1);
+    pthread_detach(worker);
+    return 1;
+}
+static void ds_gui_arm_master(unsigned added) {
+    if (!(added & 1)) return;
+    pthread_mutex_lock(&g_master_state_mu);
+    atomic_fetch_or_explicit(&ds_gui_armed, 1, memory_order_release);
+    struct ds_gui_record seed = ds_master_seed();
+    ds_gui_send(&seed, 1, 1);
+    pthread_mutex_unlock(&g_master_state_mu);
+}
+static void ds_gui_arm_tempo(unsigned added) {
+    for (unsigned deck = 0; deck < 4; deck++)
+        if (added & (2u << deck)) {
+            atomic_fetch_or_explicit(&ds_gui_armed, 2u << deck, memory_order_release);
+            struct ds_gui_record seed = ds_tempo_seed(deck);
+            if (seed.availability != AZ_AVAIL_STALE || seed.revision) ds_gui_send(&seed, 2u << deck, 1);
         }
-    for (unsigned m = 0; m < DS_MODEL_COUNT; m++)
-        for (unsigned d = 0; d < 4; d++) {
-            unsigned bit = ds_model_bit(m, d);
-            if (!(wanted & ~before & bit)) continue;
+}
+static void ds_gui_arm_models(unsigned added) {
+    for (unsigned model = 0; model < DS_MODEL_COUNT; model++)
+        for (unsigned deck = 0; deck < 4; deck++) {
+            unsigned bit = ds_model_bit(model, deck);
+            if (!(added & bit)) continue;
             atomic_fetch_or_explicit(&ds_gui_armed, bit, memory_order_release);
-            struct ds_gui_record seed = ds_model_seed(m, d);
+            struct ds_gui_record seed = ds_model_seed(model, deck);
             if (seed.revision) ds_gui_send(&seed, bit, 1);
         }
-    for (unsigned d = 0; d < 4; d++)
-        if (wanted & ~before & ds_pad_bit(d)) {
-            unsigned bit = ds_pad_bit(d);
+}
+static void ds_gui_arm_pads(unsigned added) {
+    for (unsigned deck = 0; deck < 4; deck++)
+        if (added & ds_pad_bit(deck)) {
+            unsigned bit = ds_pad_bit(deck);
             atomic_fetch_or(&ds_gui_armed, bit);
-            struct ds_gui_record seed = ds_pad_seed(d);
+            struct ds_gui_record seed = ds_pad_seed(deck);
             if (seed.revision) ds_gui_send(&seed, bit, 1);
         }
+}
+static void ds_gui_interest(uint64_t topics) {
+    unsigned wanted = ds_gui_wanted(topics);
+    unsigned before = atomic_load(&ds_gui_armed);
+    unsigned added = wanted & ~before;
+    if (!added) return;
+    if (!before && !ds_gui_start()) return;
+    ds_gui_arm_master(added);
+    ds_gui_arm_tempo(added);
+    ds_gui_arm_models(added);
+    ds_gui_arm_pads(added);
 }

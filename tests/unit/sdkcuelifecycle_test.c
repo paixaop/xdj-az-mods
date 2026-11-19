@@ -80,7 +80,56 @@ void azsdk_cue_recall_retire(void *manager) {
     retirement_stage = 3;
     for (unsigned i = 0; i < 4; ++i) assert(live[i] != manager);
 }
+static void test_native_profile_validation(void) {
+#if defined(__linux__) && defined(__aarch64__)
+    struct {
+        _Alignas(8) unsigned char code[16];
+        uintptr_t tables[6][8];
+    } native = {0};
+    ElfW(Phdr) segment = {.p_type = PT_LOAD, .p_flags = PF_R | PF_X, .p_vaddr = (uintptr_t) &native, .p_memsz = sizeof native};
+    Main image = {.found = true, .headers = &segment, .count = 1};
+    struct azcue_profile profile = {0};
+    struct azcue_entry entry = {.address = (uintptr_t) native.code};
+    profile.ctor = profile.complete_dtor = profile.deleting_dtor = entry;
+    struct azcue_entry *groups[] = {profile.store, profile.persist_hooks, profile.persist_metadata, profile.actor_entries};
+    const unsigned counts[] = {sizeof profile.store / sizeof *profile.store, sizeof profile.persist_hooks / sizeof *profile.persist_hooks,
+                               sizeof profile.persist_metadata / sizeof *profile.persist_metadata, sizeof profile.actor_entries / sizeof *profile.actor_entries};
+    for (unsigned i = 0; i < 4; ++i)
+        for (unsigned j = 0; j < counts[i]; ++j) groups[i][j] = entry;
+    profile.actor.manager_vptr = (uintptr_t) native.tables[0];
+    profile.actor.box_vptr = (uintptr_t) native.tables[1];
+    profile.actor.owner_vptr = (uintptr_t) native.tables[2];
+    profile.actor.task_vptr = (uintptr_t) native.tables[3];
+    profile.persist.handler_table = (uintptr_t) native.tables[4];
+    profile.persist.reception_table = (uintptr_t) native.tables[5];
+    profile.actor.memory_producer = profile.actor.post = profile.actor.complete_dtor = profile.actor.execute = entry.address;
+    native.tables[0][0] = native.tables[0][1] = native.tables[0][2] = entry.address;
+    native.tables[1][6] = native.tables[3][0] = native.tables[3][2] = entry.address;
+    assert(profile_verified(&image, &profile));
+    native.code[3] = 1;
+    assert(!profile_verified(&image, &profile)); // prologue mismatch blocks all hooking
+    native.code[3] = 0;
+    segment.p_flags = PF_R;
+    assert(!profile_verified(&image, &profile)); // readable data cannot be called as code
+    assert(profile_tables_readable(&image, &profile));
+    segment.p_flags = PF_X;
+    assert(!profile_tables_readable(&image, &profile));
+    segment.p_flags = PF_R | PF_X;
+    native.tables[3][2] = 0;
+    assert(!profile_verified(&image, &profile)); // execute vtable must match the verified profile
+    native.tables[3][2] = entry.address;
+    profile.persist.reception_table = (uintptr_t) &native + sizeof native - 8;
+    assert(!profile_verified(&image, &profile)); // full table must lie in a readable segment
+    assert(!main_contains(&image, UINTPTR_MAX - 7, 16, false));
+    Main found = {0};
+    struct dl_phdr_info info = {.dlpi_name = "library.so", .dlpi_addr = 0x2000, .dlpi_phdr = &segment, .dlpi_phnum = 1};
+    assert(!main_image(&info, sizeof info, &found) && !found.found);
+    info.dlpi_name = "";
+    assert(main_image(&info, sizeof info, &found) && found.found && found.bias == 0x2000 && found.headers == &segment && found.count == 1);
+#endif
+}
 int main() {
+    test_native_profile_validation();
     struct azcue_profile p = {0}, q = {0};
     assert(!azsdk_cue_profile_get(0, 0, &p));
     assert(!azsdk_cue_profile_get(1, 0, NULL));

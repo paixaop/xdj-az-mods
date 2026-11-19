@@ -182,7 +182,10 @@ static void row_enter(void *u) {
     g_row_enter++;
 }
 static const az_screen_v1 ROWSCR = {
-    .size = sizeof ROWSCR, .on_draw = row_draw, .on_input = row_input, .on_enter = row_enter,
+    .size = sizeof ROWSCR,
+    .on_draw = row_draw,
+    .on_input = row_input,
+    .on_enter = row_enter,
 };
 
 int main(void) {

@@ -232,6 +232,7 @@ static void contracts(void) {
     assert(scmd_submit(&f.engine, 0, &r, &f.target[0], &f.adapter, &large.value, NULL) == AZ_OK);
     assert(large.value.size == sizeof large && large.guard[0] == UINT64_MAX && large.guard[1] == UINT64_MAX);
     assert(scmd_step(&f.engine, 0, &f.adapter) == AZ_OK);
+    assert(scmd_acknowledge(&f.engine, 0, 1) == AZ_INVALID);
     assert(scmd_poll(&f.engine, 0, 1, &large.value) == AZ_OK && large.value.outcome == AZ_COMMAND_APPLIED);
     assert(large.value.size == sizeof large && large.guard[0] == UINT64_MAX && large.guard[1] == UINT64_MAX);
     assert(scmd_destroy(&f.engine) == AZ_BUSY);
@@ -738,6 +739,12 @@ static void pending_delivery_identity(void) {
     unsigned calls = 0;
     enum scmd_detail detail;
     assert(scmd_submit_async(&f.engine, 0, &r, async_callback, &calls, &f.target[0], &f.adapter, &out, &detail, 0) == AZ_OK);
+    assert(scmd_acknowledge(NULL, 0, 1) == AZ_INVALID);
+    assert(scmd_acknowledge(&f.engine, -1, 1) == AZ_INVALID);
+    assert(scmd_acknowledge(&f.engine, SCMD_OWNERS, 1) == AZ_INVALID);
+    assert(scmd_acknowledge(&f.engine, 0, 0) == AZ_INVALID);
+    assert(scmd_acknowledge(&f.engine, 0, 1) == AZ_INVALID);
+    assert(poll(&f, 0, 1).outcome == AZ_COMMAND_ACCEPTED);
     assert(scmd_step(&f.engine, 0, &f.adapter) == AZ_OK);
     struct scmd_notification notification;
     assert(scmd_next_notification(&f.engine, &notification) == AZ_OK);
@@ -749,6 +756,17 @@ static void pending_delivery_identity(void) {
     scmd_notification_done(&f.engine, &notification);
     assert(scmd_find_token(&f.engine, notification.token) == NULL);
     assert(scmd_find_pending_token(&f.engine, notification.token) != NULL);
+    /* The result remains queryable by its owner after moving out of the
+     * primary store, until RELEASED delivery completes. Other owners cannot
+     * observe it, and a miss must leave the caller's output untouched. */
+    out = poll(&f, 0, 1);
+    assert(out.outcome == AZ_COMMAND_APPLIED && out.reason == AZ_OK && out.request_id == 1);
+    assert(out.revision == notification.completion.result.revision);
+    int time_order = compare_timestamps(out.observed_ns, notification.completion.result.observed_ns,
+                                        1000000000, 1000000000, 1);
+    assert(time_order != AZ_TIME_INVALID && time_order == AZ_TIME_EQUAL);
+    az_command_result saved = out;
+    assert(scmd_poll(&f.engine, 1, 1, &out) == AZ_STALE && !memcmp(&saved, &out, sizeof out));
     out = result();
     assert(scmd_submit_async(&f.engine, 0, &r, async_callback, &calls, &f.target[0], &f.adapter, &out, &detail, 0) == AZ_OK);
     assert(out.outcome == AZ_COMMAND_APPLIED && out.request_id == 1);
@@ -758,6 +776,8 @@ static void pending_delivery_identity(void) {
     scmd_notification_done(&f.engine, &notification);
     assert(calls == 0);
     assert(scmd_acknowledge(&f.engine, 0, 1) == AZ_STALE);
+    saved = out;
+    assert(scmd_poll(&f.engine, 0, 1, &out) == AZ_STALE && !memcmp(&saved, &out, sizeof out));
     assert(scmd_destroy(&f.engine) == AZ_OK);
 }
 int main(void) {

@@ -56,59 +56,78 @@ void azsdk_cue_recall_test_profile(const struct azcue_recall_profile *p) {
     if (p && !s->configured) s->profile = *p;
 }
 #endif
+#if defined(__aarch64__) && !defined(AZSDK_CUE_RECALL_TESTING)
+static void native_profile_addresses(struct azcue_recall_profile *p, int build, uintptr_t bias) {
+    const uintptr_t addresses[2][9] = {
+        {0x2614318, 0x2616030, 0x28770b8, 0x288eeb0, 0x13726c8, 0x80aac0, 0x13e7e98, 0x957408, 0x288f0d0},
+        {0x294e7a8, 0x29504c0, 0x2bc9300, 0x2be12b0, 0x142da18, 0x8504a8, 0x14a32d8, 0x99ca38, 0x2be14d0}};
+    uintptr_t *fields[] = {&p->manager_table, &p->loader_table, &p->load_table, &p->property_table,
+                           &p->load_call, &p->copy_property, &p->destroy_property, &p->affinity, &p->locked_property_table};
+    for (unsigned i = 0; i < sizeof fields / sizeof *fields; i++) *fields[i] = bias + addresses[build - 1][i];
+}
+#endif
+static bool profile_functions_ready(const struct azcue_recall_profile *p) {
+    return p->load_call && p->copy_property && p->destroy_property && p->affinity &&
+           word(p->load_table + 3 * sizeof(uintptr_t)) == p->load_call;
+}
+static bool profile_ready(const struct azcue_recall_profile *p) {
+    bool tables = p->manager_table && p->loader_table && p->load_table && p->property_table;
+    return tables && profile_functions_ready(p);
+}
 int azsdk_cue_recall_configure(int build, uintptr_t bias) {
     State *s = state();
     AZ_MUTEX_LOCK(lock, s->mutex);
     if (build != 1 && build != 2) return AZ_INVALID;
     if (s->configured) return AZ_OK;
 #if defined(__aarch64__) && !defined(AZSDK_CUE_RECALL_TESTING)
-    const bool newer = build == 2;
-#define NATIVE(field, old_address, new_address) s->profile.field = bias + (newer ? new_address : old_address)
-    NATIVE(manager_table, 0x2614318, 0x294e7a8);
-    NATIVE(loader_table, 0x2616030, 0x29504c0);
-    NATIVE(load_table, 0x28770b8, 0x2bc9300);
-    NATIVE(property_table, 0x288eeb0, 0x2be12b0);
-    NATIVE(load_call, 0x13726c8, 0x142da18);
-    NATIVE(copy_property, 0x80aac0, 0x8504a8);
-    NATIVE(destroy_property, 0x13e7e98, 0x14a32d8);
-    NATIVE(affinity, 0x957408, 0x99ca38);
-    NATIVE(locked_property_table, 0x288f0d0, 0x2be14d0);
+    native_profile_addresses(&s->profile, build, bias);
     struct azcue_profile verified = {0};
     if (!azsdk_cue_main_profile(build, &verified)) return AZ_UNSUPPORTED;
     s->profile.assign_property = verified.store[13].address;
     s->profile.assign_locked = verified.store[14].address;
-#undef NATIVE
 #else
     (void) bias;
 #endif
-    const struct azcue_recall_profile *p = &s->profile;
-    if (!p->manager_table || !p->loader_table || !p->load_table || !p->property_table ||
-        !p->load_call || !p->copy_property || !p->destroy_property || !p->affinity ||
-        word(p->load_table + 3 * sizeof(uintptr_t)) != p->load_call) return AZ_UNSUPPORTED;
+    if (!profile_ready(&s->profile)) return AZ_UNSUPPORTED;
     s->configured = true;
     return AZ_OK;
 }
-int azsdk_cue_recall_prepare(const struct azexit_cue_request *r, void *manager,
-                             const void *property) {
-    if (!r || r->size < sizeof *r || r->identity.deck >= 4 || !r->identity.token ||
-        !r->identity.load_generation || !r->identity.deadline_ns || r->identity.reserved ||
-        (r->operation != AZ_CMD_MEMORY_RECALL && r->operation != AZ_CMD_SAVED_RECALL &&
-         !((r->operation == AZ_CMD_CUE_POINT_SET || r->operation == AZ_CMD_CUE_LOOP_SET) &&
-           r->classification == AZ_CUE_HOT && r->entry_id >= 1 && r->entry_id <= 8))) return AZ_INVALID;
+static bool valid_hot_request(const struct azexit_cue_request *r) {
+    return hot_install(r->operation) && r->classification == AZ_CUE_HOT && r->entry_id >= 1 && r->entry_id <= 8;
+}
+static bool valid_recall_operation(const struct azexit_cue_request *r) {
+    return r->operation == AZ_CMD_MEMORY_RECALL || r->operation == AZ_CMD_SAVED_RECALL || valid_hot_request(r);
+}
+static bool valid_recall_identity(const struct azexit_cue_request *r) {
+    return r && r->size >= sizeof *r && r->identity.deck < 4 && r->identity.token &&
+           r->identity.load_generation && r->identity.deadline_ns && !r->identity.reserved;
+}
+static uintptr_t recall_facade(uintptr_t manager, const struct azcue_recall_profile *p) {
+    const uintptr_t loader = word(manager + 0x130);
+    if (!nominal(loader, p->loader_table)) return 0;
+    uintptr_t facade = word(loader + 0x1b8);
+    return nominal(facade, p->load_table) ? facade : 0;
+}
+static bool recall_source_ready(const State *s, const void *manager, const void *property) {
+    return s->configured && nominal((uintptr_t) manager, s->profile.manager_table) &&
+           nominal((uintptr_t) property, s->profile.property_table);
+}
+static bool recall_dispatch_valid(const State *s, unsigned deck, uint64_t token) {
+    return s->configured && deck < 4 && token;
+}
+int azsdk_cue_recall_prepare(const struct azexit_cue_request *r, void *manager, const void *property) {
+    if (!valid_recall_identity(r) || !valid_recall_operation(r)) return AZ_INVALID;
     State *s = state();
     AZ_MUTEX_LOCK(lock, s->mutex);
     const struct azcue_recall_profile *p = &s->profile;
-    if (!s->configured || !nominal(((uintptr_t) (manager)), p->manager_table) ||
-        !nominal(((uintptr_t) (property)), p->property_table)) return AZ_UNSUPPORTED;
+    if (!recall_source_ready(s, manager, property)) return AZ_UNSUPPORTED;
     Slot *slot = &s->slots[r->identity.deck];
     AZ_MUTEX_LOCK(slot_lock, slot->mutex);
     if (slot->token) return AZ_BUSY;
     uintptr_t facade = 0;
     if (!hot_install(r->operation)) {
-        const uintptr_t loader = word(((uintptr_t) (manager)) + 0x130);
-        if (!nominal(loader, p->loader_table)) return AZ_UNSUPPORTED;
-        facade = word(loader + 0x1b8);
-        if (!nominal(facade, p->load_table)) return AZ_UNSUPPORTED;
+        facade = recall_facade((uintptr_t) manager, p);
+        if (!facade) return AZ_UNSUPPORTED;
     }
     native_copy(p->copy_property, slot->property, property, false);
     slot->operation = r->operation;
@@ -134,46 +153,49 @@ const void *azsdk_cue_recall_property(unsigned deck, uint64_t token) {
     if (!lock.held || slot->token != token) return NULL;
     return slot->property;
 }
+static bool recall_owner(uintptr_t c, uintptr_t control, const struct azcue_recall_profile *p) {
+    if (!c || !control || word(control + 0x18) != c + 0x110 || !word(control + 0x68) ||
+        !word(control + 0x28) || !read(uint8_t, word(control + 0x28) + 8)) return false;
+    return word(word(c + 0x110) + 5 * sizeof(uintptr_t)) == p->affinity &&
+           !((bool (*)(void *))(p->affinity))((void *) (c + 0x110));
+}
+static bool recall_facade_binding(uintptr_t facade, uintptr_t c, uintptr_t control, const struct azcue_recall_profile *p) {
+    return nominal(facade, p->load_table) && word(facade + 0x10) == c + 0x110 &&
+           word(facade + 0x60) == word(control + 0x68) && word(facade + 0x20) == word(control + 0x28);
+}
+static int dispatch_hot(Slot *slot, uintptr_t control, const struct azcue_recall_profile *p) {
+    /* The bridge already joined this registered Core and ControlFacade under its
+     * lifecycle lease. Direct Hot assignment preserves unrelated control state. */
+    uintptr_t context = word(control + 0x68);
+    uintptr_t target = word(context + 0x18 + slot->kind * 8);
+    uintptr_t assign = nominal(target, p->property_table) ? p->assign_property : nominal(target, p->locked_property_table) ? p->assign_locked
+                                                                                                                           : 0;
+    if (!assign || word(word(target) + 7 * sizeof(uintptr_t)) != assign) return AZ_UNSUPPORTED;
+    slot->dispatched = true;
+    native_copy(assign, (void *) target, slot->property, false);
+    return AZ_OK;
+}
+static int dispatch_recall(Slot *slot, uintptr_t c, uintptr_t control, const struct azcue_recall_profile *p) {
+    uintptr_t facade = slot->facade;
+    if (!recall_facade_binding(facade, c, control, p)) return AZ_UNSUPPORTED;
+    /* Native root copies the owned property synchronously on this DSP owner.
+     * Completion still requires the bridge's correlated seek and settled work. */
+    slot->dispatched = true;
+    native_copy(p->load_call, (void *) facade, slot->property, true);
+    return AZ_OK;
+}
 int azsdk_cue_recall_dispatch(unsigned deck, uint64_t token, void *core,
                               void *control_facade) {
     State *s = state();
-    if (!s->configured || deck >= 4 || !token) return AZ_INVALID;
+    if (!recall_dispatch_valid(s, deck, token)) return AZ_INVALID;
     Slot *slot = &s->slots[deck];
     AZ_MUTEX_GUARD(lock, slot->mutex, true);
     if (!lock.held) return AZ_BUSY;
     const struct azcue_recall_profile *p = &s->profile;
     if (slot->token != token || slot->dispatched || slot->retired) return AZ_STALE;
     const uintptr_t c = ((uintptr_t) (core)), control = ((uintptr_t) (control_facade));
-    const uintptr_t facade = slot->facade;
-    if (!c || !control || word(control + 0x18) != c + 0x110 ||
-        !word(control + 0x68) || !word(control + 0x28) ||
-        !read(uint8_t, word(control + 0x28) + 8) ||
-        word(word(c + 0x110) + 5 * sizeof(uintptr_t)) != p->affinity ||
-        ((bool (*)(void *))(p->affinity))(((void *) (c + 0x110)))) return AZ_UNSUPPORTED;
-    if (hot_install(slot->operation)) {
-        // sdk_exit already joined this registered unit/Core/ControlFacade,
-        // native load generation and the owned property's source ID under its
-        // DSP lifecycle lease. Stock CueLoader's lazy recall cache can be NULL;
-        // the direct typed Hot update neither borrows nor invokes that wrapper.
-        // CueLoadFacade::call also cancels unrelated control state. Use its
-        // inner typed Hot property update instead, on this same DSP owner.
-        uintptr_t context = word(control + 0x68);
-        uintptr_t target = word(context + 0x18 + slot->kind * 8);
-        uintptr_t assign = nominal(target, p->property_table) ? p->assign_property : nominal(target, p->locked_property_table) ? p->assign_locked
-                                                                                                                               : 0;
-        if (!assign || word(word(target) + 7 * sizeof(uintptr_t)) != assign) return AZ_UNSUPPORTED;
-        slot->dispatched = true;
-        native_copy(assign, (void *) target, slot->property, false);
-        return AZ_OK;
-    }
-    if (!nominal(facade, p->load_table) || word(facade + 0x10) != c + 0x110 ||
-        word(facade + 0x60) != word(control + 0x68) ||
-        word(facade + 0x20) != word(control + 0x28)) return AZ_UNSUPPORTED;
-    /* Native root copies the owned property again. The affinity check above
-     * forces its synchronous branch, preserving sdk_exit's causal node scope. */
-    slot->dispatched = true;
-    native_copy(p->load_call, (void *) facade, slot->property, true);
-    return AZ_OK; /* Submission only: sdk_exit requires the correlated seek and settled work. */
+    if (!recall_owner(c, control, p)) return AZ_UNSUPPORTED;
+    return hot_install(slot->operation) ? dispatch_hot(slot, control, p) : dispatch_recall(slot, c, control, p);
 }
 void azsdk_cue_recall_release(unsigned deck, uint64_t token) {
     State *s = state();

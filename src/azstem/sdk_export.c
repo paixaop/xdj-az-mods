@@ -63,10 +63,12 @@ int azstem_deck_beat_phase(int deck, double *phase) {
 
 /* One attempt at the atomic LTI copy, with its capture time. No retry, yield or native
  * dereference. A concurrent update means unavailable until the caller's next observation. */
+static int azstem_observation_request(int deck, const struct azstem_deck_observation_v1 *out) {
+    return !(!out || azdeck_record_size(out) < sizeof *out || out->version != 1 || deck < 0 || deck >= NDECK || !g_lti_on);
+}
 int azstem_deck_observation_v1(int deck, struct azstem_deck_observation_v1 *out);
 int azstem_deck_observation_v1(int deck, struct azstem_deck_observation_v1 *out) {
-    if (!out || azdeck_record_size(out) < sizeof *out || out->version != 1 || deck < 0 || deck >= NDECK || !g_lti_on)
-        return -1;
+    if (!azstem_observation_request(deck, out)) return -1;
     struct lti_snap *sn = &g_lti_snap[deck];
     unsigned seq = atomic_load_explicit(&sn->seq, memory_order_acquire);
     if (seq & 1u) return -1;
@@ -151,7 +153,7 @@ int azstem_tempo_lock_observation_v1(int deck, struct azstem_tempo_lock_observat
     struct azsdk_tempo_lock_sample sample;
     if (!azsdk_tempo_lock_read(deck, &sample)) return -1;
     struct azstem_tempo_lock_observation_v1 value = {out->size, 1, sample.unit_generation,
-        sample.revision, sample.observed_ns, sample.raw_locked, sample.valid};
+                                                     sample.revision, sample.observed_ns, sample.raw_locked, sample.valid};
     memcpy(out, &value, sizeof value);
     return 0;
 }

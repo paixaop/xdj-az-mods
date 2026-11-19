@@ -10,7 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 REQUIRED = (
-    "records", "automation", "time", "command", "command-delivery", "exit", "cue-actor", "cue-store", "cue-lifecycle", "cue-persist", "cue-recall", "cue-stage", "cue-commands", "stored", "live", "sources", "native-commands", "load",
+    "native-c", "records", "automation", "time", "command", "command-delivery", "exit", "cue-actor", "cue-store", "cue-lifecycle", "cue-persist", "cue-recall", "cue-stage", "cue-commands", "stored", "live", "sources", "native-commands", "load",
     "load-lifecycle", "vtable", "hook-install", "source-probe", "load-probe",
     "wave-overview", "wave-report",
 )
@@ -24,7 +24,7 @@ class CompletionRunner(unittest.TestCase):
             tests.mkdir()
             shutil.copyfile(ROOT / "tests/sdk-completion.sh", tests / "sdk-completion.sh")
             for name in ("data", *REQUIRED):
-                script = tests / (name + ".sh" if name.startswith("wave-") else "sdk-" + name + ".sh")
+                script = tests / (name + ".sh" if name == "native-c" or name.startswith("wave-") else "sdk-" + name + ".sh")
                 body = (changes or {}).get(name, "exit 0\n")
                 if body is not None:
                     script.write_text("#!/bin/sh\nprintf '%s\\n' '" + name + "' >> ran\n" + body)

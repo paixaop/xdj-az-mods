@@ -5,13 +5,12 @@
 Reads gcov text reports (gcov -b -c -p) laid out as <gcov-root>/<suite>/<object>/*.gcov and
 attributes every line to an original file under <guest-dir>:
   - a report whose Source path is a guest file (or /g/<path>, the containers' mount) maps 1:1;
-  - a report of an extracted copy (.inc / copied .c made by the test scripts) is aligned back
-    to the guest file(s) it was cut from with difflib matching blocks (runs of >= 3 identical
-    lines, after undoing run.sh's FDT_DEV rewrite of "/dev/" paths);
+  - an extracted copy maps only complete, uniquely matching production definitions;
+    altered functions (including FDT_DEV path rewrites) never contribute production hits;
   - test sources (tools/unit-tests, guest/**/test/, *_test.c) and system headers are dropped.
 Writes summary.txt, files.tsv, functions.tsv, unmapped.txt and coverage.info (lcov).
 """
-import difflib
+import importlib.util
 import os
 import re
 import sys
@@ -44,16 +43,10 @@ for dp, dn, fn in os.walk(guest):
                 continue
             with open(p, encoding='utf-8', errors='replace') as fh:
                 gfiles[rel] = fh.read().split('\n')
-line_owner = defaultdict(set)
-for rel, lines in gfiles.items():
-    for l in lines:
-        s = l.strip()
-        if len(s) >= 12:
-            line_owner[s].add(rel)
-
-
-def norm(l):
-    return l.rstrip().replace('FDT_DEV "/', '"/dev/')
+spec = importlib.util.spec_from_file_location("coverage_functions", os.path.join(os.path.dirname(__file__), "coverage-functions.py"))
+coverage_functions = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(coverage_functions)
+function_index = coverage_functions.FunctionIndex({rel: "\n".join(lines) for rel, lines in gfiles.items()})
 
 
 def guest_rel(path):
@@ -76,29 +69,7 @@ def align(path, text):
     key = (path, tuple(text))
     if key in align_cache:
         return align_cache[key]
-    L = [norm(t) for t in text]
-    votes = defaultdict(int)
-    for l in L:
-        s = l.strip()
-        if len(s) >= 12:
-            for r in line_owner.get(s, ()):
-                votes[r] += 1
-    m = {}
-    if votes:
-        top = max(votes.values())
-        cands = [r for r, v in votes.items() if v >= 3 and v >= 0.05 * top]
-        best = {}
-        for r in cands:
-            F = [norm(x) for x in gfiles[r]]
-            sm = difflib.SequenceMatcher(None, L, F, autojunk=False)
-            for b in sm.get_matching_blocks():
-                if b.size < 3:
-                    continue
-                for k in range(b.size):
-                    i = b.a + k
-                    if i not in best or best[i][0] < b.size:
-                        best[i] = (b.size, r, b.b + k + 1)
-        m = {i + 1: (r, gl) for i, (sz, r, gl) in best.items()}
+    m = function_index.align("\n".join(text))
     align_cache[key] = m
     return m
 
@@ -169,14 +140,22 @@ for suite in sorted(os.listdir(root)):
             if rel is not None and rel.startswith('out/'):
                 rel = None  # a copy the suites made under guest/out: aligned like any other copy
             mapping = None
+            text = [""] * max((r[0] for r in rows), default=0)
+            for row in rows:
+                text[row[0] - 1] = row[2]
             if rel is not None:
                 if is_test(rel) or rel not in gfiles:
                     continue
+                # A source-looking path is not proof that the compiled text
+                # was production. gcov retains that text; verify it as well.
+                actual = "\n".join(text).rstrip("\n")
+                expected = "\n".join(gfiles[rel]).rstrip("\n")
+                if actual != expected:
+                    mapping = coverage_functions.FunctionIndex({rel: expected}).align(actual)
             else:
                 if (src.startswith('tools/') or '/tools/unit-tests/' in src) and not src.endswith('.inc') \
                         and '/az-unit-tests.' not in src:
                     continue
-                text = [r[2] for r in rows]
                 mapping = align(src, text)
             for ln, cnt, txt, brs, funcs in rows:
                 if mapping is None:

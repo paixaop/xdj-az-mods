@@ -29,13 +29,19 @@ static void observe_load(const void *p) {
         (void) __atomic_fetch_sub(read_use, 1, __ATOMIC_ACQ_REL);
     }
 }
-#define __atomic_load_n(p, order) __extension__ ({ __typeof__(*(p)) v = __atomic_load_n((p), (order)); observe_load(p); v; })
+#define __atomic_load_n(p, order) __extension__({ __typeof__(*(p)) v = __atomic_load_n((p), (order)); observe_load(p); v; })
 #include BPM_INC
 #undef __atomic_load_n
 #include "check.h"
 
-static void fake_dispose(void *control) { (void) control; disposed++; }
-static void fake_destroy(void *control) { (void) control; abort(); }
+static void fake_dispose(void *control) {
+    (void) control;
+    disposed++;
+}
+static void fake_destroy(void *control) {
+    (void) control;
+    abort();
+}
 static void (*fake_vtable[5])(void *) = {NULL, NULL, fake_dispose, fake_destroy, NULL};
 #define FAKE_VT ((uintptr_t) fake_vtable)
 struct blk {

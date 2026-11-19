@@ -33,67 +33,110 @@ static unsigned reloop_value(const azn_point *points, uint64_t in, uint64_t out)
     if (a > 3 || b > 3) return AZN_RELOOP_STALE;
     return a == 2 && b == 2 ? AZN_RELOOP_ALLOWED : AZN_RELOOP_DENIED;
 }
+struct ReloopObservation {
+    azsdk_load_sample load;
+    uint64_t mutation, raw[2], fault, seed, cut;
+    unsigned revision, value;
+    azn_point points[2];
+    bool same, loss;
+};
+static bool reloop_capture_ready(unsigned d, const struct ReloopState *s) {
+    return atomic_load_explicit(&(reloop_installed), memory_order_acquire) == 15 && (azn_interest(d) & status_loop_route) &&
+           !atomic_load_explicit(&(s->writers), memory_order_acquire) && !atomic_load_explicit(&(s->editing), memory_order_acquire);
+}
+static void reloop_capture_failed(unsigned d, uint64_t epoch) {
+    if (!azn_load_history_revoked(d, epoch)) reloop_loss(d);
+}
+static bool reloop_capture_load(unsigned d, Slot *slot, uintptr_t retained, uint64_t fence, azsdk_load_sample *load) {
+    return retained && azsdk_load_read((int) d, load) && load->invalidation_epoch == fence && status_source_loaded(d, slot, *load);
+}
+static void reloop_read_state(unsigned d, uintptr_t retained, struct ReloopObservation *value) {
+    struct ReloopState *s = &reloop_state[d];
+    uintptr_t previous = atomic_exchange_explicit(&(s->retained), retained, memory_order_acq_rel);
+    value->raw[0] = word(retained + 0x178);
+    value->raw[1] = word(retained + 0x200);
+    value->revision = (unsigned) integer(retained + 8);
+    value->same = s->epoch == value->load.invalidation_epoch && previous == retained;
+    value->fault = atomic_load_explicit(&(s->fault), memory_order_acquire);
+    value->seed = azn_seed_id(d);
+    value->cut = azn_reloop_cut(d);
+}
+static bool reloop_unchanged(const struct ReloopState *s, const struct ReloopObservation *value) {
+    return value->same && s->cut == value->cut && s->seed == value->seed && s->sealed_fault == value->fault &&
+           value->revision == s->property_revision && value->raw[0] == s->raw[0] && value->raw[1] == s->raw[1];
+}
+static bool reloop_unwitnessed_lock(const struct ReloopState *s, const uint64_t raw[2], int changed, uint64_t before) {
+    for (unsigned i = 0; i < 2; ++i)
+        if (s->raw[i] != raw[i] && ((int) i != changed || before != s->raw[i])) return true;
+    return false;
+}
+static bool reloop_lost(const struct ReloopState *s, const struct ReloopObservation *value, int changed, uint64_t before) {
+    /* A seed can recover a lock moved outside the witnessed writer. No point
+     * read, including a later equal value, substitutes for its history. */
+    bool could_be_ready = s->points[0].state != AZN_ABSENT && s->points[1].state != AZN_ABSENT;
+    return value->same && could_be_ready && s->sealed_fault == value->fault && reloop_unwitnessed_lock(s, value->raw, changed, before);
+}
+static bool reloop_property_current(const struct ReloopState *s, uintptr_t retained, const struct ReloopObservation *value) {
+    return integer(retained + 8) == (int32_t) value->revision && value->raw[0] == word(retained + 0x178) && value->raw[1] == word(retained + 0x200) &&
+           atomic_load_explicit(&(s->fault), memory_order_acquire) == value->fault && value->mutation == atomic_load_explicit(&(s->mutation), memory_order_acquire) &&
+           !atomic_load_explicit(&(s->writers), memory_order_acquire) && !atomic_load_explicit(&(s->editing), memory_order_acquire);
+}
+static bool reloop_observation_current(unsigned d, Slot *slot, uintptr_t retained, const struct ReloopObservation *value) {
+    azsdk_load_sample end = {0};
+    if (!azsdk_load_read((int) d, &end) || end.invalidation_epoch != value->load.invalidation_epoch ||
+        end.unit_generation != value->load.unit_generation || end.load_generation != value->load.load_generation) return false;
+    return reloop_property_current(&reloop_state[d], retained, value) && status_source_loaded(d, slot, end);
+}
+static bool reloop_needs_receipt(const struct ReloopState *s, const struct ReloopObservation *value) {
+    return !value->same || value->cut != s->cut || value->seed != s->seed || value->fault != s->sealed_fault || value->value != s->value || value->loss;
+}
+static bool reloop_publish(unsigned d, const struct ReloopObservation *value) {
+    azstatus_native_receipt receipt = {0};
+    receipt.kind = AZN_RELOOP;
+    receipt.deck = d;
+    receipt.epoch = value->load.invalidation_epoch;
+    receipt.unit = value->load.unit_generation;
+    receipt.load_generation = value->load.load_generation;
+    receipt.reloop = value->value;
+    if (value->loss) receipt.lost_topics = status_loop_route;
+    return azn_offer(&receipt) != 0;
+}
+static void reloop_commit(struct ReloopState *s, const struct ReloopObservation *value) {
+    memcpy(s->points, value->points, sizeof value->points);
+    s->unit = value->load.unit_generation;
+    s->load = value->load.load_generation;
+    s->epoch = value->load.invalidation_epoch;
+    s->seed = value->seed;
+    s->cut = value->cut;
+    s->sealed_fault = value->fault;
+    s->value = value->value;
+    s->property_revision = value->revision;
+    s->raw[0] = value->raw[0];
+    s->raw[1] = value->raw[1];
+}
 static void reloop_observe(unsigned d, Slot *slot, uintptr_t retained, uint64_t load_fence, int changed, uint64_t before) {
-    if (atomic_load_explicit(&(reloop_installed), memory_order_acquire) != 15 || !(azn_interest(d) & status_loop_route)) return;
-    __auto_type s = &(reloop_state[d]);
-    if (atomic_load_explicit(&(s->writers), memory_order_acquire) || atomic_load_explicit(&(s->editing), memory_order_acquire)) return;
-    const uint64_t mutation = atomic_load_explicit(&(s->mutation), memory_order_acquire);
+    struct ReloopState *s = &reloop_state[d];
+    if (!reloop_capture_ready(d, s)) return;
+    struct ReloopObservation value = {0};
+    value.mutation = atomic_load_explicit(&(s->mutation), memory_order_acquire);
     if (atomic_flag_test_and_set_explicit(&(s->busy), memory_order_acquire)) {
-        if (!azn_load_history_revoked(d, load_fence)) reloop_loss(d);
+        reloop_capture_failed(d, load_fence);
         return;
     }
     EXIT_FLAG_GUARD(guard, &s->busy);
-    azsdk_load_sample load = {0}, end = {0};
-    if (!retained || !azsdk_load_read((int) (d), &load) || load.invalidation_epoch != load_fence ||
-        !status_source_loaded(d, &((*slot)), load)) return;
-    __auto_type previous = atomic_exchange_explicit(&(s->retained), retained, memory_order_acq_rel);
-    const uint64_t raw[] = {word(retained + 0x178), word(retained + 0x200)};
-    const unsigned rr = (unsigned) (integer(retained + 8));
-    bool same = s->epoch == load.invalidation_epoch && previous == retained;
-    uint64_t fault = atomic_load_explicit(&(s->fault), memory_order_acquire), seed = azn_seed_id(d), cut = azn_reloop_cut(d);
-    if (same && s->cut == cut && s->seed == seed && s->sealed_fault == fault && rr == s->property_revision &&
-        raw[0] == s->raw[0] && raw[1] == s->raw[1]) return;
-    azn_point points[2];
-    status_points(retained, points);
-    status_qualify_points(slot, retained, points);
-    unsigned value = reloop_value(points, raw[0], raw[1]);
-    /* uintptr_t seed can recover a lock moved outside the witnessed writer. No point
-     * read, including a later equal value, substitutes for its history. */
-    bool loss = false;
-    bool could_be_ready = s->points[0].state != AZN_ABSENT && s->points[1].state != AZN_ABSENT;
-    if (same && could_be_ready && s->sealed_fault == fault)
-        for (unsigned i = 0; i < 2; ++i)
-            if (s->raw[i] != raw[i] && ((int) (i) != changed || before != s->raw[i])) loss = true;
-    if (!azsdk_load_read((int) (d), &end) || end.invalidation_epoch != load.invalidation_epoch ||
-        end.unit_generation != load.unit_generation || end.load_generation != load.load_generation ||
-        integer(retained + 8) != (int32_t) (rr) || raw[0] != word(retained + 0x178) || raw[1] != word(retained + 0x200) ||
-        atomic_load_explicit(&(s->fault), memory_order_acquire) != fault || mutation != atomic_load_explicit(&(s->mutation), memory_order_acquire) ||
-        atomic_load_explicit(&(s->writers), memory_order_acquire) || atomic_load_explicit(&(s->editing), memory_order_acquire) || !status_source_loaded(d, &((*slot)), end)) {
-        if (!azn_load_history_revoked(d, load.invalidation_epoch)) reloop_loss(d);
+    if (!reloop_capture_load(d, slot, retained, load_fence, &value.load)) return;
+    reloop_read_state(d, retained, &value);
+    if (reloop_unchanged(s, &value)) return;
+    status_points(retained, value.points);
+    status_qualify_points(slot, retained, value.points);
+    value.value = reloop_value(value.points, value.raw[0], value.raw[1]);
+    value.loss = reloop_lost(s, &value, changed, before);
+    if (!reloop_observation_current(d, slot, retained, &value)) {
+        reloop_capture_failed(d, value.load.invalidation_epoch);
         return;
     }
-    if (!same || cut != s->cut || seed != s->seed || fault != s->sealed_fault || value != s->value || loss) {
-        azstatus_native_receipt r = {0};
-        r.kind = AZN_RELOOP;
-        r.deck = d;
-        r.epoch = load.invalidation_epoch;
-        r.unit = load.unit_generation;
-        r.load_generation = load.load_generation;
-        r.reloop = value;
-        if (loss) r.lost_topics = status_loop_route;
-        if (!azn_offer(&r)) return;
-    }
-    memcpy(s->points, points, sizeof points);
-    s->unit = load.unit_generation;
-    s->load = load.load_generation;
-    s->epoch = load.invalidation_epoch;
-    s->seed = seed;
-    s->cut = cut;
-    s->sealed_fault = fault;
-    s->value = value;
-    s->property_revision = rr;
-    s->raw[0] = raw[0];
-    s->raw[1] = raw[1];
+    if (reloop_needs_receipt(s, &value) && !reloop_publish(d, &value)) return;
+    reloop_commit(s, &value);
 }
 /* uintptr_t residency callback can run on the stock StateServer thread. The getter
  * owns the embedded lock until return, but does not grant ownership of the
@@ -170,47 +213,57 @@ static void reloop_write_scope_drop(ReloopWrite *ctx) {
 
     if (ctx->state) atomic_fetch_sub_explicit(&(ctx->state->writers), 1, memory_order_release);
 }
+static bool reloop_write_current(const ReloopWrite *ctx, azsdk_load_sample *load) {
+    const struct ReloopState *s = ctx->state;
+    return azsdk_load_read((int) ctx->deck, load) && ctx->load_fence == load->invalidation_epoch && load->invalidation_epoch == s->epoch &&
+           load->unit_generation == s->unit && load->load_generation == s->load &&
+           ctx->retained == atomic_load_explicit(&(s->retained), memory_order_acquire);
+}
+static bool reloop_write_witnessed(const ReloopWrite *ctx) {
+    const struct ReloopState *s = ctx->state;
+    return !ctx->overlap && !atomic_load_explicit(&(s->editing), memory_order_acquire) && s->raw[ctx->index] == ctx->before &&
+           s->sealed_fault == atomic_load_explicit(&(s->fault), memory_order_acquire) && s->cut == azn_reloop_cut(ctx->deck) &&
+           atomic_load_explicit(&(s->mutation), memory_order_acquire) == ctx->mutation;
+}
+static bool reloop_write_publish(const ReloopWrite *ctx, unsigned value) {
+    const struct ReloopState *s = ctx->state;
+    if (value == s->value) return true;
+    azstatus_native_receipt receipt = {0};
+    receipt.kind = AZN_RELOOP;
+    receipt.deck = ctx->deck;
+    receipt.epoch = s->epoch;
+    receipt.unit = s->unit;
+    receipt.load_generation = s->load;
+    receipt.reloop = value;
+    return azn_offer(&receipt) != 0;
+}
 static void reloop_write_scope_finish(ReloopWrite *ctx) {
-    (void) ctx;
-
     if (!ctx->state) return;
-    __auto_type s = &(*ctx->state);
+    struct ReloopState *s = ctx->state;
     const uint64_t after = word(ctx->lock + 0x80);
     if (ctx->before == after) return;
     if (atomic_flag_test_and_set_explicit(&(s->busy), memory_order_acquire)) {
-        if (!azn_load_history_revoked(ctx->deck, ctx->load_fence)) reloop_loss(ctx->deck);
+        reloop_capture_failed(ctx->deck, ctx->load_fence);
         return;
     }
     EXIT_FLAG_GUARD(guard, &s->busy);
     azsdk_load_sample load = {0};
-    if (!azsdk_load_read((int) (ctx->deck), &load) || ctx->load_fence != load.invalidation_epoch || load.invalidation_epoch != s->epoch ||
-        load.unit_generation != s->unit || load.load_generation != s->load || ctx->retained != atomic_load_explicit(&(s->retained), memory_order_acquire)) return;
-        /* Before the property writer commits a complete pair, both outcomes of
-         * every buffer transition leave re-entry unavailable. Its final owner
-         * snapshot supplies the new point edition and both lock states. */
+    if (!reloop_write_current(ctx, &load)) return;
+    /* Before the property writer commits a complete pair, both outcomes of
+     * every buffer transition leave re-entry unavailable. Its final owner
+     * snapshot supplies the new point edition and both lock states. */
     if (s->points[0].state == AZN_ABSENT || s->points[1].state == AZN_ABSENT) {
         s->raw[ctx->index] = after;
         return;
     }
-    if (ctx->overlap || atomic_load_explicit(&(s->editing), memory_order_acquire) ||
-        s->raw[ctx->index] != ctx->before || s->sealed_fault != atomic_load_explicit(&(s->fault), memory_order_acquire) ||
-        s->cut != azn_reloop_cut(ctx->deck) || atomic_load_explicit(&(s->mutation), memory_order_acquire) != ctx->mutation) {
+    if (!reloop_write_witnessed(ctx)) {
         reloop_loss(ctx->deck);
         return;
     }
     uint64_t raw[] = {s->raw[0], s->raw[1]};
     raw[ctx->index] = after;
     unsigned value = reloop_value(s->points, raw[0], raw[1]);
-    if (value != s->value) {
-        azstatus_native_receipt r = {0};
-        r.kind = AZN_RELOOP;
-        r.deck = ctx->deck;
-        r.epoch = s->epoch;
-        r.unit = s->unit;
-        r.load_generation = s->load;
-        r.reloop = value;
-        if (!azn_offer(&r)) return;
-    }
+    if (!reloop_write_publish(ctx, value)) return;
     s->raw[ctx->index] = after;
     s->value = value;
 }

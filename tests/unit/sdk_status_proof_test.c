@@ -9,10 +9,19 @@ static void ds_wake(void) {}
 static void ds_deadline(uint64_t ns) { (void) ns; }
 static int ds_live(int owner) { return owner >= 0; }
 static void ds_gui_interest(uint64_t topics) { (void) topics; }
-static void ds_native_interest(unsigned deck, uint64_t topics) { (void) deck; (void) topics; }
-static void sdk_status_store_interest(unsigned deck, uint64_t topics) { (void) deck; (void) topics; }
+static void ds_native_interest(unsigned deck, uint64_t topics) {
+    (void) deck;
+    (void) topics;
+}
+static void sdk_status_store_interest(unsigned deck, uint64_t topics) {
+    (void) deck;
+    (void) topics;
+}
 static void sdk_status_store_binding(unsigned d, uint64_t e, const az_track_ref *r, uint64_t c) {
-    (void) d; (void) e; (void) r; (void) c;
+    (void) d;
+    (void) e;
+    (void) r;
+    (void) c;
 }
 #define CM_ROOT "/tmp/azmod-proof-fixture"
 #ifndef DS_METRICS_PATH
@@ -30,8 +39,7 @@ static void receive(const az_deck_status_event_v1 *event, void *user) {
 }
 static struct ds_field field(unsigned topic, unsigned member, unsigned provenance, uint64_t revision,
                              const void *value, unsigned count) {
-    return (struct ds_field) {topic, member, {.info = {AZ_AVAIL_READY, provenance, revision, ds_now()},
-        .scope = AZ_STATUS_LOAD_SCOPE, .scope_id = 1, .provider_id = 11, .count = count}, value, NULL};
+    return (struct ds_field) {topic, member, {.info = {AZ_AVAIL_READY, provenance, revision, ds_now()}, .scope = AZ_STATUS_LOAD_SCOPE, .scope_id = 1, .provider_id = 11, .count = count}, value, NULL};
 }
 int main(void) {
     ds.enabled = 1;
@@ -50,9 +58,7 @@ int main(void) {
     assert(ds_register(0, &watch, receive, NULL, &handles[0]) == AZ_OK);
     assert(ds_register(1, &watch, receive, NULL, &handles[1]) == AZ_OK);
     ds_drain(8);
-    ds_proof_context = (struct ds_proof_context) {.kind = DS_PROOF_GAP, .cause = DS_PROOF_DATABASE,
-        .binding_cut = 1, .binding_serial = 10, .connection = 100, .db_before = 2, .db_after = 3,
-        .device = 9, .inode = 8, .mount_id = 7};
+    ds_proof_context = (struct ds_proof_context) {.kind = DS_PROOF_GAP, .cause = DS_PROOF_DATABASE, .binding_cut = 1, .binding_serial = 10, .connection = 100, .db_before = 2, .db_after = 3, .device = 9, .inode = 8, .mount_id = 7};
     assert(ds_publish_file(0, 1, &source, ds_now(), NULL, 0, metadata | key, AZ_STATUS_CAPTURE_GAP) == AZ_OK);
     assert(ds_proofs.count == 1 && ds_proofs.record[0].interval == 1);
     assert(ds_proofs.record[0].input_lost == (metadata | key) && ds_proofs.record[0].context.cause == DS_PROOF_DATABASE);
@@ -65,8 +71,7 @@ int main(void) {
         assert(r->kind == DS_PROOF_RESYNC && r->interval == 1 && r->sequence == gap_sequence);
         assert(r->cursor_before < r->sequence && r->handle && r->topics == AZ_STATUS_ALL_V1);
     }
-    ds_proof_context = (struct ds_proof_context) {.kind = DS_PROOF_BASELINE, .binding_cut = 1,
-        .binding_serial = 11, .connection = 100, .db_before = 3, .db_after = 3, .topics = metadata};
+    ds_proof_context = (struct ds_proof_context) {.kind = DS_PROOF_BASELINE, .binding_cut = 1, .binding_serial = 11, .connection = 100, .db_before = 3, .db_after = 3, .topics = metadata};
     title.info.info.revision++;
     assert(ds_publish_file(0, 1, &source, ds_now(), &title, 1, 0, 0) == AZ_OK);
     assert(ds_proofs.record[3].ready == metadata && ds_proofs.record[3].pending == key);
@@ -78,7 +83,8 @@ int main(void) {
     ds_proof_context.topics = key;
     key_field.info.info.revision++;
     key_field.info.info.availability = AZ_AVAIL_UNSUPPORTED;
-    key_field.info.count = 0; key_field.value = NULL;
+    key_field.info.count = 0;
+    key_field.value = NULL;
     assert(ds_publish_file(0, 1, &source, ds_now(), &key_field, 1, 0, 0) == AZ_OK);
     assert(ds_proofs.record[4].unavailable == key && !ds_proofs.record[4].pending);
     assert(!ds_proofs.active[0].interval);
@@ -116,7 +122,8 @@ int main(void) {
     ds_write_metrics();
     FILE *file = fopen(DS_METRICS_PATH, "r");
     assert(file);
-    char line[4096]; unsigned exported = 0, header = 0;
+    char line[4096];
+    unsigned exported = 0, header = 0;
     while (fgets(line, sizeof line, file)) {
         if (!strncmp(line, "proof=", 6)) exported++;
         if (strstr(line, "provenance_version=1") && strstr(line, "provenance_overflow=0")) header++;

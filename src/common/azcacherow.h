@@ -27,6 +27,14 @@ static inline bool azcrow_address(uintptr_t value, size_t bytes) {
            bytes && bytes - 1 <= maximum - value;
 }
 #define scalar(T, value) ({ T scalar_value;memcpy(&scalar_value,(const void *)(uintptr_t)(value),sizeof scalar_value);scalar_value; })
+static inline bool azcrow_owned_span(const uintptr_t span[3], uintptr_t *count) {
+    uintptr_t begin = span[0], end = span[1], capacity = span[2];
+    if (!azcrow_address(begin, 1) || !azcrow_address(end, 1) || !azcrow_address(capacity, 1)) return false;
+    if (end <= begin || capacity < end || (end - begin) % azcrow_slot_bytes || (capacity - begin) % azcrow_slot_bytes) return false;
+    *count = (end - begin) / azcrow_slot_bytes;
+    /* Observation quota for the proved families, not a global native maximum. */
+    return *count <= azcrow_row_quota;
+}
 static inline bool azcrow_copy_owned_tag23(const void *owned_carrier, uint32_t *out) {
 #if !defined(__BYTE_ORDER__) || __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__ || UINTPTR_MAX != UINT64_MAX
     (void) owned_carrier;
@@ -37,12 +45,8 @@ static inline bool azcrow_copy_owned_tag23(const void *owned_carrier, uint32_t *
     if (!azcrow_address(carrier, azcrow_carrier_bytes)) return false;
     uintptr_t span[3];
     memcpy(span, owned_carrier, sizeof span);
-    uintptr_t begin = span[0], end = span[1], capacity = span[2];
-    if (!azcrow_address(begin, 1) || !azcrow_address(end, 1) || !azcrow_address(capacity, 1) ||
-        end <= begin || capacity < end || (end - begin) % azcrow_slot_bytes || (capacity - begin) % azcrow_slot_bytes) return false;
-    __auto_type count = (end - begin) / azcrow_slot_bytes;
-    /* Observation quota for the proved families, not a global native maximum. */
-    if (count > azcrow_row_quota) return false;
+    uintptr_t begin = span[0], count;
+    if (!azcrow_owned_span(span, &count)) return false;
     bool found = false;
     uint32_t value = 0;
     for (uintptr_t i = 0; i < count; ++i) {

@@ -134,7 +134,12 @@ int main(int argc, char **argv) {
         CHECK(!api->take(0, &receipt));
         ++next;
     }
+    uint64_t last_epoch = azn_lifecycle_fence(0);
+    CHECK(last_epoch && !azn_load_history_revoked(0, last_epoch));
+    CHECK(!azn_load_history_revoked(4, last_epoch) && !azn_load_history_revoked(0, 0));
     eject(&f, next, false);
+    CHECK(azn_load_history_revoked(0, last_epoch));
+    CHECK(!azn_load_history_revoked(0, azn_lifecycle_fence(0)));
     struct azstatus_native_receipt seed = {0};
     seed.size = sizeof seed;
     seed.version = 1;

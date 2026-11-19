@@ -87,46 +87,56 @@ static bool analysis_supported() {
     return atomic_load_explicit(&(enabled), memory_order_acquire) && profile == &profiles[1] &&
            atomic_load_explicit(&(analysis_ready), memory_order_acquire) && map_writer_installed == 15;
 }
+static bool analysis_request_valid(unsigned deck, uint64_t load, const void *packet) {
+    return packet && deck < 4 && load;
+}
 static int analysis_current(unsigned deck, uint64_t load, const struct aznm_packet *expected) {
-    if (!expected || deck >= 4 || !load) return AZ_INVALID;
+    if (!analysis_request_valid(deck, load, expected)) return AZ_INVALID;
     if (!analysis_supported()) return AZ_UNSUPPORTED;
     return azn_maps_current(deck, load, expected) ? AZ_OK : AZ_STALE;
 }
+static bool analysis_pair_ready(const Pair *pair, uintptr_t object) {
+    return pair->pack.address == object && sample_matches(pair) && pair->packet.owner && pair->content[0].token && pair->content[1].token;
+}
+static int analysis_capture_pair(uintptr_t object, struct aznm_packet *out) {
+    Slot *slot = &cache[bucket(object)];
+    SLOT_LOCK(lock, *slot);
+    if (!lock.held) return AZ_BUSY;
+    if (!analysis_pair_ready(&slot->pair, object)) return AZ_BUSY;
+    return copy_packet(&slot->pair, out) ? AZ_OK : AZ_STALE;
+}
+static int analysis_capture_current(unsigned deck, const struct azn_pack_view *view, const struct aznm_packet *result) {
+    uint32_t count = 0;
+    int rc = read_rows(&result->grid, AZNM_GRID, NULL, 0, &count);
+    if (rc != AZ_OK) return rc;
+    if (!count) return AZ_BUSY;
+    return current_identity(deck, view, result) ? AZ_OK : AZ_STALE;
+}
 static int analysis_capture(unsigned deck, uint64_t load, struct aznm_packet *out) {
-    if (!out || deck >= 4 || !load) return AZ_INVALID;
+    if (!analysis_request_valid(deck, load, out)) return AZ_INVALID;
     if (!analysis_supported()) return AZ_UNSUPPORTED;
     struct azn_pack_view view = {0};
     if (!azn_pack_acquire(deck, &view)) return AZ_STALE;
     PIN_DROP(drop, view.token);
     if (view.load != load || !azn_pack_current(deck, &view)) return AZ_STALE;
     struct aznm_packet result = {0};
-    {
-        Slot *slot = &(cache[bucket(view.object)]);
-        SLOT_LOCK(lock, (*slot));
-        if (!lock.held) return AZ_BUSY;
-        const Pair *pair = &(slot->pair);
-        if (pair->pack.address != view.object || !sample_matches(&(*pair)) || !pair->packet.owner ||
-            !pair->content[0].token || !pair->content[1].token) return AZ_BUSY;
-        if (!copy_packet(&(*pair), &result)) return AZ_STALE;
-    }
-    uint32_t count = 0;
-    int rc = read_rows(&result.grid, AZNM_GRID, NULL, 0, &count);
-    if (rc != AZ_OK || !count || !current_identity(deck, &view, &result)) {
+    int rc = analysis_capture_pair(view.object, &result);
+    if (rc != AZ_OK) return rc;
+    rc = analysis_capture_current(deck, &view, &result);
+    if (rc != AZ_OK) {
         release_packet(&result);
-        return rc != AZ_OK ? rc : !count ? AZ_BUSY
-                                         : AZ_STALE;
+        return rc;
     }
     *out = result;
     return AZ_OK;
 }
 static unsigned analysis_u16(const uint8_t *p) { return (unsigned) (p[0]) << 8 | p[1]; }
 static uint32_t analysis_u32(const uint8_t *p) { return (uint32_t) (p[0]) << 24 | (uint32_t) (p[1]) << 16 | (uint32_t) (p[2]) << 8 | p[3]; }
-static bool analysis_pssi(const uint8_t *p, uint32_t size, uint32_t beats) {
-    if (!p || size < 56 || size > 32 + 1024 * 24 || memcmp(p, "PSSI", 4) ||
-        analysis_u32(p + 4) != 32 || analysis_u32(p + 8) != size || analysis_u16(p + 12) != 0 ||
-        analysis_u16(p + 14) != 24) return false;
-    unsigned count = analysis_u16(p + 16), mood = analysis_u16(p + 18), end = analysis_u16(p + 26);
-    if (!count || count > 1024 || size != 32 + count * 24 || mood < 1 || mood > 3 || end > beats) return false;
+static bool analysis_pssi_header(const uint8_t *p, uint32_t size) {
+    return p && size >= 56 && size <= 32 + 1024 * 24 && !memcmp(p, "PSSI", 4) &&
+           analysis_u32(p + 4) == 32 && analysis_u32(p + 8) == size && analysis_u16(p + 12) == 0 && analysis_u16(p + 14) == 24;
+}
+static bool analysis_pssi_rows(const uint8_t *p, unsigned count, unsigned end) {
     unsigned prior = 0;
     for (unsigned i = 0; i < count; i++) {
         unsigned start = analysis_u16(p + 32 + i * 24 + 2);
@@ -135,48 +145,41 @@ static bool analysis_pssi(const uint8_t *p, uint32_t size, uint32_t beats) {
     }
     return true;
 }
-static int analysis_publish(unsigned deck, uint64_t load, const struct aznm_packet *expected, const void *data, uint32_t size) {
-    if (!expected || deck >= 4 || !load || !data) return AZ_INVALID;
-    if (!analysis_supported()) return AZ_UNSUPPORTED;
+static bool analysis_pssi(const uint8_t *p, uint32_t size, uint32_t beats) {
+    if (!analysis_pssi_header(p, size)) return false;
+    unsigned count = analysis_u16(p + 16), mood = analysis_u16(p + 18), end = analysis_u16(p + 26);
+    if (!count || count > 1024 || size != 32 + count * 24 || mood < 1 || mood > 3 || end > beats) return false;
+    return analysis_pssi_rows(p, count, end);
+}
+static int analysis_publish_input(const struct aznm_packet *expected, const void *data, uint32_t size) {
     uint32_t beats = 0, phrases = 0;
     int rc = read_rows(&expected->grid, AZNM_GRID, NULL, 0, &beats);
     if (rc != AZ_OK) return rc;
     rc = read_rows(&expected->phrases, AZNM_PHRASES, NULL, 0, &phrases);
     if (rc != AZ_OK) return rc;
     if (phrases) return AZ_NOT_FOUND;
-    __auto_type pssi = ((const uint8_t *) (data));
-    if (!analysis_pssi(pssi, size, beats)) return AZ_INVALID;
-    if (analysis_current(deck, load, expected) != AZ_OK) return AZ_STALE;
-    struct AnalysisMake call __attribute__((cleanup(analysis_make_drop))) = {.pssi = pssi, .size = size};
-    analysis_make(&call);
-    uintptr_t made = call.content;
-    if (!made || !typed(made, profile->phrase_content) ||
-        read_u32(made, 0x48) != analysis_u16(pssi + 16)) return AZ_FAILED;
-    MAP_MUTATION(mutation);
-    struct azn_pack_view view = {0};
-    if (!azn_pack_acquire(deck, &view)) return AZ_STALE;
-    PIN_DROP(drop, view.token);
-    if (view.load != load || !current_identity(deck, &view, expected)) return AZ_STALE;
-    uintptr_t holder = 0, prior = 0;
-    PIN_DROP(holder_pin, 0);
-    {
-        Slot *slot = &(cache[bucket(view.object)]);
-        SLOT_LOCK(lock, (*slot));
-        if (!lock.held) return AZ_BUSY;
-        const Pair *pair = &(slot->pair);
-        if (pair->pack.address != view.object || pair->packet.owner != expected->owner ||
-            !azn_pin_hold(pair->holder[1].token, &holder)) return AZ_STALE;
-        holder_pin = pair->holder[1].token;
-    }
-    if (!typed(holder, profile->phrase_holder) || !azn_pin_hold(expected->phrases.content, &prior)) return AZ_STALE;
-    PIN_DROP(prior_pin, expected->phrases.content);
+    return analysis_pssi(data, size, beats) ? AZ_OK : AZ_INVALID;
+}
+static bool analysis_content_valid(const struct AnalysisMake *call) {
+    return call->content && typed(call->content, profile->phrase_content) && read_u32(call->content, 0x48) == analysis_u16(call->pssi + 16);
+}
+static int analysis_hold_holder(uintptr_t object, uint64_t owner, uintptr_t *holder, uint64_t *token) {
+    Slot *slot = &cache[bucket(object)];
+    SLOT_LOCK(lock, *slot);
+    if (!lock.held) return AZ_BUSY;
+    const Pair *pair = &slot->pair;
+    if (pair->pack.address != object || pair->packet.owner != owner || !azn_pin_hold(pair->holder[1].token, holder)) return AZ_STALE;
+    *token = pair->holder[1].token;
+    return AZ_OK;
+}
+static int analysis_replace(unsigned deck, const struct azn_pack_view *view, const struct aznm_packet *expected,
+                            uintptr_t holder, uintptr_t prior, uintptr_t made) {
     if (read_ptr(holder, 0x28) != prior || read_u32(prior, 0x48)) return AZ_STALE;
     HOLDER_EDIT(edit, 1, holder);
-    if (!(edit.mask & (1u << deck)) || !edit.bracket || !current_identity(deck, &view, expected)) return AZ_BUSY;
+    if (!(edit.mask & (1u << deck)) || !edit.bracket || !current_identity(deck, view, expected)) return AZ_BUSY;
     if (!analysis_ops.grant(made)) return AZ_FAILED;
     uintptr_t compare = prior;
-    if (!__atomic_compare_exchange_n(((uintptr_t *) (holder + 0x28)), &compare, made,
-                                     false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    if (!__atomic_compare_exchange_n(((uintptr_t *) (holder + 0x28)), &compare, made, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         analysis_drop(made);
         return AZ_STALE;
     }
@@ -186,4 +189,29 @@ static int analysis_publish(unsigned deck, uint64_t load, const struct aznm_pack
      * normal registry invokes the same broadcast from its repository worker. */
     ((uintptr_t (*)(uintptr_t, uintptr_t))(map_writer_original[3]))(holder, 0);
     return AZ_OK;
+}
+static int analysis_publish_commit(unsigned deck, uint64_t load, const struct aznm_packet *expected, uintptr_t made) {
+    MAP_MUTATION(mutation);
+    struct azn_pack_view view = {0};
+    if (!azn_pack_acquire(deck, &view)) return AZ_STALE;
+    PIN_DROP(drop, view.token);
+    if (view.load != load || !current_identity(deck, &view, expected)) return AZ_STALE;
+    uintptr_t holder = 0, prior = 0;
+    PIN_DROP(holder_pin, 0);
+    int rc = analysis_hold_holder(view.object, expected->owner, &holder, &holder_pin);
+    if (rc != AZ_OK) return rc;
+    if (!typed(holder, profile->phrase_holder) || !azn_pin_hold(expected->phrases.content, &prior)) return AZ_STALE;
+    PIN_DROP(prior_pin, expected->phrases.content);
+    return analysis_replace(deck, &view, expected, holder, prior, made);
+}
+static int analysis_publish(unsigned deck, uint64_t load, const struct aznm_packet *expected, const void *data, uint32_t size) {
+    if (!analysis_request_valid(deck, load, expected) || !data) return AZ_INVALID;
+    if (!analysis_supported()) return AZ_UNSUPPORTED;
+    int rc = analysis_publish_input(expected, data, size);
+    if (rc != AZ_OK) return rc;
+    if (analysis_current(deck, load, expected) != AZ_OK) return AZ_STALE;
+    struct AnalysisMake call __attribute__((cleanup(analysis_make_drop))) = {.pssi = data, .size = size};
+    analysis_make(&call);
+    if (!analysis_content_valid(&call)) return AZ_FAILED;
+    return analysis_publish_commit(deck, load, expected, call.content);
 }

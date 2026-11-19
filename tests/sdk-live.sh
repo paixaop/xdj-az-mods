@@ -63,6 +63,8 @@ fi
 map=-Wl,--version-script=src/azstem/sdk_native.map
 ${HOST_CC:-gcc} "${flags[@]}" "$map" src/azstem/sdk_live_observer.c tests/unit/sdkliveobserver_test.c -DAZ_NATIVE_LISTENER_TESTING tests/unit/native_unwind.c -lstdc++ -ldl -lm -ldl -o "$task_tmp/real"
 "$task_tmp/real"
+${HOST_CC:-gcc} "${flags[@]}" "$map" -DAZ_STATUS_NATIVE_PRODUCER -DAZ_NATIVE_LISTENER_TESTING src/azstem/sdk_live_observer.c tests/unit/sdkliveobserver_test.c tests/unit/native_unwind.c -lstdc++ -ldl -lm -o "$task_tmp/native"
+"$task_tmp/native"
 ${HOST_CC:-gcc} "${flags[@]}" "$map" src/azstem/sdk_loop_observer.c tests/unit/sdkloopobserver_test.c tests/unit/native_unwind.c -lstdc++ -ldl -lm -ldl -o "$task_tmp/loop"
 "$task_tmp/loop"
 # Controls use a plain build; the real fixture above always uses the requested sanitizer.
@@ -86,7 +88,7 @@ variants = [
     ('generation', 'atomic_load_explicit(&(p->active_generation), memory_order_acquire) != generation', 'false', 2),
     ('slot', '{15, 19, 21, 2, 5}', '{14, 19, 21, 2, 5}', 1),
     ('boolean', 'a <= 1 && b <= 1 && c <= 1', 'true', 1),
-    ('invalid-retention', 'if (stream == kSync) valid = a == 0 || a == 2;', 'if (stream == kSync) valid = a == 0 || a == 2;\n    if (!valid) return;', 1),
+    ('invalid-retention', 'bool valid = notification.valid;', 'bool valid = notification.valid;\n    if (!valid) return;', 1),
     ('allocation-rollback', 'if (!pending[s].object) return 0;', 'if (!pending[s].object) return 0;\n            az_native_owner_copy(&owners[deck][s], &pending[s]);', 1),
     ('sync-slot', '{15, 19, 21, 2, 5}', '{15, 19, 21, 3, 5}', 1),
     ('sync-mode', 'if (stream == kSync) valid = a == 0 || a == 2;', 'if (stream == kSync) valid = a <= 2;', 1),

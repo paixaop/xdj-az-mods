@@ -2142,4 +2142,5 @@ int main(int argc, char **argv) {
 #undef fixture_interval_10
 
 #undef fixture_land_11
+    return 0;
 }

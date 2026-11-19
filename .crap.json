@@ -1,0 +1,11 @@
+{
+  "base": "f851c610fd2c68adcc950c1032d97bceeae1bb02",
+  "threshold": 10,
+  "paths": [
+    "src/"
+  ],
+  "exclude": [
+    "src/azmod/test/*",
+    "src/azstem/stb_vorbis.c"
+  ]
+}

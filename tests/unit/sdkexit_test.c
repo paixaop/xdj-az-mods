@@ -921,6 +921,37 @@ static void entry(azexit_native_entry *out, uintptr_t address) {
     out->address = address;
     memcpy(out->prologue, ((void *) (address)), 16);
 }
+bool azsdk_exit_test_rebase(azexit_profile *profile, uintptr_t bias);
+static void profile_relocation(void) {
+    azexit_profile profile = {0};
+    profile.unit = 0x100;
+    profile.core = 0x200;
+    profile.manager_submit.address = 0x300;
+    profile.hot_countdown[1].address = 0x400;
+    profile.manager_submit.prologue[0] = 0xa5;
+    for (unsigned i = 0; i < AZEXIT_COMMAND_TYPES; ++i)
+        profile.commands[i] = (struct azexit_command_profile) {0x500 + i * 16, 0x600 + i * 16, 0x700 + i * 16, 0x800 + i * 16};
+    assert(azsdk_exit_test_rebase(&profile, 0x10000));
+    assert(profile.unit == 0x10100 && profile.core == 0x10200);
+    assert(profile.manager_submit.address == 0x10300 && profile.hot_countdown[1].address == 0x10400);
+    assert(profile.manager_submit.prologue[0] == 0xa5);
+    for (unsigned i = 0; i < AZEXIT_COMMAND_TYPES; ++i) {
+        assert(profile.commands[i].table == 0x10500 + i * 16);
+        assert(profile.commands[i].destroy == 0x10600 + i * 16);
+        assert(profile.commands[i].deleting == 0x10700 + i * 16);
+        assert(profile.commands[i].execute == 0x10800 + i * 16);
+    }
+    profile = (azexit_profile) {0};
+    profile.unit = UINTPTR_MAX;
+    assert(!azsdk_exit_test_rebase(&profile, 1));
+    assert(profile.unit == UINTPTR_MAX && profile.core == 0);
+    profile = (azexit_profile) {0};
+    profile.commands[AZEXIT_COMMAND_TYPES - 1].execute = UINTPTR_MAX;
+    assert(!azsdk_exit_test_rebase(&profile, 1));
+    assert(profile.commands[AZEXIT_COMMAND_TYPES - 1].execute == UINTPTR_MAX);
+    assert(profile.commands[AZEXIT_COMMAND_TYPES - 1].deleting == 1);
+}
+
 static void setup(int build, unsigned enabled) {
     quantize_cancel_hook = native_quantize_cancel;
     core_table[3] = ((uintptr_t) (native_process));
@@ -2064,6 +2095,13 @@ static void loop_commands() {
     assert(azexit_pack_beat(65535.0, &packed) && packed == 0x0001ffff);
     assert(!azexit_pack_beat(0, &packed) && !azexit_pack_beat(-1, &packed));
     assert(!azexit_pack_beat(65536.0, &packed));
+    assert(azexit_pack_beat(1.0 / 65535.0, &packed) && packed == UINT32_C(0xffff0001));
+    assert(!azexit_pack_beat(1, NULL));
+    const double unrepresentable[] = {NAN, INFINITY, -INFINITY, 1.0 / 65536.0, 0x1.0000000000001p0};
+    for (unsigned i = 0; i < sizeof unrepresentable / sizeof unrepresentable[0]; ++i) {
+        packed = UINT32_C(0xfeed1234);
+        assert(!azexit_pack_beat(unrepresentable[i], &packed) && packed == UINT32_C(0xfeed1234));
+    }
     __auto_type length = loop_request(AZ_CMD_LOOP_LENGTH, 0);
     __auto_type out = result();
     length.beats = 0;
@@ -3355,6 +3393,7 @@ static void loop_only_gating() {
 int main(int argc, char **argv) {
     assert(argc == 2 || argc == 3);
     unsigned enabled = argc == 3 ? (unsigned) (strtoul(argv[2], NULL, 10)) : AZEXIT_ENABLE_EXIT | AZEXIT_ENABLE_RELOOP;
+    profile_relocation();
     setup(argv[1][0] == '1' ? 1 : 2, enabled);
 #ifdef AZSDK_CUE_STAGE_TESTING
 #ifdef AZSDK_MEMORY_RECALL_ONLY

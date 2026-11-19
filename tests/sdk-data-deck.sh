@@ -54,7 +54,7 @@ a = s.index('    return a->source_id == b->source_id')
 b = s.index('\n}', a)
 open(sys.argv[2], 'w').write(s[:a] + '    return a->track_id==b->track_id;' + s[b:])
 PY
-awk '/^static int sd_native_load_read\(/,/^}/; /^static int sd_native_cue_read\(/,/^}/; /^static uint32_t sd_live_fields\(/,/^}/; /^static int sd_deck_snapshot_v1\(/,/^}/' src/azmod/sdk_deck.c > "$tmp/deck.inc"
+python3 tests/unit/sdk_deck_extract.py src/azmod/sdk_deck.c "$tmp/deck.inc"
 python3 - "$tmp" <<'PY'
 from pathlib import Path
 import sys
@@ -82,7 +82,8 @@ s = Path('src/azmod/sdk_data_engine.h').read_text()
 for name, condition in [('first', 's->wave_query.first_column == wave->first_column'), ('count', 's->wave_query.column_count == wave->column_count')]:
     assert s.count(condition) == 1
     (root / ('wave-' + name + '.h')).write_text(s.replace(condition, '1'))
-s = (root / 'deck.inc').read_text()
+import re
+s = re.sub(r'^#line[^\n]*\n', '', (root / 'deck.inc').read_text(), flags=re.M)
 old = 'memcpy(out, &v, bytes);'
 assert s.count(old) == 1
 (root / 'deck-control.inc').write_text(s.replace(old, 'memcpy(out, &v, bytes + (sizeof v - bytes));'))

@@ -8,11 +8,14 @@ source = Path(__file__).resolve().parents[2] / "src/azmod/sdk_track.c"
 s = source.read_text()
 a = s.index("struct st_source {")
 b = s.index("\n};", a) + 3
-c = s.index("static int st_source_read(")
-d = s.index("\n}", c) + 2
+functions = []
+for name in ("st_source_probe", "st_source_update", "st_source_read"):
+    start = s.index("static int " + name + "(")
+    end = s.index("\n}", start) + 2
+    functions.append(s[start:end])
 body = ("static pthread_mutex_t g_st_source_mu = PTHREAD_MUTEX_INITIALIZER;\n"
         "static uint64_t g_st_generation;\n" + s[a:b] + "\n"
-        "static struct st_source g_st_sources[2];\n" + s[c:d] + "\n")
+        "static struct st_source g_st_sources[2];\n" + "\n".join(functions) + "\n")
 root = Path(sys.argv[1])
 (root / "source-identity.inc").write_text(body)
 for name, old, new in [

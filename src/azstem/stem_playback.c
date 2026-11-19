@@ -884,12 +884,88 @@ static int find_track_folder_any(const char *track, const char *src, char *folde
                                  int *ident) {
     return find_track_folder_any_c(track, src, folder, sz, ident, 0, NULL);
 }
+struct stem_name_scan {
+    DIR *directory;
+    char **names;
+    int cached, count, index;
+    int *complete;
+};
+static int stem_names_begin(struct stem_name_scan *scan, const char *base, int cached, int *complete) {
+    *scan = (struct stem_name_scan) {.cached = cached, .complete = complete};
+    if (!cached) {
+        scan->directory = stem_opendir(base, complete);
+        return scan->directory != NULL;
+    }
+    pthread_mutex_lock(&g_nl_mu);
+    scan->names = nl_get(base, &scan->count);
+    if (scan->names) return 1;
+    pthread_mutex_unlock(&g_nl_mu);
+    return 0;
+}
+static const char *stem_names_next(struct stem_name_scan *scan) {
+    if (scan->cached) return scan->index < scan->count ? scan->names[scan->index++] : NULL;
+    struct dirent *de = stem_readdir(scan->directory, scan->complete);
+    return de ? de->d_name : NULL;
+}
+static void stem_names_end(struct stem_name_scan *scan) {
+    if (scan->cached) pthread_mutex_unlock(&g_nl_mu);
+    else closedir(scan->directory);
+}
+struct stem_folder_search {
+    const char *track, *source;
+    char *folder;
+    size_t capacity;
+    int *ident, *complete;
+    int cached, best;
+    srcid_t identity;
+};
+static void stem_folder_candidate(struct stem_folder_search *search, const char *base, const char *name, int other) {
+    if (name[0] == '.') return;
+    int rank = stem_folder_rank(name, search->track);
+    if (rank < 0) return;
+    char path[1600];
+    snprintf(path, sizeof path, "%s/%s", base, name);
+    if (!is_dir(path)) return;
+    int id = stem_folder_identity(path, &search->identity);
+    if (id < 0) {
+        logln("ogg: reject folder '%s' for '%s': made from a different file", path, search->track);
+        return;
+    }
+    int score = (id ? 0 : 1000) + other * 100 + rank * 10;
+    if (score >= search->best) return;
+    search->best = score;
+    *search->ident = id;
+    snprintf(search->folder, search->capacity, "%s", path);
+}
+static void stem_folder_scan(struct stem_folder_search *search, const char *base, int other) {
+    struct stem_name_scan scan;
+    if (!stem_names_begin(&scan, base, search->cached, search->complete)) return;
+    const char *name;
+    while ((name = stem_names_next(&scan))) stem_folder_candidate(search, base, name, other);
+    stem_names_end(&scan);
+}
+static void stem_folder_mounts(struct stem_folder_search *search, const char *root) {
+    DIR *directory = stem_opendir(root, search->complete);
+    if (!directory) return;
+    struct dirent *de;
+    while ((de = stem_readdir(directory, search->complete))) {
+        if (de->d_name[0] == '.') continue;
+        char stick[512];
+        snprintf(stick, sizeof stick, "%s/%s", root, de->d_name);
+        size_t length = strlen(stick);
+        int other = !(search->source && !strncmp(search->source, stick, length) && search->source[length] == '/');
+        char base[1024];
+        if (child_named_checked(stick, "STEMS", base, sizeof base, search->complete)) stem_folder_scan(search, base, other);
+    }
+    closedir(directory);
+}
+static srcid_t stem_folder_source(const char *src) {
+    struct stat source_stat;
+    return (srcid_t) {src, (src && src[0] && stat(src, &source_stat) == 0) ? (long long) source_stat.st_size : -1, 0, 0};
+}
 /* Find the stems folder for `track` in every mounted stick's STEMS/.
  * A folder made from a different file is never taken (stem_folder_identity).
- * Best candidate wins by, in order:
- *   1. made from this file (source.json) before unknown;
- *   2. on the same stick as the track's file `src`, when known;
- *   3. match rank (stem_folder_rank).
+ * Best candidate wins by file identity, same stick, then stem_folder_rank.
  * Read-only. Off-RT. Returns 1 and fills `folder`. */
 static int find_track_folder_any_c(const char *track, const char *src, char *folder, size_t sz,
                                    int *ident, int cached, int *complete) {
@@ -899,136 +975,13 @@ static int find_track_folder_any_c(const char *track, const char *src, char *fol
     pthread_mutex_unlock(&g_stems_base_mu);
     folder[0] = 0;
     *ident = 0;
-    if (!track || !track[0])
-        return 0;
-    static const char *sroots[] = {"/media/usb", "/run/media", "/mnt", "/media"};
-    int best = 1 << 30;
-    struct stat sst;
-    srcid_t sid = {src, (src && src[0] && stat(src, &sst) == 0) ? (long long) sst.st_size : -1, 0,
-                   0};
-    if (sid.size < 0)
-        logln("ogg: identity of '%s' unchecked (file '%s' unknown)", track, src ? src : "");
-    for (size_t r = 0; r < sizeof sroots / sizeof sroots[0]; r++) {
-        DIR *rd = stem_opendir(sroots[r], complete);
-        if (!rd)
-            continue;
-        struct dirent *rde;
-        while ((rde = stem_readdir(rd, complete))) {
-            if (rde->d_name[0] == '.')
-                continue;
-            char stick[512];
-            snprintf(stick, sizeof stick, "%s/%s", sroots[r], rde->d_name);
-            size_t sl = strlen(stick);
-            int other = !(src && !strncmp(src, stick, sl) && src[sl] == '/');
-            char base[1024];
-            if (!child_named_checked(stick, "STEMS", base, sizeof base, complete))
-                continue;
-            DIR *d = 0;
-            struct dirent *de;
-            char **nl = 0;
-            int nn = 0, ni = 0;
-            if (cached) {
-                pthread_mutex_lock(&g_nl_mu);
-                nl = nl_get(base, &nn);
-                if (!nl) {
-                    pthread_mutex_unlock(&g_nl_mu);
-                    continue;
-                }
-            } else if (!(d = stem_opendir(base, complete)))
-                continue;
-            for (;;) {
-                const char *dn;
-                if (cached) {
-                    if (ni >= nn)
-                        break;
-                    dn = nl[ni++];
-                } else {
-                    if (!(de = stem_readdir(d, complete)))
-                        break;
-                    dn = de->d_name;
-                }
-                if (dn[0] == '.')
-                    continue;
-                int rank = stem_folder_rank(dn, track);
-                if (rank < 0)
-                    continue;
-                char p[1600];
-                snprintf(p, sizeof p, "%s/%s", base, dn);
-                if (!is_dir(p))
-                    continue;
-                int id = stem_folder_identity(p, &sid);
-                if (id < 0) {
-                    logln("ogg: reject folder '%s' for '%s': made from a different file", p,
-                          track);
-                    continue;
-                }
-                int score = (id ? 0 : 1000) + other * 100 + rank * 10;
-                if (score >= best)
-                    continue;
-                best = score;
-                *ident = id;
-                snprintf(folder, sz, "%s", p);
-            }
-            if (cached)
-                pthread_mutex_unlock(&g_nl_mu);
-            else
-                closedir(d);
-        }
-        closedir(rd);
-    }
-    /* extra_base covers a base outside the mount roots above (env / control file) */
-    if (!folder[0] && extra_base[0]) {
-        DIR *d = 0;
-        struct dirent *de;
-        char **nl = 0;
-        int nn = 0, ni = 0, ok;
-        if (cached) {
-            pthread_mutex_lock(&g_nl_mu);
-            nl = nl_get(extra_base, &nn);
-            ok = nl != 0;
-            if (!ok)
-                pthread_mutex_unlock(&g_nl_mu);
-        } else
-            ok = (d = stem_opendir(extra_base, complete)) != 0;
-        if (ok) {
-            for (;;) {
-                const char *dn;
-                if (cached) {
-                    if (ni >= nn)
-                        break;
-                    dn = nl[ni++];
-                } else {
-                    if (!(de = stem_readdir(d, complete)))
-                        break;
-                    dn = de->d_name;
-                }
-                if (dn[0] == '.')
-                    continue;
-                int rank = stem_folder_rank(dn, track);
-                if (rank < 0)
-                    continue;
-                char p[1600];
-                snprintf(p, sizeof p, "%s/%s", extra_base, dn);
-                if (!is_dir(p))
-                    continue;
-                int id = stem_folder_identity(p, &sid);
-                if (id < 0) {
-                    logln("ogg: reject folder '%s' for '%s': made from a different file", p, track);
-                    continue;
-                }
-                int score = (id ? 0 : 1000) + rank * 10;
-                if (score < best) {
-                    best = score;
-                    *ident = id;
-                    snprintf(folder, sz, "%s", p);
-                }
-            }
-            if (cached)
-                pthread_mutex_unlock(&g_nl_mu);
-            else
-                closedir(d);
-        }
-    }
+    if (!track || !track[0]) return 0;
+    struct stem_folder_search search = {.track = track, .source = src, .folder = folder, .capacity = sz, .ident = ident, .complete = complete, .cached = cached, .best = 1 << 30, .identity = stem_folder_source(src)};
+    if (search.identity.size < 0) logln("ogg: identity of '%s' unchecked (file '%s' unknown)", track, src ? src : "");
+    static const char *roots[] = {"/media/usb", "/run/media", "/mnt", "/media"};
+    for (size_t r = 0; r < sizeof roots / sizeof *roots; ++r) stem_folder_mounts(&search, roots[r]);
+    /* extra_base covers a base outside the mount roots (env / control file). */
+    if (!folder[0] && extra_base[0]) stem_folder_scan(&search, extra_base, 0);
     return folder[0] != 0;
 }
 
@@ -1054,32 +1007,44 @@ int azstem_has_stems(const char *abs_path) {
 }
 
 #ifdef AZ_STATUS_NATIVE_PRODUCER
-static int status_stem_probe(const char *src, int *available) {
-    char key[256], folder[1024];
+static int status_stem_source_key(const char *src, char key[256], struct stat *start) {
     const char *base = strrchr(src, '/');
-    struct stat start, end;
-    if (!base || !base[1] || strlen(base + 1) >= sizeof key || stat(src, &start) != 0 || !S_ISREG(start.st_mode))
-        return AZ_AVAIL_STALE;
+    if (!base || !base[1] || strlen(base + 1) >= 256 || stat(src, start) != 0 || !S_ISREG(start->st_mode)) return 0;
     strcpy(key, base + 1);
     char *ext = strrchr(key, '.');
     if (ext) *ext = 0;
+    return 1;
+}
+static int status_stem_folder_present(DIR *directory, int *complete) {
+    struct dirent *de;
+    int found = 0;
+    while ((de = stem_readdir(directory, complete)))
+        if (de->d_name[0] != '.' && has_ogg_ext(de->d_name) && slot_for_filename(de->d_name) >= 0) found = 1;
+    return found;
+}
+static int status_stem_source_unchanged(const char *src, const struct stat *start) {
+    struct stat end;
+    return stat(src, &end) == 0 && start->st_dev == end.st_dev && start->st_ino == end.st_ino && start->st_size == end.st_size && start->st_mtime == end.st_mtime;
+}
+static int status_stem_probe(const char *src, int *available) {
+    char key[256], folder[1024];
+    struct stat start;
+    if (!status_stem_source_key(src, key, &start)) return AZ_AVAIL_STALE;
     int ident = 0, complete = 1, found = 0;
     if (find_track_folder_any_c(key, src, folder, sizeof folder, &ident, 0, &complete)) {
         DIR *d = stem_opendir(folder, &complete);
         if (!d) return AZ_AVAIL_STALE;
-        struct dirent *de;
-        while ((de = stem_readdir(d, &complete)))
-            if (de->d_name[0] != '.' && has_ogg_ext(de->d_name) && slot_for_filename(de->d_name) >= 0) found = 1;
+        found = status_stem_folder_present(d, &complete);
         closedir(d);
         /* A same-name folder without a matching file fingerprint is not a
          * qualified positive until this engine actually decodes it for src. */
         if (found && !ident) return AZ_AVAIL_LOADING;
     }
-    if (!complete || stat(src, &end) != 0 || start.st_dev != end.st_dev || start.st_ino != end.st_ino ||
-        start.st_size != end.st_size || start.st_mtime != end.st_mtime) return AZ_AVAIL_STALE;
+    if (!complete || !status_stem_source_unchanged(src, &start)) return AZ_AVAIL_STALE;
     *available = found;
     return AZ_AVAIL_READY;
 }
+
 #endif
 /* Exported for azmod's stem pads and tiles: which stems the deck's track has,
  * bit k = slot k (0 vocals, 1 other, 2 bass, 3 drums), i.e. found and not failed
@@ -1595,12 +1560,7 @@ static void loaded_track_path(int deck, char *out, size_t n) {
     snprintf(out, n, "%s", g_dk[deck].track_path);
 }
 
-static void start_load(int deck, const char *tr) {
-    loadjob_t *j = malloc(sizeof *j);
-    if (!j)
-        return;
-    j->deck = deck;
-    snprintf(j->track, sizeof j->track, "%s", tr);
+static void stem_load_source(loadjob_t *j, int deck) {
 #ifdef AZ_STATUS_NATIVE_PRODUCER
     struct azsdk_load_sample before = {0}, after = {0};
     j->status_job = (struct azn_stem_job) {0};
@@ -1612,6 +1572,14 @@ static void start_load(int deck, const char *tr) {
         before.invalidation_epoch == after.invalidation_epoch && before.unit_generation == after.unit_generation)
         j->status_job = azn_stems_job((unsigned) deck, before.load_generation, j->src);
 #endif
+}
+static void start_load(int deck, const char *tr) {
+    loadjob_t *j = malloc(sizeof *j);
+    if (!j)
+        return;
+    j->deck = deck;
+    snprintf(j->track, sizeof j->track, "%s", tr);
+    stem_load_source(j, deck);
     atomic_store_explicit(&g_env_cid[deck], lti_content_id(deck), memory_order_release);
     atomic_store_explicit(&g_stem_loading[deck], 1, memory_order_relaxed);
     pthread_t th;
@@ -1622,145 +1590,128 @@ static void start_load(int deck, const char *tr) {
     } /* thread exhausted: decode inline */
 }
 
-static void stems_tick(void) {
-    /* Discover the stems base at most every ~5 s: with no stems present the walk
-     * can cover a large library, and this runs every 200 ms. Cached once found. */
-    if (!g_stems_base[0]) {
-        static int discover_skip = 0;
-        if (discover_skip <= 0) {
-            char candidate[sizeof g_stems_base] = {0};
-            find_stems_base(candidate, sizeof candidate);
-            if (candidate[0]) {
-                pthread_mutex_lock(&g_stems_base_mu);
-                memcpy(g_stems_base, candidate, sizeof g_stems_base);
-                pthread_mutex_unlock(&g_stems_base_mu);
-#ifdef AZ_STATUS_NATIVE_PRODUCER
-                azn_stems_rescan();
-#endif
-            }
-            discover_skip = 25;
-        } else
-            discover_skip--;
+static void stems_discover_base(void) {
+    /* Discover at most every ~5 s: an empty library walk runs off the audio path. */
+    if (g_stems_base[0]) return;
+    static int discover_skip;
+    if (discover_skip > 0) {
+        discover_skip--;
+        return;
     }
-    int vdbg = dev_flag("/home/root/settings/azstem.vdbg");
-    for (int deck = 0; deck < NDECK; deck++) {
-        deck_stems *dk = &g_dk[deck];
-        if (vdbg) {
-            void *sf = atomic_load_explicit(&g_deck_self[STEM_SLOT[deck]], memory_order_relaxed);
-            logln("STICK d%d base='%s' self=%p frames=%ld gl='%s'", deck, g_stems_base, sf,
-                  dk->stem_frames, dk->loaded_track);
-        }
-        /* No stems base: track identity still runs below, since the drum roll's grid,
-         * the auto key-shift mapping and azmod's toggle reset key on the generation
-         * whether or not the stick has stems. Only stem loading waits for a base. */
-        int have_base = g_stems_base[0] != 0;
-        /* no USB tree: emulator f32 fallback (Deck 1 only) */
-        if (!have_base && deck == 0 && dk->stem_frames == 0) {
-            load_stems_f32(0);
-            if (dk->stem_frames > 0)
-                logln("stems(f32 fallback) loaded: frames=%ld", dk->stem_frames);
-        }
-        const char *tr = get_loaded_track_name(deck);
-        if (!tr || !tr[0]) {
-            /* Empty name = a transient probe miss or a real eject. A miss recovers
-             * within a tick or two; ~1.6 s empty while a track was loaded is an
-             * eject: free the stems and clear availability, which removes azmod's
-             * stem indicators. */
-            if (dk->loaded_track[0] && ++g_eject_empty[deck] >= EJECT_EMPTY_TICKS) {
-                logln("stems_tick: d%d EJECT (name empty %d ticks) -- free + clear avail", deck,
-                      g_eject_empty[deck]);
-                if (have_base)
-                    drop_stems(deck);
-                atomic_store_explicit(&g_stem_pending[deck], 0, memory_order_relaxed);
-                g_load_deferred[deck] = 0;
-                dk->loaded_track[0] = 0;
-                g_loaded_src[deck][0] = 0;
-                deck_track_changed(deck); /* generation + identity: ejected */
-                /* Clear the published name too, or reloading the same track
-                 * reads as "unchanged" to azmod and its toggles never reset. */
-                publish_deck_file(deck, "curtrack", "");
-                publish_src(deck);
-                g_eject_empty[deck] = 0;
-            }
-            continue; /* unknown/ejected: nothing more to do this tick */
-        }
-        g_eject_empty[deck] = 0; /* a real name resets the eject debounce */
-        /* Same name and same file = same track. An unreadable path (either side
-         * empty) compares by name alone, so it never causes reload churn. */
-        char src[600];
-        loaded_track_path(deck, src, sizeof src);
-        int same_file = !src[0] || !g_loaded_src[deck][0] || strcmp(src, g_loaded_src[deck]) == 0;
-        if (strcmp(tr, dk->loaded_track) == 0 && same_file) {
-            g_pending_name[deck][0] = 0;
-            if (!g_loaded_src[deck][0] && src[0]) { /* path readable only now: record it */
-                snprintf(g_loaded_src[deck], sizeof g_loaded_src[deck], "%s", src);
-                publish_src(deck);
-            }
-            /* a load discarded because the track changed under it: start this track's */
-            if (!atomic_load_explicit(&g_stem_loading[deck], memory_order_acquire) &&
-                atomic_exchange_explicit(&g_load_again[deck], 0, memory_order_acq_rel))
-                start_load(deck, tr);
-            /* identified before a stems base existed: the base is here now */
-            else if (have_base && g_load_deferred[deck] &&
-                     !atomic_load_explicit(&g_stem_loading[deck], memory_order_acquire)) {
-                g_load_deferred[deck] = 0;
-                start_load(deck, tr);
-            }
-            continue;
-        }
-
-        /* Confirm a change across two ticks before acting on it. On the scan
-         * route, probe_strings takes the first audio path within two pointer
-         * levels of the deck object, which can transiently be another deck's
-         * track. Requiring the same new name on two consecutive ~200 ms ticks
-         * rejects that at a cost of one tick. The native route (g_lti_on) does
-         * not have this problem. */
-        if (strcmp(tr, g_pending_name[deck]) != 0 || strcmp(src, g_pending_src[deck]) != 0) {
-            snprintf(g_pending_name[deck], sizeof g_pending_name[deck], "%s", tr);
-            snprintf(g_pending_src[deck], sizeof g_pending_src[deck], "%s", src);
-            logln("stems_tick: d%d track change '%s' -> '%s' PENDING (needs 2nd tick)", deck,
-                  dk->loaded_track, tr);
-            continue; /* unconfirmed: act on it next tick */
-        }
-        g_pending_name[deck][0] = 0;
-        logln("stems_tick: d%d track changed '%s' -> '%s'", deck, dk->loaded_track, tr);
-        if (!strcmp(tr, dk->loaded_track))
-            logln("stems_tick: d%d same name, different file '%s' -> '%s'", deck,
-                  g_loaded_src[deck], src);
+    char candidate[sizeof g_stems_base] = {0};
+    find_stems_base(candidate, sizeof candidate);
+    if (candidate[0]) {
+        pthread_mutex_lock(&g_stems_base_mu);
+        memcpy(g_stems_base, candidate, sizeof g_stems_base);
+        pthread_mutex_unlock(&g_stems_base_mu);
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+        azn_stems_rescan();
+#endif
+    }
+    discover_skip = 25;
+}
+static void stems_tick_empty(int deck, deck_stems *dk, int have_base) {
+    /* Transient misses recover within a tick or two; ~1.6 s empty is an eject. */
+    if (!dk->loaded_track[0] || ++g_eject_empty[deck] < EJECT_EMPTY_TICKS) return;
+    logln("stems_tick: d%d EJECT (name empty %d ticks) -- free + clear avail", deck, g_eject_empty[deck]);
+    if (have_base) drop_stems(deck);
+    atomic_store_explicit(&g_stem_pending[deck], 0, memory_order_relaxed);
+    g_load_deferred[deck] = 0;
+    dk->loaded_track[0] = 0;
+    g_loaded_src[deck][0] = 0;
+    deck_track_changed(deck); /* generation + identity: ejected */
+    /* Clearing the published name also makes a same-track reload reset toggles. */
+    publish_deck_file(deck, "curtrack", "");
+    publish_src(deck);
+    g_eject_empty[deck] = 0;
+}
+static int stems_same_file(int deck, const char *src) {
+    /* An unreadable path compares by name alone, preventing reload churn. */
+    return !src[0] || !g_loaded_src[deck][0] || strcmp(src, g_loaded_src[deck]) == 0;
+}
+static void stems_tick_existing(int deck, const char *tr, const char *src, int have_base) {
+    g_pending_name[deck][0] = 0;
+    if (!g_loaded_src[deck][0] && src[0]) {
         snprintf(g_loaded_src[deck], sizeof g_loaded_src[deck], "%s", src);
-        /* before the publish below: azmod must see the new name and the new generation
-         * together, or it resets the deck's stem toggles twice */
-        deck_track_changed(deck);
-        if (!have_base) {
-            /* identity only: publish it, and load the stems if a base turns up */
-            publish_deck_file(deck, "curtrack", tr);
-            publish_src(deck);
-            snprintf(dk->loaded_track, sizeof dk->loaded_track, "%s", tr);
-            g_load_deferred[deck] = 1;
-            continue;
-        }
+        publish_src(deck);
+    }
+    /* Restart a discarded load, or a load deferred until a base appeared. */
+    if (!atomic_load_explicit(&g_stem_loading[deck], memory_order_acquire) && atomic_exchange_explicit(&g_load_again[deck], 0, memory_order_acq_rel))
+        start_load(deck, tr);
+    else if (have_base && g_load_deferred[deck] && !atomic_load_explicit(&g_stem_loading[deck], memory_order_acquire)) {
         g_load_deferred[deck] = 0;
-
-        /* Drop the old stems now, or the RT hook keeps rendering them against the
-         * new track's playhead until the new decode lands. Without buffers it
-         * passes native audio through. drop_stems, not free_stems: a load may
-         * still be writing these buffers. */
-        drop_stems(deck);
-        atomic_store_explicit(&g_stem_pending[deck], 0, memory_order_relaxed);
-        publish_deck_file(deck, "avail", "0");
-
-        /* Publish before the in-flight-load check: azmod resets the deck's toggles
-         * to all-on when this file changes. */
+        start_load(deck, tr);
+    }
+}
+static int stems_confirm_change(int deck, const deck_stems *dk, const char *tr, const char *src) {
+    /* The legacy scan can briefly find another deck's path. Confirm a new
+     * name and source across two ticks before publishing or decoding. */
+    if (strcmp(tr, g_pending_name[deck]) != 0 || strcmp(src, g_pending_src[deck]) != 0) {
+        snprintf(g_pending_name[deck], sizeof g_pending_name[deck], "%s", tr);
+        snprintf(g_pending_src[deck], sizeof g_pending_src[deck], "%s", src);
+        logln("stems_tick: d%d track change '%s' -> '%s' PENDING (needs 2nd tick)", deck, dk->loaded_track, tr);
+        return 0;
+    }
+    g_pending_name[deck][0] = 0;
+    return 1;
+}
+static void stems_tick_changed(int deck, deck_stems *dk, const char *tr, const char *src, int have_base) {
+    logln("stems_tick: d%d track changed '%s' -> '%s'", deck, dk->loaded_track, tr);
+    if (!strcmp(tr, dk->loaded_track)) logln("stems_tick: d%d same name, different file '%s' -> '%s'", deck, g_loaded_src[deck], src);
+    snprintf(g_loaded_src[deck], sizeof g_loaded_src[deck], "%s", src);
+    /* Publish the new generation before its name, so toggles reset once. */
+    deck_track_changed(deck);
+    if (!have_base) {
         publish_deck_file(deck, "curtrack", tr);
         publish_src(deck);
         snprintf(dk->loaded_track, sizeof dk->loaded_track, "%s", tr);
-        /* A load still in flight was just marked stale by drop_stems; the loader
-         * raises g_load_again when it has freed, and the branch above restarts. */
-        if (atomic_load_explicit(&g_stem_loading[deck], memory_order_relaxed))
-            continue;
-        /* Decode on a worker: blocking here would stall every deck's polling. */
-        start_load(deck, tr);
+        g_load_deferred[deck] = 1;
+        return;
     }
+    g_load_deferred[deck] = 0;
+    /* A loader may still own old buffers. Close rendering before publishing
+     * the new track; that loader frees its buffers and requests a restart. */
+    drop_stems(deck);
+    atomic_store_explicit(&g_stem_pending[deck], 0, memory_order_relaxed);
+    publish_deck_file(deck, "avail", "0");
+    publish_deck_file(deck, "curtrack", tr);
+    publish_src(deck);
+    snprintf(dk->loaded_track, sizeof dk->loaded_track, "%s", tr);
+    if (!atomic_load_explicit(&g_stem_loading[deck], memory_order_relaxed)) start_load(deck, tr);
+}
+static void stems_tick_fallback(int deck, deck_stems *dk, int have_base) {
+    if (have_base || deck != 0 || dk->stem_frames != 0) return;
+    load_stems_f32(0);
+    if (dk->stem_frames > 0) logln("stems(f32 fallback) loaded: frames=%ld", dk->stem_frames);
+}
+static void stems_tick_deck(int deck, int vdbg) {
+    deck_stems *dk = &g_dk[deck];
+    if (vdbg) {
+        void *sf = atomic_load_explicit(&g_deck_self[STEM_SLOT[deck]], memory_order_relaxed);
+        logln("STICK d%d base='%s' self=%p frames=%ld gl='%s'", deck, g_stems_base, sf, dk->stem_frames, dk->loaded_track);
+    }
+    /* Track identity still runs without stems: other features use its generation. */
+    int have_base = g_stems_base[0] != 0;
+    stems_tick_fallback(deck, dk, have_base);
+    const char *tr = get_loaded_track_name(deck);
+    if (!tr || !tr[0]) {
+        stems_tick_empty(deck, dk, have_base);
+        return;
+    }
+    g_eject_empty[deck] = 0;
+    char src[600];
+    loaded_track_path(deck, src, sizeof src);
+    int same_file = stems_same_file(deck, src);
+    if (strcmp(tr, dk->loaded_track) == 0 && same_file) {
+        stems_tick_existing(deck, tr, src, have_base);
+        return;
+    }
+    if (stems_confirm_change(deck, dk, tr, src)) stems_tick_changed(deck, dk, tr, src, have_base);
+}
+static void stems_tick(void) {
+    stems_discover_base();
+    int vdbg = dev_flag("/home/root/settings/azstem.vdbg");
+    for (int deck = 0; deck < NDECK; deck++) stems_tick_deck(deck, vdbg);
 }
 static _Atomic int g_installed = 0; /* 1 ok, -1 declined, 0 not tried */
 

@@ -1360,14 +1360,7 @@ static int cm_tempo_read(int d, double *bpm, uint64_t *generation, uint64_t *rev
     pthread_mutex_unlock(&g_cm_bpm_mu);
     return valid;
 }
-static void cm_tempo_publish(int d, int sampled, double bpm, uint64_t generation, uint64_t observed_ns) {
-    if (d < 0 || d >= AZMOD_STEM_DECKS) return;
-    uint64_t event = cm_tempo_event_next(d);
-    if (pthread_mutex_trylock(&g_cm_bpm_mu) != 0) return;
-    if (!event || event != atomic_load_explicit(&g_cm_tempo_event[d], memory_order_acquire)) {
-        pthread_mutex_unlock(&g_cm_bpm_mu);
-        return;
-    }
+static void cm_tempo_receipt(int d, int sampled, double bpm, uint64_t generation, uint64_t observed_ns, uint64_t event) {
     g_cm_tempo[d].valid = 0;
     g_cm_tempo[d].bpm = 0.0;
     atomic_store_explicit(&g_cm_bpm[d], 0.0, memory_order_seq_cst);
@@ -1386,6 +1379,16 @@ static void cm_tempo_publish(int d, int sampled, double bpm, uint64_t generation
             g_cm_tempo[d].valid = 1;
         }
     }
+}
+static void cm_tempo_publish(int d, int sampled, double bpm, uint64_t generation, uint64_t observed_ns) {
+    if (d < 0 || d >= AZMOD_STEM_DECKS) return;
+    uint64_t event = cm_tempo_event_next(d);
+    if (pthread_mutex_trylock(&g_cm_bpm_mu) != 0) return;
+    if (!event || event != atomic_load_explicit(&g_cm_tempo_event[d], memory_order_acquire)) {
+        pthread_mutex_unlock(&g_cm_bpm_mu);
+        return;
+    }
+    cm_tempo_receipt(d, sampled, bpm, generation, observed_ns, event);
     pthread_mutex_unlock(&g_cm_bpm_mu);
 }
 static void cm_tempo_poll(void) {
@@ -2127,8 +2130,7 @@ static void cm_write_status(void) {
 }
 
 /* Called once from the overlay thread (EP147 only), after load_config. */
-static void community_init(void) {
-    sdk_status_start();
+static void cm_services_start(void) {
 #ifndef SDK_PROC_IMPL
     /* Resolve the shared SQL table before any community worker can read it. */
     /* Public SDK data and command services are available on a normal install. */
@@ -2144,10 +2146,8 @@ static void community_init(void) {
         }
     }
 #endif
-    cm_derive_fwtag();
-    g_cm_logs_on = access(CM_ROOT "/azmod-logs.on", F_OK) == 0;
-    dbg("community: running EP147 tag %s\n", g_cm_fwtag[0] ? g_cm_fwtag : "(not derivable: hooking mods refused)");
-    g_cm_alloff = access(CM_ALL_OFF, F_OK) == 0 || access(CM_USER_OFF, F_OK) == 0;
+}
+static void cm_enabled_read(void) {
     FILE *ef = fopen(CM_STAGE "/enabled", "re");
     if (ef) {
         char line[64];
@@ -2161,152 +2161,127 @@ static void community_init(void) {
         }
         fclose(ef);
     }
-    /* A disabled plugin is out of `enabled` but still installed (<id>/<id>.off):
-     * list it too, so the Mod Menu shows it as off and can offer Enable. cm_load_one
-     * refuses it on the .off file before it reads anything else, so it never loads. */
-    int nen = g_cm_n;
-    {
-        DIR *dd = opendir(CM_STAGE);
-        struct dirent *de;
-        while (dd && (de = readdir(dd)) && g_cm_n < CM_MAX) {
-            const char *id = de->d_name;
-            size_t L = strlen(id);
-            int ok = L >= 3 && L <= 32 && cm_id_ok(id);
-            if (!ok || cm_find(id)) continue;
-            char p[200];
-            if (snprintf(p, sizeof p, CM_STAGE "/%s/%s.off", id, id) >= (int) sizeof p) continue;
-            if (access(p, F_OK) != 0) continue;
-            cm_mod *c = &g_cm[g_cm_n++];
-            memset(c, 0, sizeof *c);
-            _Static_assert(sizeof c->id > 32 && sizeof c->name > 32, "an id of L <= 32 fits");
-            memcpy(c->id, id, L + 1);
-            memcpy(c->name, id, L + 1);
+}
+static void cm_disabled_manifest(cm_mod *c, const char *id, size_t L) {
           /* its name for the menu, best effort: the manifest is data, nothing of it runs */
-            if (snprintf(p, sizeof p, CM_STAGE "/%s/azmod.json", id) < (int) sizeof p) {
-                char js[16384], mid[40];
-                int jn = 0, fd = open(p, O_RDONLY | O_CLOEXEC);
-                if (fd >= 0) {
-                    jn = (int) read(fd, js, sizeof js - 1);
-                    close(fd);
-                }
-                if (jn > 0) {
-                    js[jn] = 0;
-                    if (cm_json_str(js, "id", mid, sizeof mid) && !strcmp(mid, id)) {
-                        cm_json_str(js, "name", c->name, sizeof c->name);
-                        cm_json_str(js, "version", c->version, sizeof c->version);
-                        cm_json_str(js, "author", c->author, sizeof c->author);
-                        cm_json_str(js, "summary", c->summary, sizeof c->summary);
-                        if (!c->name[0]) memcpy(c->name, id, L + 1);
-                    }
-                }
-            }
-            cm_refuse(c, AZCM_DISABLED, "Disabled");
-        }
-        if (dd) closedir(dd);
-    }
-    /* from here on only the enabled ones (the first nen) take part: a disabled plugin
-     * neither counts toward the quarantine nor gets relabeled by it */
-    cm_grandfather(nen);
-    cm_approved_read();
-    if (!nen) {
-        cm_write_status();
-        return;
-    }
-    if (g_cm_alloff) {
-        for (int i = 0; i < nen; i++) {
-            cm_names(&g_cm[i]);
-            cm_refuse(&g_cm[i], AZCM_DISABLED, "Community mods are disabled");
-        }
-        cm_write_status();
-        return;
-    }
-    /* a mod that froze or died inside its own init() last start (CM_INITING left behind) */
-    {
-        char who[40] = {0};
-        int fd = open(CM_INITING, O_RDONLY | O_CLOEXEC);
+    char p[200];
+    if (snprintf(p, sizeof p, CM_STAGE "/%s/azmod.json", id) < (int) sizeof p) {
+        char js[16384], mid[40];
+        int jn = 0, fd = open(p, O_RDONLY | O_CLOEXEC);
         if (fd >= 0) {
-            ssize_t k = read(fd, who, sizeof who - 1);
+            jn = (int) read(fd, js, sizeof js - 1);
             close(fd);
-            if (k > 0) who[k] = 0;
         }
-        cm_mod *b = who[0] ? cm_find(who) : NULL;
-        if (b) {
-            mkdir(CM_STATE, 0755);
-            char p[200];
-            snprintf(p, sizeof p, CM_STATE "/%s.crashed", b->id);
-            int fd2 = open(p, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-            if (fd2 >= 0) {
-                if (write(fd2, "froze", 5) < 0) {}
-                close(fd2);
+        if (jn > 0) {
+            js[jn] = 0;
+            if (cm_json_str(js, "id", mid, sizeof mid) && !strcmp(mid, id)) {
+                cm_json_str(js, "name", c->name, sizeof c->name);
+                cm_json_str(js, "version", c->version, sizeof c->version);
+                cm_json_str(js, "author", c->author, sizeof c->author);
+                cm_json_str(js, "summary", c->summary, sizeof c->summary);
+                if (!c->name[0]) memcpy(c->name, id, L + 1);
             }
-            dbg("community: %s never finished starting last time: suspended\n", b->id);
-            unlink(CM_STARTING);
         }
-        unlink(CM_INITING);
     }
-    /* crash blame from the last start: suspend only that mod */
-    {
-        char who[40] = {0};
-        int fd = open(CM_BLAME, O_RDONLY | O_CLOEXEC);
-        if (fd >= 0) {
-            ssize_t k = read(fd, who, sizeof who - 1);
-            close(fd);
-            if (k > 0) who[k] = 0;
-        }
-        cm_mod *b = who[0] ? cm_find(who) : NULL;
-        if (b) {
-          /* in CM_STATE, never in the stage: az-usbload re-mirrors the stick over the stage */
-            mkdir(CM_STATE, 0755);
-            char p[200];
-            snprintf(p, sizeof p, CM_STATE "/%s.crashed", b->id);
-            int fd2 = open(p, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
-            if (fd2 >= 0) close(fd2);
-            dbg("community: %s crashed the deck last start: suspended\n", b->id);
-            unlink(CM_STARTING);   /* the culprit is known: no reason to hold the others back */
-        }
-        unlink(CM_BLAME);
+}
+static void cm_disabled_add(const char *id) {
+    size_t L = strlen(id);
+    int ok = L >= 3 && L <= 32 && cm_id_ok(id);
+    if (!ok || cm_find(id)) return;
+    char p[200];
+    if (snprintf(p, sizeof p, CM_STAGE "/%s/%s.off", id, id) >= (int) sizeof p) return;
+    if (access(p, F_OK) != 0) return;
+    cm_mod *c = &g_cm[g_cm_n++];
+    memset(c, 0, sizeof *c);
+    _Static_assert(sizeof c->id > 32 && sizeof c->name > 32, "an id of L <= 32 fits");
+    memcpy(c->id, id, L + 1);
+    memcpy(c->name, id, L + 1);
+    cm_disabled_manifest(c, id, L);
+    cm_refuse(c, AZCM_DISABLED, "Disabled");
+}
+static void cm_disabled_read(void) {
+    DIR *dd = opendir(CM_STAGE);
+    struct dirent *de;
+    while (dd && (de = readdir(dd)) && g_cm_n < CM_MAX) cm_disabled_add(de->d_name);
+    if (dd) closedir(dd);
+}
+static cm_mod *cm_read_failed_mod(const char *path) {
+    char who[40] = {0};
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) {
+        ssize_t n = read(fd, who, sizeof who - 1);
+        close(fd);
+        if (n > 0) who[n] = 0;
     }
-    /* quarantine */
+    return who[0] ? cm_find(who) : NULL;
+}
+static void cm_mark_prior_failure(cm_mod *c, int frozen) {
+    mkdir(CM_STATE, 0755);
+    char path[200];
+    snprintf(path, sizeof path, CM_STATE "/%s.crashed", c->id);
+    int flags = O_WRONLY | O_CREAT | O_CLOEXEC | (frozen ? O_TRUNC : 0);
+    int fd = open(path, flags | O_CLOEXEC, 0644);
+    if (fd >= 0) {
+        if (frozen && write(fd, "froze", 5) < 0) {}
+        close(fd);
+    }
+}
+static void cm_record_prior_failure(const char *path, int frozen) {
+    cm_mod *c = cm_read_failed_mod(path);
+    if (c) {
+        cm_mark_prior_failure(c, frozen);
+        dbg("community: %s %s: suspended\n", c->id, frozen ? "never finished starting last time" : "crashed the deck last start");
+        unlink(CM_STARTING);
+    }
+    unlink(path);
+}
+static int cm_start_count(void) {
     int starts = 0;
-    {
-        FILE *sf = fopen(CM_STARTING, "re");
-        if (sf) {
-            if (fscanf(sf, "%d", &starts) != 1) starts = 0;
-            fclose(sf);
-        }
+    FILE *file = fopen(CM_STARTING, "re");
+    if (file) {
+        if (fscanf(file, "%d", &starts) != 1) starts = 0;
+        fclose(file);
     }
-    if (starts >= 2) {
+    return starts;
+}
+static int cm_quarantine_starts(int nen, int starts) {
+    if (starts < 2) return 0;
+    g_cm_suspended = 1;
+    for (int i = 0; i < nen; ++i) cm_refuse(&g_cm[i], AZCM_SUSPENDED, "Suspended: the deck restarted twice right after starting with community mods");
+    cm_write_status();
+    return 1;
+}
+static int cm_recent_crashes(long now_s, long keep[16], int *present) {
+    int count = 0;
+    long t;
+    FILE *file = fopen(CM_CRASHES, "re");
+    *present = file != NULL;
+    if (!file) return 0;
+    while (fscanf(file, "%ld", &t) == 1)
+        if (now_s - t >= 0 && now_s - t < CM_CRASH_S && count < 16) keep[count++] = t;
+    fclose(file);
+    return count;
+}
+static void cm_save_recent_crashes(const long *keep, int count) {
+    FILE *file = fopen(CM_CRASHES ".new", "we");
+    if (!file) return;
+    for (int i = 0; i < count; ++i) fprintf(file, "%ld\n", keep[i]);
+    if (fclose(file) == 0) rename(CM_CRASHES ".new", CM_CRASHES);
+}
+static int cm_quarantine_crashes(int nen) {
+    long keep[16];
+    int present = 0;
+    int count = cm_recent_crashes((long) time(NULL), keep, &present);
+    if (count >= CM_CRASH_N) {
         g_cm_suspended = 1;
-        for (int i = 0; i < nen; i++) cm_refuse(&g_cm[i], AZCM_SUSPENDED, "Suspended: the deck restarted twice right after starting with community mods");
+        for (int i = 0; i < nen; ++i) cm_refuse(&g_cm[i], AZCM_SUSPENDED, "Suspended: the deck crashed %d times in %d minutes with community mods on", count, CM_CRASH_S / 60);
         cm_write_status();
-        return;
+        return 1;
     }
-    /* crashes nobody could be blamed for, with community mods loaded: CM_CRASH_N within
-     * CM_CRASH_S hold them all back until the DJ resumes them (a mod that crashes the deck later
-     * in a set, through code blame cannot see, must not do it every set). Old entries are dropped. */
-    {
-        long now_s = (long) time(NULL), t, keep[16];
-        int nk = 0;
-        FILE *cf = fopen(CM_CRASHES, "re");
-        if (cf) {
-            while (fscanf(cf, "%ld", &t) == 1)
-                if (now_s - t >= 0 && now_s - t < CM_CRASH_S && nk < 16) keep[nk++] = t;
-            fclose(cf);
-        }
-        if (nk >= CM_CRASH_N) {
-            g_cm_suspended = 1;
-            for (int i = 0; i < nen; i++) cm_refuse(&g_cm[i], AZCM_SUSPENDED, "Suspended: the deck crashed %d times in %d minutes with community mods on", nk, CM_CRASH_S / 60);
-            cm_write_status();
-            return;
-        }
-        if (cf) {
-            FILE *w = fopen(CM_CRASHES ".new", "we");
-            if (w) {
-                for (int i = 0; i < nk; i++) fprintf(w, "%ld\n", keep[i]);
-                if (fclose(w) == 0) rename(CM_CRASHES ".new", CM_CRASHES);
-            }
-        }
-    }
+    if (present) cm_save_recent_crashes(keep, count);
+    return 0;
+}
+static void cm_record_start(int starts) {
     mkdir(CM_STATE, 0755);
     { /* must be on p7 before a mod's code runs (a crash in init must still count): fsync the
        * file and its folder only, not a global sync() that would also flush the USB sticks */
@@ -2325,6 +2300,40 @@ static void community_init(void) {
         }
         if (cmo_install(CM_STARTING) != 0) dbg("community: no SIGTERM handler: an orderly stop counts as a failed start\n");
     }
+}
+static void cm_disable_all(int nen) {
+    for (int i = 0; i < nen; ++i) {
+        cm_names(&g_cm[i]);
+        cm_refuse(&g_cm[i], AZCM_DISABLED, "Community mods are disabled");
+    }
+}
+static void community_init(void) {
+    sdk_status_start();
+    cm_services_start();
+    cm_derive_fwtag();
+    g_cm_logs_on = access(CM_ROOT "/azmod-logs.on", F_OK) == 0;
+    dbg("community: running EP147 tag %s\n", g_cm_fwtag[0] ? g_cm_fwtag : "(not derivable: hooking mods refused)");
+    g_cm_alloff = access(CM_ALL_OFF, F_OK) == 0 || access(CM_USER_OFF, F_OK) == 0;
+    cm_enabled_read();
+    int nen = g_cm_n;
+    cm_disabled_read();
+    /* Disabled packages neither count toward quarantine nor get relabeled. */
+    cm_grandfather(nen);
+    cm_approved_read();
+    if (!nen) {
+        cm_write_status();
+        return;
+    }
+    if (g_cm_alloff) {
+        cm_disable_all(nen);
+        cm_write_status();
+        return;
+    }
+    cm_record_prior_failure(CM_INITING, 1);
+    cm_record_prior_failure(CM_BLAME, 0);
+    int starts = cm_start_count();
+    if (cm_quarantine_starts(nen, starts) || cm_quarantine_crashes(nen)) return;
+    cm_record_start(starts);
     g_cm_t0 = now_ms();
     g_cm_timing = 1;
     sdk_timing_init();
@@ -2338,21 +2347,25 @@ static void community_init(void) {
 
 /* Every overlay tick. Cheap with no live mod. */
 static void sdk_confirm_tick(void);
-static void community_tick(void) {
-    sdk_confirm_tick(); /* the dialog: also the core's own questions, with no mod loaded */
-#ifndef SDK_PROC_IMPL
-    sdk_beatport_owner_tick();
-#endif
-    if (!g_cm_n) return;
-    sdk_rows_tick();    /* rows of mods that stopped leave the menu, also when none runs */
-    long now = now_ms();
-    cmo_note(__atomic_load_n(&g_rtick_n, __ATOMIC_RELAXED), now); /* EP147's message thread is alive */
+static void cm_flush_dirty_settings(long now) {
+    pthread_mutex_lock(&g_cm_mu);
+    for (int i = 0; i < g_cm_n; i++) {
+        cm_mod *c = &g_cm[i];
+        if (c->cfg_dirty && (!c->cfg_flushed_at || now - c->cfg_flushed_at >= CM_CFG_BUSY_MS)) {
+            cm_cfg_flush(c);
+            c->cfg_flushed_at = now ? now : 1;
+        }
+    }
+    pthread_mutex_unlock(&g_cm_mu);
+    cm_conf_save();
+}
+static void cm_tick_maintenance(long now) {
+    static long last_slow = 0, last_flush = 0;
     if (g_cm_timing && !g_cm_healthy && now - g_cm_t0 >= CM_HEALTHY_MS) {
         g_cm_healthy = 1;
         unlink(CM_STARTING);
         dbg("community: %d s healthy, quarantine counter cleared\n", CM_HEALTHY_MS / 1000);
     }
-    static long last_tick = 0, last_slow = 0, last_flush = 0;
     if (now - last_slow >= 1000) {
         last_slow = now;
         g_cm_logs_on = access(CM_ROOT "/azmod-logs.on", F_OK) == 0;
@@ -2362,17 +2375,38 @@ static void community_tick(void) {
      * most once every CM_CFG_BUSY_MS: p7 is small flash, not a place for a write every tick. */
     if (now - last_flush >= 250) {
         last_flush = now;
-        pthread_mutex_lock(&g_cm_mu);
-        for (int i = 0; i < g_cm_n; i++) {
-            cm_mod *c = &g_cm[i];
-            if (c->cfg_dirty && (!c->cfg_flushed_at || now - c->cfg_flushed_at >= CM_CFG_BUSY_MS)) {
-                cm_cfg_flush(c);
-                c->cfg_flushed_at = now ? now : 1;
-            }
-        }
-        pthread_mutex_unlock(&g_cm_mu);
-        cm_conf_save();
+        cm_flush_dirty_settings(now);
     }
+}
+static void cm_tick_logs(cm_mod *c) {
+    for (int k = 0; k < 8; k++)
+        if (__atomic_load_n(&c->fq.ready[k], __ATOMIC_ACQUIRE)) {
+            cm_logf(c, 0, "%s", c->fq.line[k]);
+            __atomic_store_n(&c->fq.ready[k], 0, __ATOMIC_RELEASE);
+        }
+    unsigned dr = __atomic_exchange_n(&c->fq.dropped, 0, __ATOMIC_RELAXED);
+    if (dr) cm_logf(c, 0, "(%u log lines from on_frame dropped: log less there)", dr);
+    unsigned rf = __atomic_exchange_n(&c->fq.refused, 0, __ATOMIC_RELAXED);
+    if (rf) cm_logf(c, 1, "%u calls to settings or file services from on_frame were refused (allowed in tick, the page callbacks and your own threads)", rf);
+}
+static void cm_tick_callbacks(long now) {
+    sdk_deck_tick(now);                          /* deck events, before the mods' ticks */
+    if (azsdk_slip_collect_v1) azsdk_slip_collect_v1();
+    sdk_ui_tick();                               /* the mods' post_ui callbacks */
+    for (int i = 0; i < g_cm_n; i++)
+        if (g_cm[i].state == AZCM_LOADED && g_cm[i].m && g_cm[i].m->tick) g_cm[i].m->tick();
+}
+static void community_tick(void) {
+    sdk_confirm_tick(); /* the dialog: also the core's own questions, with no mod loaded */
+#ifndef SDK_PROC_IMPL
+    sdk_beatport_owner_tick();
+#endif
+    if (!g_cm_n) return;
+    sdk_rows_tick();    /* rows of mods that stopped leave the menu, also when none runs */
+    long now = now_ms();
+    cmo_note(__atomic_load_n(&g_rtick_n, __ATOMIC_RELAXED), now); /* EP147's message thread is alive */
+    cm_tick_maintenance(now);
+    static long last_tick = 0;
     if (!cm_nlive()) return;
     if (now - last_tick < 33) return;
     last_tick = now;
@@ -2383,29 +2417,14 @@ static void community_tick(void) {
             cm_tempo_poll();
         }
     }
-    for (int i = 0; i < g_cm_n; i++) {   /* on_frame's queued log lines and refusals, written here */
-        cm_mod *c = &g_cm[i];
-        for (int k = 0; k < 8; k++)
-            if (__atomic_load_n(&c->fq.ready[k], __ATOMIC_ACQUIRE)) {
-                cm_logf(c, 0, "%s", c->fq.line[k]);
-                __atomic_store_n(&c->fq.ready[k], 0, __ATOMIC_RELEASE);
-            }
-        unsigned dr = __atomic_exchange_n(&c->fq.dropped, 0, __ATOMIC_RELAXED);
-        if (dr) cm_logf(c, 0, "(%u log lines from on_frame dropped: log less there)", dr);
-        unsigned rf = __atomic_exchange_n(&c->fq.refused, 0, __ATOMIC_RELAXED);
-        if (rf) cm_logf(c, 1, "%u calls to settings or file services from on_frame were refused (allowed in tick, the page callbacks and your own threads)", rf);
-    }
+    for (int i = 0; i < g_cm_n; ++i) cm_tick_logs(&g_cm[i]);
 #ifndef SDK_PROC_IMPL
     /* Keep older companions' independent cue observations available. The
      * unbound core admits no native commands. */
     if (!atomic_load_explicit(&g_sdk_exit_bound, memory_order_acquire)) sdk_cue_tick();
     sdk_data_callbacks_tick();                  /* works for mods with no tick callback */
 #endif
-    sdk_deck_tick(now);                          /* deck events, before the mods' ticks */
-    if (azsdk_slip_collect_v1) azsdk_slip_collect_v1();
-    sdk_ui_tick();                               /* the mods' post_ui callbacks */
-    for (int i = 0; i < g_cm_n; i++)
-        if (g_cm[i].state == AZCM_LOADED && g_cm[i].m && g_cm[i].m->tick) g_cm[i].m->tick();
+    cm_tick_callbacks(now);
 }
 
 /* The ErP LED frame, before core's single CRC recompute. Returns 1 if a mod ate it. */
@@ -2435,6 +2454,20 @@ int azcm_all_off(void) { return g_cm_alloff; }
 int azcm_off_by_stick(void) { return access(CM_ALL_OFF, F_OK) == 0; }
 const char *azcm_fwtag(void) { return g_cm_fwtag; }
 static const az_screen_v1 *cm_scr(int i); /* below: the screen a mod's page shows */
+static void cm_info_origin(const cm_mod *c, char *from, size_t size) {
+    /* where it came from, short: owner/repo for a GitHub repository, else the address without
+     * https://; "" for a copy without an install record */
+    from[0] = 0;
+    if (c->owner[0] && strcmp(c->owner, "local")) {
+        const char *o = c->owner, *gh = "https://raw.githubusercontent.com/";
+        if (!strncmp(o, gh, strlen(gh))) {
+            o += strlen(gh);
+            const char *e = strchr(o, '/');
+            e = e ? strchr(e + 1, '/') : NULL;
+            snprintf(from, size, "%.*s", e ? (int) (e - o) : (int) strlen(o), o);
+        } else snprintf(from, size, "%s", strncmp(o, "https://", 8) ? o : o + 8);
+    }
+}
 int azcm_info(int i, azcm_info_t *out) {
     if (i < 0 || i >= g_cm_n || !out) return -1;
     const cm_mod *c = &g_cm[i];
@@ -2452,18 +2485,7 @@ int azcm_info(int i, azcm_info_t *out) {
                             : 0;
     out->hooks = c->nhooks;
     out->allowed = c->allowed;
-    /* where it came from, short: owner/repo for a GitHub repository, else the address without
-     * https://; "" for a copy without an install record */
-    out->from[0] = 0;
-    if (c->owner[0] && strcmp(c->owner, "local")) {
-        const char *o = c->owner, *gh = "https://raw.githubusercontent.com/";
-        if (!strncmp(o, gh, strlen(gh))) {
-            o += strlen(gh);
-            const char *e = strchr(o, '/');
-            e = e ? strchr(e + 1, '/') : NULL;
-            snprintf(out->from, sizeof out->from, "%.*s", e ? (int) (e - o) : (int) strlen(o), o);
-        } else snprintf(out->from, sizeof out->from, "%s", strncmp(o, "https://", 8) ? o : o + 8);
-    }
+    cm_info_origin(c, out->from, sizeof out->from);
     return 0;
 }
 /* Allow on a "New mod found" page: approve exactly the .so this start hashed. The stage is
@@ -2611,14 +2633,7 @@ static void cm_wait_ms(int ms) {
     struct timespec ts = {0, ms * 1000000L};
     nanosleep(&ts, NULL);
 }
-static int cm_live_off(cm_mod *c) {
-    if (!cm_live_stoppable(c)) return 0;
-    int idx = (int) (c - g_cm);
-    cm_set_state(c, AZCM_DISABLED);   /* from here on nothing calls into it (cm_enter, cm_running) */
-    __atomic_sub_fetch(&g_cm_live, 1, __ATOMIC_RELAXED);
-    ds_retire(idx);
-    sdk_data_retire_owner(idx);
-    snprintf(c->reason, sizeof c->reason, "Disabled");
+static void cm_stop_drained(cm_mod *c, int idx) {
     int k = 0;
     while (__atomic_load_n(&c->inflight, __ATOMIC_SEQ_CST) && k++ < CM_LIVE_DRAIN_MS) cm_wait_ms(1);
     if (__atomic_load_n(&c->inflight, __ATOMIC_SEQ_CST)) {
@@ -2632,6 +2647,23 @@ static int cm_live_off(cm_mod *c) {
         g_cm_loading = -1;
         unlink(CM_INITING);
     }
+}
+static void cm_drain_threads(cm_mod *c, int idx) {
+    for (int k = 0; sd_threads_of(idx) && k < CM_LIVE_THREADS_MS / 10; k++) cm_wait_ms(10);
+    if (sd_threads_of(idx)) {
+        c->dirty = 1;
+        cm_logf(c, 1, "turned off, but %d of its threads still run (stop() must end them): on again after a reload", sd_threads_of(idx));
+    }
+}
+static int cm_live_off(cm_mod *c) {
+    if (!cm_live_stoppable(c)) return 0;
+    int idx = (int) (c - g_cm);
+    cm_set_state(c, AZCM_DISABLED);   /* from here on nothing calls into it (cm_enter, cm_running) */
+    __atomic_sub_fetch(&g_cm_live, 1, __ATOMIC_RELAXED);
+    ds_retire(idx);
+    sdk_data_retire_owner(idx);
+    snprintf(c->reason, sizeof c->reason, "Disabled");
+    cm_stop_drained(c, idx);
     c->screen = NULL;
     sdk_rows_forget(c);
     sdk_input_forget(c);
@@ -2641,11 +2673,7 @@ static int cm_live_off(cm_mod *c) {
 #endif
     int np = sdk_proc_forget(c->id);
     if (np) cm_logf(c, 1, "stopped %d program%s it launched", np, np == 1 ? "" : "s");
-    for (k = 0; sd_threads_of(idx) && k < CM_LIVE_THREADS_MS / 10; k++) cm_wait_ms(10);
-    if (sd_threads_of(idx)) {
-        c->dirty = 1;
-        cm_logf(c, 1, "turned off, but %d of its threads still run (stop() must end them): on again after a reload", sd_threads_of(idx));
-    }
+    cm_drain_threads(c, idx);
     azcm_flush_settings();
     cm_logf(c, 1, "turned off without a reload");
     cm_write_status();

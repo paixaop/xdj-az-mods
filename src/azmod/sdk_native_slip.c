@@ -99,18 +99,26 @@ static bool make_listener(Slot *slot) {
     pending = NULL;
     return true;
 }
+static bool slip_constructor_valid(const struct azce_call *call, uintptr_t object, unsigned deck) {
+    const struct az_slip_profile *profile = &state()->profile;
+    return call->caller_link == profile->construct_return && deck < 4 && pointer(object) && object >= 16 &&
+           scalar(uintptr_t, object - 16) == profile->source_control_vtable &&
+           __atomic_load_n(&((struct az_native_control *) (object - 16))->strong, __ATOMIC_RELAXED) > 0 &&
+           scalar(unsigned, object + 0x134) == deck;
+}
+static bool slip_source_seen(uintptr_t object) {
+    for (unsigned i = 0; i < used(); ++i) {
+        const Slot *prior = &state()->slots[i];
+        unsigned stage = atomic_load_explicit(&prior->stage, memory_order_acquire);
+        if (stage && prior->source_control == object - 16 && (stage != 3 || prior->source_owner)) return true;
+    }
+    return false;
+}
 static void constructed(const struct azce_call *call) {
     State *s = state();
     __auto_type object = (uintptr_t) (call->args[0]);
     const unsigned deck = (unsigned) (call->args[2]);
-    if (call->caller_link != s->profile.construct_return || deck >= 4 || !pointer(object) || object < 16 ||
-        scalar(uintptr_t, object - 16) != s->profile.source_control_vtable ||
-        __atomic_load_n(&((struct az_native_control *) (object - 16))->strong, __ATOMIC_RELAXED) <= 0 || scalar(unsigned, object + 0x134) != deck) return;
-    for (unsigned i = 0; i < used(); i++) {
-        const Slot *prior = &(s->slots[i]);
-        __auto_type stage = atomic_load_explicit(&(prior->stage), memory_order_acquire);
-        if (stage && prior->source_control == object - 16 && (stage != 3 || prior->source_owner)) return;
-    }
+    if (!slip_constructor_valid(call, object, deck) || slip_source_seen(object)) return;
     unsigned n = atomic_load_explicit(&(s->used), memory_order_relaxed);
     do {
         if (n == limit) return;
@@ -121,38 +129,52 @@ static void constructed(const struct azce_call *call) {
     slot->deck = deck;
     atomic_store_explicit(&(slot->stage), 1, memory_order_release);
 }
+static bool slip_parent_valid(const struct azce_call *call, uintptr_t parent, unsigned deck) {
+    const struct az_slip_profile *profile = &state()->profile;
+    return deck < 4 && call->caller_link == profile->parent_returns[deck] && pointer(parent) && parent >= 16 &&
+           scalar(uintptr_t, parent - 16) == profile->parent_control_vtable;
+}
+static bool slip_parent_seen(uintptr_t parent, struct Pair pair) {
+    for (unsigned i = 0; i < used(); ++i) {
+        const Slot *prior = &state()->slots[i];
+        unsigned stage = atomic_load_explicit(&prior->stage, memory_order_acquire);
+        if ((stage == 2 || stage == 3) && prior->parent_control == parent - 16 && prior->source == pair.source && prior->source_control == pair.control) return true;
+    }
+    return false;
+}
+static bool slip_pending_pair(const Slot *slot, unsigned deck, struct Pair pair) {
+    return atomic_load_explicit(&slot->stage, memory_order_acquire) == 1 && slot->deck == deck &&
+           slot->source == pair.source && slot->source_control == pair.control;
+}
+static void slip_publish_slot(Slot *slot, uintptr_t parent, struct Pair pair) {
+    slot->source_owner = (struct az_native_control *) pair.control;
+    az_native_weak_add(slot->source_owner);
+    slot->parent_owner = (struct az_native_control *) (parent - 16);
+    az_native_weak_add(slot->parent_owner);
+    slot->parent_control = parent - 16;
+    if (!make_listener(slot)) {
+        retire(slot);
+        return;
+    }
+    atomic_store_explicit(&slot->stage, 2, memory_order_release);
+    atomic_store_explicit(&state()->current[slot->deck], number(slot), memory_order_release);
+}
 static void published(const struct azce_call *call) {
     State *s = state();
     const unsigned deck = (unsigned) (call->args[5]);
     __auto_type parent = (uintptr_t) (call->args[0]);
-    if (deck >= 4 || call->caller_link != s->profile.parent_returns[deck] || !pointer(parent) || parent < 16 ||
-        scalar(uintptr_t, parent - 16) != s->profile.parent_control_vtable) return;
+    if (!slip_parent_valid(call, parent, deck)) return;
     /* The successful actual PlayerInfoState constructor has published this real
      * shared_ptr<gui::SlipState> into its owned member. It is not an SDK caller
      * inventing an owner from an address; the exact native caller holds the new
      * inplace PlayerInfoState owner throughout this constructor return. */
     __auto_type pair = scalar(struct Pair, parent + 0x1120);
-    for (unsigned i = 0; i < used(); i++) {
-        const Slot *prior = &(s->slots[i]);
-        __auto_type stage = atomic_load_explicit(&(prior->stage), memory_order_acquire);
-        if ((stage == 2 || stage == 3) && prior->parent_control == parent - 16 &&
-            prior->source == pair.source && prior->source_control == pair.control) return;
-    }
+    if (slip_parent_seen(parent, pair)) return;
     atomic_store_explicit(&(s->current[deck]), 0, memory_order_release);
     for (unsigned i = used(); i; i--) {
         Slot *slot = &(s->slots[i - 1]);
-        if (atomic_load_explicit(&(slot->stage), memory_order_acquire) != 1 || slot->deck != deck || slot->source != pair.source || slot->source_control != pair.control) continue;
-        slot->source_owner = (struct az_native_control *) pair.control;
-        az_native_weak_add(slot->source_owner);
-        slot->parent_owner = (struct az_native_control *) (parent - 16);
-        az_native_weak_add(slot->parent_owner);
-        slot->parent_control = parent - 16;
-        if (!make_listener(slot)) {
-            retire(slot);
-            return;
-        }
-        atomic_store_explicit(&(slot->stage), 2, memory_order_release);
-        atomic_store_explicit(&(s->current[deck]), i, memory_order_release);
+        if (!slip_pending_pair(slot, deck, pair)) continue;
+        slip_publish_slot(slot, parent, pair);
         return;
     }
 }
@@ -211,13 +233,16 @@ int az_slip_configure(const struct az_slip_profile *value) {
     atomic_store_explicit(&(s->configured), true, memory_order_release);
     return true;
 }
-void az_slip_forward(struct azce_call *call, void (*original)(struct azce_call *)) {
-    if (!call || !original) return;
+static bool slip_call_reserved(const struct azce_call *call) {
     bool reserved = call->reserved != 0;
 #if AZCE_SIZE >= 320
     reserved = reserved || call->caller_reserved != 0;
 #endif
-    if (!atomic_load_explicit(&(state()->configured), memory_order_acquire) || reserved) {
+    return reserved;
+}
+void az_slip_forward(struct azce_call *call, void (*original)(struct azce_call *)) {
+    if (!call || !original) return;
+    if (!atomic_load_explicit(&(state()->configured), memory_order_acquire) || slip_call_reserved(call)) {
         original(call);
         return;
     }
@@ -246,14 +271,7 @@ void az_slip_forward(struct azce_call *call, void (*original)(struct azce_call *
     default: original(call); return;
     }
 }
-int az_slip_read(unsigned deck, struct az_slip_receipt *out) {
-    AZ_NATIVE_ERRNO(preserve);
-    if (deck >= 4 || !out) return false;
-    State *s = state();
-    const unsigned id = atomic_load_explicit(&(s->current[deck]), memory_order_acquire);
-    if (!id || id > used()) return false;
-    Slot *slot = &(s->slots[id - 1]);
-    if (!current(slot)) return false;
+static bool slip_read_slot(Slot *slot, unsigned id, struct az_slip_receipt *out) {
     for (unsigned attempt = 0; attempt < 3; attempt++) {
         __auto_type before = atomic_load_explicit(&(slot->stamp), memory_order_seq_cst);
         if (before & 1) continue;
@@ -265,83 +283,108 @@ int az_slip_read(unsigned deck, struct az_slip_receipt *out) {
     }
     return false;
 }
+int az_slip_read(unsigned deck, struct az_slip_receipt *out) {
+    AZ_NATIVE_ERRNO(preserve);
+    if (deck >= 4 || !out) return false;
+    State *s = state();
+    const unsigned id = atomic_load_explicit(&(s->current[deck]), memory_order_acquire);
+    if (!id || id > used()) return false;
+    Slot *slot = &(s->slots[id - 1]);
+    if (!current(slot)) return false;
+    return slip_read_slot(slot, id, out);
+}
+static void slip_capture_getter_slot(Slot *slot, unsigned site, uintptr_t target) {
+    bool idle = false;
+    if (!atomic_compare_exchange_strong_explicit(&(slot->writing), &(idle), true, memory_order_acquire, memory_order_acquire)) return;
+    uint64_t stamp = atomic_load_explicit(&(slot->stamp), memory_order_relaxed), ns = now();
+    if (stamp <= UINT64_MAX - 2 && ns && current(slot)) {
+        atomic_store_explicit(&(slot->stamp), stamp + 1, memory_order_seq_cst);
+        __auto_type prior = atomic_load_explicit(&(slot->getter[site]), memory_order_seq_cst);
+        const unsigned bit = 1u << site;
+        if (prior && prior != target) atomic_fetch_or_explicit(&(slot->getter_conflict), bit, memory_order_seq_cst);
+        else {
+            atomic_store_explicit(&(slot->getter[site]), target, memory_order_seq_cst);
+            atomic_fetch_or_explicit(&(slot->getter_seen), bit, memory_order_seq_cst);
+        }
+        atomic_store_explicit(&(slot->getter_ns), ns, memory_order_seq_cst);
+        atomic_store_explicit(&(slot->stamp), stamp + 2, memory_order_seq_cst);
+    }
+    atomic_store_explicit(&(slot->writing), false, memory_order_release);
+}
 void azsdk_slip_capture_getter(unsigned site, uintptr_t source, uintptr_t target) {
     AZ_NATIVE_ERRNO(preserve);
     if (site >= 3 || target < 0x10000 || target > UINT64_C(0x0000ffffffffffff) || (target & 3)) return;
     for (unsigned i = 0; i < used(); i++) {
         Slot *slot = &(state()->slots[i]);
         if (!current(slot) || slot->source != source) continue;
-        bool idle = false;
-        if (!atomic_compare_exchange_strong_explicit(&(slot->writing), &(idle), true, memory_order_acquire, memory_order_acquire)) return;
-        uint64_t stamp = atomic_load_explicit(&(slot->stamp), memory_order_relaxed), ns = now();
-        if (stamp <= UINT64_MAX - 2 && ns && current(slot)) {
-            atomic_store_explicit(&(slot->stamp), stamp + 1, memory_order_seq_cst);
-            __auto_type prior = atomic_load_explicit(&(slot->getter[site]), memory_order_seq_cst);
-            const unsigned bit = 1u << site;
-            if (prior && prior != target) atomic_fetch_or_explicit(&(slot->getter_conflict), bit, memory_order_seq_cst);
-            else {
-                atomic_store_explicit(&(slot->getter[site]), target, memory_order_seq_cst);
-                atomic_fetch_or_explicit(&(slot->getter_seen), bit, memory_order_seq_cst);
-            }
-            atomic_store_explicit(&(slot->getter_ns), ns, memory_order_seq_cst);
-            atomic_store_explicit(&(slot->stamp), stamp + 2, memory_order_seq_cst);
-        }
-        atomic_store_explicit(&(slot->writing), false, memory_order_release);
+        slip_capture_getter_slot(slot, site, target);
         return;
     }
+}
+static bool slip_debug_publish(unsigned d, unsigned id, bool registered, bool valid, const struct az_slip_receipt *r) {
+    struct azsdk_slip_debug_v1 *out = &azsdk_slip_observation_v1[d];
+    __auto_type seq = __atomic_load_n(&out->sequence, __ATOMIC_RELAXED);
+    if (seq > UINT64_MAX - 2) return false;
+    __atomic_store_n(&out->sequence, seq + 1, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&out->generation, registered ? (uint64_t) (id) : 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&out->revision, valid ? r->revision : 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&out->observed_ns, valid ? r->observed_ns : 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&out->callbacks, registered ? atomic_load_explicit(&(state()->slots[id - 1].callbacks), memory_order_seq_cst) : 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&out->registered, registered ? 1u : 0u, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&out->valid, valid ? 1u : 0u, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&out->raw, valid ? r->raw : 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&out->reserved, 0u, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&out->sequence, seq + 2, __ATOMIC_SEQ_CST);
+    return true;
+}
+static struct azsdk_slip_getter_debug_v1 slip_getter_snapshot(unsigned id, bool registered) {
+    struct azsdk_slip_getter_debug_v1 g = (struct azsdk_slip_getter_debug_v1) {0};
+    if (registered)
+        for (unsigned attempt = 0; attempt < 3; attempt++) {
+            Slot *slot = &(state()->slots[id - 1]);
+            __auto_type before = atomic_load_explicit(&(slot->stamp), memory_order_seq_cst);
+            if (before & 1) continue;
+            g.generation = id;
+            g.observed_ns = atomic_load_explicit(&(slot->getter_ns), memory_order_seq_cst);
+            g.target_slot4 = atomic_load_explicit(&(slot->getter[0]), memory_order_seq_cst);
+            g.target_slot13 = atomic_load_explicit(&(slot->getter[1]), memory_order_seq_cst);
+            g.target_slot14 = atomic_load_explicit(&(slot->getter[2]), memory_order_seq_cst);
+            g.seen_mask = atomic_load_explicit(&(slot->getter_seen), memory_order_seq_cst);
+            g.conflict_mask = atomic_load_explicit(&(slot->getter_conflict), memory_order_seq_cst);
+            if (before == atomic_load_explicit(&(slot->stamp), memory_order_seq_cst) && current(slot)) break;
+            g = (struct azsdk_slip_getter_debug_v1) {0};
+        }
+    return g;
+}
+static void slip_getter_debug_publish(unsigned d, const struct azsdk_slip_getter_debug_v1 *g) {
+    struct azsdk_slip_getter_debug_v1 *get = &azsdk_slip_getter_observation_v1[d];
+    __auto_type gs = __atomic_load_n(&get->sequence, __ATOMIC_RELAXED);
+    if (gs > UINT64_MAX - 2) return;
+    __atomic_store_n(&get->sequence, gs + 1, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&get->generation, g->generation, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&get->observed_ns, g->observed_ns, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&get->target_slot4, g->target_slot4, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&get->target_slot13, g->target_slot13, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&get->target_slot14, g->target_slot14, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&get->seen_mask, g->seen_mask, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&get->conflict_mask, g->conflict_mask, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&get->sequence, gs + 2, __ATOMIC_SEQ_CST);
+}
+static void slip_collect_deck(unsigned d) {
+    struct az_slip_receipt r = {0};
+    bool valid = az_slip_read(d, &r);
+    unsigned id = atomic_load_explicit(&state()->current[d], memory_order_acquire);
+    bool registered = id && id <= used() && current(&state()->slots[id - 1]);
+    if (!registered || (valid && r.generation != id)) valid = false;
+    if (!slip_debug_publish(d, id, registered, valid, &r)) return;
+    struct azsdk_slip_getter_debug_v1 g = slip_getter_snapshot(id, registered);
+    slip_getter_debug_publish(d, &g);
 }
 void azsdk_slip_collect_v1(void) {
     AZ_NATIVE_ERRNO(preserve);
     static _Atomic(bool) collecting;
     bool idle = false;
-    if (!atomic_compare_exchange_strong_explicit(&(collecting), &(idle), true, memory_order_acquire, memory_order_acquire)) return;
-    for (unsigned d = 0; d < 4; d++) {
-        struct az_slip_receipt r = {0};
-        bool valid = az_slip_read(d, &r);
-        __auto_type id = atomic_load_explicit(&(state()->current[d]), memory_order_acquire);
-        const bool registered = id && id <= used() && current(&state()->slots[id - 1]);
-        if (!registered || (valid && r.generation != id)) valid = false;
-        struct azsdk_slip_debug_v1 *out = &azsdk_slip_observation_v1[d];
-        __auto_type seq = __atomic_load_n(&out->sequence, __ATOMIC_RELAXED);
-        if (seq > UINT64_MAX - 2) continue;
-        __atomic_store_n(&out->sequence, seq + 1, __ATOMIC_SEQ_CST);
-        __atomic_store_n(&out->generation, registered ? (uint64_t) (id) : 0, __ATOMIC_SEQ_CST);
-        __atomic_store_n(&out->revision, valid ? r.revision : 0, __ATOMIC_SEQ_CST);
-        __atomic_store_n(&out->observed_ns, valid ? r.observed_ns : 0, __ATOMIC_SEQ_CST);
-        __atomic_store_n(&out->callbacks, registered ? atomic_load_explicit(&(state()->slots[id - 1].callbacks), memory_order_seq_cst) : 0, __ATOMIC_SEQ_CST);
-        __atomic_store_n(&out->registered, registered ? 1u : 0u, __ATOMIC_SEQ_CST);
-        __atomic_store_n(&out->valid, valid ? 1u : 0u, __ATOMIC_SEQ_CST);
-        __atomic_store_n(&out->raw, valid ? r.raw : 0, __ATOMIC_SEQ_CST);
-        __atomic_store_n(&out->reserved, 0u, __ATOMIC_SEQ_CST);
-        __atomic_store_n(&out->sequence, seq + 2, __ATOMIC_SEQ_CST);
-        struct azsdk_slip_getter_debug_v1 *get = &azsdk_slip_getter_observation_v1[d];
-        struct azsdk_slip_getter_debug_v1 g = (struct azsdk_slip_getter_debug_v1) {0};
-        if (registered)
-            for (unsigned attempt = 0; attempt < 3; attempt++) {
-                Slot *slot = &(state()->slots[id - 1]);
-                __auto_type before = atomic_load_explicit(&(slot->stamp), memory_order_seq_cst);
-                if (before & 1) continue;
-                g.generation = id;
-                g.observed_ns = atomic_load_explicit(&(slot->getter_ns), memory_order_seq_cst);
-                g.target_slot4 = atomic_load_explicit(&(slot->getter[0]), memory_order_seq_cst);
-                g.target_slot13 = atomic_load_explicit(&(slot->getter[1]), memory_order_seq_cst);
-                g.target_slot14 = atomic_load_explicit(&(slot->getter[2]), memory_order_seq_cst);
-                g.seen_mask = atomic_load_explicit(&(slot->getter_seen), memory_order_seq_cst);
-                g.conflict_mask = atomic_load_explicit(&(slot->getter_conflict), memory_order_seq_cst);
-                if (before == atomic_load_explicit(&(slot->stamp), memory_order_seq_cst) && current(slot)) break;
-                g = (struct azsdk_slip_getter_debug_v1) {0};
-            }
-        __auto_type gs = __atomic_load_n(&get->sequence, __ATOMIC_RELAXED);
-        if (gs > UINT64_MAX - 2) continue;
-        __atomic_store_n(&get->sequence, gs + 1, __ATOMIC_SEQ_CST);
-        __atomic_store_n(&get->generation, g.generation, __ATOMIC_SEQ_CST);
-        __atomic_store_n(&get->observed_ns, g.observed_ns, __ATOMIC_SEQ_CST);
-        __atomic_store_n(&get->target_slot4, g.target_slot4, __ATOMIC_SEQ_CST);
-        __atomic_store_n(&get->target_slot13, g.target_slot13, __ATOMIC_SEQ_CST);
-        __atomic_store_n(&get->target_slot14, g.target_slot14, __ATOMIC_SEQ_CST);
-        __atomic_store_n(&get->seen_mask, g.seen_mask, __ATOMIC_SEQ_CST);
-        __atomic_store_n(&get->conflict_mask, g.conflict_mask, __ATOMIC_SEQ_CST);
-        __atomic_store_n(&get->sequence, gs + 2, __ATOMIC_SEQ_CST);
-    }
-    atomic_store_explicit(&(collecting), false, memory_order_release);
+    if (!atomic_compare_exchange_strong_explicit(&collecting, &idle, true, memory_order_acquire, memory_order_acquire)) return;
+    for (unsigned d = 0; d < 4; ++d) slip_collect_deck(d);
+    atomic_store_explicit(&collecting, false, memory_order_release);
 }

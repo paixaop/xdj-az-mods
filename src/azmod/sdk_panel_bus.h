@@ -26,7 +26,7 @@ static struct {
 static uint64_t panel_now(void) {
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) || ts.tv_sec < 0 || ts.tv_nsec < 0 ||
-        ts.tv_nsec >= 1000000000L || (uint64_t) ts.tv_sec > UINT64_MAX / 1000000000u - 4)
+        ts.tv_nsec >= 1000000000L || (uint64_t) ts.tv_sec > UINT64_MAX / UINT64_C(1000000000) - UINT64_C(4))
         return 0;
     return (uint64_t) ts.tv_sec * 1000000000u + (uint64_t) ts.tv_nsec;
 }
@@ -89,31 +89,33 @@ static void panel_registration(int epfd, int op, int fd, const struct epoll_even
     }
     pthread_mutex_unlock(&g_panel_mu);
 }
+static int panel_can_submit(const struct sdk_panel_bus *b, unsigned byte, unsigned mask, uint64_t now) {
+    return !g_panel_job.phase && b->ready && b->len == 128 && !(b->frame[byte] & mask) && now;
+}
+static int panel_queue(const void *owner, unsigned bus, unsigned byte, unsigned mask,
+                       unsigned hold_ms, uint64_t now, uint64_t *token) {
+    if (g_panel_job.token == UINT64_MAX) return AZ_LIMIT;
+    ++g_panel_job.token;
+    g_panel_job.owner = owner;
+    g_panel_job.bus = bus;
+    g_panel_job.byte = byte;
+    g_panel_job.mask = mask;
+    g_panel_job.hold_ms = hold_ms;
+    g_panel_job.deadline = now + 2000000000u;
+    g_panel_job.phase = 1;
+    g_panel_job.result = AZ_PENDING;
+    *token = g_panel_job.token;
+    return AZ_OK;
+}
 static int panel_submit(const void *owner, unsigned button, unsigned hold_ms, uint64_t *token) {
     unsigned bus, byte, mask;
     if (!owner || !token || hold_ms < 40 || hold_ms > 3000 ||
         !panel_button_map(button, &bus, &byte, &mask)) return AZ_INVALID;
     if (pthread_mutex_trylock(&g_panel_mu)) return AZ_BUSY;
-    struct sdk_panel_bus *b = &g_panel_bus[bus];
     uint64_t now = panel_now();
     int rc = AZ_BUSY;
-    if (!g_panel_job.phase && b->ready && b->len == 128 &&
-        !(b->frame[byte] & mask) && now) {
-        if (g_panel_job.token == UINT64_MAX) rc = AZ_LIMIT;
-        else {
-            ++g_panel_job.token;
-            g_panel_job.owner = owner;
-            g_panel_job.bus = bus;
-            g_panel_job.byte = byte;
-            g_panel_job.mask = mask;
-            g_panel_job.hold_ms = hold_ms;
-            g_panel_job.deadline = now + 2000000000u;
-            g_panel_job.phase = 1;
-            g_panel_job.result = AZ_PENDING;
-            *token = g_panel_job.token;
-            rc = AZ_OK;
-        }
-    }
+    if (panel_can_submit(&g_panel_bus[bus], byte, mask, now))
+        rc = panel_queue(owner, bus, byte, mask, hold_ms, now, token);
     pthread_mutex_unlock(&g_panel_mu);
     return rc;
 }
@@ -165,6 +167,11 @@ static void panel_observe(int fd, unsigned char *f, ssize_t n) {
  * bounded poll can establish readiness. Preserve kernel events and their data.
  * A synthetic event is emitted only for an otherwise empty result. */
 static __thread int g_panel_synthetic_fd = -1;
+static int panel_event_due(const struct sdk_panel_bus *b, unsigned bus, int result,
+                           int count, const struct epoll_event *events) {
+    if (!b->ready || result || count < 1 || !events || !g_panel_job.phase || g_panel_job.bus != bus) return 0;
+    return g_panel_job.phase != 2 || panel_due(panel_now(), g_panel_job.deadline);
+}
 static int panel_epoll(int epfd, struct epoll_event *events, int count, int result, int timeout) {
     g_panel_synthetic_fd = -1;
     if (pthread_mutex_trylock(&g_panel_mu)) return result;
@@ -172,8 +179,7 @@ static int panel_epoll(int epfd, struct epoll_event *events, int count, int resu
         struct sdk_panel_bus *b = &g_panel_bus[i];
         if (b->epfd != epfd) continue;
         b->ready = timeout >= 0 && timeout <= 10;
-        if (!b->ready || result || count < 1 || !events || !g_panel_job.phase || g_panel_job.bus != i) continue;
-        if (g_panel_job.phase == 2 && !panel_due(panel_now(), g_panel_job.deadline)) continue;
+        if (!panel_event_due(b, i, result, count, events)) continue;
         events[0].events = EPOLLIN;
         events[0].data.u64 = b->data;
         g_panel_synthetic_fd = b->fd;
@@ -182,6 +188,17 @@ static int panel_epoll(int epfd, struct epoll_event *events, int count, int resu
     pthread_mutex_unlock(&g_panel_mu);
     return result;
 }
+static ssize_t panel_copy_frame(int fd, void *out, size_t cap) {
+    ssize_t n = -1;
+    for (unsigned i = 0; i < 2; ++i) {
+        struct sdk_panel_bus *b = &g_panel_bus[i];
+        if (b->fd != fd || b->len != 128 || cap < 128 || !out) continue;
+        memcpy(out, b->frame, 128);
+        panel_apply(i, out);
+        n = 128;
+    }
+    return n;
+}
 static ssize_t panel_read(int fd, void *out, size_t cap) {
     if (fd < 0 || fd != g_panel_synthetic_fd) return -2;
     g_panel_synthetic_fd = -1;
@@ -189,15 +206,7 @@ static ssize_t panel_read(int fd, void *out, size_t cap) {
         errno = EAGAIN;
         return -1;
     }
-    ssize_t n = -1;
-    for (unsigned i = 0; i < 2; ++i) {
-        struct sdk_panel_bus *b = &g_panel_bus[i];
-        if (b->fd == fd && b->len == 128 && cap >= 128 && out) {
-            memcpy(out, b->frame, 128);
-            panel_apply(i, out);
-            n = 128;
-        }
-    }
+    ssize_t n = panel_copy_frame(fd, out, cap);
     pthread_mutex_unlock(&g_panel_mu);
     if (n < 0) errno = EAGAIN;
     return n;

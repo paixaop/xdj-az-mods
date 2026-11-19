@@ -94,6 +94,24 @@ static void bpl_queue_locked(int job, const struct bp_credentials *creds) {
     pthread_cond_signal(&bpl_cv);
 }
 
+static int bpl_storage_operation(int job, struct bp_credentials *value) {
+    if (job == BPL_LOAD) return bp_credentials_load(BPL_PATH, value);
+    if (job == BPL_FORGET) return bp_credentials_forget(BPL_PATH);
+    return bp_credentials_save(BPL_PATH, value);
+}
+static void bpl_storage_result(uint64_t serial, int job, int rc, int error, const struct bp_credentials *value) {
+    /* A superseded operation may still have committed; describe that result. */
+    if (!error) {
+        bp_credentials_clear(&bpl_saved, sizeof bpl_saved);
+        bpl_have = job == BPL_SAVE || (job == BPL_LOAD && rc == 1);
+        if (bpl_have) bpl_saved = *value;
+    }
+    if (serial == bpl_serial) {
+        bpl_done = serial;
+        bpl_error = error;
+        bp_credentials_clear(&bpl_candidate, sizeof bpl_candidate);
+    }
+}
 static void *bpl_worker(void *unused) {
     (void) unused;
     pthread_mutex_lock(&bpl_mu);
@@ -103,61 +121,48 @@ static void *bpl_worker(void *unused) {
         int job = bpl_job;
         struct bp_credentials value = bpl_candidate;
         pthread_mutex_unlock(&bpl_mu);
-        int rc;
         errno = 0;
-        if (job == BPL_LOAD) rc = bp_credentials_load(BPL_PATH, &value);
-        else if (job == BPL_FORGET) rc = bp_credentials_forget(BPL_PATH);
-        else rc = bp_credentials_save(BPL_PATH, &value);
+        int rc = bpl_storage_operation(job, &value);
         int error = rc < 0 ? (errno ? errno : EIO) : 0;
         pthread_mutex_lock(&bpl_mu);
-        /* Even a superseded job may have changed disk. If the next operation
-         * fails, committed status must describe this last successful result. */
-        if (!error) {
-            bp_credentials_clear(&bpl_saved, sizeof bpl_saved);
-            bpl_have = job == BPL_SAVE || (job == BPL_LOAD && rc == 1);
-            if (bpl_have) bpl_saved = value;
-        }
-        if (serial == bpl_serial) {
-            bpl_done = serial;
-            bpl_error = error;
-            bp_credentials_clear(&bpl_candidate, sizeof bpl_candidate);
-        }
+        bpl_storage_result(serial, job, rc, error, &value);
         bp_credentials_clear(&value, sizeof value);
     }
     return NULL;
 }
-
+static int bpl_option_flag(int value) { return value == 0 || value == 1; }
+static int bpl_options_valid(const az_beatport_login_options *options) {
+    return options && options->size >= sizeof *options && bpl_option_flag(options->auto_login) &&
+           bpl_option_flag(options->remember) && options->delay_sec >= 0 && options->delay_sec <= 600 &&
+           options->max_attempts >= 1 && options->max_attempts <= 4;
+}
+static int bpl_owner_admitted(int owner) {
+    return bpl_owner >= 0 ? bpl_owner == owner : g_sdk_in_init && g_cm_loading == owner;
+}
+static int bpl_start_worker(void) {
+    if (bpl_worker_started) return 1;
+    pthread_t thread;
+    if (az_thread_create(&thread, NULL, bpl_worker, NULL)) return 0;
+    pthread_detach(thread);
+    bpl_worker_started = 1;
+    bpl_queue_locked(BPL_LOAD, NULL);
+    return 1;
+}
 static int bpl_configure(const char *id, const az_beatport_login_options *o) {
     if (!g_cm_on_ui) return -1;
     cm_mod *c = cm_self(id, CM_RA(), "beatport.configure");
-    if (!bpl_caller_live(c) || !bpl_ready || !o || o->size < sizeof *o ||
-        (o->auto_login != 0 && o->auto_login != 1) ||
-        (o->remember != 0 && o->remember != 1) || o->delay_sec < 0 ||
-        o->delay_sec > 600 || o->max_attempts < 1 || o->max_attempts > 4)
-        return -1;
+    if (!bpl_caller_live(c) || !bpl_ready || !bpl_options_valid(o)) return -1;
     if (pthread_mutex_trylock(&bpl_action_mu)) return -1;
     pthread_mutex_t *action __attribute__((cleanup(bpl_unlock_action))) = &bpl_action_mu;
     pthread_mutex_lock(&bpl_mu);
     int owner = (int) (c - g_cm);
-    if ((bpl_owner >= 0 && bpl_owner != owner) ||
-        (bpl_owner < 0 && (!g_sdk_in_init || g_cm_loading != owner))) {
+    if (!bpl_owner_admitted(owner) || !bpl_start_worker()) {
         pthread_mutex_unlock(&bpl_mu);
         return -1;
     }
-    if (!bpl_worker_started) {
-        pthread_t thread;
-        int rc = az_thread_create(&thread, NULL, bpl_worker, NULL);
-        if (rc) {
-            pthread_mutex_unlock(&bpl_mu);
-            return -1;
-        }
-        pthread_detach(thread);
-        bpl_worker_started = 1;
-        bpl_queue_locked(BPL_LOAD, NULL);
-    }
     bpl_owner = owner;
     bpl_options = *o;
-    ++bpl_control; /* cancel every outstanding automatic press */
+    ++bpl_control;
     pthread_mutex_unlock(&bpl_mu);
     return 0;
 }
@@ -225,14 +230,18 @@ static void *bpl_live_widget(void) {
     return w;
 }
 /* -1 invalid/too long; 0 empty; 1 complete. Never truncate UTF-8 or passwords. */
+static int bpl_editor_text_valid(const char *text, size_t n) {
+    if (n >= 128) return 0;
+    for (size_t i = 0; i < n; ++i)
+        if ((unsigned char) text[i] < 32 || (unsigned char) text[i] == 127) return 0;
+    return 1;
+}
 static int bpl_editor_read(void *editor, char out[128]) {
     if (!editor) return -1;
     bpl_string s = {0};
     bpl_get_text(&s, editor);
     size_t n = s.text ? strnlen(s.text, 128) : 0;
-    int ok = n < 128;
-    for (size_t i = 0; ok && i < n; ++i)
-        if ((unsigned char) s.text[i] < 32 || (unsigned char) s.text[i] == 127) ok = 0;
+    int ok = bpl_editor_text_valid(s.text, n);
     if (ok) {
         if (n) memcpy(out, s.text, n);
         out[n] = 0;
@@ -301,41 +310,44 @@ static void bpl_delete48_hook(void *self) {
     bpl_orig_delete48(self);
 }
 
+static int bpl_remember_enabled(void) {
+    return bpl_options.remember && !(bpl_job == BPL_FORGET && bpl_serial != bpl_done);
+}
+static int bpl_credentials_changed(const struct bp_credentials *value) {
+    return !bpl_have || bpl_error || strcmp(value->user, bpl_saved.user) || strcmp(value->pass, bpl_saved.pass);
+}
+static void bpl_remember_fields(void *widget) {
+    pthread_mutex_lock(&bpl_mu);
+    uint64_t control = bpl_control;
+    int capture = bpl_remember_enabled();
+    pthread_mutex_unlock(&bpl_mu);
+    struct bp_credentials value = {0};
+    if (capture && bpl_read(widget, &value) == 1) {
+        pthread_mutex_lock(&bpl_mu);
+        if (control == bpl_control && bpl_remember_enabled() && bpl_credentials_changed(&value)) bpl_queue_locked(BPL_SAVE, &value);
+        pthread_mutex_unlock(&bpl_mu);
+    }
+    bp_credentials_clear(&value, sizeof value);
+}
 static void bpl_dispatch_hook(void *self, void *name) {
     if (on_msg_thread() && atomic_load_explicit(&bpl_active, memory_order_acquire) &&
         name && *(uintptr_t *) name == *(uintptr_t *) BPL_LOGIN_NAME) {
-        bpl_cancelled = 1; /* a manual press cancels pending automatic retries */
-        void *w = bpl_live_widget();
-        if (self == bpl_ctrl && w && lb_showing((uintptr_t) w) && bpl_is_login(w)) {
-            pthread_mutex_lock(&bpl_mu);
-            uint64_t control = bpl_control;
-            int capture = bpl_options.remember &&
-                          !(bpl_job == BPL_FORGET && bpl_serial != bpl_done);
-            pthread_mutex_unlock(&bpl_mu);
-            struct bp_credentials value = {0};
-            if (capture && bpl_read(w, &value) == 1) {
-                pthread_mutex_lock(&bpl_mu);
-                if (control == bpl_control && bpl_options.remember &&
-                    !(bpl_job == BPL_FORGET && bpl_serial != bpl_done) &&
-                    (!bpl_have || bpl_error || strcmp(value.user, bpl_saved.user) ||
-                     strcmp(value.pass, bpl_saved.pass)))
-                    bpl_queue_locked(BPL_SAVE, &value);
-                pthread_mutex_unlock(&bpl_mu);
-            }
-            bp_credentials_clear(&value, sizeof value);
-        }
+        bpl_cancelled = 1;
+        void *widget = bpl_live_widget();
+        if (self == bpl_ctrl && widget && lb_showing((uintptr_t) widget) && bpl_is_login(widget)) bpl_remember_fields(widget);
     }
     bpl_orig_dispatch(self, name);
 }
-
+static int bpl_auto_control(uint64_t control) {
+    return control == bpl_control && bpl_options.auto_login && bpl_have && !bpl_error &&
+           bpl_serial == bpl_done && atomic_load_explicit(&bpl_active, memory_order_acquire);
+}
 static int bpl_auto_current(uint64_t control, uint64_t screen) {
     pthread_mutex_lock(&bpl_mu);
-    int ok = control == bpl_control && bpl_options.auto_login && bpl_have &&
-             !bpl_error && bpl_serial == bpl_done &&
-             atomic_load_explicit(&bpl_active, memory_order_acquire);
+    int ok = bpl_auto_control(control);
     pthread_mutex_unlock(&bpl_mu);
-    void *w = bpl_live_widget();
-    return ok && screen == bpl_screen && !bpl_cancelled && w && lb_showing((uintptr_t) w);
+    void *widget = bpl_live_widget();
+    return ok && screen == bpl_screen && !bpl_cancelled && widget && lb_showing((uintptr_t) widget);
 }
 
 static void bpl_submit(uint64_t control, uint64_t screen) {
@@ -348,6 +360,70 @@ static void bpl_submit(uint64_t control, uint64_t screen) {
     bpl_orig_dispatch(bpl_ctrl, (void *) BPL_LOGIN_NAME);
 }
 
+struct bpl_attempt {
+    struct bp_credentials saved, current;
+    az_beatport_login_options options;
+    uint64_t control, screen;
+};
+static int bpl_visible_entry(void *widget) {
+    int showing = widget && lb_showing((uintptr_t) widget);
+    if (showing != bpl_visible) {
+        bpl_visible = showing;
+        ++bpl_screen;
+        bpl_reset_attempt();
+        bpl_opened_ms = now_ms();
+    }
+    return showing;
+}
+static int bpl_capture_attempt(struct bpl_attempt *attempt) {
+    pthread_mutex_lock(&bpl_mu);
+    if (bpl_seen_control != bpl_control) {
+        bpl_seen_control = bpl_control;
+        bpl_reset_attempt();
+    }
+    int eligible = bpl_have && !bpl_error && bpl_serial == bpl_done;
+    attempt->saved = bpl_saved;
+    attempt->options = bpl_options;
+    attempt->control = bpl_control;
+    attempt->screen = bpl_screen;
+    pthread_mutex_unlock(&bpl_mu);
+    return eligible;
+}
+static int bpl_fill_attempt(void *widget, struct bpl_attempt *attempt, long now) {
+    if (bpl_filled) return 1;
+    int fields = bpl_read(widget, &attempt->current);
+    if (!bpl_auto_current(attempt->control, attempt->screen)) return 0;
+    if (fields != 0) {
+        bpl_cancelled = 1;
+        return 0;
+    }
+    bpl_filled = 1;
+    bpl_filled_with = attempt->saved;
+    bpl_editor_write(bpl_member(widget, 0xf0), attempt->saved.user);
+    /* Native listeners may retire the widget between writes. */
+    if (!bpl_auto_current(attempt->control, attempt->screen)) return 0;
+    bpl_editor_write(bpl_member(widget, 0xf8), attempt->saved.pass);
+    if (!bpl_auto_current(attempt->control, attempt->screen)) return 0;
+    bpl_press_ms = now + (long) attempt->options.delay_sec * 1000;
+    return 1;
+}
+static void bpl_attempt_press(struct bpl_attempt *attempt, long now) {
+    if (bpl_presses >= attempt->options.max_attempts || now < bpl_press_ms) return;
+    void *widget = bpl_live_widget();
+    if (!widget || !bpl_is_login(widget) || !*(uintptr_t *) BPL_LOGIN_NAME) return;
+    if (bpl_read(widget, &attempt->current) != 1 || strcmp(attempt->current.user, bpl_filled_with.user) ||
+        strcmp(attempt->current.pass, bpl_filled_with.pass)) {
+        bpl_cancelled = 1;
+        return;
+    }
+    bpl_submit(attempt->control, attempt->screen);
+}
+static void bpl_auto_attempt(void *widget, struct bpl_attempt *attempt, int eligible) {
+    if (!eligible || !attempt->options.auto_login || bpl_cancelled || !widget || !bpl_is_login(widget)) return;
+    long now = now_ms();
+    if (now - bpl_opened_ms < 400) return;
+    if (bpl_fill_attempt(widget, attempt, now)) bpl_attempt_press(attempt, now);
+}
 static void sdk_beatport_msg_tick(void) {
     if (!bpl_ready || !on_msg_thread()) return;
     if (!atomic_load_explicit(&bpl_active, memory_order_acquire)) {
@@ -355,86 +431,44 @@ static void sdk_beatport_msg_tick(void) {
         bpl_visible = 0;
         return;
     }
-    /* EP147 constructs this widget during startup, while detached from the
-     * visible tree, and clears its fields when the user opens it. Construction
-     * is not a login attempt. Start the delay on each visible screen entry. */
-    void *w = bpl_live_widget();
-    int showing = w && lb_showing((uintptr_t) w);
-    if (showing != bpl_visible) {
-        bpl_visible = showing;
-        ++bpl_screen;
-        bpl_reset_attempt();
-        bpl_opened_ms = now_ms();
-    }
-    if (!showing) return;
-    struct bp_credentials saved, current = {0};
-    az_beatport_login_options options;
-    pthread_mutex_lock(&bpl_mu);
-    if (bpl_seen_control != bpl_control) {
-        bpl_seen_control = bpl_control;
-        bpl_reset_attempt();
-    }
-    int eligible = bpl_have && !bpl_error && bpl_serial == bpl_done;
-    saved = bpl_saved;
-    options = bpl_options;
-    uint64_t control = bpl_control, screen = bpl_screen;
-    pthread_mutex_unlock(&bpl_mu);
-    if (!eligible || !options.auto_login || bpl_cancelled || !w || !bpl_is_login(w))
-        goto done;
-    long now = now_ms();
-    if (now - bpl_opened_ms < 400) goto done;
-    if (!bpl_filled) {
-        int fields = bpl_read(w, &current);
-        if (!bpl_auto_current(control, screen)) goto done;
-        if (fields != 0) {
-            bpl_cancelled = 1;
-            goto done;
-        }
-        bpl_filled = 1;
-        bpl_filled_with = saved;
-        bpl_editor_write(bpl_member(w, 0xf0), saved.user);
-        /* setText may notify listeners. Recheck lifetime before the next call. */
-        if (!bpl_auto_current(control, screen)) goto done;
-        bpl_editor_write(bpl_member(w, 0xf8), saved.pass);
-        if (!bpl_auto_current(control, screen)) goto done;
-        bpl_press_ms = now + (long) options.delay_sec * 1000;
-    }
-    if (bpl_presses >= options.max_attempts || now < bpl_press_ms) goto done;
-    w = bpl_live_widget();
-    if (!w || !bpl_is_login(w) || !*(uintptr_t *) BPL_LOGIN_NAME) goto done;
-    if (bpl_read(w, &current) != 1 || strcmp(current.user, bpl_filled_with.user) ||
-        strcmp(current.pass, bpl_filled_with.pass)) {
-        bpl_cancelled = 1;
-        goto done;
-    }
-    bpl_submit(control, screen);
-done:
-    bp_credentials_clear(&saved, sizeof saved);
-    bp_credentials_clear(&current, sizeof current);
+    /* Construction occurs offscreen; each visible entry starts its own delay. */
+    void *widget = bpl_live_widget();
+    if (!bpl_visible_entry(widget)) return;
+    struct bpl_attempt attempt = {0};
+    int eligible = bpl_capture_attempt(&attempt);
+    bpl_auto_attempt(widget, &attempt, eligible);
+    bp_credentials_clear(&attempt.saved, sizeof attempt.saved);
+    bp_credentials_clear(&attempt.current, sizeof attempt.current);
 }
 
 /* Native hooks go in before EP147 starts. The secondary-base destructors are
  * independently compiled bodies, not branches through the primary entries.
  * All six must be tracked before retaining any controller. */
-static void sdk_beatport_install(void) {
-    if (g_ep147_build != EPB_V200 || !g_compdtor_ok ||
-        !wref_track(&bpl_widget, 1, 0) || !install_msgtick_hook("Beatport login")) return;
-    int d = azm_install_hook(BPL_DTOR, (void *) bpl_dtor_hook, (void **) &bpl_orig_dtor);
-    int e = azm_install_hook(BPL_DELETE, (void *) bpl_delete_hook, (void **) &bpl_orig_delete);
-    int d8 = azm_install_hook(BPL_DTOR8, (void *) bpl_dtor8_hook, (void **) &bpl_orig_dtor8);
-    int e8 = azm_install_hook(BPL_DELETE8, (void *) bpl_delete8_hook, (void **) &bpl_orig_delete8);
-    int d48 = azm_install_hook(BPL_DTOR48, (void *) bpl_dtor48_hook, (void **) &bpl_orig_dtor48);
-    int e48 = azm_install_hook(BPL_DELETE48, (void *) bpl_delete48_hook, (void **) &bpl_orig_delete48);
-    if (d != 1 || e != 1 || d8 != 1 || e8 != 1 || d48 != 1 || e48 != 1) return;
-    int c = azm_install_hook(BPL_CTOR, (void *) bpl_ctor_hook, (void **) &bpl_orig_ctor);
-    int b = azm_install_hook(BPL_DISPATCH, (void *) bpl_dispatch_hook, (void **) &bpl_orig_dispatch);
-    bpl_ready = c == 1 && b == 1;
-    /* EP147 leaves this unattached cipher segment across process restarts.
-     * Match all known properties; never remove memory attached by a process. */
+static int bpl_install_destructors(void) {
+    struct {
+        uintptr_t address;
+        void (*hook)(void *);
+        void (**original)(void *);
+    } entries[] = {
+        {BPL_DTOR, bpl_dtor_hook, &bpl_orig_dtor}, {BPL_DELETE, bpl_delete_hook, &bpl_orig_delete}, {BPL_DTOR8, bpl_dtor8_hook, &bpl_orig_dtor8}, {BPL_DELETE8, bpl_delete8_hook, &bpl_orig_delete8}, {BPL_DTOR48, bpl_dtor48_hook, &bpl_orig_dtor48}, {BPL_DELETE48, bpl_delete48_hook, &bpl_orig_delete48}};
+    int complete = 1;
+    for (unsigned i = 0; i < sizeof entries / sizeof *entries; i++)
+        if (azm_install_hook(entries[i].address, (void *) entries[i].hook, (void **) entries[i].original) != 1) complete = 0;
+    return complete;
+}
+static void bpl_retire_cipher_segment(void) {
     key_t key = ftok("/etc", 0x14);
     struct shmid_ds ds;
     int shmid = key == (key_t) -1 ? -1 : shmget(key, 0, 0);
     if (shmid >= 0 && shmctl(shmid, IPC_STAT, &ds) == 0 && ds.shm_nattch == 0 &&
-        ds.shm_segsz == 0x340 && ds.shm_perm.mode == 0600)
-        (void) shmctl(shmid, IPC_RMID, NULL);
+        ds.shm_segsz == 0x340 && ds.shm_perm.mode == 0600) (void) shmctl(shmid, IPC_RMID, NULL);
+}
+static void sdk_beatport_install(void) {
+    if (g_ep147_build != EPB_V200 || !g_compdtor_ok ||
+        !wref_track(&bpl_widget, 1, 0) || !install_msgtick_hook("Beatport login")) return;
+    if (!bpl_install_destructors()) return;
+    int ctor = azm_install_hook(BPL_CTOR, (void *) bpl_ctor_hook, (void **) &bpl_orig_ctor);
+    int dispatch = azm_install_hook(BPL_DISPATCH, (void *) bpl_dispatch_hook, (void **) &bpl_orig_dispatch);
+    bpl_ready = ctor == 1 && dispatch == 1;
+    bpl_retire_cipher_segment();
 }

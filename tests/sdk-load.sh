@@ -52,19 +52,19 @@ import sys
 source = Path('src/azstem/sdk_load_observer.c').read_text().replace('../common/', '')
 variants = [
     ('listener-offset', 'kCompleteThis = -0x150', 'kCompleteThis = -0x120'),
-    ('request-id', 'atomic_load_explicit(&(d->pending_id), memory_order_acquire) != (uint64_t) (id) + 1', 'false'),
+    ('request-id', 'atomic_load_explicit(&(d->pending_id), memory_order_acquire) != (uint64_t) (id) + 1', '((void)id, false)'),
     ('failure', 'result == 0 ? load_generation() : 0', '((void)result, load_generation())'),
     ('monotonic', 'if (value <= previous) return false;', 'if (value < previous) return false;'),
-    ('late-consume', 'atomic_store_explicit(&(d->pending_id), 0, memory_order_release);\n            uint64_t generation', 'uint64_t generation'),
+    ('late-consume', 'atomic_store_explicit(&(d->pending_id), 0, memory_order_release);\n    uint64_t generation', 'uint64_t generation'),
     ('unload-epoch', '__auto_type epoch = invalidate(d);\n#ifdef AZ_STATUS_NATIVE_PRODUCER\n    atomic_store_explicit(&(d->awaiting_empty)', '__auto_type epoch = atomic_load(&d->epoch);\n#ifdef AZ_STATUS_NATIVE_PRODUCER\n    atomic_store_explicit(&(d->awaiting_empty)'),
     ('retire-epoch', '__auto_type epoch = invalidate(d);\n#ifdef AZ_STATUS_NATIVE_PRODUCER\n    status_load(deck', '__auto_type epoch = atomic_load(&d->epoch);\n#ifdef AZ_STATUS_NATIVE_PRODUCER\n    status_load(deck'),
     ('partial-ack', 'return atomic_load_explicit(acknowledged, memory_order_acquire) && expected &&', 'return expected &&'),
     ('original-order', 'if (!expected) {\n        expected = current;\n        __atomic_store_n(original, expected, __ATOMIC_RELEASE);\n    }', 'if (!expected) expected = current;'),
-    ('native-entry', 'if ((current != hook && current != verified) || (expected && expected != verified)) return false;', '(void)verified;'),
+    ('native-entry', 'if ((current != hook && current != verified) || (expected && expected != verified)) return false;', '(void)verified; (void)current; (void)hook; (void)expected;'),
     ('configure-order', 'if (lock.error) return;\n        atomic_store_explicit(&(enabled), 0, memory_order_release);', 'if (lock.error) return;'),
-    ('unknown-load', '        atomic_store_explicit(&(d->poison), 1, memory_order_release);\n        return;\n    }\n#ifdef AZ_STATUS_NATIVE_PRODUCER\n    status_load', '        return;\n    }\n#ifdef AZ_STATUS_NATIVE_PRODUCER\n    status_load'),
+    ('unknown-load', '        atomic_store_explicit(&(d->poison), 1, memory_order_release);\n        return false;\n    }\n#ifdef AZ_STATUS_NATIVE_PRODUCER\n    status_load', '        (void)d; return false;\n    }\n#ifdef AZ_STATUS_NATIVE_PRODUCER\n    status_load'),
     ('unknown-unload', 'else atomic_store_explicit(&(d->poison), 1, memory_order_release);', 'else {}'),
-    ('shared-listener', 'if (owner < kDecks) {\n            atomic_store_explicit(&(decks[owner].poison), 1, memory_order_release);\n            invalidate(&decks[owner]);\n        }', '(void)owner;'),
+    ('shared-listener', 'if (owner < kDecks) {\n        atomic_store_explicit(&(decks[owner].poison), 1, memory_order_release);\n        invalidate(&decks[owner]);\n    }', '(void)owner;'),
     ('short-name', 'for (size_t i = 0; i < bytes; ++i)\n        if (actual[i] != expected[i]) return 0;', 'if (memcmp((const char *)actual, expected, bytes)) return 0;'),
 ]
 for name, old, new in variants:
@@ -76,7 +76,7 @@ for name, old, new in variants:
     if name == 'request-id':
         inner = 'atomic_load_explicit(&(d->pending_id), memory_order_acquire) == (uint64_t) (id) + 1'
         assert changed.count(inner) == 1
-        changed = changed.replace(inner, 'true')
+        changed = changed.replace(inner, '((void)id, true)')
     (Path(sys.argv[1]) / (name + '.c')).write_text(changed)
 PY
 for control in listener-offset request-id failure monotonic late-consume unload-epoch retire-epoch partial-ack original-order native-entry configure-order unknown-load unknown-unload shared-listener; do

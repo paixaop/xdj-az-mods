@@ -47,10 +47,9 @@ static int bpmstate_sample(int d, double *live, double *track, uint64_t *generat
     *generation = 0;
     return 0;
 }
+static uint64_t fake_bpm_generation[AZMOD_STEM_DECKS];
 static int bpmstate_current(int deck, uint64_t generation) {
-    (void) deck;
-    (void) generation;
-    return 0;
+    return deck >= 0 && deck < AZMOD_STEM_DECKS && generation && generation == fake_bpm_generation[deck];
 }
 static int deck_for_ds(long ds) { return ds == 0x1000 ? 2 : -1; }
 static int deck_for_modeobj(long p) {

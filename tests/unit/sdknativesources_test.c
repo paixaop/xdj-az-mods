@@ -436,6 +436,11 @@ void weak_lifetime_and_outputs() {
     assert(second.owner_epoch == first.owner_epoch && second.revision > first.revision);
     struct azsdk_source_sample out;
     assert(azsdk_sources_candidate(0x110, &out, sizeof out) == AZS_OK && out.owner_epoch == first.owner_epoch);
+    /* Legacy observation cannot stand in for an authenticated status connection. */
+    UNCHANGED(o, azsdk_sources_status_read(first.owner_epoch, o, sizeof *o), AZS_STALE);
+    UNCHANGED(o, azsdk_sources_status_read(0, o, sizeof *o), AZS_INVALID);
+    UNCHANGED(o, azsdk_sources_status_read(UINT64_MAX, o, sizeof *o), AZS_UNKNOWN);
+    assert(azsdk_sources_status_read(first.owner_epoch, NULL, sizeof out) == AZS_INVALID);
     UNCHANGED(o, azsdk_sources_read(0, o, sizeof *o), AZS_INVALID);
     UNCHANGED(o, azsdk_sources_read(UINT64_MAX, o, sizeof *o), AZS_UNKNOWN);
     UNCHANGED(o, azsdk_sources_candidate(0, o, sizeof *o), AZS_INVALID);
@@ -998,6 +1003,7 @@ void concurrency_and_busy(void) {
     while (!atomic_load_explicit(&c.holding, memory_order_acquire)) sched_yield();
     clear_counts();
     UNCHANGED(o, azsdk_sources_read(initial.owner_epoch, o, sizeof *o), AZS_BUSY);
+    UNCHANGED(o, azsdk_sources_status_read(initial.owner_epoch, o, sizeof *o), AZS_BUSY);
     UNCHANGED(o, azsdk_sources_candidate(0x310, o, sizeof *o), AZS_BUSY);
     UNCHANGED(o, capture(&(fixture), o, &(empty_sql)), AZS_BUSY);
     no_physical_calls();
@@ -1063,6 +1069,16 @@ void native_sqlcipher(const char *path) {
     assert(!stat(original_path, &original_stat));
     assert(before.device == ((uint64_t) (original_stat.st_dev)) &&
            before.inode == original_stat.st_ino && before.file_size == ((uint64_t) (original_stat.st_size)));
+    int reader = azsdk_sources_reader_fd(connection, before.mount_id, before.device, before.inode);
+    struct stat reader_stat;
+    assert(reader >= 0 && !fstat(reader, &reader_stat) && reader_stat.st_ino == original_stat.st_ino);
+    assert(azsdk_sources_reader_fd(NULL, before.mount_id, before.device, before.inode) == -1);
+    assert(azsdk_sources_reader_fd(connection, 0, before.device, before.inode) == -1);
+    assert(azsdk_sources_reader_fd(connection, before.mount_id, before.device, 0) == -1);
+    assert(azsdk_sources_reader_fd(connection, before.mount_id + 1, before.device, before.inode) == -1);
+    assert(azsdk_sources_reader_fd(connection, before.mount_id, before.device ^ 1, before.inode) == -1);
+    assert(azsdk_sources_reader_fd(connection, before.mount_id, before.device, before.inode + 1) == -1);
+    assert(!fstat(reader, &reader_stat)); /* Rejection never closes the borrowed native descriptor. */
     char moved[128];
     snprintf(moved, sizeof moved, "%s.old", original_path);
     assert(!rename(original_path, moved));
@@ -1074,6 +1090,8 @@ void native_sqlcipher(const char *path) {
     __auto_type after = native_sample(&(fixture));
     assert(after.owner_epoch == before.owner_epoch && after.inode == before.inode && after.device == before.device &&
            after.mount_id == before.mount_id && after.file_size == before.file_size);
+    assert(azsdk_sources_reader_fd(connection, before.mount_id, before.device, before.inode) == reader);
+    assert(azsdk_sources_reader_fd(replacement, before.mount_id, before.device, before.inode) == -1);
     fixture_drop(&fixture.updater.mount);
     struct azsdk_source_sample stale;
     assert(azsdk_sources_read(before.owner_epoch, &stale, sizeof stale) == AZS_STALE && !(stale.flags & AZS_PHYSICAL));

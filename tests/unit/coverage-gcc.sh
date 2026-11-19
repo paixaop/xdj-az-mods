@@ -17,15 +17,18 @@
 # the clang numbers.
 # Controls, in the same round: the hook suites rebuilt without the counter flush must read
 # crash_guards.c's crash path as never run, and the mapping without the sdkvslot suite must lose
-# exactly sdk_vslot.c's lines. <work-dir> must be under the tree (docker shares it); it is
-# emptied first. Exit 0 = every suite and both controls behaved.
+# exactly sdk_vslot.c's lines. <work-dir> must be a fresh absolute directory; it is
+# mounted separately so evidence can live outside the repository. Development-only
+# hook/crash controls are explicitly skipped when absent from a published tree.
+# Exit 0 = every available suite and applicable control behaved.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$PWD
 [ $# -eq 1 ] || { echo "usage: $0 <work-dir>"; exit 2; }
 W=$1
-case $W in "$ROOT"/*) ;; *) echo "coverage-gcc: $W must be inside $ROOT (docker shares the tree)"; exit 2 ;; esac
-rm -rf "$W"; mkdir -p "$W/bin" "$W/tmp" "$W/gcov" "$W/nof" "$W/logs"
+case $W in /*) ;; *) echo "coverage-gcc: use an absolute fresh work directory"; exit 2 ;; esac
+[ ! -e "$W" ] || { echo "coverage-gcc: preserve existing evidence; choose a new work directory"; exit 2; }
+mkdir -p "$W/bin" "$W/tmp" "$W/gcov" "$W/nof" "$W/logs"
 T=tools/unit-tests
 cp $T/coverage-gcc-cc.sh "$W/bin/covcc"; chmod +x "$W/bin/covcc"
 
@@ -59,8 +62,8 @@ for want in 'trap - EXIT' "cd \"$ROOT\"" 'suite "fd tracking"' 'suite "readers: 
 done
 rc=0
 echo "coverage-gcc: the Linux-only suites (azmod-test:18.04)"
-docker run --rm --platform=linux/arm64 --security-opt seccomp=unconfined -v "$ROOT:$ROOT" -w "$ROOT" \
-    -e HOST_CC="$W/bin/covcc" -e TMPDIR="$W/tmp" -e COVERAGE= -e SAN= azmod-test:18.04 bash -c '
+docker run --rm --platform=linux/arm64 --security-opt seccomp=unconfined -v "$ROOT:$ROOT" -v "$W:$W" -w "$ROOT" \
+    -e HOST_CC="$W/bin/covcc" -e TMPDIR="$W/tmp" -e SDK_PROC_TMPDIR=/tmp -e COVERAGE= -e SAN= azmod-test:18.04 bash -c '
         bash "'"$CR"'"; r=$?
         out=$(ls -d "'"$W"'"/tmp/az-unit-tests.* | head -1)
         bash "'"$W"'/bin/gcov-all.sh" "$out" "'"$W"'/gcov" auto; exit $r' > "$W/logs/linux.log" 2>&1 || rc=1
@@ -70,16 +73,24 @@ grep -E '^(FAIL|COVERAGE SUITES|gcov failed)' "$W/logs/linux.log" | tail -5 || t
 hooks() { # hooks <gcov-root> <noflush 0|1>
     docker run --rm --platform=linux/arm64 -v "$ROOT/guest":/g:ro -v "$W:$W" -e CC="$W/bin/covcc" \
         -e COVCC_NOFLUSH="$2" azmod-build:18.04 bash -c '
-        cd /g && bash azmod/test/hooks/run.sh; r=$?
+        cd /g
+        if [ -f azmod/test/hooks/run.sh ]; then
+            bash azmod/test/hooks/run.sh; r=$?
+        else
+            r=77
+            echo "SKIP: development hook/crash-chain fixture is absent from the published source tree"
+        fi
         "'"$W"'/bin/covcc" -O0 -pthread -I/g/common -o /tmp/alt /g/common/azaltstack_test.c && /tmp/alt; a=$?
-        mkdir -p /tmp/hk /tmp/al; mv /tmp/hooktest.cov* /tmp/crashchain.cov* /tmp/hk/; mv /tmp/alt.cov* /tmp/al/
+        mkdir -p /tmp/hk /tmp/al
+        if [ "$r" != 77 ]; then mv /tmp/hooktest.cov* /tmp/crashchain.cov* /tmp/hk/; fi
+        mv /tmp/alt.cov* /tmp/al/
         bash "'"$W"'/bin/gcov-all.sh" /tmp/hk "'"$1"'" hooks
         bash "'"$W"'/bin/gcov-all.sh" /tmp/al "'"$1"'" altstack
-        echo "HOOKS rc=$r ALTSTACK rc=$a"; [ $r = 0 ] && [ $a = 0 ]'
+        echo "HOOKS rc=$r ALTSTACK rc=$a"; { [ "$r" = 0 ] || [ "$r" = 77 ]; } && [ "$a" = 0 ]'
 }
 echo "coverage-gcc: hooks + altstack (azmod-build:18.04)"
 hooks "$W/gcov" 0 > "$W/logs/hooks.log" 2>&1 || rc=1
-grep -E 'HOOKS rc|gcov failed' "$W/logs/hooks.log" | tail -3 || true
+grep -E '^SKIP:|HOOKS rc|gcov failed' "$W/logs/hooks.log" | tail -3 || true
 hooks "$W/nof" 1 > "$W/logs/hooks-noflush.log" 2>&1 || true
 
 # ---- 3. the Community Mods host
@@ -101,7 +112,9 @@ sed -n 2,3p "$W/report/summary.txt"
 # lines covered in one file of a report (files.tsv: file, covered, total, ...)
 cov_of() { awk -F'\t' -v f="$2" '$1 == f {print $2; found=1} END {if (!found) print 0}' "$1/files.tsv"; }
 cg=$(cov_of "$W/report" azmod/crash_guards.c); cn=$(cov_of "$W/ctl-noflush" azmod/crash_guards.c)
-if [ "$cg" -gt 0 ] && [ "$cn" -lt "$cg" ]; then
+if [ ! -f "$ROOT/guest/azmod/test/hooks/run.sh" ]; then
+    echo "SKIP: crash counter-flush control requires the absent development hook/crash-chain fixture"
+elif [ "$cg" -gt 0 ] && [ "$cn" -lt "$cg" ]; then
     echo "CONTROL FAILED AS REQUIRED  coverage-gcc: without the counter flush, crash_guards.c reads $cn of $cg lines"
 else
     echo "BROKEN TEST: control PASSED  coverage-gcc: crash_guards.c reads $cn lines without the flush, $cg with it"; rc=1

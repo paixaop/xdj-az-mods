@@ -55,11 +55,11 @@ static uint64_t next_generation; /* Registration mutex; never wrap and reuse an 
 struct Published {
     _Atomic(uint64_t) sequence, active_generation;
     _Atomic(uint64_t) generation, revision, observed;
-    _Atomic(int) engaged;
-    _Atomic(int) bounds_valid, bounds_reason;
     _Atomic(uint64_t) in_bits, out_bits;
     _Atomic(uint64_t) check_in_samples, check_out_samples;
     _Atomic(uint64_t) check_in_cached_us, check_out_cached_us;
+    _Atomic(int) engaged;
+    _Atomic(int) bounds_valid, bounds_reason;
     _Atomic(uint32_t) check_rate;
 };
 static struct Published published[kDecks] = {
@@ -83,6 +83,10 @@ static uintptr_t word(uintptr_t p) {
     return out;
 }
 #if defined(__linux__)
+static bool image_segment_fits(const ElfW(Phdr) * segment, uintptr_t base) {
+    return segment->p_vaddr <= UINTPTR_MAX - base &&
+           segment->p_memsz <= UINTPTR_MAX - base - segment->p_vaddr;
+}
 static int main_image(struct dl_phdr_info *info, size_t size __attribute__((unused)), void *context __attribute__((unused))) {
     if (info->dlpi_name && *info->dlpi_name) return 0;
     for (unsigned i = 0; i < info->dlpi_phnum; ++i) {
@@ -93,8 +97,7 @@ static int main_image(struct dl_phdr_info *info, size_t size __attribute__((unus
             return 1;
         }
         uintptr_t base = info->dlpi_addr;
-        if (h->p_vaddr > UINTPTR_MAX - base ||
-            h->p_memsz > UINTPTR_MAX - base - h->p_vaddr) {
+        if (!image_segment_fits(h, base)) {
             image_count = 0;
             return 1;
         }
@@ -105,11 +108,7 @@ static int main_image(struct dl_phdr_info *info, size_t size __attribute__((unus
 #endif
 /* Object liveness comes from the caller's native constructor scope, not these range checks.
  * ELF bounds constrain vtable/typeinfo/name/code reads to the main executable only. */
-static uintptr_t checked_vtable(uintptr_t object, const char *expected, unsigned slots) {
-    if (!canonical(object)) return 0;
-    uintptr_t table = word(object);
-    if (!canonical(table) || table < 16 ||
-        !image_contains(table - 16, (slots + 2u) * 8u, kRead) || word(table - 16)) return 0;
+static uintptr_t checked_type_name(uintptr_t table, const char *expected) {
     uintptr_t type = word(table - 8);
     if (!canonical(type) || !image_contains(type, 16, kRead)) return 0;
     uintptr_t name = word(type + 8);
@@ -124,6 +123,13 @@ static uintptr_t checked_vtable(uintptr_t object, const char *expected, unsigned
     for (size_t i = 0; i < length; ++i)
         if (actual[i] != expected[i]) return 0;
     return table;
+}
+static uintptr_t checked_vtable(uintptr_t object, const char *expected, unsigned slots) {
+    if (!canonical(object)) return 0;
+    uintptr_t table = word(object);
+    if (!canonical(table) || table < 16 ||
+        !image_contains(table - 16, (slots + 2u) * 8u, kRead) || word(table - 16)) return 0;
+    return checked_type_name(table, expected);
 }
 static uint64_t observed_now() {
     struct timespec ts;
@@ -200,7 +206,9 @@ static bool source_time_consistent_us(uint64_t samples, uint32_t rate, uint64_t 
     typedef unsigned __int128 Wide;
     Wide source = ((Wide) (samples)) * 1000000u;
     Wide cached = ((Wide) (us)) * rate;
-    return compare_timestamps(2u * source, 2u * cached, 1, 1, UINT64_C(2000000) + rate + 1) == AZ_TIME_EQUAL;
+    int order = compare_timestamps(2u * source, 2u * cached, 1, 1, UINT64_C(2000000) + rate + 1);
+    if (order == AZ_TIME_INVALID) return false;
+    return order == AZ_TIME_EQUAL;
 }
 /* Both builds: CueProperty IN/OUT at +0x18/+0x70, PositionWithSourceInfo at point+0x10.
  * Setter 1.30 13ef020 / 2.00 14aa460 stores signed samples/Hertz and caches microseconds
@@ -208,32 +216,53 @@ static bool source_time_consistent_us(uint64_t samples, uint32_t rate, uint64_t 
  * This is a bounded borrowed-record read ending at notification+0xd0. SourceInfo words
  * are compared only as opaque associations, never followed or retained. Point+8 is an
  * independent native setter bool; neither native position predicate requires it. */
-static struct Bounds working_loop_bounds(const void *notification, bool engaged) {
-    struct Bounds result = {.reason = 1};
-    if (!engaged) return result;
-    uintptr_t property = ((uintptr_t) (notification)) + 8;
-    if (!checked_vtable(property, "N9dj_player11CuePropertyE", 1)) return rejected_bounds(2);
-    if (!checked_vtable(property + 0x18, "N9dj_player13PointPropertyE", 1)) return rejected_bounds(3);
-    if (!checked_vtable(property + 0x70, "N9dj_player13PointPropertyE", 1)) return rejected_bounds(4);
-    if (!checked_vtable(property + 0x28, "N12player_basis22PositionWithSourceInfoE", 1)) return rejected_bounds(5);
-    if (!checked_vtable(property + 0x80, "N12player_basis22PositionWithSourceInfoE", 1)) return rejected_bounds(6);
-    unsigned char bytes[0xc8];
-    memcpy(bytes, ((const void *) (property)), sizeof bytes);
-    if (!source_position_valid(bytes + 0x30) || !source_position_valid(bytes + 0x88)) return rejected_bounds(7);
-    if (memcmp(bytes + 0x30, bytes + 0x88, 12)) return rejected_bounds(8);
-    uint32_t rate = scalar32(bytes + 0x60);
-    if (!rate || rate >= UINT32_C(0x7fffffff) || rate != scalar32(bytes + 0xb8)) return rejected_bounds(9);
+static int bounds_property_reason(uintptr_t property) {
+    if (!checked_vtable(property, "N9dj_player11CuePropertyE", 1)) return 2;
+    if (!checked_vtable(property + 0x18, "N9dj_player13PointPropertyE", 1)) return 3;
+    if (!checked_vtable(property + 0x70, "N9dj_player13PointPropertyE", 1)) return 4;
+    if (!checked_vtable(property + 0x28, "N12player_basis22PositionWithSourceInfoE", 1)) return 5;
+    if (!checked_vtable(property + 0x80, "N12player_basis22PositionWithSourceInfoE", 1)) return 6;
+    return 0;
+}
+static int bounds_source_reason(const unsigned char bytes[0xc8], uint32_t *rate) {
+    if (!source_position_valid(bytes + 0x30) || !source_position_valid(bytes + 0x88)) return 7;
+    if (memcmp(bytes + 0x30, bytes + 0x88, 12)) return 8;
+    *rate = scalar32(bytes + 0x60);
+    if (!*rate || *rate >= UINT32_C(0x7fffffff) || *rate != scalar32(bytes + 0xb8)) return 9;
     /* Native stored-cue conversion creates independently owned Source objects
      * for IN and OUT. Their checked SourceInfo/rate above define association,
      * and each opaque source reference must remain present. Neither is followed. */
-    if (!scalar64(bytes + 0x50) || !scalar64(bytes + 0xa8)) return rejected_bounds(10);
-    uint64_t in = scalar64(bytes + 0x40), out = scalar64(bytes + 0x98);
-    uint64_t in_us = scalar64(bytes + 0x68), out_us = scalar64(bytes + 0xc0);
+    if (!scalar64(bytes + 0x50) || !scalar64(bytes + 0xa8)) return 10;
+    return 0;
+}
+static bool bounds_after(uint64_t out, uint64_t in, uint32_t rate) {
+    int order = compare_timestamps(out, in, rate, rate, 1);
+    if (order == AZ_TIME_INVALID) return false;
+    return order == AZ_TIME_AFTER;
+}
+static bool bounds_samples_precise(uint64_t in, uint64_t out, uint64_t in_us, uint64_t out_us, uint32_t rate) {
     /* Technical precision bound, not a media-duration policy. It also rejects negative
      * signed values and INT64_MAX without implementation-defined unsigned-to-signed casts. */
     const uint64_t exact_integer = UINT64_C(9007199254740992);
     if (in > exact_integer || out > exact_integer || in_us > exact_integer ||
-        out_us > exact_integer || compare_timestamps(out, in, rate, rate, 1) != AZ_TIME_AFTER) return rejected_bounds(11);
+        out_us > exact_integer || !bounds_after(out, in, rate)) return false;
+    return true;
+}
+static bool bounds_seconds(struct Bounds *result, uint64_t in, uint64_t out, uint32_t rate) {
+    result->in_s = ((double) (in)) / ((double) (rate));
+    result->out_s = ((double) (out)) / ((double) (rate));
+    if (!isfinite(result->in_s) || !isfinite(result->out_s) || result->out_s <= result->in_s) {
+        result->in_s = result->out_s = 0;
+        result->reason = 13;
+        return false;
+    }
+    return true;
+}
+static struct Bounds bounds_coordinates(const unsigned char bytes[0xc8], uint32_t rate) {
+    struct Bounds result = {.reason = 1};
+    uint64_t in = scalar64(bytes + 0x40), out = scalar64(bytes + 0x98);
+    uint64_t in_us = scalar64(bytes + 0x68), out_us = scalar64(bytes + 0xc0);
+    if (!bounds_samples_precise(in, out, in_us, out_us, rate)) return rejected_bounds(11);
     result.check_in_samples = in;
     result.check_out_samples = out;
     result.check_in_cached_us = in_us;
@@ -243,16 +272,23 @@ static struct Bounds working_loop_bounds(const void *notification, bool engaged)
         result.reason = 12;
         return result;
     }
-    result.in_s = ((double) (in)) / ((double) (rate));
-    result.out_s = ((double) (out)) / ((double) (rate));
-    if (!isfinite(result.in_s) || !isfinite(result.out_s) || result.out_s <= result.in_s) {
-        result.in_s = result.out_s = 0;
-        result.reason = 13;
-        return result;
-    }
+    if (!bounds_seconds(&result, in, out, rate)) return result;
     result.valid = true;
     result.reason = 0;
     return result;
+}
+static struct Bounds working_loop_bounds(const void *notification, bool engaged) {
+    struct Bounds result = {.reason = 1};
+    if (!engaged) return result;
+    uintptr_t property = ((uintptr_t) (notification)) + 8;
+    int reason = bounds_property_reason(property);
+    if (reason) return rejected_bounds(reason);
+    unsigned char bytes[0xc8];
+    memcpy(bytes, ((const void *) (property)), sizeof bytes);
+    uint32_t rate;
+    reason = bounds_source_reason(bytes, &rate);
+    if (reason) return rejected_bounds(reason);
+    return bounds_coordinates(bytes, rate);
 }
 
 struct LoopListener {
@@ -313,6 +349,17 @@ static void invalidate(unsigned deck) {
 }
 
 
+static void enable_loop_profile(int on, int build) {
+#if defined(__linux__)
+    if (on && (build == 1 || build == 2)) {
+        if (!image_count) dl_iterate_phdr(main_image, NULL);
+        if (image_count) atomic_store_explicit(&(enabled), 1, memory_order_release);
+    }
+#else
+    (void) on;
+    (void) build;
+#endif
+}
 void azsdk_loop_configure(int on, int build) {
     atomic_store_explicit(&(enabled), 0, memory_order_release);
     for (unsigned d = 0; d < kDecks; ++d) invalidate(d);
@@ -323,15 +370,7 @@ void azsdk_loop_configure(int on, int build) {
             invalidate(d); /* Also cover a registration already inside the mutex. */
             az_native_owner_reset(&owners[d]);
         }
-#if defined(__linux__)
-        if (on && (build == 1 || build == 2)) {
-            if (!image_count) dl_iterate_phdr(main_image, NULL);
-            if (image_count) atomic_store_explicit(&(enabled), 1, memory_order_release);
-        }
-#else
-        (void) on;
-        (void) build;
-#endif
+        enable_loop_profile(on, build);
     }
 }
 /* A provisional listener must not survive an interrupted registration. The
@@ -341,36 +380,48 @@ static void registration_drop(int *deck) {
     invalidate((unsigned) *deck);
     az_native_owner_reset(&owners[*deck]);
 }
+struct LoopBinding {
+    uintptr_t server, entry;
+};
+static int loop_binding(void *owned_unit, struct LoopBinding *binding) {
+    uintptr_t unit = ((uintptr_t) (owned_unit));
+    if (!canonical(unit)) return 0;
+    uintptr_t publisher = word(unit + kUnitPublisher);
+    if (!checked_vtable(publisher, "N9dj_player15UnitStateServerE", 2)) return 0;
+    binding->server = word(publisher + kPublisherServer);
+    uintptr_t table = checked_vtable(binding->server, "N9dj_player23StateNotificationServerE", 26);
+    if (!table) return 0;
+    binding->entry = word(table + kObserverSlot * 8);
+    if (!image_contains(binding->entry, 4, kExecute)) return 0;
+    return 1;
+}
+static int register_loop_listener(int deck, const struct LoopBinding *binding) {
+    if (next_generation == UINT64_MAX) return 0;
+    uint64_t generation = ++next_generation;
+    struct az_native_owner listener __attribute__((cleanup(az_native_owner_reset))) =
+        az_listener_create(sizeof(struct LoopListener), listener_vtable);
+    if (!listener.object) return 0;
+    struct LoopListener *object = listener.object;
+    object->deck = (unsigned) deck;
+    object->generation = generation;
+    az_native_owner_copy(&owners[deck], &listener);
+    atomic_store_explicit(&(published[deck].active_generation), generation, memory_order_release);
+    int pending_deck __attribute__((cleanup(registration_drop))) = deck;
+    az_listener_register(binding->entry, binding->server, &listener);
+    pending_deck = -1;
+    (void) pending_deck; /* Successful registration disarms the cleanup rollback. */
+    atomic_fetch_or_explicit(&(submitted), 1u << deck, memory_order_release);
+    return 1;
+}
 int azsdk_loop_register(int deck, void *owned_unit) {
     if (!deck_ok(deck) || !owned_unit || !atomic_load_explicit(&(enabled), memory_order_acquire)) return 0;
     {
         AZ_MUTEX_GUARD(lock, registration_mutex, false);
         if (lock.error) return 0;
         if (!atomic_load_explicit(&(enabled), memory_order_acquire) || owners[deck].object) return 0;
-        uintptr_t unit = ((uintptr_t) (owned_unit));
-        if (!canonical(unit)) return 0;
-        uintptr_t publisher = word(unit + kUnitPublisher);
-        if (!checked_vtable(publisher, "N9dj_player15UnitStateServerE", 2)) return 0;
-        uintptr_t server = word(publisher + kPublisherServer);
-        uintptr_t table = checked_vtable(server, "N9dj_player23StateNotificationServerE", 26);
-        if (!table) return 0;
-        uintptr_t entry = word(table + kObserverSlot * 8);
-        if (!image_contains(entry, 4, kExecute)) return 0;
-        if (next_generation == UINT64_MAX) return 0;
-        uint64_t generation = ++next_generation;
-        struct az_native_owner listener __attribute__((cleanup(az_native_owner_reset))) =
-            az_listener_create(sizeof(struct LoopListener), listener_vtable);
-        if (!listener.object) return 0;
-        struct LoopListener *object = listener.object;
-        object->deck = (unsigned) deck;
-        object->generation = generation;
-        az_native_owner_copy(&owners[deck], &listener);
-        atomic_store_explicit(&(published[deck].active_generation), generation, memory_order_release);
-        int pending_deck __attribute__((cleanup(registration_drop))) = deck;
-        az_listener_register(entry, server, &listener);
-        pending_deck = -1;
-        atomic_fetch_or_explicit(&(submitted), 1u << deck, memory_order_release);
-        return 1;
+        struct LoopBinding binding;
+        if (!loop_binding(owned_unit, &binding)) return 0;
+        return register_loop_listener(deck, &binding);
     }
 }
 void azsdk_loop_retire(int deck) {
@@ -382,6 +433,12 @@ void azsdk_loop_retire(int deck) {
         invalidate(((unsigned) (deck)));
         az_native_owner_reset(&owners[deck]);
     }
+}
+static int loop_read_current(struct Published *p, uint64_t seq, uint64_t active, const struct azsdk_loop_sample *value) {
+    if (atomic_load_explicit(&(p->sequence), memory_order_relaxed) != seq || value->unit_generation != active ||
+        !value->revision || !value->observed_ns || atomic_load_explicit(&(p->active_generation), memory_order_acquire) != active)
+        return 0;
+    return 1;
 }
 int azsdk_loop_read(int deck, struct azsdk_loop_sample *out) {
     if (!deck_ok(deck) || !out || !atomic_load_explicit(&(enabled), memory_order_acquire)) return 0;
@@ -405,9 +462,7 @@ int azsdk_loop_read(int deck, struct azsdk_loop_sample *out) {
     value.check_out_cached_us = atomic_load_explicit(&(p->check_out_cached_us), memory_order_relaxed);
     value.check_rate = atomic_load_explicit(&(p->check_rate), memory_order_relaxed);
     atomic_thread_fence(memory_order_acquire);
-    if (atomic_load_explicit(&(p->sequence), memory_order_relaxed) != seq || value.unit_generation != active ||
-        !value.revision || !value.observed_ns || atomic_load_explicit(&(p->active_generation), memory_order_acquire) != active)
-        return 0;
+    if (!loop_read_current(p, seq, active, &value)) return 0;
     *out = value;
     return 1;
 }

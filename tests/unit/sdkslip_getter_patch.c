@@ -8,8 +8,9 @@
 #include <errno.h>
 #include <sys/mman.h>
 #include <unistd.h>
-#define dbg(...) ((void)0)
+#define dbg(...) ((void) 0)
 #include "../../src/azmod/inline_hooks.c"
-int slip_getter_test_patch(uintptr_t address,void *replacement,void **original,void *context) {
-    (void)context;return azm_install_island_hook_at(address,replacement,original,"slip-getter-test");
+int slip_getter_test_patch(uintptr_t address, void *replacement, void **original, void *context) {
+    (void) context;
+    return azm_install_island_hook_at(address, replacement, original, "slip-getter-test");
 }

@@ -5,6 +5,7 @@ cd "$(dirname "$0")/.."
 task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/az-sdk-cue-persist.XXXXXX")
 trap 'rm -rf "$task_tmp"' EXIT
 flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread)
+if [[ ${CUE_DIAGNOSTIC:-0} == 1 ]]; then flags+=(-DAZSDK_CUE_DIAGNOSTIC); fi
 case ${SAN:-plain} in
 plain|'') ;;
 asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer) ;;

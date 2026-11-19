@@ -9,8 +9,11 @@
 #ifndef AZSDK_PATCH_TEST
 #include "../common/azprot.h"
 #endif
+static int sdk_patch_arguments(uintptr_t address, const void *hook, void *const *orig) {
+    return address && !(address & (sizeof(void *) - 1)) && hook && orig;
+}
 static int sdk_patch_slot(uintptr_t address, void *hook, void **orig) {
-    if (!address || (address & (sizeof(void *) - 1)) || !hook || !orig) return -1;
+    if (!sdk_patch_arguments(address, hook, orig)) return -1;
     void *expected = __atomic_load_n(orig, __ATOMIC_ACQUIRE);
     if (!expected || expected == hook) return -1;
     void **slot = (void **) address;

@@ -39,13 +39,13 @@ controls={
 'candidate-result':('if (!(s.flags & AZS_CURRENT)) continue;','(void)s;'),
 'forgotten-ambiguity':('return reclaimed;','memset(source_state().ambiguous_media,0,sizeof source_state().ambiguous_media);return reclaimed;'),
 'physical-profile':('if (!p->ready || !p->file_control) return AZS_PHYSICAL_PROFILE;','if (!p->file_control) return AZS_PHYSICAL_PROFILE;'),
-'fdinfo-bound':('attempt < 8 && used < sizeof text','attempt < 16 && used < sizeof text'),
-'descriptor-recheck':('load(int32_t, address + 0x18) != native_fd','false'),
+'fdinfo-bound':('attempt < 8 && *used < capacity','attempt < 16 && *used < capacity'),
+'descriptor-recheck':('load(int32_t, address + 0x18) != native_fd','((void) native_fd, false)'),
 'native-fd-dup-close':('struct stat before, after;','int unsafe_copy=dup(native_fd);if(unsafe_copy>=0)close(unsafe_copy);\nstruct stat before,after;'),
 'rtti-short-name':('return image_string_equal(&(source_state().main_image), text, name) ? table : 0;','size_t length=strlen(name)+1;return image_contains(&source_state().main_image,text,length,kRead)&&!memcmp((const void*)text,name,length)?table:0;')}
 for name,(old,new) in controls.items():
     assert source.count(old)==1,(name,source.count(old));(out/(name+'.c')).write_text(instrument(source.replace(old,new)))
-a=source.index('static bool supported_name(');b=source.index('\nstatic int capture_physical(',a)
+a=source.index('static bool supported_name(');b=source.index('\nstatic bool physical_vfs_matches(',a)
 unsafe='''static bool supported_name(const SqlProfile *p,const char *name){
  const char *const names[]={"unix","unix-excl","unix-none","unix-dotfile"};
  for(unsigned i=0;i<4;i++){size_t length=strlen(names[i])+1;if(image_contains(&p->image,(uintptr_t)name,length,kRead)&&!memcmp(name,names[i],length))return true;}return false;
@@ -59,6 +59,11 @@ initial=source[a:b].split(' = ',1)[1][:-1]
 reset='\n__attribute__((constructor(200))) static void late_state_reset(void) {sources=(SourceState)'+initial+';}\n'
 (out/'constructor-order.c').write_text(instrument(source[:b]+reset+source[b:]))
 PY
+# Exercise the untouched implementation as well as the deterministic boundary
+# seam below. Coverage must come from real production definitions.
+${HOST_CC:-gcc} "${flags[@]}" -UAZS_SAMPLE_BOUNDARY -Isrc/common tests/unit/sdknativesources_test.c src/azmod/sdk_connection_hooks.c src/common/azcache_scopes.c tests/unit/native_unwind.c -lstdc++ -ldl -o "$task_tmp/production"
+"$task_tmp/production" 1
+"$task_tmp/production" 2
 ${HOST_CC:-gcc} "${flags[@]}" -Isrc/common -DSOURCES_INC="\"$task_tmp/sample-boundary.c\"" tests/unit/sdknativesources_test.c src/azmod/sdk_connection_hooks.c src/common/azcache_scopes.c tests/unit/native_unwind.c -lstdc++ -ldl -o "$task_tmp/real"
 "$task_tmp/real" 1
 "$task_tmp/real" 2

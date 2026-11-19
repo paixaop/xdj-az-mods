@@ -16,15 +16,10 @@ if [ "${MODE:-build}" = build ]; then
 from pathlib import Path
 import hashlib,json,sys
 out=Path(sys.argv[1]);src=Path('src/azmod/azmod.c').resolve();text=src.read_text()
-init=text.index('__attribute__((constructor)) static void azmod_init(void)')
-start=text.index('        if (sdk_passive_sources || (access("/home/root/settings/azmod.track-data.on", F_OK)==0 &&',init)
-end=text.index('        msg_thread_note();',start)
-# This packet qualifies the source/SQL lifecycle stage. The separately tested
-# cache stage follows it and requires its own generated profile/entry backend.
-cache_stage=text.find('        sdk_cache_at_start();',start,end)
-if cache_stage != -1: end=cache_stage
-fragment=text[start:end]
-if fragment.count('azsdk_sources_configure')!=1: raise SystemExit('FAIL: exact existing startup config boundary not found once')
+start=text.index('static void sdk_sources_configure_at_start(int b)')
+end=text.index('\n}',start)+2
+fragment='#line {} {}\n'.format(text[:start].count('\n')+1,json.dumps(str(src)))+text[start:end]+'\n'
+if fragment.count('azsdk_sources_configure')!=1: raise SystemExit('FAIL: exact startup config helper not found once')
 (out/'startup-config.inc').write_text(fragment)
 helper=Path('src/azmod/sdk_connections.c').resolve()
 include_helper=('#include '+json.dumps(str(helper))+'\n') if helper.exists() else ''
@@ -46,8 +41,11 @@ static int azm_install_island_hook_at(uintptr_t e,void*h,void**o,const char*n) {
 #define dbg(...) ((void)0)
 #define access azsdk_test_startup_access
 '''+include_helper+'''
-void azsdk_test_run_startup_config(int b) {
 #include '''+json.dumps(str(out/'startup-config.inc'))+'''
+#line 1 "sdk-source-startup-wrapper.c"
+void azsdk_test_run_startup_config(int b) {
+    sdk_sources_configure_at_start(b);
+    sdk_connections_at_start();
 }
 #undef access
 int azsdk_test_startup_sources_on(void) { return g_sdk_sources_on; }

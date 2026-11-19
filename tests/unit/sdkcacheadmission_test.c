@@ -19,11 +19,29 @@ volatile unsigned trap;
     static uint64_t __attribute__((aligned(16))) original_##n(uint64_t x) { return (n + 1) * 1000 + x; }
 ORIGINAL(0)
 ORIGINAL(1)
-ORIGINAL(2) ORIGINAL(3) ORIGINAL(4) ORIGINAL(5) ORIGINAL(6)
-    ORIGINAL(7) ORIGINAL(8) ORIGINAL(9) ORIGINAL(10) ORIGINAL(11) ORIGINAL(12) ORIGINAL(13)
-        ORIGINAL(14) ORIGINAL(15) ORIGINAL(16) ORIGINAL(17) ORIGINAL(18) ORIGINAL(19) ORIGINAL(20) ORIGINAL(21) ORIGINAL(22)
+ORIGINAL(2)
+ORIGINAL(3)
+ORIGINAL(4)
+ORIGINAL(5)
+ORIGINAL(6)
+ORIGINAL(7)
+ORIGINAL(8)
+ORIGINAL(9)
+ORIGINAL(10)
+ORIGINAL(11)
+ORIGINAL(12)
+ORIGINAL(13)
+ORIGINAL(14)
+ORIGINAL(15)
+ORIGINAL(16)
+ORIGINAL(17)
+ORIGINAL(18)
+ORIGINAL(19)
+ORIGINAL(20)
+ORIGINAL(21)
+ORIGINAL(22)
 #undef ORIGINAL
-            typedef uint64_t (*Native)(uint64_t);
+typedef uint64_t (*Native)(uint64_t);
 Native const originals[] = {original_0, original_1, original_2, original_3, original_4, original_5, original_6,
                             original_7, original_8, original_9, original_10, original_11, original_12, original_13, original_14,
                             original_15, original_16, original_17, original_18, original_19, original_20, original_21, original_22};
@@ -37,11 +55,29 @@ bool admit(uint32_t mask) { return azsdk_cache_capture_admit(mask) == 1; }
     }
 ENTRY(0)
 ENTRY(1)
-ENTRY(2) ENTRY(3) ENTRY(4) ENTRY(5) ENTRY(6) ENTRY(7) ENTRY(8)
-    ENTRY(9) ENTRY(10) ENTRY(11) ENTRY(12) ENTRY(13) ENTRY(14) ENTRY(15) ENTRY(16)
-        ENTRY(17) ENTRY(18) ENTRY(19) ENTRY(20) ENTRY(21) ENTRY(22)
+ENTRY(2)
+ENTRY(3)
+ENTRY(4)
+ENTRY(5)
+ENTRY(6)
+ENTRY(7)
+ENTRY(8)
+ENTRY(9)
+ENTRY(10)
+ENTRY(11)
+ENTRY(12)
+ENTRY(13)
+ENTRY(14)
+ENTRY(15)
+ENTRY(16)
+ENTRY(17)
+ENTRY(18)
+ENTRY(19)
+ENTRY(20)
+ENTRY(21)
+ENTRY(22)
 #undef ENTRY
-            void azsdk_cache_invoke_original(struct azce_call *call) {
+void azsdk_cache_invoke_original(struct azce_call *call) {
     (void) call;
     abort();
 }

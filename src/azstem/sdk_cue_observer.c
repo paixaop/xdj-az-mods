@@ -33,7 +33,7 @@ enum {
     mask_bits = 9,
     cue_mask = 0x1ff
 };
-static const uint64_t max_generation = UINT64_MAX >> mask_bits;
+static const uint64_t max_generation = UINT64_C(0xffffffffffffffff) >> mask_bits;
 static const unsigned read_flag = 4, execute_flag = 1;
 static const uintptr_t unit_publisher = 0x1a0, publisher_server = 0x1f28;
 static const uintptr_t cue_channel = 0x1508, channel_route = 0x48;
@@ -120,13 +120,7 @@ static int main_image(struct dl_phdr_info *info, size_t size __attribute__((unus
 }
 static void prepare_image() { dl_iterate_phdr(main_image, NULL); }
 #endif
-static uintptr_t checked_vtable(uintptr_t object, const char *name, unsigned slots) {
-    if (!canonical(object)) return 0;
-    __auto_type table = scalar_word(object);
-    if (!canonical(table) || table < 16 || !contains(table - 16, (slots + 2u) * 8u, read_flag) ||
-        scalar_word(table - 16)) return 0;
-    __auto_type type = scalar_word(table - 8);
-    if (!canonical(type) || !contains(type, 16, read_flag)) return 0;
+static uintptr_t checked_type_name(uintptr_t table, uintptr_t type, const char *name) {
     __auto_type text = scalar_word(type + 8);
     if (!contains(text, 1, read_flag)) return 0;
     if (*((const char *) (text)) == '*') ++text;
@@ -136,6 +130,15 @@ static uintptr_t checked_vtable(uintptr_t object, const char *name, unsigned slo
         if (actual != name[i]) return 0;
         if (!actual) return table;
     }
+}
+static uintptr_t checked_vtable(uintptr_t object, const char *name, unsigned slots) {
+    if (!canonical(object)) return 0;
+    __auto_type table = scalar_word(object);
+    if (!canonical(table) || table < 16 || !contains(table - 16, (slots + 2u) * 8u, read_flag) ||
+        scalar_word(table - 16)) return 0;
+    __auto_type type = scalar_word(table - 8);
+    if (!canonical(type) || !contains(type, 16, read_flag)) return 0;
+    return checked_type_name(table, type, name);
 }
 static void invalidate(unsigned deck) {
     atomic_store_explicit(&(state()->active[deck]), 0, memory_order_release);
@@ -192,6 +195,19 @@ static void collection_release(_Atomic(bool) **busy) {
     atomic_store_explicit(*busy, false, memory_order_release);
 }
 
+static void enable_cue_profile(int on, int build) {
+    struct State *s = state();
+#if defined(__linux__)
+    if (!on || (build != 1 && build != 2) || (s->bound_build && s->bound_build != (unsigned) (build))) return;
+    if (pthread_once(&s->image_once, prepare_image) || !s->image_count) return;
+    s->bound_build = (unsigned) (build);
+    atomic_store_explicit(&(s->enabled), 1, memory_order_release);
+#else
+    (void) s;
+    (void) on;
+    (void) build;
+#endif
+}
 void azsdk_cue_configure(int on, int build) {
     struct State *s = state();
     atomic_store_explicit(&(s->enabled), 0, memory_order_release);
@@ -203,15 +219,7 @@ void azsdk_cue_configure(int on, int build) {
         az_native_owner_reset(&s->owners[d]);
         s->owner_slot[d] = 0;
     }
-#if defined(__linux__)
-    if (!on || (build != 1 && build != 2) || (s->bound_build && s->bound_build != (unsigned) (build))) return;
-    if (pthread_once(&s->image_once, prepare_image) || !s->image_count) return;
-    s->bound_build = (unsigned) (build);
-    atomic_store_explicit(&(s->enabled), 1, memory_order_release);
-#else
-    (void) on;
-    (void) build;
-#endif
+    enable_cue_profile(on, build);
 }
 struct cue_registration {
     unsigned deck, slot;
@@ -227,69 +235,93 @@ static void registration_drop(struct cue_registration *registration) {
         s->owner_slot[deck] = 0;
     }
 }
-int azsdk_cue_register(int deck, void *owned_unit) {
+struct CueBinding {
+    uintptr_t server, entry;
+    uint32_t route;
+};
+static bool cue_binding(void *owned_unit, struct CueBinding *binding) {
+    const uintptr_t unit = (uintptr_t) owned_unit;
+    if (!canonical(unit)) return false;
+    const uintptr_t publisher = scalar_word(unit + unit_publisher);
+    if (!checked_vtable(publisher, "N9dj_player15UnitStateServerE", 2)) return false;
+    const uintptr_t server = scalar_word(publisher + publisher_server);
+    const uintptr_t table = checked_vtable(server, "N9dj_player23StateNotificationServerE", 26);
+    if (!table) return false;
+    const uintptr_t entry = scalar_word(table + observer_slot * 8);
+    if (!contains(entry, 4, execute_flag)) return false;
+    /* Synchronous post-Unit-ctor window only. The native complete server
+     * constructors initialize this u32 from their fourth argument:
+     * 1.30 STR at0x148a3f8;2.00 STR at0x1545988. Copy it once while the
+     * caller owns the constructed chain; no later native field read.
+     * Same embedded channel as registration vector+0x1508 and dispatch
+     * X0. No deck namespace or global immutability is assigned to it. */
+    *binding = (struct CueBinding) {server, entry, scalar_u32(server + cue_channel + channel_route)};
+    return true;
+}
+static bool cue_registration_available(unsigned deck) {
     struct State *s = state();
-    if (!deck_ok(deck) || !owned_unit || !atomic_load_explicit(&s->enabled, memory_order_acquire)) return 0;
-    unsigned slot = 0;
-    uintptr_t server = 0, entry = 0;
-    struct az_native_owner listener __attribute__((cleanup(az_native_owner_reset))) = {0};
-    {
-        AZ_MUTEX_GUARD(lock, s->registration, false);
-        if (lock.error) return 0;
-        if (!atomic_load_explicit(&s->enabled, memory_order_acquire) || s->owners[deck].object || s->used == slot_limit ||
-            s->next_generation == max_generation) return 0;
-        const uintptr_t unit = (uintptr_t) owned_unit;
-        if (!canonical(unit)) return 0;
-        const uintptr_t publisher = scalar_word(unit + unit_publisher);
-        if (!checked_vtable(publisher, "N9dj_player15UnitStateServerE", 2)) return 0;
-        server = scalar_word(publisher + publisher_server);
-        const uintptr_t table = checked_vtable(server, "N9dj_player23StateNotificationServerE", 26);
-        if (!table) return 0;
-        entry = scalar_word(table + observer_slot * 8);
-        if (!contains(entry, 4, execute_flag)) return 0;
-        /* Synchronous post-Unit-ctor window only. The native complete server
-         * constructors initialize this u32 from their fourth argument:
-         * 1.30 STR at0x148a3f8;2.00 STR at0x1545988. Copy it once while the
-         * caller owns the constructed chain; no later native field read.
-         * Same embedded channel as registration vector+0x1508 and dispatch
-         * X0. No deck namespace or global immutability is assigned to it. */
-        const uint32_t route = scalar_u32(server + cue_channel + channel_route);
-        slot = ++s->used;
-        const uint64_t generation = ++s->next_generation;
-        atomic_store_explicit(&s->pending[slot - 1].word, generation << mask_bits, memory_order_release);
-        listener = az_listener_create(sizeof(struct CueListener), listener_vtable);
-        if (!listener.object) {
-            invalidate_slot((unsigned) deck, slot);
-            return 0;
-        }
-        struct CueListener *object = listener.object;
-        object->deck = (unsigned) deck;
-        object->slot = slot;
-        object->route = route;
-        az_native_owner_copy(&s->owners[deck], &listener);
-        s->owner_slot[deck] = slot;
-        atomic_store_explicit(&s->active[deck], slot, memory_order_release);
+    return atomic_load_explicit(&s->enabled, memory_order_acquire) && !s->owners[deck].object &&
+           s->used < slot_limit && s->next_generation < max_generation;
+}
+/* Called with registration held. A consumed slot is never reused, including
+ * allocation failure, because old callbacks retain their immutable slot. */
+static unsigned create_cue_listener(unsigned deck, uint32_t route, struct az_native_owner *listener) {
+    struct State *s = state();
+    const unsigned slot = ++s->used;
+    const uint64_t generation = ++s->next_generation;
+    atomic_store_explicit(&s->pending[slot - 1].word, generation << mask_bits, memory_order_release);
+    *listener = az_listener_create(sizeof(struct CueListener), listener_vtable);
+    if (!listener->object) {
+        invalidate_slot(deck, slot);
+        return 0;
     }
-    /* Native registration may reenter or unwind. Retain the local core listener
-     * without holding any SDK lock while native registration is running. */
-    struct cue_registration registration __attribute__((cleanup(registration_drop))) = {(unsigned) deck, slot};
-    az_listener_register(entry, server, &listener);
+    struct CueListener *object = listener->object;
+    object->deck = deck;
+    object->slot = slot;
+    object->route = route;
+    az_native_owner_copy(&s->owners[deck], listener);
+    s->owner_slot[deck] = slot;
+    atomic_store_explicit(&s->active[deck], slot, memory_order_release);
+    return slot;
+}
+static bool acknowledge_cue_listener(unsigned deck, unsigned slot) {
+    struct State *s = state();
     AZ_MUTEX_GUARD(lock, s->registration, false);
     if (lock.error) {
-        invalidate_slot((unsigned) deck, slot);
-        return 0;
+        invalidate_slot(deck, slot);
+        return false;
     }
     if (!atomic_load_explicit(&s->enabled, memory_order_acquire) ||
         atomic_load_explicit(&s->active[deck], memory_order_acquire) != slot) {
-        invalidate_slot((unsigned) deck, slot);
+        invalidate_slot(deck, slot);
         if (s->owner_slot[deck] == slot) {
             az_native_owner_reset(&s->owners[deck]);
             s->owner_slot[deck] = 0;
         }
-        return 0;
+        return false;
     }
-    registration.slot = 0;
     atomic_store_explicit(&s->acknowledged[deck], slot, memory_order_release);
+    return true;
+}
+int azsdk_cue_register(int deck, void *owned_unit) {
+    struct State *s = state();
+    if (!deck_ok(deck) || !owned_unit || !atomic_load_explicit(&s->enabled, memory_order_acquire)) return 0;
+    unsigned slot;
+    struct CueBinding binding;
+    struct az_native_owner listener __attribute__((cleanup(az_native_owner_reset))) = {0};
+    {
+        AZ_MUTEX_GUARD(lock, s->registration, false);
+        if (lock.error || !cue_registration_available((unsigned) deck)) return 0;
+        if (!cue_binding(owned_unit, &binding)) return 0;
+        slot = create_cue_listener((unsigned) deck, binding.route, &listener);
+        if (!slot) return 0;
+    }
+    /* Native registration may reenter or unwind. Retain the local core listener
+     * without holding any SDK lock while native registration is running. */
+    struct cue_registration registration __attribute__((cleanup(registration_drop))) = {(unsigned) deck, slot};
+    az_listener_register(binding.entry, binding.server, &listener);
+    if (!acknowledge_cue_listener((unsigned) deck, slot)) return 0;
+    registration.slot = 0;
     return 1;
 }
 void azsdk_cue_retire(int deck) {
@@ -305,60 +337,81 @@ void azsdk_cue_retire(int deck) {
     }
 }
 
-int azsdk_cue_take(int deck, struct azsdk_cue_sample *out) {
+static bool cue_slot_current(unsigned deck, unsigned slot) {
     struct State *s = state();
-    if (!deck_ok(deck) || !out || !atomic_load_explicit(&(s->enabled), memory_order_acquire)) return 0;
-    __auto_type slot = atomic_load_explicit(&(s->active[deck]), memory_order_acquire);
-    if (!slot || slot > slot_limit || atomic_load_explicit(&(s->acknowledged[deck]), memory_order_acquire) != slot) return 0;
-    __auto_type p = &(s->published[deck]);
-    bool free = false;
-    if (!atomic_compare_exchange_strong_explicit(&(p->collecting), &(free), true, memory_order_acq_rel, memory_order_relaxed)) return 0;
-    _Atomic(bool) *guard __attribute__((cleanup(collection_release))) = &p->collecting;
-    __auto_type sequence = atomic_load_explicit(&(p->sequence), memory_order_acquire);
-    __auto_type revision = atomic_load_explicit(&(p->revision), memory_order_relaxed);
-    if ((sequence & 1u) || sequence > UINT64_MAX - 2 || revision == UINT64_MAX ||
-        !atomic_load_explicit(&(s->enabled), memory_order_acquire) || atomic_load_explicit(&(s->active[deck]), memory_order_acquire) != slot ||
-        atomic_load_explicit(&(s->acknowledged[deck]), memory_order_acquire) != slot ||
-        !(atomic_load_explicit(&(s->pending[slot - 1].word), memory_order_acquire) & cue_mask)) return 0;
-    __auto_type now = collection_now((unsigned) (deck));
-    if (!now) return 0; // preserve pending on clock failure
-    __auto_type batch = atomic_fetch_and_explicit(&(s->pending[slot - 1].word), ~(uint64_t) (cue_mask), memory_order_acq_rel);
-    __auto_type mask = ((unsigned) (batch & cue_mask));
-    if (!mask) return 0;
+    return atomic_load_explicit(&s->enabled, memory_order_acquire) &&
+           atomic_load_explicit(&s->active[deck], memory_order_acquire) == slot &&
+           atomic_load_explicit(&s->acknowledged[deck], memory_order_acquire) == slot;
+}
+static unsigned readable_cue_slot(int deck, const struct azsdk_cue_sample *out) {
+    struct State *s = state();
+    if (!deck_ok(deck) || !out || !atomic_load_explicit(&s->enabled, memory_order_acquire)) return 0;
+    const unsigned slot = atomic_load_explicit(&s->active[deck], memory_order_acquire);
+    if (!slot || slot > slot_limit || atomic_load_explicit(&s->acknowledged[deck], memory_order_acquire) != slot) return 0;
+    return slot;
+}
+static bool cue_collection_ready(unsigned deck, unsigned slot, uint64_t sequence, uint64_t revision) {
+    if ((sequence & 1u) || sequence > UINT64_MAX - 2 || revision == UINT64_MAX) return false;
+    if (!cue_slot_current(deck, slot)) return false;
+    return (atomic_load_explicit(&state()->pending[slot - 1].word, memory_order_acquire) & cue_mask) != 0;
+}
+static void publish_cue_sample(struct Published *p, uint64_t sequence, const struct azsdk_cue_sample *value) {
+    atomic_store_explicit(&p->sequence, sequence + 1, memory_order_release);
+    atomic_store_explicit(&p->generation, value->unit_generation, memory_order_relaxed);
+    atomic_store_explicit(&p->revision, value->revision, memory_order_relaxed);
+    atomic_store_explicit(&p->observed, value->observed_ns, memory_order_relaxed);
+    atomic_store_explicit(&p->mask, value->changed_index_mask, memory_order_relaxed);
+    atomic_store_explicit(&p->sequence, sequence + 2, memory_order_release);
+}
+static bool collect_cue_sample(unsigned deck, unsigned slot, struct azsdk_cue_sample *out) {
+    struct State *s = state();
+    struct Published *p = &s->published[deck];
+    const uint64_t sequence = atomic_load_explicit(&p->sequence, memory_order_acquire);
+    const uint64_t revision = atomic_load_explicit(&p->revision, memory_order_relaxed);
+    if (!cue_collection_ready(deck, slot, sequence, revision)) return false;
+    const uint64_t now = collection_now(deck);
+    if (!now) return false; // preserve pending on clock failure
+    const uint64_t batch = atomic_fetch_and_explicit(&s->pending[slot - 1].word, ~(uint64_t) cue_mask, memory_order_acq_rel);
+    const unsigned mask = (unsigned) (batch & cue_mask);
+    if (!mask) return false;
 #ifdef AZSDK_CUE_TESTING
-    __auto_type hook = atomic_load_explicit(&(s->after_collect), memory_order_acquire);
-    if (hook) hook(deck);
+    __auto_type hook = atomic_load_explicit(&s->after_collect, memory_order_acquire);
+    if (hook) hook((int) deck);
 #endif
-    if (!atomic_load_explicit(&(s->enabled), memory_order_acquire) || atomic_load_explicit(&(s->active[deck]), memory_order_acquire) != slot ||
-        atomic_load_explicit(&(s->acknowledged[deck]), memory_order_acquire) != slot) return 0;
+    if (!cue_slot_current(deck, slot)) return false;
     const struct azsdk_cue_sample value = {batch >> mask_bits, revision + 1, now, mask, 0};
-    atomic_store_explicit(&(p->sequence), sequence + 1, memory_order_release);
-    atomic_store_explicit(&(p->generation), value.unit_generation, memory_order_relaxed);
-    atomic_store_explicit(&(p->revision), value.revision, memory_order_relaxed);
-    atomic_store_explicit(&(p->observed), now, memory_order_relaxed);
-    atomic_store_explicit(&(p->mask), mask, memory_order_relaxed);
-    atomic_store_explicit(&(p->sequence), sequence + 2, memory_order_release);
-    if (!atomic_load_explicit(&(s->enabled), memory_order_acquire) || atomic_load_explicit(&(s->active[deck]), memory_order_acquire) != slot ||
-        atomic_load_explicit(&(s->acknowledged[deck]), memory_order_acquire) != slot) return 0;
+    publish_cue_sample(p, sequence, &value);
+    if (!cue_slot_current(deck, slot)) return false;
     *out = value;
-    return 1;
+    return true;
+}
+int azsdk_cue_take(int deck, struct azsdk_cue_sample *out) {
+    const unsigned slot = readable_cue_slot(deck, out);
+    if (!slot) return 0;
+    struct Published *p = &state()->published[deck];
+    bool free = false;
+    if (!atomic_compare_exchange_strong_explicit(&p->collecting, &free, true, memory_order_acq_rel, memory_order_relaxed)) return 0;
+    _Atomic(bool) *guard __attribute__((cleanup(collection_release))) = &p->collecting;
+    (void) guard;
+    return collect_cue_sample((unsigned) deck, slot, out);
+}
+static bool cue_sample_valid(const struct azsdk_cue_sample *value, uint64_t generation) {
+    return value->unit_generation && value->unit_generation == generation && value->revision &&
+           value->observed_ns && value->changed_index_mask;
 }
 int azsdk_cue_read(int deck, struct azsdk_cue_sample *out) {
+    const unsigned slot = readable_cue_slot(deck, out);
+    if (!slot) return 0;
     struct State *s = state();
-    if (!deck_ok(deck) || !out || !atomic_load_explicit(&(s->enabled), memory_order_acquire)) return 0;
-    __auto_type slot = atomic_load_explicit(&(s->active[deck]), memory_order_acquire);
-    if (!slot || slot > slot_limit || atomic_load_explicit(&(s->acknowledged[deck]), memory_order_acquire) != slot) return 0;
-    __auto_type generation = atomic_load_explicit(&(s->pending[slot - 1].word), memory_order_acquire) >> mask_bits;
-    __auto_type p = &(s->published[deck]);
-    __auto_type sequence = atomic_load_explicit(&(p->sequence), memory_order_acquire);
+    const uint64_t generation = atomic_load_explicit(&s->pending[slot - 1].word, memory_order_acquire) >> mask_bits;
+    struct Published *p = &s->published[deck];
+    const uint64_t sequence = atomic_load_explicit(&p->sequence, memory_order_acquire);
     if (sequence & 1u) return 0;
-    const struct azsdk_cue_sample value = {atomic_load_explicit(&(p->generation), memory_order_relaxed), atomic_load_explicit(&(p->revision), memory_order_relaxed),
-                                           atomic_load_explicit(&(p->observed), memory_order_relaxed), atomic_load_explicit(&(p->mask), memory_order_relaxed), 0};
+    const struct azsdk_cue_sample value = {atomic_load_explicit(&p->generation, memory_order_relaxed), atomic_load_explicit(&p->revision, memory_order_relaxed),
+                                           atomic_load_explicit(&p->observed, memory_order_relaxed), atomic_load_explicit(&p->mask, memory_order_relaxed), 0};
     atomic_thread_fence(memory_order_acquire);
-    if (atomic_load_explicit(&(p->sequence), memory_order_relaxed) != sequence || !value.unit_generation || value.unit_generation != generation ||
-        !value.revision || !value.observed_ns || !value.changed_index_mask || !atomic_load_explicit(&(s->enabled), memory_order_acquire) ||
-        atomic_load_explicit(&(s->active[deck]), memory_order_acquire) != slot ||
-        atomic_load_explicit(&(s->acknowledged[deck]), memory_order_acquire) != slot) return 0;
+    if (atomic_load_explicit(&p->sequence, memory_order_relaxed) != sequence || !cue_sample_valid(&value, generation) ||
+        !cue_slot_current((unsigned) deck, slot)) return 0;
     *out = value;
     return 1;
 }
@@ -374,18 +427,26 @@ unsigned azsdk_cue_capabilities() {
 }
 
 #ifdef AZSDK_CUE_TESTING
+static int cue_test_collection_lock(struct Published *p, uint64_t value) {
+    if (!value) {
+        atomic_store_explicit(&p->collecting, false, memory_order_release);
+        return 1;
+    }
+    bool free = false;
+    return atomic_compare_exchange_strong_explicit(&p->collecting, &free, true, memory_order_seq_cst, memory_order_seq_cst);
+}
+static int cue_test_next_generation(uint64_t value) {
+    struct State *s = state();
+    AZ_MUTEX_LOCK(lock, s->registration);
+    if (value < s->next_generation || value > max_generation) return 0;
+    s->next_generation = value;
+    return 1;
+}
 int azsdk_cue_test_control(int deck, unsigned kind, uint64_t value) {
     if (!deck_ok(deck)) return 0;
     struct State *s = state();
     __auto_type p = &(s->published[deck]);
-    if (kind == 1) {
-        if (!value) {
-            atomic_store_explicit(&(p->collecting), false, memory_order_release);
-            return 1;
-        }
-        bool free = false;
-        return atomic_compare_exchange_strong_explicit(&(p->collecting), &(free), true, memory_order_seq_cst, memory_order_seq_cst);
-    }
+    if (kind == 1) return cue_test_collection_lock(p, value);
     if (kind == 2) {
         atomic_store_explicit(&(p->clock_failure), value != 0, memory_order_release);
         return 1;
@@ -398,12 +459,7 @@ int azsdk_cue_test_control(int deck, unsigned kind, uint64_t value) {
         __auto_type slot = atomic_load_explicit(&(s->active[deck]), memory_order_acquire);
         return slot && slot <= slot_limit ? (int) (atomic_load_explicit(&(s->pending[slot - 1].word), memory_order_acquire) & cue_mask) : 0;
     }
-    if (kind == 5) {
-        AZ_MUTEX_LOCK(lock, s->registration);
-        if (value < s->next_generation || value > max_generation) return 0;
-        s->next_generation = value;
-        return 1;
-    }
+    if (kind == 5) return cue_test_next_generation(value);
     return 0;
 }
 void azsdk_cue_test_pending_hook(void (*hook)(int)) {

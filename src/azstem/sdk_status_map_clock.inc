@@ -91,57 +91,76 @@ static uint64_t read_map_clock(unsigned d, uint64_t load, aznm_packet *out) {
     (*out) = p;
     return seq;
 }
-static int offer_map_cut(azstatus_native_receipt *r) {
-    if (!r || r->deck >= 4 || !r->load_generation) return 0;
-    unsigned d = r->deck;
-    __auto_type m = &(state().decks[d].motion);
-    __auto_type c = &(map_clocks[d]);
-    uint64_t old = atomic_load_explicit(&(c->serial), memory_order_acquire);
-    if ((old & 1) || old >= UINT64_MAX - 1 ||
-        !atomic_compare_exchange_strong_explicit(&(c->serial), &(old), old + 1, memory_order_acq_rel, memory_order_acquire)) {
-        azn_map_gap(d);
-        return 0;
-    }
-    bool paired = r->map.owner && r->map.grid.provider && r->map.phrases.provider && r->map.grid.content && r->map.phrases.content;
-    bool had_map = atomic_load_explicit(&(c->load), memory_order_relaxed) == r->load_generation && atomic_load_explicit(&(c->owner), memory_order_relaxed);
-    bool same = had_map && paired && atomic_load_explicit(&(c->owner), memory_order_relaxed) == r->map.owner &&
-                atomic_load_explicit(&(c->grid), memory_order_relaxed) == r->map.grid.provider &&
-                atomic_load_explicit(&(c->grid_rev), memory_order_relaxed) == r->map.grid.revision &&
-                atomic_load_explicit(&(c->phrase), memory_order_relaxed) == r->map.phrases.provider &&
-                atomic_load_explicit(&(c->phrase_rev), memory_order_relaxed) == r->map.phrases.revision;
-    if (same) {
-        atomic_store_explicit(&(c->serial), old, memory_order_release);
-        return azn_offer(r);
-    }
+static bool map_cut_paired(const aznm_packet *p) {
+    return p->owner && p->grid.provider && p->phrases.provider && p->grid.content && p->phrases.content;
+}
+static bool map_clock_matches(const MapClock *c, const aznm_packet *p) {
+    return atomic_load_explicit(&(c->owner), memory_order_relaxed) == p->owner &&
+           atomic_load_explicit(&(c->grid), memory_order_relaxed) == p->grid.provider &&
+           atomic_load_explicit(&(c->grid_rev), memory_order_relaxed) == p->grid.revision &&
+           atomic_load_explicit(&(c->phrase), memory_order_relaxed) == p->phrases.provider &&
+           atomic_load_explicit(&(c->phrase_rev), memory_order_relaxed) == p->phrases.revision;
+}
+static void map_clock_store(MapClock *c, const azstatus_native_receipt *r, bool paired) {
     atomic_store_explicit(&(c->load), r->load_generation, memory_order_relaxed);
     atomic_store_explicit(&(c->owner), paired ? r->map.owner : 0, memory_order_relaxed);
     atomic_store_explicit(&(c->grid), r->map.grid.provider, memory_order_relaxed);
     atomic_store_explicit(&(c->grid_rev), r->map.grid.revision, memory_order_relaxed);
     atomic_store_explicit(&(c->phrase), r->map.phrases.provider, memory_order_relaxed);
     atomic_store_explicit(&(c->phrase_rev), r->map.phrases.revision, memory_order_relaxed);
+}
+static bool map_cut_motion_current(const Motion *m, uint64_t load) {
+    return m->load == load && m->known && m->order < UINT64_MAX && m->generation &&
+           !atomic_load_explicit(&(m->foreign), memory_order_acquire) &&
+           m->captured_interference == atomic_load_explicit(&(m->interference), memory_order_acquire);
+}
+static void map_cut_motion(azstatus_native_receipt *r, Motion *m) {
+    if (!map_cut_motion_current(m, r->load_generation)) return;
+    r->motion_order = ++m->order;
+    r->motion_generation = m->generation;
+    atomic_store_explicit(&(map_mutations[r->deck].last_order), m->order, memory_order_release);
+    r->points[1] = (__typeof__(r->points[1])) {AZN_COORD, m->rate, ((int64_t) (m->previous))};
+    r->observed_window_samples = m->window_samples;
+    r->observed_window_rate = m->window_rate;
+    if (atomic_load_explicit(&(m->opening), memory_order_acquire) && !r->lost_topics) r->motion_flags = AZN_AT_OPENING;
+}
+static int map_cut_publish(azstatus_native_receipt *r, MapClock *c, uint64_t serial, bool had_map) {
+    Motion *m = &state().decks[r->deck].motion;
     const uint64_t phrase_route = AZ_STATUS_TOPIC(AZ_STATUS_PHRASE_TRANSITION);
-    if (had_map && r->map.changed && !exact_map_bracket(d)) r->lost_topics |= phrase_route;
+    if (had_map && r->map.changed && !exact_map_bracket(r->deck)) r->lost_topics |= phrase_route;
     unsigned reservation = MOTION_FREE;
     if (!atomic_compare_exchange_strong_explicit(&(m->busy), &(reservation), MOTION_MAP, memory_order_acquire, memory_order_acquire)) {
         /* The overlapping native head writer detects the serial change and
          * cannot assign the ambiguous interval to either phrase map. */
         if (had_map) r->lost_topics |= phrase_route;
         int result = azn_offer(r);
-        atomic_store_explicit(&(c->serial), old + 2, memory_order_release);
+        atomic_store_explicit(&(c->serial), serial, memory_order_release);
         return result;
     }
-    if (m->load == r->load_generation && m->known && m->order < UINT64_MAX && m->generation &&
-        !atomic_load_explicit(&(m->foreign), memory_order_acquire) && m->captured_interference == atomic_load_explicit(&(m->interference), memory_order_acquire)) {
-        r->motion_order = ++m->order;
-        r->motion_generation = m->generation;
-        atomic_store_explicit(&(map_mutations[d].last_order), m->order, memory_order_release);
-        r->points[1] = (__typeof__(r->points[1])) {AZN_COORD, m->rate, ((int64_t) (m->previous))};
-        r->observed_window_samples = m->window_samples;
-        r->observed_window_rate = m->window_rate;
-        if (atomic_load_explicit(&(m->opening), memory_order_acquire) && !r->lost_topics) r->motion_flags = AZN_AT_OPENING;
-    }
+    map_cut_motion(r, m);
     int result = azn_offer(r);
-    atomic_store_explicit(&(c->serial), old + 2, memory_order_release);
+    atomic_store_explicit(&(c->serial), serial, memory_order_release);
     atomic_store_explicit(&(m->busy), MOTION_FREE, memory_order_release);
     return result;
+}
+static bool map_clock_claim(MapClock *c, uint64_t *old) {
+    return !(*old & 1) && *old < UINT64_MAX - 1 &&
+           atomic_compare_exchange_strong_explicit(&(c->serial), old, *old + 1, memory_order_acq_rel, memory_order_acquire);
+}
+static int offer_map_cut(azstatus_native_receipt *r) {
+    if (!r || r->deck >= 4 || !r->load_generation) return 0;
+    MapClock *c = &map_clocks[r->deck];
+    uint64_t old = atomic_load_explicit(&(c->serial), memory_order_acquire);
+    if (!map_clock_claim(c, &old)) {
+        azn_map_gap(r->deck);
+        return 0;
+    }
+    bool paired = map_cut_paired(&r->map);
+    bool had_map = atomic_load_explicit(&(c->load), memory_order_relaxed) == r->load_generation && atomic_load_explicit(&(c->owner), memory_order_relaxed);
+    if (had_map && paired && map_clock_matches(c, &r->map)) {
+        atomic_store_explicit(&(c->serial), old, memory_order_release);
+        return azn_offer(r);
+    }
+    map_clock_store(c, r, paired);
+    return map_cut_publish(r, c, old + 2, had_map);
 }

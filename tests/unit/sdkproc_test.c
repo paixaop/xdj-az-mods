@@ -163,7 +163,12 @@ static int hard_link(const char *from, const char *to) { return link(from, to); 
 
 int main(void) {
     ut_suite = "sdk: other programs";
-    snprintf(g_root, sizeof g_root, "%s/.az-sdkproc.XXXXXX", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+    /* Docker's shared macOS filesystem can report X_OK for mode 0644. Keep
+     * permission-sensitive fixtures on the container filesystem while retained
+     * coverage objects may live in the shared TMPDIR. */
+    const char *fixture_tmp = getenv("SDK_PROC_TMPDIR");
+    if (!fixture_tmp) fixture_tmp = getenv("TMPDIR");
+    snprintf(g_root, sizeof g_root, "%s/.az-sdkproc.XXXXXX", fixture_tmp ? fixture_tmp : "/tmp");
     if (!mkdtemp(g_root))
         return 2;
     char p[PATH_MAX], out[PATH_MAX];

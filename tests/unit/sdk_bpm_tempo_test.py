@@ -2,16 +2,17 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Lightweight host checks of the actual BPM reader/publication/public projection."""
 from pathlib import Path
+from sdk_deck_extract import projection, mapped
 import os
 import re
 import subprocess
 import tempfile
 
 root = Path(__file__).resolve().parents[2]
-def fn(text, name):
-    m = re.search(r'^static (?:int|void|uint32_t|double) ' + name + r'\([^;{]*\{', text, re.M)
+def fn(text, name, path):
+    m = re.search(r'^static (?:int|void|uint32_t|double|unsigned long) ' + name + r'\([^;{]*\{', text, re.M)
     assert m, name
-    return text[m.start():text.index('\n}', m.start()) + 2] + '\n'
+    return mapped(text, root / path, m.start(), text.index('\n}', m.start()) + 2)
 
 with tempfile.TemporaryDirectory(prefix='az-bpm-tempo-') as tmp:
     out = Path(tmp)
@@ -21,14 +22,13 @@ with tempfile.TemporaryDirectory(prefix='az-bpm-tempo-') as tmp:
                     re.match(r'^static (unsigned long|int|pthread_mutex_t) g_bpmstate', line)]
     # The extracted reader does not include the ctor's logging-only counter.
     declarations = [line.replace('g_bpmstate_n = 0, ', '') for line in declarations]
-    bpm = '\n'.join(declarations) + '\n' + ''.join(fn(display, n) for n in
-          ('bpmstate_capture', 'bpmstate_hold', 'bpmstate_release', 'bpmstate_sample', 'bpmstate_read', 'bpmstate_current'))
+    bpm = '\n'.join(declarations) + '\n' + ''.join(fn(display, n, 'src/azmod/stems_display.c') for n in
+          ('bpmstate_weak_hold', 'bpmstate_capture_locked', 'bpmstate_capture', 'bpmstate_hold', 'bpmstate_release', 'bpmstate_clear_sample', 'bpmstate_acquire', 'bpmstate_identity', 'bpmstate_sample', 'bpmstate_read', 'bpmstate_current'))
     (out / 'bpm.inc').write_text(bpm)
     community = (root / 'src/azmod/community.c').read_text()
-    (out / 'tempo.inc').write_text(community[community.index('static _Atomic double g_cm_bpm['):
-                                           community.index('static int (*g_cm_track_fn)')] + fn(community, 'cm_deck_bpm'))
+    (out / 'tempo.inc').write_text(mapped(community, root / 'src/azmod/community.c', community.index('static _Atomic double g_cm_bpm['), community.index('static int (*g_cm_track_fn)')) + fn(community, 'cm_deck_bpm', 'src/azmod/community.c'))
     deck = (root / 'src/azmod/sdk_deck.c').read_text()
-    (out / 'deck.inc').write_text(fn(deck, 'sd_native_load_read') + fn(deck, 'sd_native_cue_read') + fn(deck, 'sd_live_fields') + fn(deck, 'sd_deck_snapshot_v1'))
+    (out / 'deck.inc').write_text(projection(deck))
     flags = [os.environ.get('HOST_CC', os.environ.get('CC', 'cc')), '-std=c11', '-O1', '-Wall', '-Wextra', '-Werror',
              '-Wno-unused-function', '-pthread', '-I' + str(root / 'src/azmod'), '-I' + str(root / 'tests/unit')]
     san = os.environ.get('SAN', 'plain')
@@ -40,7 +40,7 @@ with tempfile.TemporaryDirectory(prefix='az-bpm-tempo-') as tmp:
         raise ValueError('SAN must be plain, asan or tsan')
     for name, source in [('lease', 'bpmstate_test.c'), ('public', 'sdkdeckdata_test.c'), ('feed', 'sdkbpmtempo_test.c')]:
         if name == 'feed':
-            (out / 'feed-deck.inc').write_text((out / 'deck.inc').read_text() + fn(deck, 'sd_snapshot') + fn(deck, 'sd_deck_info'))
+            (out / 'feed-deck.inc').write_text((out / 'deck.inc').read_text() + fn(deck, 'sd_snapshot', 'src/azmod/sdk_deck.c') + fn(deck, 'sd_deck_info', 'src/azmod/sdk_deck.c'))
         command = flags + ['-DBPM_INC="' + str(out / 'bpm.inc') + '"',
                            '-DTEMPO_INC="' + str(out / 'tempo.inc') + '"',
                            '-DDECK_DATA_INC="' + str(out / ('feed-deck.inc' if name == 'feed' else 'deck.inc')) + '"',

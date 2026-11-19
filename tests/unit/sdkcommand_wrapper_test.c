@@ -59,6 +59,24 @@ static az_command_request request(uint64_t id) {
     return (az_command_request) {.size = sizeof(az_command_request), .version = AZ_DATA_VERSION, .operation = AZ_CMD_LOOP_EXIT, .request_id = id, .expected_load_generation = 1, .deadline_ns = UINT64_MAX};
 }
 static az_command_result result(void) { return (az_command_result) {.size = sizeof(az_command_result)}; }
+static void unavailable_completion(const az_command_completion *completion, void *user) {
+    (void) completion;
+    (*(unsigned *) user)++;
+}
+static void unavailable_async_host(void) {
+    az_command_request r = request(1);
+    az_command_result out = result(), before = out;
+    unsigned calls = 0;
+    /* Without the community host, asynchronous entry points cannot retain a
+     * callback or acknowledge another owner's command, even with valid input. */
+    assert(sdk_command_submit_async("alpha", &r, unavailable_completion, &calls, &out) == AZ_INVALID);
+    assert(!calls && !memcmp(&out, &before, sizeof out));
+    assert(sdk_command_submit_async(NULL, NULL, NULL, NULL, NULL) == AZ_INVALID);
+    assert(sdk_command_acknowledge("alpha", 1) == AZ_INVALID);
+    assert(sdk_command_acknowledge(NULL, 0) == AZ_INVALID);
+    assert(!g_sdk_commands.next_token && !sdk_command_has_pending_notification());
+    assert(!sdk_command_nearest_deadline());
+}
 static void auth_rejections(void) {
     az_command_request r = request(1);
     az_command_result out = result();
@@ -166,6 +184,8 @@ static void refusal_and_shared_state(void) {
 int main(void) {
     assert(sdk_command_capabilities() == 0);
     sdk_command_retire_owner(-1);
+    unavailable_async_host();
+    puts("PASS sdk command wrappers: absent community host retains no asynchronous work");
     auth_rejections();
     puts("PASS sdk command wrappers: module/caller/frame authentication");
     malformed_submissions();

@@ -17,24 +17,36 @@ python3 - "$task_tmp" <<'PY'
 from pathlib import Path
 import re, sys
 out = Path(sys.argv[1])
+def mapped(source, path, start, end):
+    return '#line {} "{}"\n'.format(source.count('\n',0,start)+1,Path(path).resolve())+source[start:end]
+def unmapped(source):
+    return re.sub(r'^#line[^\n]*\n','',source,flags=re.M)
 source = Path('src/azstem/stem_playback.c').read_text()
 a = source.index('static _Atomic(void *) g_ls_self[NDECK];')
 m = re.search(r'^static DIR \*stem_opendir\(|^#ifndef AZMOD_RELEASE /\* the path scan|^static int is_dir\(const char \*p\) \{', source[a:], re.M)
 assert m
-lifetime = source[a:a + m.start()]
+lifetime = mapped(source,'src/azstem/stem_playback.c',a,a + m.start())
 source = Path('src/azstem/deck_track_map.c').read_text()
 a = source.index('/* ---- DjPlayerUnit ctor hook')
 b = source.index('static int lti_id_zero(', a)
-lifetime += source[a:b]
+lifetime += mapped(source,'src/azstem/deck_track_map.c',a,b)
 (out / 'real.inc').write_text(lifetime)
+live_modes = ''
+for name in ('djpuctor_unit_owned', 'djpuctor_live'):
+    match = re.search(r'^static [^\n]*\b'+name+r'\([^\n;]*\) \{', source, re.M)
+    assert match, name
+    live_modes += mapped(source, 'src/azstem/deck_track_map.c', match.start(),
+                         source.index('\n}', match.end()) + 2) + '\n'
+(out / 'live-modes.inc').write_text(live_modes)
+lifetime = unmapped(lifetime)
 variants = [
     ('cue-register', '(void) azsdk_cue_register((int) n32, self);', '(void) 0;'),
     ('cue-retire', 'if (g_sdk_cue_on) azsdk_cue_retire(d);', '(void) 0;'),
     ('register', '(void) azsdk_load_register((int) n32, self);', '(void) 0;'),
     ('retire', 'if (g_sdk_load_on) azsdk_load_retire(d);', '(void) 0;'),
-    ('owner', 'if (g_sdk_load_on && (claimed || exp == self) &&', 'if (g_sdk_load_on &&'),
-    ('disabled', 'if (g_sdk_load_on && (claimed || exp == self) &&', 'if ((claimed || exp == self) &&'),
-    ('unit-vtable', 'if (g_sdk_load_on && (claimed || exp == self) &&\n            *(const uintptr_t *) self == atomic_load_explicit(&g_djpu_vt, memory_order_relaxed))', 'if (g_sdk_load_on && (claimed || exp == self))'),
+    ('owner', 'if (g_sdk_load_on && djpuctor_unit_owned(self, claimed, exp))', 'if (g_sdk_load_on && *(const uintptr_t *) self == atomic_load_explicit(&g_djpu_vt, memory_order_relaxed))'),
+    ('disabled', 'if (g_sdk_load_on && djpuctor_unit_owned(self, claimed, exp))', 'if (djpuctor_unit_owned(self, claimed, exp))'),
+    ('unit-vtable', 'if (g_sdk_load_on && djpuctor_unit_owned(self, claimed, exp))', 'if (g_sdk_load_on && (claimed || exp == self))'),
 ]
 for name, old, new in variants:
     assert lifetime.count(old) == 1, name
@@ -48,9 +60,9 @@ assert finish > 0
 (out / 'ctor-order.inc').write_text(early[:finish] + '\n' + old + early[finish:])
 
 source = Path('src/azstem/azstem.c').read_text()
-a = source.index('        g_djpuctor_addr = (uintptr_t) v;')
-b = source.index('\n    }\n    /* gui::LoadState ctor', a)
-body = source[a:b]
+a = source.index('static void azstem_configure_loop(')
+b = source.index('static void azstem_lti_hooks(', a)
+body = mapped(source,'src/azstem/azstem.c',a,b)+'\n#line 1 "{}"\n'.format(out/'config-fixture.c')
 config = '''#include "azexit.h"
 #include <stdatomic.h>
 #include <stdint.h>
@@ -94,9 +106,8 @@ static void azsdk_loop_configure(int on,int build) { (void)on;(void)build; }
 static void azsdk_live_configure(int on,int build) { (void)on;(void)build; }
 static void azsdk_cue_configure(int on,int build) { (void)on;(void)build; }
 int azsdk_exit_configure(int on,int build,void *(*install)(uintptr_t,void*,void**)) { command_options|=(unsigned)on;(void)build;(void)install;return 0; }
-static void configure(unsigned long long v) {
 ''' + body + '''
-}
+static void configure(unsigned long long v) { azstem_deck_hooks(v, sdk_loop_build); }
 int main(void) {
     for (int build=1;build<=2;++build) for(int flags=0;flags<128;++flags)
       for(int ctor=0;ctor<2;++ctor) for(int dtor=0;dtor<2;++dtor) for(int def=0;def<2;++def) {
@@ -116,14 +127,15 @@ int main(void) {
 }
 '''
 (out / 'config.c').write_text(config)
+config = unmapped(config)
 controls = [
-    ('master-flag', 'access("/home/root/settings/azmod.track-data.off", F_OK) != 0 &&\n                                       access("/home/root/settings/azmod.native-load.off", F_OK) != 0', 'access("/home/root/settings/azmod.native-load.off", F_OK) != 0'),
+    ('master-flag', 'access("/home/root/settings/azmod.track-data.off", F_OK) != 0 &&\n                               access("/home/root/settings/azmod.native-load.off", F_OK) != 0', 'access("/home/root/settings/azmod.native-load.off", F_OK) != 0'),
     ('load-flag', 'access("/home/root/settings/azmod.native-load.off", F_OK) != 0', '1'),
     ('default-address', 'if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT && sdk_commands_enabled)', 'if (td && sdk_commands_enabled)'),
-    ('dtor-required', 'if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT && sdk_commands_enabled)', 'if (g_djpuctor_addr == DJPUCTOR_DEFAULT && sdk_commands_enabled)'),
+    ('dtor-required', 'if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT && sdk_commands_enabled)', '(void) td;\n    if (g_djpuctor_addr == DJPUCTOR_DEFAULT && sdk_commands_enabled)'),
     ('cue-off-switch', 'access("/home/root/settings/azmod.native-cue-commands.off", F_OK) != 0', '1'),
     ('exit-off-switch', 'access("/home/root/settings/azmod.native-exit.off", F_OK) != 0', '1'),
-    ('build', 'azsdk_load_configure(1, sdk_loop_build, sdk_patch_slot);\n                atomic_store_explicit', 'azsdk_load_configure(1, 1, sdk_patch_slot);\n                atomic_store_explicit'),
+    ('build', 'azsdk_load_configure(1, sdk_loop_build, sdk_patch_slot);\n        atomic_store_explicit', 'azsdk_load_configure(1, 1, sdk_patch_slot);\n        atomic_store_explicit'),
 ]
 for name, old, new in controls:
     assert config.count(old)==1,(name,config.count(old))
@@ -136,6 +148,8 @@ PY
 compiler=${HOST_CC:-cc}
 "$compiler" "${flags[@]}" -DLIFE_INC="\"$task_tmp/real.inc\"" tests/unit/lifetime_test.c -o "$task_tmp/real"
 "$task_tmp/real"
+"$compiler" "${flags[@]}" -DLIFE_MODES_INC="\"$task_tmp/live-modes.inc\"" tests/unit/sdkload_live_modes_test.c -o "$task_tmp/live-modes"
+"$task_tmp/live-modes"
 "$compiler" "${flags[@]}" -DLIFE_INC="\"$task_tmp/real.inc\"" tests/unit/ltisnap_test.c -o "$task_tmp/snapshot"
 "$task_tmp/snapshot" 0.2
 "$compiler" "${flags[@]}" "$task_tmp/config.c" -o "$task_tmp/config"

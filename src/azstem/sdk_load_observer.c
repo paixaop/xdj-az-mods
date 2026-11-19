@@ -71,7 +71,6 @@ static _Atomic(uint64_t) next_load;
 static void *original_load, *original_unload, *original_secondary_unload, *original_complete;
 static _Atomic(unsigned) load_installed, unload_installed, secondary_installed, complete_installed;
 struct Deck {
-    atomic_flag capture;
     _Atomic(uintptr_t) unit, facade, listener;
     _Atomic(uint64_t) unit_generation, epoch, history;
     _Atomic(uint64_t) pending_epoch, pending_unit, pending_id;
@@ -79,19 +78,22 @@ struct Deck {
     _Atomic(uint64_t) awaiting_empty, pending_source_pin, sample_source_pin;
     _Atomic(uint64_t) confirmed_empty;
     _Atomic(uintptr_t) pending_wherefrom;
-    unsigned char pending_track[12]; /* capture flag owns pending writes/consumption */
     _Atomic(uint64_t) pending_track_lo;
-    _Atomic(uint32_t) pending_track_hi;
     double pending_original_bpm;
-    unsigned pending_bpm_state;
     _Atomic(uint64_t) sample_original_bpm;
-    _Atomic(unsigned) sample_bpm_state;
     _Atomic(uint64_t) sample_track_lo;
+#endif
+    _Atomic(uint64_t) sequence, sample_unit, sample_load, sample_epoch, observed, sample_id;
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    _Atomic(uint32_t) pending_track_hi;
+    unsigned pending_bpm_state;
+    _Atomic(unsigned) sample_bpm_state;
     _Atomic(uint32_t) sample_track_hi;
     _Atomic(unsigned) sample_source_kind;
+    unsigned char pending_track[12]; /* capture flag owns pending writes/consumption */
 #endif
     _Atomic(unsigned) ready, poison, valid;
-    _Atomic(uint64_t) sequence, sample_unit, sample_load, sample_epoch, observed, sample_id;
+    atomic_flag capture;
 };
 #define DECK_INITIALIZER {.capture = ATOMIC_FLAG_INIT, .epoch = 1}
 static struct Deck decks[kDecks] = {DECK_INITIALIZER, DECK_INITIALIZER, DECK_INITIALIZER, DECK_INITIALIZER};
@@ -134,11 +136,7 @@ static int main_image(struct dl_phdr_info *info, size_t size __attribute__((unus
 #endif
 /* Only the caller's genuine owned object may be read. Mapped RTTI cannot make a
  * stale object pointer safe. Native names stop at first mismatch/NUL. */
-static uintptr_t nominal(uintptr_t object, const char *expected, intptr_t top, unsigned slots) {
-    if (!canonical(object)) return 0;
-    uintptr_t table = word(object);
-    if (!canonical(table) || table < 16 || !contains(table - 16, (slots + 2u) * 8u, kRead) ||
-        ((intptr_t) (word(table - 16))) != top) return 0;
+static uintptr_t checked_type_name(uintptr_t table, const char *expected) {
     uintptr_t type = word(table - 8);
     if (!canonical(type) || !contains(type, 16, kRead)) return 0;
     uintptr_t name = word(type + 8);
@@ -150,6 +148,13 @@ static uintptr_t nominal(uintptr_t object, const char *expected, intptr_t top, u
     for (size_t i = 0; i < bytes; ++i)
         if (actual[i] != expected[i]) return 0;
     return table;
+}
+static uintptr_t nominal(uintptr_t object, const char *expected, intptr_t top, unsigned slots) {
+    if (!canonical(object)) return 0;
+    uintptr_t table = word(object);
+    if (!canonical(table) || table < 16 || !contains(table - 16, (slots + 2u) * 8u, kRead) ||
+        ((intptr_t) (word(table - 16))) != top) return 0;
+    return checked_type_name(table, expected);
 }
 static bool native_id(const void *borrowed, uint32_t *out) {
     uintptr_t p = ((uintptr_t) (borrowed));
@@ -204,13 +209,16 @@ static void load_hook(void *, const void *, const void *, const void *, const vo
 static void unload_hook(void *, const void *, void *);
 static void secondary_unload_hook(void *, const void *, void *);
 static void complete_hook(void *, const void *, uint32_t, const void *);
+static uintptr_t native_entry_address(unsigned kind) {
+    uintptr_t value = native_entries[installed_build - 1][kind];
+    return value > UINTPTR_MAX - image_base ? 0 : image_base + value;
+}
 static uintptr_t verified_entry(unsigned kind) {
     if (!installed_build || installed_build > 2 || kind >= 4) return 0;
 #ifdef AZSDK_LOAD_TESTING
     if (fixture_build == installed_build) return fixture_profile[kind];
 #endif
-    uintptr_t value = native_entries[installed_build - 1][kind];
-    return value > UINTPTR_MAX - image_base ? 0 : image_base + value;
+    return native_entry_address(kind);
 }
 struct patch_call {
     azsdk_load_patch_fn patch;
@@ -223,18 +231,13 @@ static void invoke_patch(void *opaque) {
     struct patch_call *call = opaque;
     call->result = call->patch(call->slot, call->hook, call->original);
 }
-static bool install(uintptr_t slot, void *hook, void **original, _Atomic(unsigned) *acknowledged, unsigned kind) {
-    void *current = __atomic_load_n(((void **) (slot)), __ATOMIC_ACQUIRE);
-    void *expected = __atomic_load_n(original, __ATOMIC_ACQUIRE);
+static bool patch_slot_admitted(void *current, void *hook, void *expected, unsigned kind) {
     void *verified = ((void *) (verified_entry(kind)));
     if (!verified || !contains(((uintptr_t) (verified)), 4, kExecute)) return false;
     if ((current != hook && current != verified) || (expected && expected != verified)) return false;
-    if (current == hook) return atomic_load_explicit(acknowledged, memory_order_acquire) && expected && contains(((uintptr_t) (expected)), 4, kExecute);
-    if (!contains(((uintptr_t) (current)), 4, kExecute) || (expected && expected != current)) return false;
-    if (!expected) {
-        expected = current;
-        __atomic_store_n(original, expected, __ATOMIC_RELEASE);
-    }
+    return true;
+}
+static bool apply_load_patch(uintptr_t slot, void *hook, void **original, _Atomic(unsigned) *acknowledged, void *expected) {
     __auto_type patch = atomic_load_explicit(&(patcher), memory_order_acquire);
     if (!patch) return false;
     int rc = 0;
@@ -245,6 +248,18 @@ static bool install(uintptr_t slot, void *hook, void **original, _Atomic(unsigne
               __atomic_load_n(((void **) (slot)), __ATOMIC_ACQUIRE) == hook;
     if (ok) atomic_store_explicit(acknowledged, 1, memory_order_release);
     return ok;
+}
+static bool install(uintptr_t slot, void *hook, void **original, _Atomic(unsigned) *acknowledged, unsigned kind) {
+    void *current = __atomic_load_n(((void **) (slot)), __ATOMIC_ACQUIRE);
+    void *expected = __atomic_load_n(original, __ATOMIC_ACQUIRE);
+    if (!patch_slot_admitted(current, hook, expected, kind)) return false;
+    if (current == hook) return atomic_load_explicit(acknowledged, memory_order_acquire) && expected && contains(((uintptr_t) (expected)), 4, kExecute);
+    if (!contains(((uintptr_t) (current)), 4, kExecute) || (expected && expected != current)) return false;
+    if (!expected) {
+        expected = current;
+        __atomic_store_n(original, expected, __ATOMIC_RELEASE);
+    }
+    return apply_load_patch(slot, hook, original, acknowledged, expected);
 }
 static bool completion_ready(uintptr_t listener) {
     uintptr_t table = nominal(listener, "N7usecase4load14LoadControllerE", kCompleteThis, 3);
@@ -262,29 +277,35 @@ static int facade_deck(uintptr_t facade) {
         if (atomic_load_explicit(&(decks[n].facade), memory_order_acquire) == facade && atomic_load_explicit(&(decks[n].unit_generation), memory_order_acquire)) return ((int) (n));
     return -1;
 }
+static void association_reserved(unsigned deck) {
+#ifdef AZSDK_LOAD_TESTING
+    if (before_association) before_association(deck);
+#else
+    (void) deck;
+#endif
+}
+static void association_conflict(unsigned deck, unsigned owner) {
+    if (owner < kDecks) {
+        atomic_store_explicit(&(decks[owner].poison), 1, memory_order_release);
+        invalidate(&decks[owner]);
+    }
+    atomic_store_explicit(&(decks[deck].poison), 1, memory_order_release);
+    invalidate(&decks[deck]);
+}
 static bool reserve_listener(unsigned deck, uintptr_t listener) {
     for (unsigned i = 0; i < sizeof association_history / sizeof *association_history; ++i) {
         uintptr_t value = atomic_load_explicit(&(association_history[i]), memory_order_acquire);
         if (!value && atomic_compare_exchange_strong_explicit(&(association_history[i]), &(value), listener | (deck + 1u), memory_order_acq_rel, memory_order_acquire)) {
-#ifdef AZSDK_LOAD_TESTING
-            if (before_association) before_association(deck);
-#endif
+            association_reserved(deck);
             return true;
         }
         if ((value & ~(uintptr_t) (7)) != listener) continue;
         unsigned owner = (unsigned) (value & 7u) - 1u;
         if (owner == deck) {
-#ifdef AZSDK_LOAD_TESTING
-            if (before_association) before_association(deck);
-#endif
+            association_reserved(deck);
             return true;
         }
-        if (owner < kDecks) {
-            atomic_store_explicit(&(decks[owner].poison), 1, memory_order_release);
-            invalidate(&decks[owner]);
-        }
-        atomic_store_explicit(&(decks[deck].poison), 1, memory_order_release);
-        invalidate(&decks[deck]);
+        association_conflict(deck, owner);
         return false;
     }
     atomic_store_explicit(&(decks[deck].poison), 1, memory_order_release);
@@ -317,6 +338,97 @@ void status_load(unsigned deck, uint64_t unit, uint64_t epoch, int state,
     azn_emit(&r);
 }
 #endif
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+static void capture_pending_bpm(struct Deck *d, const void *track) {
+    /* Both admitted firmware loaders copy the complete 0x38-byte
+     * TrackInfoToLoad into their queued task. Its +0x30 double is copied
+     * unchanged into SourceInfo+0x60, unlike the position-dependent grid
+     * BPM. Copy only while the original load argument is borrowed. */
+    d->pending_original_bpm = 0;
+    d->pending_bpm_state = AZN_BPM_UNAVAILABLE;
+    if (track) {
+        double bpm;
+        memcpy(&bpm, ((const unsigned char *) (track)) + 0x30, sizeof bpm);
+        if (bpm == DBL_MAX) d->pending_bpm_state = AZN_BPM_EMPTY;
+        else if (isfinite(bpm) && bpm > 0) {
+            d->pending_original_bpm = bpm;
+            d->pending_bpm_state = AZN_BPM_READY;
+        }
+    }
+}
+static void capture_pending_track(unsigned deck, uint64_t unit, uint64_t epoch, const void *track, const void *where) {
+    struct Deck *d = &decks[deck];
+    uint64_t pin = 0;
+    uintptr_t object = 0;
+    memset(d->pending_track, 0, sizeof d->pending_track);
+    if (track) memcpy(d->pending_track, track, sizeof d->pending_track);
+    uint64_t pending_lo;
+    uint32_t pending_hi;
+    memcpy(&pending_lo, d->pending_track, 8);
+    memcpy(&pending_hi, d->pending_track + 8, 4);
+    atomic_store_explicit(&(d->pending_track_lo), pending_lo, memory_order_release);
+    atomic_store_explicit(&(d->pending_track_hi), pending_hi, memory_order_release);
+    capture_pending_bpm(d, track);
+    __auto_type capture_source = atomic_load_explicit(&(source_capture), memory_order_acquire);
+    if (track && where) {
+        object = contained_wherefrom(where);
+        if (canonical(object)) {
+            if (capture_source) pin = capture_source((unsigned) (deck), unit, epoch, object, d->pending_track);
+        }
+    }
+    atomic_store_explicit(&(d->pending_source_pin), pin, memory_order_relaxed);
+    atomic_store_explicit(&(d->pending_wherefrom), object, memory_order_relaxed);
+}
+#endif
+static bool load_request_id(unsigned deck, uint64_t unit, uint64_t epoch, const void *option, uint32_t *out) {
+    struct Deck *d = &decks[deck];
+    uint32_t id;
+#ifndef AZ_STATUS_NATIVE_PRODUCER
+    (void) unit;
+    (void) epoch;
+#endif
+    if (!native_id(option, &id)) {
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+        status_load(deck, unit, epoch, AZN_UNKNOWN, 0, false, 0, 0, 0, 0, AZN_BPM_UNKNOWN);
+#endif
+        atomic_store_explicit(&(d->poison), 1, memory_order_release);
+        return false;
+    }
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    status_load(deck, unit, epoch, AZN_LOADING, id, true, 0, 0, 0, 0, AZN_BPM_UNKNOWN);
+#endif
+    *out = id;
+    return true;
+}
+static bool claim_load_request(unsigned deck, void *listener, uint32_t id) {
+    struct Deck *d = &decks[deck];
+    if (!fresh_id(d, id) ||
+        !atomic_load_explicit(&(d->ready), memory_order_acquire) || !completion_ready(((uintptr_t) (listener)))) return false;
+    if (!reserve_listener((unsigned) (deck), ((uintptr_t) (listener))) ||
+        atomic_load_explicit(&(d->poison), memory_order_acquire) || atomic_flag_test_and_set_explicit(&(d->capture), memory_order_acquire)) return false;
+    return true;
+}
+static void publish_pending_load(unsigned deck, uint64_t unit, uint64_t epoch, uint32_t id,
+                                 void *listener, const void *track, const void *where) {
+    struct Deck *d = &decks[deck];
+#ifndef AZ_STATUS_NATIVE_PRODUCER
+    (void) track;
+    (void) where;
+#endif
+    if (atomic_load_explicit(&(enabled), memory_order_acquire) && atomic_load_explicit(&(d->epoch), memory_order_acquire) == epoch &&
+        atomic_load_explicit(&(d->unit_generation), memory_order_acquire) == unit && !atomic_load_explicit(&(d->poison), memory_order_acquire)) {
+        atomic_store_explicit(&(d->listener), ((uintptr_t) (listener)), memory_order_release);
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+        capture_pending_track((unsigned) deck, unit, epoch, track, where);
+#endif
+        atomic_store_explicit(&(d->pending_unit), unit, memory_order_relaxed);
+        atomic_store_explicit(&(d->pending_id), (uint64_t) (id) + 1, memory_order_relaxed);
+        atomic_store_explicit(&(d->pending_epoch), epoch, memory_order_release);
+    }
+}
+static bool load_incarnation_usable(const struct Deck *d, uint64_t epoch, uint64_t unit) {
+    return epoch && unit && !atomic_load_explicit(&(d->poison), memory_order_acquire);
+}
 static void begin_load(uintptr_t facade, const void *option, void *listener, const void *track, const void *where) {
     (void) track;
     (void) where;
@@ -326,70 +438,16 @@ static void begin_load(uintptr_t facade, const void *option, void *listener, con
     struct Deck *d = &(decks[deck]);
     uint64_t epoch = invalidate(d), unit = atomic_load_explicit(&(d->unit_generation), memory_order_acquire);
     uint32_t id;
-    if (!epoch || !unit || atomic_load_explicit(&(d->poison), memory_order_acquire)) return;
+    if (!load_incarnation_usable(d, epoch, unit)) return;
 #ifdef AZ_STATUS_NATIVE_PRODUCER
     atomic_store_explicit(&(d->awaiting_empty), 0, memory_order_release);
 #ifdef AZ_STATUS_MEMORY_PRODUCER
     azn_memory_retire(deck, epoch);
 #endif
 #endif
-    if (!native_id(option, &id)) {
-#ifdef AZ_STATUS_NATIVE_PRODUCER
-        status_load(deck, unit, epoch, AZN_UNKNOWN, 0, false, 0, 0, 0, 0, AZN_BPM_UNKNOWN);
-#endif
-        atomic_store_explicit(&(d->poison), 1, memory_order_release);
-        return;
-    }
-#ifdef AZ_STATUS_NATIVE_PRODUCER
-    status_load(deck, unit, epoch, AZN_LOADING, id, true, 0, 0, 0, 0, AZN_BPM_UNKNOWN);
-#endif
-    if (!fresh_id(d, id) ||
-        !atomic_load_explicit(&(d->ready), memory_order_acquire) || !completion_ready(((uintptr_t) (listener)))) return;
-    if (!reserve_listener((unsigned) (deck), ((uintptr_t) (listener))) ||
-        atomic_load_explicit(&(d->poison), memory_order_acquire) || atomic_flag_test_and_set_explicit(&(d->capture), memory_order_acquire)) return;
-    if (atomic_load_explicit(&(enabled), memory_order_acquire) && atomic_load_explicit(&(d->epoch), memory_order_acquire) == epoch &&
-        atomic_load_explicit(&(d->unit_generation), memory_order_acquire) == unit && !atomic_load_explicit(&(d->poison), memory_order_acquire)) {
-        atomic_store_explicit(&(d->listener), ((uintptr_t) (listener)), memory_order_release);
-#ifdef AZ_STATUS_NATIVE_PRODUCER
-        uint64_t pin = 0;
-        uintptr_t object = 0;
-        memset(d->pending_track, 0, sizeof d->pending_track);
-        if (track) memcpy(d->pending_track, track, sizeof d->pending_track);
-        uint64_t pending_lo;
-        uint32_t pending_hi;
-        memcpy(&pending_lo, d->pending_track, 8);
-        memcpy(&pending_hi, d->pending_track + 8, 4);
-        atomic_store_explicit(&(d->pending_track_lo), pending_lo, memory_order_release);
-        atomic_store_explicit(&(d->pending_track_hi), pending_hi, memory_order_release);
-        /* Both admitted firmware loaders copy the complete 0x38-byte
-         * TrackInfoToLoad into their queued task. Its +0x30 double is copied
-         * unchanged into SourceInfo+0x60, unlike the position-dependent grid
-         * BPM. Copy only while the original load argument is borrowed. */
-        d->pending_original_bpm = 0;
-        d->pending_bpm_state = AZN_BPM_UNAVAILABLE;
-        if (track) {
-            double bpm;
-            memcpy(&bpm, ((const unsigned char *) (track)) + 0x30, sizeof bpm);
-            if (bpm == DBL_MAX) d->pending_bpm_state = AZN_BPM_EMPTY;
-            else if (isfinite(bpm) && bpm > 0) {
-                d->pending_original_bpm = bpm;
-                d->pending_bpm_state = AZN_BPM_READY;
-            }
-        }
-        __auto_type capture_source = atomic_load_explicit(&(source_capture), memory_order_acquire);
-        if (track && where) {
-            object = contained_wherefrom(where);
-            if (canonical(object)) {
-                if (capture_source) pin = capture_source((unsigned) (deck), unit, epoch, object, d->pending_track);
-            }
-        }
-        atomic_store_explicit(&(d->pending_source_pin), pin, memory_order_relaxed);
-        atomic_store_explicit(&(d->pending_wherefrom), object, memory_order_relaxed);
-#endif
-        atomic_store_explicit(&(d->pending_unit), unit, memory_order_relaxed);
-        atomic_store_explicit(&(d->pending_id), (uint64_t) (id) + 1, memory_order_relaxed);
-        atomic_store_explicit(&(d->pending_epoch), epoch, memory_order_release);
-    }
+    if (!load_request_id((unsigned) deck, unit, epoch, option, &id)) return;
+    if (!claim_load_request((unsigned) deck, listener, id)) return;
+    publish_pending_load((unsigned) deck, unit, epoch, id, listener, track, where);
     unlock(d);
 }
 static void begin_unload(uintptr_t facade, const void *option) {
@@ -416,82 +474,124 @@ static void begin_unload(uintptr_t facade, const void *option) {
     atomic_store_explicit(&(d->pending_id), 0, memory_order_release);
     unlock(d);
 }
-static void complete(uintptr_t listener, const void *request, uint32_t result, const void *where) {
+static bool pending_completion(const struct Deck *d, uintptr_t listener, uint64_t unit, uint64_t epoch, uint32_t id) {
+    if (!unit || atomic_load_explicit(&(d->listener), memory_order_acquire) != listener ||
+        atomic_load_explicit(&(d->pending_epoch), memory_order_acquire) != epoch ||
+        atomic_load_explicit(&(d->pending_unit), memory_order_acquire) != unit ||
+        atomic_load_explicit(&(d->pending_id), memory_order_acquire) != (uint64_t) (id) + 1) return false;
+    return true;
+}
+static bool completion_current(const struct Deck *d, uintptr_t listener, uint64_t unit, uint64_t epoch, uint32_t id) {
+    return atomic_load_explicit(&(enabled), memory_order_acquire) && !atomic_load_explicit(&(d->poison), memory_order_acquire) &&
+           atomic_load_explicit(&(d->epoch), memory_order_acquire) == epoch &&
+           atomic_load_explicit(&(d->unit_generation), memory_order_acquire) == unit &&
+           atomic_load_explicit(&(d->listener), memory_order_acquire) == listener &&
+           atomic_load_explicit(&(d->pending_epoch), memory_order_acquire) == epoch &&
+           atomic_load_explicit(&(d->pending_id), memory_order_acquire) == (uint64_t) (id) + 1;
+}
+static bool load_incarnation_current(const struct Deck *d, uint64_t epoch, uint64_t unit) {
+    return atomic_load_explicit(&(d->epoch), memory_order_acquire) == epoch &&
+           atomic_load_explicit(&(d->unit_generation), memory_order_acquire) == unit;
+}
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+struct CompletedSource {
+    uint64_t pin;
+    uintptr_t origin;
+    unsigned kind, bpm_state;
+    double bpm;
+};
+static struct CompletedSource complete_source(struct Deck *d, const void *where) {
+    uint64_t pin = atomic_exchange_explicit(&(d->pending_source_pin), 0, memory_order_relaxed);
+    uintptr_t origin = atomic_exchange_explicit(&(d->pending_wherefrom), 0, memory_order_relaxed);
+    if (!origin || !where || contained_wherefrom(where) != origin) {
+        pin = 0;
+        origin = 0;
+    }
+    unsigned kind = origin ? (unsigned) (azn_source_kind((int) (installed_build), d->pending_track)) : 0;
+    atomic_store_explicit(&(d->sample_source_kind), kind, memory_order_release);
+    atomic_store_explicit(&(d->sample_source_pin), pin, memory_order_release);
+    unsigned bpm_state = origin ? d->pending_bpm_state : (unsigned) (AZN_BPM_UNAVAILABLE);
+    double bpm = bpm_state == AZN_BPM_READY ? d->pending_original_bpm : 0;
+    uint64_t bpm_bits;
+    memcpy(&bpm_bits, &bpm, sizeof bpm_bits);
+    atomic_store_explicit(&(d->sample_original_bpm), bpm_bits, memory_order_release);
+    atomic_store_explicit(&(d->sample_bpm_state), bpm_state, memory_order_release);
+    uint64_t lo;
+    uint32_t hi;
+    memcpy(&lo, d->pending_track, 8);
+    memcpy(&hi, d->pending_track + 8, 4);
+    atomic_store_explicit(&(d->sample_track_lo), lo, memory_order_release);
+    atomic_store_explicit(&(d->sample_track_hi), hi, memory_order_release);
+    return (struct CompletedSource) {pin, origin, kind, bpm_state, bpm};
+}
+#endif
+static void publish_completed_load(unsigned deck, uint64_t unit, uint64_t epoch, uint32_t id,
+                                   uint64_t sequence, uint64_t generation, uint64_t observed, const void *where) {
+    struct Deck *d = &decks[deck];
+    atomic_store_explicit(&(d->sequence), sequence + 1, memory_order_release);
+    /* Acquiring any field of a newer write must also observe its
+     * preceding odd sequence at the final sequence check. */
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    struct CompletedSource source = complete_source(d, where);
+#else
     (void) where;
+#endif
+    atomic_store_explicit(&(d->sample_unit), unit, memory_order_release);
+    atomic_store_explicit(&(d->sample_load), generation, memory_order_release);
+    atomic_store_explicit(&(d->sample_epoch), epoch, memory_order_release);
+    atomic_store_explicit(&(d->sample_id), id, memory_order_release);
+    atomic_store_explicit(&(d->observed), observed, memory_order_release);
+    atomic_store_explicit(&(d->sequence), sequence + 2, memory_order_release);
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    // Reserve the load barrier before this matched generation is visible to owner writers.
+    if (load_incarnation_current(d, epoch, unit))
+        status_load(deck, unit, epoch, AZN_LOADED, id, true, generation, source.pin, source.kind, source.bpm, source.bpm_state);
+#endif
+    atomic_store_explicit(&(d->valid), 1, memory_order_release);
+    if (!load_incarnation_current(d, epoch, unit))
+        atomic_store_explicit(&(d->valid), 0, memory_order_release);
+#ifdef AZ_STATUS_MEMORY_PRODUCER
+    else if (source.origin) azn_memory_bind(deck, unit, epoch, generation, source.origin, d->pending_track);
+#endif
+}
+static bool completion_publishable(const struct Deck *d, uint64_t unit, uint64_t epoch,
+                                   uint64_t generation, uint64_t observed, uint64_t sequence) {
+    return generation && observed && sequence <= UINT64_MAX - 2 && load_incarnation_current(d, epoch, unit);
+}
+static void consume_completion(unsigned deck, uint64_t unit, uint64_t epoch, uint32_t id, uint32_t result, const void *where) {
+    struct Deck *d = &decks[deck];
+    atomic_store_explicit(&(d->pending_id), 0, memory_order_release);
+    uint64_t generation = result == 0 ? load_generation() : 0, observed = generation ? now() : 0;
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    if (result) status_load(deck, unit, epoch, AZN_FAILED, id, true, 0, 0, 0, 0, AZN_BPM_UNKNOWN);
+#endif
+    uint64_t sequence = atomic_load_explicit(&(d->sequence), memory_order_relaxed);
+#ifdef AZSDK_LOAD_TESTING
+    if (before_publish) before_publish(((int) (deck)));
+#endif
+    if (completion_publishable(d, unit, epoch, generation, observed, sequence))
+        publish_completed_load(deck, unit, epoch, id, sequence, generation, observed, where);
+}
+static void complete_deck(unsigned deck, uintptr_t listener, uint64_t unit, uint64_t epoch,
+                          uint32_t id, uint32_t result, const void *where) {
+    struct Deck *d = &decks[deck];
+    if (atomic_flag_test_and_set_explicit(&(d->capture), memory_order_acquire)) {
+        invalidate(d);
+        return;
+    }
+    if (completion_current(d, listener, unit, epoch, id)) consume_completion(deck, unit, epoch, id, result, where);
+    unlock(d);
+    azsdk_cue_commands_notify(deck);
+}
+static void complete(uintptr_t listener, const void *request, uint32_t result, const void *where) {
     if (!atomic_load_explicit(&(enabled), memory_order_acquire) || !nominal(listener, "N7usecase4load14LoadControllerE", kCompleteThis, 3)) return;
     uint32_t id;
     if (!native_id(request, &id)) return;
     for (unsigned deck = 0; deck < kDecks; ++deck) {
-        struct Deck *d = &(decks[deck]);
+        struct Deck *d = &decks[deck];
         uint64_t epoch = atomic_load_explicit(&(d->epoch), memory_order_acquire), unit = atomic_load_explicit(&(d->unit_generation), memory_order_acquire);
-        if (!unit || atomic_load_explicit(&(d->listener), memory_order_acquire) != listener || atomic_load_explicit(&(d->pending_epoch), memory_order_acquire) != epoch ||
-            atomic_load_explicit(&(d->pending_unit), memory_order_acquire) != unit || atomic_load_explicit(&(d->pending_id), memory_order_acquire) != (uint64_t) (id) + 1) continue;
-        if (atomic_flag_test_and_set_explicit(&(d->capture), memory_order_acquire)) {
-            invalidate(d);
-            return;
-        }
-        if (atomic_load_explicit(&(enabled), memory_order_acquire) && !atomic_load_explicit(&(d->poison), memory_order_acquire) &&
-            atomic_load_explicit(&(d->epoch), memory_order_acquire) == epoch && atomic_load_explicit(&(d->unit_generation), memory_order_acquire) == unit &&
-            atomic_load_explicit(&(d->listener), memory_order_acquire) == listener && atomic_load_explicit(&(d->pending_epoch), memory_order_acquire) == epoch &&
-            atomic_load_explicit(&(d->pending_id), memory_order_acquire) == (uint64_t) (id) + 1) {
-            atomic_store_explicit(&(d->pending_id), 0, memory_order_release);
-            uint64_t generation = result == 0 ? load_generation() : 0, observed = generation ? now() : 0;
-#ifdef AZ_STATUS_NATIVE_PRODUCER
-            if (result) status_load(deck, unit, epoch, AZN_FAILED, id, true, 0, 0, 0, 0, AZN_BPM_UNKNOWN);
-#endif
-            uint64_t sequence = atomic_load_explicit(&(d->sequence), memory_order_relaxed);
-#ifdef AZSDK_LOAD_TESTING
-            if (before_publish) before_publish(((int) (deck)));
-#endif
-            if (generation && observed && sequence <= UINT64_MAX - 2 && atomic_load_explicit(&(d->epoch), memory_order_acquire) == epoch &&
-                atomic_load_explicit(&(d->unit_generation), memory_order_acquire) == unit) {
-                atomic_store_explicit(&(d->sequence), sequence + 1, memory_order_release);
-                /* Acquiring any field of a newer write must also observe its
-                 * preceding odd sequence at the final sequence check. */
-#ifdef AZ_STATUS_NATIVE_PRODUCER
-                uint64_t pin = atomic_exchange_explicit(&(d->pending_source_pin), 0, memory_order_relaxed);
-                uintptr_t origin = atomic_exchange_explicit(&(d->pending_wherefrom), 0, memory_order_relaxed);
-                if (!origin || !where || contained_wherefrom(where) != origin) {
-                    pin = 0;
-                    origin = 0;
-                }
-                unsigned kind = origin ? (unsigned) (azn_source_kind((int) (installed_build), d->pending_track)) : 0;
-                atomic_store_explicit(&(d->sample_source_kind), kind, memory_order_release);
-                atomic_store_explicit(&(d->sample_source_pin), pin, memory_order_release);
-                unsigned bpm_state = origin ? d->pending_bpm_state : (unsigned) (AZN_BPM_UNAVAILABLE);
-                double bpm = bpm_state == AZN_BPM_READY ? d->pending_original_bpm : 0;
-                uint64_t bpm_bits;
-                memcpy(&bpm_bits, &bpm, sizeof bpm_bits);
-                atomic_store_explicit(&(d->sample_original_bpm), bpm_bits, memory_order_release);
-                atomic_store_explicit(&(d->sample_bpm_state), bpm_state, memory_order_release);
-                uint64_t lo;
-                uint32_t hi;
-                memcpy(&lo, d->pending_track, 8);
-                memcpy(&hi, d->pending_track + 8, 4);
-                atomic_store_explicit(&(d->sample_track_lo), lo, memory_order_release);
-                atomic_store_explicit(&(d->sample_track_hi), hi, memory_order_release);
-#endif
-                atomic_store_explicit(&(d->sample_unit), unit, memory_order_release);
-                atomic_store_explicit(&(d->sample_load), generation, memory_order_release);
-                atomic_store_explicit(&(d->sample_epoch), epoch, memory_order_release);
-                atomic_store_explicit(&(d->sample_id), id, memory_order_release);
-                atomic_store_explicit(&(d->observed), observed, memory_order_release);
-                atomic_store_explicit(&(d->sequence), sequence + 2, memory_order_release);
-#ifdef AZ_STATUS_NATIVE_PRODUCER
-                // Reserve the load barrier before this matched generation is visible to owner writers.
-                if (atomic_load_explicit(&(d->epoch), memory_order_acquire) == epoch && atomic_load_explicit(&(d->unit_generation), memory_order_acquire) == unit)
-                    status_load(deck, unit, epoch, AZN_LOADED, id, true, generation, pin, kind, bpm, bpm_state);
-#endif
-                atomic_store_explicit(&(d->valid), 1, memory_order_release);
-                if (atomic_load_explicit(&(d->epoch), memory_order_acquire) != epoch || atomic_load_explicit(&(d->unit_generation), memory_order_acquire) != unit)
-                    atomic_store_explicit(&(d->valid), 0, memory_order_release);
-#ifdef AZ_STATUS_MEMORY_PRODUCER
-                else if (origin) azn_memory_bind(deck, unit, epoch, generation, origin, d->pending_track);
-#endif
-            }
-        }
-        unlock(d);
-        azsdk_cue_commands_notify(deck);
+        if (!pending_completion(d, listener, unit, epoch, id)) continue;
+        complete_deck(deck, listener, unit, epoch, id, result, where);
         return;
     }
 }
@@ -541,52 +641,76 @@ uint64_t azn_load_source_pin(unsigned deck, uint64_t epoch, uint64_t load) {
  * Each new request has a new epoch; acquiring any newly copied field carries
  * that invalidation to the final epoch check. Completion clears pending_id
  * before publishing its matched load, including on failure. */
-uint64_t azn_load_pending(unsigned deck, uint64_t epoch, const unsigned char source[12]) {
-    if (deck >= kDecks || !epoch || !atomic_load_explicit(&(enabled), memory_order_acquire)) return 0;
-    __auto_type d = &(decks[deck]);
-    uint64_t request = atomic_load_explicit(&(d->pending_id), memory_order_acquire);
-    uint64_t unit = atomic_load_explicit(&(d->pending_unit), memory_order_acquire);
-    if (!request || !unit || atomic_load_explicit(&(d->pending_epoch), memory_order_acquire) != epoch) return 0;
+static bool pending_source_matches(const struct Deck *d, const unsigned char source[12]) {
     if (source) {
         uint64_t lo;
         uint32_t hi;
         memcpy(&lo, source, 8);
         memcpy(&hi, source + 8, 4);
         if (!hi || atomic_load_explicit(&(d->pending_track_lo), memory_order_acquire) != lo ||
-            atomic_load_explicit(&(d->pending_track_hi), memory_order_acquire) != hi) return 0;
+            atomic_load_explicit(&(d->pending_track_hi), memory_order_acquire) != hi) return false;
     }
+    return true;
+}
+static bool pending_load_current(const struct Deck *d, uint64_t epoch, uint64_t unit, uint64_t request) {
     return atomic_load_explicit(&(d->pending_id), memory_order_acquire) == request &&
-                   atomic_load_explicit(&(d->pending_epoch), memory_order_acquire) == epoch &&
-                   atomic_load_explicit(&(d->unit_generation), memory_order_acquire) == unit &&
-                   !atomic_load_explicit(&(d->poison), memory_order_acquire) && atomic_load_explicit(&(d->epoch), memory_order_acquire) == epoch &&
-                   atomic_load_explicit(&(enabled), memory_order_acquire)
-               ? request
-               : 0;
+           atomic_load_explicit(&(d->pending_epoch), memory_order_acquire) == epoch &&
+           atomic_load_explicit(&(d->unit_generation), memory_order_acquire) == unit &&
+           !atomic_load_explicit(&(d->poison), memory_order_acquire) && atomic_load_explicit(&(d->epoch), memory_order_acquire) == epoch &&
+           atomic_load_explicit(&(enabled), memory_order_acquire);
+}
+uint64_t azn_load_pending(unsigned deck, uint64_t epoch, const unsigned char source[12]) {
+    if (deck >= kDecks || !epoch || !atomic_load_explicit(&(enabled), memory_order_acquire)) return 0;
+    __auto_type d = &(decks[deck]);
+    uint64_t request = atomic_load_explicit(&(d->pending_id), memory_order_acquire);
+    uint64_t unit = atomic_load_explicit(&(d->pending_unit), memory_order_acquire);
+    if (!request || !unit || atomic_load_explicit(&(d->pending_epoch), memory_order_acquire) != epoch) return 0;
+    if (!pending_source_matches(d, source)) return 0;
+    return pending_load_current(d, epoch, unit, request) ? request : 0;
+}
+static bool loaded_track_current(const struct Deck *d, uint64_t epoch, uint64_t load, uint64_t seq) {
+    return atomic_load_explicit(&(d->sample_load), memory_order_acquire) == load && atomic_load_explicit(&(d->sample_epoch), memory_order_acquire) == epoch &&
+           atomic_load_explicit(&(d->valid), memory_order_acquire) && atomic_load_explicit(&(d->epoch), memory_order_acquire) == epoch &&
+           !atomic_load_explicit(&(d->poison), memory_order_acquire) && atomic_load_explicit(&(d->sequence), memory_order_acquire) == seq;
+}
+static bool loaded_track_matches(const struct Deck *d, uint64_t epoch, uint64_t load, const unsigned char source[12], uint64_t seq) {
+    uint64_t lo;
+    uint32_t hi;
+    memcpy(&lo, source, 8);
+    memcpy(&hi, source + 8, 4);
+    if (!hi || atomic_load_explicit(&(d->sample_track_lo), memory_order_acquire) != lo ||
+        atomic_load_explicit(&(d->sample_track_hi), memory_order_acquire) != hi) return false;
+    return loaded_track_current(d, epoch, load, seq);
 }
 int azn_load_track_matches(unsigned deck, uint64_t epoch, uint64_t load, const unsigned char source[12]) {
     if (deck >= kDecks || !source || !epoch || !load) return 0;
     __auto_type d = &(decks[deck]);
     uint64_t seq = atomic_load_explicit(&(d->sequence), memory_order_acquire);
     if (!seq || (seq & 1)) return 0;
-    uint64_t lo;
-    uint32_t hi;
-    memcpy(&lo, source, 8);
-    memcpy(&hi, source + 8, 4);
-    return hi && atomic_load_explicit(&(d->sample_track_lo), memory_order_acquire) == lo && atomic_load_explicit(&(d->sample_track_hi), memory_order_acquire) == hi &&
-           atomic_load_explicit(&(d->sample_load), memory_order_acquire) == load && atomic_load_explicit(&(d->sample_epoch), memory_order_acquire) == epoch &&
-           atomic_load_explicit(&(d->valid), memory_order_acquire) && atomic_load_explicit(&(d->epoch), memory_order_acquire) == epoch &&
-           !atomic_load_explicit(&(d->poison), memory_order_acquire) && atomic_load_explicit(&(d->sequence), memory_order_acquire) == seq;
+    return loaded_track_matches(d, epoch, load, source, seq);
+}
+static bool load_kind_current(const struct Deck *d, uint64_t epoch, uint64_t load, uint64_t seq) {
+    return seq && !(seq & 1) && atomic_load_explicit(&(d->sample_load), memory_order_acquire) == load &&
+           atomic_load_explicit(&(d->sample_epoch), memory_order_acquire) == epoch && atomic_load_explicit(&(d->epoch), memory_order_acquire) == epoch &&
+           atomic_load_explicit(&(d->valid), memory_order_acquire) && atomic_load_explicit(&(d->sequence), memory_order_acquire) == seq;
 }
 unsigned azn_load_kind(unsigned deck, uint64_t epoch, uint64_t load) {
     if (deck >= kDecks || !epoch || !load) return 0;
     __auto_type d = &(decks[deck]);
     uint64_t seq = atomic_load_explicit(&(d->sequence), memory_order_acquire);
     unsigned kind = atomic_load_explicit(&(d->sample_source_kind), memory_order_acquire);
+    return load_kind_current(d, epoch, load, seq) ? kind : 0;
+}
+static bool bpm_sample_matches(const struct Deck *d, uint64_t unit, uint64_t epoch, uint64_t load, uint64_t seq) {
     return seq && !(seq & 1) && atomic_load_explicit(&(d->sample_load), memory_order_acquire) == load &&
-                   atomic_load_explicit(&(d->sample_epoch), memory_order_acquire) == epoch && atomic_load_explicit(&(d->epoch), memory_order_acquire) == epoch &&
-                   atomic_load_explicit(&(d->valid), memory_order_acquire) && atomic_load_explicit(&(d->sequence), memory_order_acquire) == seq
-               ? kind
-               : 0;
+           atomic_load_explicit(&(d->sample_epoch), memory_order_acquire) == epoch &&
+           atomic_load_explicit(&(d->sample_unit), memory_order_acquire) == unit;
+}
+static bool bpm_sample_current(const struct Deck *d, uint64_t unit, uint64_t epoch, uint64_t seq) {
+    return atomic_load_explicit(&(d->epoch), memory_order_acquire) == epoch &&
+           atomic_load_explicit(&(d->unit_generation), memory_order_acquire) == unit &&
+           atomic_load_explicit(&(d->valid), memory_order_acquire) && !atomic_load_explicit(&(d->poison), memory_order_acquire) &&
+           atomic_load_explicit(&(enabled), memory_order_acquire) && atomic_load_explicit(&(d->sequence), memory_order_acquire) == seq;
 }
 unsigned azn_load_original_bpm(unsigned deck, uint64_t unit, uint64_t epoch, uint64_t load, double *out) {
     if (deck >= kDecks || !out || !unit || !epoch || !load) return AZN_BPM_UNKNOWN;
@@ -594,11 +718,7 @@ unsigned azn_load_original_bpm(unsigned deck, uint64_t unit, uint64_t epoch, uin
     uint64_t seq = atomic_load_explicit(&(d->sequence), memory_order_acquire);
     uint64_t bits = atomic_load_explicit(&(d->sample_original_bpm), memory_order_acquire);
     unsigned state = atomic_load_explicit(&(d->sample_bpm_state), memory_order_acquire);
-    if (!seq || (seq & 1) || atomic_load_explicit(&(d->sample_load), memory_order_acquire) != load ||
-        atomic_load_explicit(&(d->sample_epoch), memory_order_acquire) != epoch || atomic_load_explicit(&(d->sample_unit), memory_order_acquire) != unit ||
-        atomic_load_explicit(&(d->epoch), memory_order_acquire) != epoch || atomic_load_explicit(&(d->unit_generation), memory_order_acquire) != unit ||
-        !atomic_load_explicit(&(d->valid), memory_order_acquire) || atomic_load_explicit(&(d->poison), memory_order_acquire) ||
-        !atomic_load_explicit(&(enabled), memory_order_acquire) || atomic_load_explicit(&(d->sequence), memory_order_acquire) != seq) return AZN_BPM_UNKNOWN;
+    if (!bpm_sample_matches(d, unit, epoch, load, seq) || !bpm_sample_current(d, unit, epoch, seq)) return AZN_BPM_UNKNOWN;
     memcpy(out, &bits, sizeof bits);
     return state;
 }
@@ -646,6 +766,29 @@ int azn_empty_seed(unsigned deck, struct azstatus_native_receipt *out) {
     return 1;
 }
 #endif
+#if defined(__linux__)
+static bool load_profile_supported(int on, int build, azsdk_load_patch_fn patch) {
+    return on && patch && (build == 1 || build == 2) && (!installed_build || installed_build == (unsigned) build);
+}
+#endif
+static void enable_load_profile(int on, int build, azsdk_load_patch_fn patch) {
+#if defined(__linux__)
+    if (!load_profile_supported(on, build, patch)) return;
+    if (!image_count) dl_iterate_phdr(main_image, NULL);
+    if (!image_count) return;
+    if (!installed_build) installed_build = (unsigned) (build); /* immutable before first enabled publication */
+    atomic_store_explicit(&(patcher), patch, memory_order_release);
+#ifdef AZSDK_LOAD_TESTING
+    if (configure_hook) configure_hook(1, on);
+#endif
+    atomic_store_explicit(&(enabled), 1, memory_order_release);
+#else
+    (void) on;
+    (void) build;
+    (void) patch;
+    (void) installed_build;
+#endif
+}
 void azsdk_load_configure(int on, int build, azsdk_load_patch_fn patch) {
     atomic_store_explicit(&(enabled), 0, memory_order_release);
     for (unsigned d = 0; d < kDecks; ++d) {
@@ -666,66 +809,73 @@ void azsdk_load_configure(int on, int build, azsdk_load_patch_fn patch) {
             atomic_store_explicit(&(decks[d].unit), 0, memory_order_release);
             atomic_store_explicit(&(decks[d].ready), 0, memory_order_release);
         }
-#if defined(__linux__)
-        if (!on || !patch || (build != 1 && build != 2) || (installed_build && installed_build != (unsigned) (build))) return;
-        if (!image_count) dl_iterate_phdr(main_image, NULL);
-        if (!image_count) return;
-        if (!installed_build) installed_build = (unsigned) (build); /* immutable before first enabled publication */
-        atomic_store_explicit(&(patcher), patch, memory_order_release);
-#ifdef AZSDK_LOAD_TESTING
-        if (configure_hook) configure_hook(1, on);
-#endif
-        atomic_store_explicit(&(enabled), 1, memory_order_release);
-#else
-        (void) on;
-        (void) build;
-        (void) patch;
-        (void) installed_build;
-#endif
+        enable_load_profile(on, build, patch);
     }
+}
+struct LoadBinding {
+    uintptr_t unit, facade, primary, secondary;
+};
+static bool facade_available(unsigned deck, uintptr_t unit, uintptr_t facade) {
+    for (unsigned n = 0; n < kDecks; ++n)
+        if (n != deck && atomic_load_explicit(&(decks[n].unit_generation), memory_order_acquire) &&
+            (atomic_load_explicit(&(decks[n].unit), memory_order_acquire) == unit ||
+             atomic_load_explicit(&(decks[n].facade), memory_order_acquire) == facade)) return false;
+    return true;
+}
+static bool load_binding(unsigned deck, void *owned_unit, struct LoadBinding *binding) {
+    uintptr_t unit = (uintptr_t) owned_unit;
+    if (!nominal(unit, "N9dj_player12DjPlayerUnitE", 0, 2)) return false;
+    uintptr_t bundle = word(unit + kUnitBundle);
+    if (!canonical(bundle)) return false;
+    uintptr_t facade = word(bundle), primary = nominal(facade, "N9dj_player15TrackLoadFacadeE", 0, 4);
+    if (!primary || !facade_available(deck, unit, facade)) return false;
+    uintptr_t secondary = nominal(facade + kUnloadThis, "N9dj_player15TrackLoadFacadeE", -8, 3);
+    if (!secondary) return false;
+    *binding = (struct LoadBinding) {unit, facade, primary, secondary};
+    return true;
+}
+static bool install_load_hooks(const struct LoadBinding *binding) {
+    if (next_unit == UINT64_MAX || atomic_flag_test_and_set_explicit(&(setup), memory_order_acquire)) return false;
+    bool ok = install(binding->primary + 16, ((void *) (load_hook)), &original_load, &load_installed, 0) &&
+              install(binding->primary + 24, ((void *) (unload_hook)), &original_unload, &unload_installed, 1) &&
+              install(binding->secondary + 16, ((void *) (secondary_unload_hook)), &original_secondary_unload, &secondary_installed, 2);
+    atomic_flag_clear_explicit(&(setup), memory_order_release);
+    return ok;
+}
+static bool load_registration_available(const struct Deck *d) {
+    return atomic_load_explicit(&(enabled), memory_order_acquire) &&
+           !atomic_load_explicit(&(d->unit_generation), memory_order_acquire) &&
+           !atomic_load_explicit(&(d->poison), memory_order_acquire);
+}
+static bool publish_load_registration(unsigned deck, const struct LoadBinding *binding) {
+    struct Deck *d = &decks[deck];
+    if (atomic_flag_test_and_set_explicit(&(d->capture), memory_order_acquire)) return false;
+    uint64_t epoch = invalidate(d);
+    if (!epoch || !atomic_load_explicit(&(enabled), memory_order_acquire)) {
+        unlock(d);
+        return false;
+    }
+    atomic_store_explicit(&(d->listener), 0, memory_order_release);
+    atomic_store_explicit(&(d->pending_epoch), 0, memory_order_release);
+    atomic_store_explicit(&(d->pending_id), 0, memory_order_release);
+    atomic_store_explicit(&(d->unit), binding->unit, memory_order_release);
+    atomic_store_explicit(&(d->facade), binding->facade, memory_order_release);
+    atomic_store_explicit(&(d->ready), 1, memory_order_release);
+    atomic_store_explicit(&(d->unit_generation), ++next_unit, memory_order_release);
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    atomic_store_explicit(&(d->awaiting_empty), epoch, memory_order_release);
+    azn_capability(deck, AZN_CAP_LOAD | AZN_CAP_ORIGINAL_BPM, 1);
+#endif
+    unlock(d);
+    return true;
 }
 int azsdk_load_register(int deck, void *owned_unit) {
     if (!deck_ok(deck) || !atomic_load_explicit(&(enabled), memory_order_acquire) || !owned_unit) return 0;
-    {
-        AZ_MUTEX_GUARD(lock, management, false);
-        if (lock.error) return 0;
-        struct Deck *d = &(decks[deck]);
-        if (!atomic_load_explicit(&(enabled), memory_order_acquire) || atomic_load_explicit(&(d->unit_generation), memory_order_acquire) || atomic_load_explicit(&(d->poison), memory_order_acquire)) return 0;
-        uintptr_t unit = ((uintptr_t) (owned_unit));
-        if (!nominal(unit, "N9dj_player12DjPlayerUnitE", 0, 2)) return 0;
-        uintptr_t bundle = word(unit + kUnitBundle);
-        if (!canonical(bundle)) return 0;
-        uintptr_t facade = word(bundle), primary = nominal(facade, "N9dj_player15TrackLoadFacadeE", 0, 4);
-        if (!primary) return 0;
-        for (unsigned n = 0; n < kDecks; ++n)
-            if (n != (unsigned) (deck) && atomic_load_explicit(&(decks[n].unit_generation), memory_order_acquire) &&
-                (atomic_load_explicit(&(decks[n].unit), memory_order_acquire) == unit || atomic_load_explicit(&(decks[n].facade), memory_order_acquire) == facade)) return 0;
-        uintptr_t secondary = nominal(facade + kUnloadThis, "N9dj_player15TrackLoadFacadeE", -8, 3);
-        if (!secondary || next_unit == UINT64_MAX || atomic_flag_test_and_set_explicit(&(setup), memory_order_acquire)) return 0;
-        bool ok = install(primary + 16, ((void *) (load_hook)), &original_load, &load_installed, 0) &&
-                  install(primary + 24, ((void *) (unload_hook)), &original_unload, &unload_installed, 1) &&
-                  install(secondary + 16, ((void *) (secondary_unload_hook)), &original_secondary_unload, &secondary_installed, 2);
-        atomic_flag_clear_explicit(&(setup), memory_order_release);
-        if (!ok || atomic_flag_test_and_set_explicit(&(d->capture), memory_order_acquire)) return 0;
-        uint64_t epoch = invalidate(d);
-        if (!epoch || !atomic_load_explicit(&(enabled), memory_order_acquire)) {
-            unlock(d);
-            return 0;
-        }
-        atomic_store_explicit(&(d->listener), 0, memory_order_release);
-        atomic_store_explicit(&(d->pending_epoch), 0, memory_order_release);
-        atomic_store_explicit(&(d->pending_id), 0, memory_order_release);
-        atomic_store_explicit(&(d->unit), unit, memory_order_release);
-        atomic_store_explicit(&(d->facade), facade, memory_order_release);
-        atomic_store_explicit(&(d->ready), 1, memory_order_release);
-        atomic_store_explicit(&(d->unit_generation), ++next_unit, memory_order_release);
-#ifdef AZ_STATUS_NATIVE_PRODUCER
-        atomic_store_explicit(&(d->awaiting_empty), epoch, memory_order_release);
-        azn_capability(deck, AZN_CAP_LOAD | AZN_CAP_ORIGINAL_BPM, 1);
-#endif
-        unlock(d);
-        return 1;
-    }
+    AZ_MUTEX_GUARD(lock, management, false);
+    if (lock.error || !load_registration_available(&decks[deck])) return 0;
+    struct LoadBinding binding;
+    if (!load_binding((unsigned) deck, owned_unit, &binding) || !install_load_hooks(&binding)) return 0;
+    return publish_load_registration((unsigned) deck, &binding);
 }
 void azsdk_load_retire(int deck) {
     if (!deck_ok(deck)) return;
@@ -745,6 +895,17 @@ void azsdk_load_retire(int deck) {
     atomic_store_explicit(&(d->unit), 0, memory_order_release);
     atomic_store_explicit(&(d->ready), 0, memory_order_release);
 }
+static bool load_sample_identity(const struct Deck *d, uint64_t epoch, const struct azsdk_load_sample *sample) {
+    return sample->invalidation_epoch == epoch &&
+           atomic_load_explicit(&(d->unit_generation), memory_order_acquire) == sample->unit_generation &&
+           sample->unit_generation && sample->load_generation;
+}
+static bool load_sample_current(const struct Deck *d, uint64_t epoch, uint64_t sequence, const struct azsdk_load_sample *sample) {
+    if (atomic_load_explicit(&(d->sequence), memory_order_acquire) != sequence || !atomic_load_explicit(&(d->valid), memory_order_acquire) ||
+        atomic_load_explicit(&(d->poison), memory_order_acquire) || atomic_load_explicit(&(d->epoch), memory_order_acquire) != epoch || !load_sample_identity(d, epoch, sample) ||
+        !atomic_load_explicit(&(enabled), memory_order_acquire)) return false;
+    return true;
+}
 int azsdk_load_read(int deck, struct azsdk_load_sample *out) {
     if (!deck_ok(deck) || !out || !atomic_load_explicit(&(enabled), memory_order_acquire)) return 0;
     struct Deck *d = &(decks[deck]);
@@ -754,10 +915,7 @@ int azsdk_load_read(int deck, struct azsdk_load_sample *out) {
     struct azsdk_load_sample sample = {atomic_load_explicit(&(d->sample_unit), memory_order_acquire), atomic_load_explicit(&(d->sample_load), memory_order_acquire),
                                        atomic_load_explicit(&(d->sample_epoch), memory_order_acquire), atomic_load_explicit(&(d->observed), memory_order_acquire),
                                        ((uint32_t) (atomic_load_explicit(&(d->sample_id), memory_order_acquire))), 0};
-    if (atomic_load_explicit(&(d->sequence), memory_order_acquire) != sequence || !atomic_load_explicit(&(d->valid), memory_order_acquire) ||
-        atomic_load_explicit(&(d->poison), memory_order_acquire) || atomic_load_explicit(&(d->epoch), memory_order_acquire) != epoch || sample.invalidation_epoch != epoch ||
-        atomic_load_explicit(&(d->unit_generation), memory_order_acquire) != sample.unit_generation || !sample.unit_generation || !sample.load_generation ||
-        !atomic_load_explicit(&(enabled), memory_order_acquire)) return 0;
+    if (!load_sample_current(d, epoch, sequence, &sample)) return 0;
     *out = sample;
     return 1;
 }

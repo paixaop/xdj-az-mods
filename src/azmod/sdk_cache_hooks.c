@@ -28,65 +28,104 @@ typedef int (*sdk_cache_verify_target_fn)(void *, const struct sdk_cache_target 
  * cannot repair a callback that exposes an entry with no genuine original. */
 typedef int (*sdk_cache_patch_target_fn)(void *, const struct sdk_cache_target *, void *, void **);
 
-static int sdk_cache_hooks_install(struct sdk_cache_hook_state *state, int build, uint32_t requested,
-                                   sdk_cache_verify_target_fn verify, sdk_cache_patch_target_fn patch, void *context) {
-    if (!state || __atomic_exchange_n(&state->attempted, 1u, __ATOMIC_ACQ_REL)) return 0;
-    if (__atomic_load_n(&state->ready, __ATOMIC_ACQUIRE) ||
-        __atomic_load_n(&state->installed_mask, __ATOMIC_ACQUIRE)) return 0;
-    if (!requested || !verify || !patch || (build != EPB_V130 && build != EPB_V200)) return 0;
+struct sdk_cache_hook_batch {
     struct sdk_cache_target targets[SDK_CACHE_TARGET_COUNT];
-    void *entries[SDK_CACHE_TARGET_COUNT] = {0};
-    int count = sdk_cache_target_profile(build, targets, SDK_CACHE_TARGET_COUNT);
-    if (count != SDK_CACHE_TARGET_COUNT) return 0;
+    void *entries[SDK_CACHE_TARGET_COUNT];
+};
+static int sdk_cache_requested_targets(const struct sdk_cache_hook_batch *batch, uint32_t requested) {
     uint32_t available = 0;
     for (unsigned i = 0; i < SDK_CACHE_TARGET_COUNT; ++i) {
-        unsigned slot = targets[i].slot;
+        unsigned slot = batch->targets[i].slot;
         if (!slot || slot >= AZCE_KIND_COUNT || slot >= 32u) return 0;
         uint32_t bit = UINT32_C(1) << slot;
         if (available & bit) return 0;
         available |= bit;
     }
-    if (requested & ~available) return 0;
-    /* Complete metadata/entry/slot preflight, then every selected byte proof,
-     * before the first patch. Unrequested originals are never inspected/changed. */
-    for (unsigned i = 0; i < SDK_CACHE_TARGET_COUNT; ++i) {
-        const struct sdk_cache_target *target = &targets[i];
-        if (!(requested & (UINT32_C(1) << target->slot))) continue;
-        if (!target->address || (target->address & 3u) || target->island_only > 1u) return 0;
-        unsigned span = target->island_only ? 4u : 16u;
-        if (target->address > UINTPTR_MAX - span) return 0;
-        unsigned proof = 0;
-        for (unsigned k = 0; k < sizeof target->expected; ++k) proof |= target->expected[k];
-        if (!proof || __atomic_load_n(&azsdk_cache_entry_originals[target->slot], __ATOMIC_ACQUIRE)) return 0;
-        entries[i] = azsdk_cache_entry(target->slot);
-        if (!entries[i] || ((uintptr_t) entries[i] & 3u) || (uintptr_t) entries[i] == target->address) return 0;
-        for (unsigned j = 0; j < i; ++j) {
-            if (!entries[j]) continue;
-            const struct sdk_cache_target *prior = &targets[j];
-            unsigned prior_span = prior->island_only ? 4u : 16u;
-            if (entries[j] == entries[i] ||
-                (target->address < prior->address + prior_span && prior->address < target->address + span)) return 0;
-        }
+    return !(requested & ~available);
+}
+static int sdk_cache_target_metadata(const struct sdk_cache_target *target) {
+    if (!target->address || (target->address & 3u) || target->island_only > 1u) return 0;
+    unsigned span = target->island_only ? 4u : 16u;
+    if (target->address > UINTPTR_MAX - span) return 0;
+    unsigned proof = 0;
+    for (unsigned k = 0; k < sizeof target->expected; ++k) proof |= target->expected[k];
+    return proof && !__atomic_load_n(&azsdk_cache_entry_originals[target->slot], __ATOMIC_ACQUIRE);
+}
+static int sdk_cache_entry_distinct(const struct sdk_cache_hook_batch *batch, unsigned index) {
+    const struct sdk_cache_target *target = &batch->targets[index];
+    unsigned span = target->island_only ? 4u : 16u;
+    for (unsigned j = 0; j < index; ++j) {
+        if (!batch->entries[j]) continue;
+        const struct sdk_cache_target *prior = &batch->targets[j];
+        unsigned prior_span = prior->island_only ? 4u : 16u;
+        if (batch->entries[j] == batch->entries[index] ||
+            (target->address < prior->address + prior_span && prior->address < target->address + span)) return 0;
     }
-    for (unsigned i = 0; i < SDK_CACHE_TARGET_COUNT; ++i)
-        if (entries[i] && verify(context, &targets[i]) != 1) return 0;
-    for (unsigned i = 0; i < SDK_CACHE_TARGET_COUNT; ++i)
-        if (entries[i] && __atomic_load_n(&azsdk_cache_entry_originals[targets[i].slot], __ATOMIC_ACQUIRE)) return 0;
+    return 1;
+}
+static int sdk_cache_entry_resolve(struct sdk_cache_hook_batch *batch, unsigned index) {
+    const struct sdk_cache_target *target = &batch->targets[index];
+    batch->entries[index] = azsdk_cache_entry(target->slot);
+    void *entry = batch->entries[index];
+    return entry && !((uintptr_t) entry & 3u) && (uintptr_t) entry != target->address && sdk_cache_entry_distinct(batch, index);
+}
+static int sdk_cache_entries_preflight(struct sdk_cache_hook_batch *batch, uint32_t requested) {
     for (unsigned i = 0; i < SDK_CACHE_TARGET_COUNT; ++i) {
-        if (!entries[i]) continue;
-        const struct sdk_cache_target *target = &targets[i];
-        /* Each native entry has its own original, even for the same semantic
-         * category. Never use a shared destructor/factory original variable. */
-        void **slot = &azsdk_cache_entry_originals[target->slot];
-        int accepted = patch(context, target, entries[i], slot);
-        void *original = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
-        if (original)
-            __atomic_fetch_or(&state->installed_mask, UINT32_C(1) << target->slot, __ATOMIC_RELEASE);
-        if (accepted != 1 || !original || original == entries[i] || (uintptr_t) original == target->address) return 0;
-        for (unsigned j = 0; j < i; ++j)
-            if (entries[j] && original == __atomic_load_n(&azsdk_cache_entry_originals[targets[j].slot], __ATOMIC_ACQUIRE)) return 0;
+        if (!(requested & (UINT32_C(1) << batch->targets[i].slot))) continue;
+        if (!sdk_cache_target_metadata(&batch->targets[i]) || !sdk_cache_entry_resolve(batch, i)) return 0;
+    }
+    return 1;
+}
+static int sdk_cache_targets_verified(const struct sdk_cache_hook_batch *batch, sdk_cache_verify_target_fn verify, void *context) {
+    for (unsigned i = 0; i < SDK_CACHE_TARGET_COUNT; ++i)
+        if (batch->entries[i] && verify(context, &batch->targets[i]) != 1) return 0;
+    /* A verifier callback must not prepopulate an original slot. */
+    for (unsigned i = 0; i < SDK_CACHE_TARGET_COUNT; ++i)
+        if (batch->entries[i] && __atomic_load_n(&azsdk_cache_entry_originals[batch->targets[i].slot], __ATOMIC_ACQUIRE)) return 0;
+    return 1;
+}
+static int sdk_cache_original_distinct(const struct sdk_cache_hook_batch *batch, unsigned index, void *original) {
+    for (unsigned j = 0; j < index; ++j)
+        if (batch->entries[j] && original == __atomic_load_n(&azsdk_cache_entry_originals[batch->targets[j].slot], __ATOMIC_ACQUIRE)) return 0;
+    return 1;
+}
+static int sdk_cache_patch_one(struct sdk_cache_hook_state *state, const struct sdk_cache_hook_batch *batch,
+                               unsigned index, sdk_cache_patch_target_fn patch, void *context) {
+    const struct sdk_cache_target *target = &batch->targets[index];
+    /* Each native entry has its own original, even within one semantic category. */
+    void **slot = &azsdk_cache_entry_originals[target->slot];
+    int accepted = patch(context, target, batch->entries[index], slot);
+    void *original = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
+    if (original) __atomic_fetch_or(&state->installed_mask, UINT32_C(1) << target->slot, __ATOMIC_RELEASE);
+    if (accepted != 1 || !original || original == batch->entries[index] || (uintptr_t) original == target->address) return 0;
+    return sdk_cache_original_distinct(batch, index, original);
+}
+static int sdk_cache_patch_batch(struct sdk_cache_hook_state *state, const struct sdk_cache_hook_batch *batch,
+                                 sdk_cache_patch_target_fn patch, void *context) {
+    for (unsigned i = 0; i < SDK_CACHE_TARGET_COUNT; ++i) {
+        if (!batch->entries[i]) continue;
+        if (!sdk_cache_patch_one(state, batch, i, patch, context)) return 0;
     }
     __atomic_store_n(&state->ready, 1u, __ATOMIC_RELEASE);
     return 1;
+}
+static int sdk_cache_install_arguments(int build, uint32_t requested, sdk_cache_verify_target_fn verify, sdk_cache_patch_target_fn patch) {
+    return requested && verify && patch && (build == EPB_V130 || build == EPB_V200);
+}
+static int sdk_cache_install_claim(struct sdk_cache_hook_state *state) {
+    if (!state || __atomic_exchange_n(&state->attempted, 1u, __ATOMIC_ACQ_REL)) return 0;
+    return !__atomic_load_n(&state->ready, __ATOMIC_ACQUIRE) && !__atomic_load_n(&state->installed_mask, __ATOMIC_ACQUIRE);
+}
+static int sdk_cache_hooks_install(struct sdk_cache_hook_state *state, int build, uint32_t requested,
+                                   sdk_cache_verify_target_fn verify, sdk_cache_patch_target_fn patch, void *context) {
+    if (!sdk_cache_install_claim(state)) return 0;
+    if (!sdk_cache_install_arguments(build, requested, verify, patch)) return 0;
+    struct sdk_cache_hook_batch batch = {0};
+    if (sdk_cache_target_profile(build, batch.targets, SDK_CACHE_TARGET_COUNT) != SDK_CACHE_TARGET_COUNT) return 0;
+    if (!sdk_cache_requested_targets(&batch, requested) || !sdk_cache_entries_preflight(&batch, requested)) return 0;
+    /* Complete metadata/entry/slot preflight, then every selected byte proof,
+     * before the first patch. Unrequested originals remain untouched. */
+    if (!sdk_cache_targets_verified(&batch, verify, context)) return 0;
+    return sdk_cache_patch_batch(state, &batch, patch, context);
 }
 #endif

@@ -20,14 +20,17 @@ static inline void azcp_pins_drop(struct azcp_pins *p) {
     az_native_owner_reset(&p->database);
     az_native_owner_reset(&p->mount);
 }
-static inline void azcp_pins_init(struct azcp_pins *p, const struct azcb_source_borrow *source,
-                                  const struct az_native_owner *actual_collector, const void *receiver_collector, const void *creator_holder) {
-    *p = (struct azcp_pins) {.source = {source->server, source->build, source->source_epoch, &p->mount, &p->database}, .status = AZS_GUARD};
-    if (!source->server || !source->source_epoch || source->build < 1 || source->build > 2 || !source->mount || !source->database || !actual_collector || !creator_holder) return;
+static inline bool azcp_source_available(const struct azcb_source_borrow *source) {
+    return source->server && source->source_epoch && source->build >= 1 && source->build <= 2 && source->mount && source->database;
+}
+static inline bool azcp_pin_owners(struct azcp_pins *p, const struct azcb_source_borrow *source,
+                                   const struct az_native_owner *actual_collector, const void *receiver_collector) {
     az_native_owner_copy(&p->mount, source->mount);
     az_native_owner_copy(&p->database, source->database);
     az_native_owner_copy(&p->collector, actual_collector);
-    if (!p->mount.object || !p->database.object || !p->collector.object || p->collector.object != receiver_collector) return;
+    return p->mount.object && p->database.object && p->collector.object && p->collector.object == receiver_collector;
+}
+static inline void azcp_pin_creator(struct azcp_pins *p, const void *creator_holder) {
     memcpy(&p->creator, creator_holder, sizeof p->creator);
     uintptr_t creator = (uintptr_t) p->creator, collector = (uintptr_t) p->collector.object;
     if (!creator || creator > UINTPTR_MAX - 0x30 || collector > UINTPTR_MAX - 0x40) return;
@@ -35,6 +38,13 @@ static inline void azcp_pins_init(struct azcp_pins *p, const struct azcb_source_
     if (!p->creator_database.object || p->creator_database.object != p->database.object || p->creator_database.control != p->database.control) return;
     memcpy(&p->pool, (const void *) (collector + 0x40), sizeof p->pool);
     if (p->pool) p->status = AZS_OK;
+}
+static inline void azcp_pins_init(struct azcp_pins *p, const struct azcb_source_borrow *source,
+                                  const struct az_native_owner *actual_collector, const void *receiver_collector, const void *creator_holder) {
+    *p = (struct azcp_pins) {.source = {source->server, source->build, source->source_epoch, &p->mount, &p->database}, .status = AZS_GUARD};
+    if (!azcp_source_available(source) || !actual_collector || !creator_holder) return;
+    if (!azcp_pin_owners(p, source, actual_collector, receiver_collector)) return;
+    azcp_pin_creator(p, creator_holder);
 }
 static inline bool azcp_pins_ready(const struct azcp_pins *p) { return p->status == AZS_OK; }
 static inline struct azcb_birth_borrow azcp_pins_borrow(const struct azcp_pins *p, const struct az_native_owner *native_result) {

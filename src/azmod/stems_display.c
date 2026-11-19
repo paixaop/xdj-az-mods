@@ -174,31 +174,34 @@ static pthread_mutex_t g_bpmstate_mu = PTHREAD_MUTEX_INITIALIZER;
 
 /* EP147's thread, inside BpmState's ctor (the object is alive and ours to read here). Returns
  * 1 when the object was pinned and published for deck d. */
-static int bpmstate_capture(unsigned long self, int d, uintptr_t want_vt) {
-    if (d < 0 || d >= AZMOD_STEM_DECKS)
-        return 0;
-    if (pthread_mutex_lock(&g_bpmstate_mu) != 0) return 0;
-    int accepted = 0;
-    if (!self || self < BPMCTRL_OFF || (self & 7) || !want_vt) goto done;
+static int bpmstate_weak_hold(unsigned long ctrl) {
+    int *weak = (int *) (ctrl + BPMCTRL_WEAK);
+    int count = __atomic_load_n(weak, __ATOMIC_ACQUIRE);
+    if (count <= 0 || count == INT_MAX) return 0;
+    return __atomic_compare_exchange_n(weak, &count, count + 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+}
+static int bpmstate_capture_locked(unsigned long self, int d, uintptr_t want_vt) {
+    if (!self || self < BPMCTRL_OFF || (self & 7) || !want_vt) return 0;
     unsigned long ctrl = self - BPMCTRL_OFF;
-    if (*(volatile uintptr_t *) ctrl != want_vt) goto done;
+    if (*(volatile uintptr_t *) ctrl != want_vt) return 0;
     unsigned long id = *(volatile unsigned long *) (self + BPMSTATE_DECK);
-    if ((id & 0xff) != (unsigned long) d) goto done;
+    if ((id & 0xff) != (unsigned long) d) return 0;
     int pins = __atomic_load_n(&g_bpmstate_pins, __ATOMIC_RELAXED);
     if (pins >= BPMSTATE_PIN_MAX) {
         __atomic_add_fetch(&g_bpmstate_refused, 1, __ATOMIC_RELAXED);
-        goto done;
+        return 0;
     }
-    int *weak = (int *) (ctrl + BPMCTRL_WEAK);
-    int count = __atomic_load_n(weak, __ATOMIC_ACQUIRE);
-    if (count <= 0 || count == INT_MAX) goto done;
-    if (!__atomic_compare_exchange_n(weak, &count, count + 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) goto done;
+    if (!bpmstate_weak_hold(ctrl)) return 0;
     __atomic_store_n(&g_bpmstate_pins, pins + 1, __ATOMIC_RELAXED);
     __atomic_store_n(&g_bpmstate_id[d], id, __ATOMIC_RELAXED);
     __atomic_store_n(&g_bpmstate_generation[d], (unsigned long) pins + 1, __ATOMIC_RELAXED);
     __atomic_store_n(&g_bpmstate[d], self, __ATOMIC_RELEASE);
-    accepted = 1;
-done:
+    return 1;
+}
+static int bpmstate_capture(unsigned long self, int d, uintptr_t want_vt) {
+    if (d < 0 || d >= AZMOD_STEM_DECKS) return 0;
+    if (pthread_mutex_lock(&g_bpmstate_mu) != 0) return 0;
+    int accepted = bpmstate_capture_locked(self, d, want_vt);
     if (!accepted) {
         __atomic_store_n(&g_bpmstate[d], 0, __ATOMIC_RELEASE);
         __atomic_store_n(&g_bpmstate_generation[d], 0, __ATOMIC_RELAXED);
@@ -222,20 +225,22 @@ static void bpmstate_release(unsigned long ctrl) {
 }
 /* GUI polling context only: native destruction may run on final shared release.
  * Public SDK readers consume the separate copied receipt, never this native lease. */
-static int bpmstate_sample(int d, double *live, double *track, uint64_t *generation) {
+static void bpmstate_clear_sample(double *live, double *track, uint64_t *generation) {
     if (live) *live = 0.0;
     if (track) *track = 0.0;
     if (generation) *generation = 0;
-    if (d < 0 || d >= AZMOD_STEM_DECKS || !live) return 0;
+}
+static unsigned long bpmstate_acquire(int d, unsigned long *expected, unsigned long *serial) {
     if (pthread_mutex_lock(&g_bpmstate_mu) != 0) return 0;
     unsigned long obj = __atomic_load_n(&g_bpmstate[d], __ATOMIC_ACQUIRE);
-    unsigned long expected = __atomic_load_n(&g_bpmstate_id[d], __ATOMIC_RELAXED);
-    unsigned long serial = __atomic_load_n(&g_bpmstate_generation[d], __ATOMIC_RELAXED);
+    *expected = __atomic_load_n(&g_bpmstate_id[d], __ATOMIC_RELAXED);
+    *serial = __atomic_load_n(&g_bpmstate_generation[d], __ATOMIC_RELAXED);
     pthread_mutex_unlock(&g_bpmstate_mu);
-    if (!obj || !serial || !bpmstate_hold(obj - BPMCTRL_OFF)) return 0;
-    unsigned long id = __atomic_load_n((const unsigned long *) (obj + BPMSTATE_DECK), __ATOMIC_RELAXED);
-    uint64_t lv = __atomic_load_n((const uint64_t *) (obj + BPMSTATE_LIVE), __ATOMIC_RELAXED);
-    uint64_t tv = __atomic_load_n((const uint64_t *) (obj + BPMSTATE_TRACK), __ATOMIC_RELAXED);
+    if (!obj || !*serial || !bpmstate_hold(obj - BPMCTRL_OFF)) return 0;
+    return obj;
+}
+static int bpmstate_identity(int d, unsigned long obj, unsigned long id,
+                             unsigned long expected, unsigned long serial) {
     int same = 0;
     if (pthread_mutex_lock(&g_bpmstate_mu) == 0) {
         same = id == expected && (id & 0xff) == (unsigned long) d &&
@@ -243,6 +248,18 @@ static int bpmstate_sample(int d, double *live, double *track, uint64_t *generat
                serial == __atomic_load_n(&g_bpmstate_generation[d], __ATOMIC_RELAXED);
         pthread_mutex_unlock(&g_bpmstate_mu);
     }
+    return same;
+}
+static int bpmstate_sample(int d, double *live, double *track, uint64_t *generation) {
+    bpmstate_clear_sample(live, track, generation);
+    if (d < 0 || d >= AZMOD_STEM_DECKS || !live) return 0;
+    unsigned long expected, serial;
+    unsigned long obj = bpmstate_acquire(d, &expected, &serial);
+    if (!obj) return 0;
+    unsigned long id = __atomic_load_n((const unsigned long *) (obj + BPMSTATE_DECK), __ATOMIC_RELAXED);
+    uint64_t lv = __atomic_load_n((const uint64_t *) (obj + BPMSTATE_LIVE), __ATOMIC_RELAXED);
+    uint64_t tv = __atomic_load_n((const uint64_t *) (obj + BPMSTATE_TRACK), __ATOMIC_RELAXED);
+    int same = bpmstate_identity(d, obj, id, expected, serial);
     bpmstate_release(obj - BPMCTRL_OFF);
     if (!same) return 0;
     memcpy(live, &lv, sizeof *live);
@@ -274,7 +291,7 @@ static void bpmctor_hook(long self, long deck, long a3, long a4) {
     g_orig_bpmctor(self, deck, a3, a4); /* the deck byte only exists afterwards */
     int d = (int) (deck & 0xff);
     int pinned = bpmstate_capture((unsigned long) self, d, BPMCTRL_VT);
-    ds_tempo_birth((unsigned)d, pinned ? __atomic_load_n(&g_bpmstate_generation[d],__ATOMIC_ACQUIRE) : 0);
+    ds_tempo_birth((unsigned) d, pinned ? __atomic_load_n(&g_bpmstate_generation[d], __ATOMIC_ACQUIRE) : 0);
     __atomic_add_fetch(&g_bpmstate_n, 1, __ATOMIC_RELAXED);
     FILE *f = azlog_open("/tmp/azmod-drumbpm.log", "a");
     if (f) {
@@ -362,13 +379,16 @@ static uint64_t master_event_next(void) {
     atomic_store_explicit(&g_master_event, UINT64_MAX, memory_order_release);
     return 0;
 }
+static int master_state_current(uint64_t current) {
+    return current && current != UINT64_MAX && g_master_state.revision == current &&
+           g_master_state.deck >= 0 && g_master_state.deck < AZMOD_STEM_DECKS &&
+           g_master_state.observed_ns;
+}
 static int master_state_read(int *deck, uint64_t *revision, uint64_t *observed_ns) {
     if (!deck || !revision || !observed_ns || pthread_mutex_trylock(&g_master_state_mu))
         return 0;
     uint64_t current = atomic_load_explicit(&g_master_event, memory_order_acquire);
-    int ok = current && current != UINT64_MAX && g_master_state.revision == current &&
-             g_master_state.deck >= 0 && g_master_state.deck < AZMOD_STEM_DECKS &&
-             g_master_state.observed_ns;
+    int ok = master_state_current(current);
     if (ok) {
         *deck = g_master_state.deck;
         *revision = current;
@@ -377,44 +397,49 @@ static int master_state_read(int *deck, uint64_t *revision, uint64_t *observed_n
     pthread_mutex_unlock(&g_master_state_mu);
     return ok;
 }
+static int master_argument_deck(void *id) {
+    uintptr_t w = 0;
+    if (!id || !own_q((uintptr_t) id, &w) || (uint32_t) w != 1 || (w >> 32) >= AZMOD_STEM_DECKS) return -1;
+    return (int) (w >> 32);
+}
+static uint64_t master_now(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) || ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000 ||
+        (uint64_t) ts.tv_sec > (UINT64_MAX - (uint64_t) ts.tv_nsec) / 1000000000) return 0;
+    return (uint64_t) ts.tv_sec * 1000000000 + (uint64_t) ts.tv_nsec;
+}
+static int master_capture(uint64_t revision, uint64_t now, int deck) {
+    if (pthread_mutex_trylock(&g_master_state_mu)) return 0;
+    int captured = 0;
+    if (revision && revision == atomic_load_explicit(&g_master_event, memory_order_acquire)) {
+        g_master_state.revision = revision;
+        int clock_order = compare_timestamps(now, g_master_state.last_ns, 1000000000, 1000000000, 1);
+        g_master_state.deck = deck >= 0 && clock_order == AZ_TIME_AFTER ? deck : -1;
+        g_master_state.observed_ns = g_master_state.deck >= 0 ? now : 0;
+        if (clock_order == AZ_TIME_AFTER) g_master_state.last_ns = now;
+        captured = 1;
+        ds_master_capture(revision, now, g_master_state.deck, 1);
+    }
+    pthread_mutex_unlock(&g_master_state_mu);
+    return captured;
+}
+static void master_log_change(uint64_t revision, int deck) {
+    if (!revision || revision != atomic_load_explicit(&g_master_event, memory_order_acquire) ||
+        atomic_exchange_explicit(&g_master_deck, deck, memory_order_relaxed) == deck) return;
+    FILE *f = azlog_open("/tmp/azmod-drumbpm.log", "a");
+    if (!f) return;
+    fprintf(f, "master: deck%d (%s)\n", deck + 1, deck < 0 ? "none" : "set");
+    fclose(f);
+}
 static long master_xm_hook(void *self, void *id) {
-    /* Reserve the event at entry: a nested/newer confirmation can complete
-     * before this original returns and must not be replaced by this argument. */
+    /* Reserve before the original: nested/newer confirmations supersede this call. */
     uint64_t revision = master_event_next();
     long r = g_orig_master_xm(self, id);
     int saved_errno = errno;
-    uintptr_t w = 0;
-    int m = -1;
-    /* id: this call's own argument (const SyncMemberID&), live for the call */
-    if (id && own_q((uintptr_t) id, &w) && (uint32_t) w == 1 && (w >> 32) < AZMOD_STEM_DECKS)
-        m = (int) (w >> 32);
-    struct timespec ts;
-    uint64_t now = 0;
-    if (!clock_gettime(CLOCK_MONOTONIC, &ts) && ts.tv_sec >= 0 && ts.tv_nsec >= 0 &&
-        ts.tv_nsec < 1000000000 && (uint64_t) ts.tv_sec <= (UINT64_MAX - (uint64_t) ts.tv_nsec) / 1000000000)
-        now = (uint64_t) ts.tv_sec * 1000000000 + (uint64_t) ts.tv_nsec;
-    int captured=0;
-    if (!pthread_mutex_trylock(&g_master_state_mu)) {
-        if (revision && revision == atomic_load_explicit(&g_master_event, memory_order_acquire)) {
-            g_master_state.revision = revision;
-            int clock_order = compare_timestamps(now, g_master_state.last_ns, 1000000000, 1000000000, 1);
-            g_master_state.deck = m >= 0 && clock_order == AZ_TIME_AFTER ? m : -1;
-            g_master_state.observed_ns = g_master_state.deck >= 0 ? now : 0;
-            if (clock_order == AZ_TIME_AFTER) g_master_state.last_ns = now;
-            captured=1;
-            ds_master_capture(revision,now,g_master_state.deck,1);
-        }
-        pthread_mutex_unlock(&g_master_state_mu);
-    }
-    if (!captured) ds_master_capture(revision,now,-1,0);
-    if (revision && revision == atomic_load_explicit(&g_master_event, memory_order_acquire) &&
-        atomic_exchange_explicit(&g_master_deck, m, memory_order_relaxed) != m) {
-        FILE *f = azlog_open("/tmp/azmod-drumbpm.log", "a");
-        if (f) {
-            fprintf(f, "master: deck%d (%s)\n", m + 1, m < 0 ? "none" : "set");
-            fclose(f);
-        }
-    }
+    int deck = master_argument_deck(id);
+    uint64_t now = master_now();
+    if (!master_capture(revision, now, deck)) ds_master_capture(revision, now, -1, 0);
+    master_log_change(revision, deck);
     errno = saved_errno;
     return r;
 }
@@ -830,26 +855,38 @@ static int modeget_from_deck_screen(uintptr_t lr) {
     return (lr >= WAVE_SWITCH && lr < WAVE_SWITCH + 0x230) ||
            (lr >= TITLE_UPDATE && lr < TITLE_UPDATE_END);
 }
+static void modeget_publish(long p, int mode, unsigned seq) {
+    __atomic_store_n(&g_true_mode, mode, __ATOMIC_RELAXED);
+    int deck = deck_for_modeobj(p);
+    if (deck < 0 || deck >= AZMOD_STEM_DECKS) return;
+    __atomic_store_n(&g_true_mode_deck[deck], mode + 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_tm_seq[deck], seq, __ATOMIC_RELEASE);
+}
+static int modeget_stems(long p, int mode, int from_deck_screen) {
+    if (!__atomic_load_n(&g_wave_forcestems, __ATOMIC_ACQUIRE) || mode != stems_bl_mode()) return 0;
+    int deck = deck_for_modeobj(p);
+    return deck >= 0 && g_state.stems_available[deck] && !bl_on_native_vpage(deck) && from_deck_screen;
+}
+static void modeget_log(int mode) {
+    static int last;
+    if (mode == last) return;
+    last = mode;
+    static _Atomic int mlog = 30;
+    if (__atomic_fetch_sub(&mlog, 1, __ATOMIC_RELAXED) <= 0) return;
+    FILE *f = azlog_open("/tmp/azmod-drumtile.log", "a");
+    if (!f) return;
+    fprintf(f, "MODE m=%d\n", mode);
+    fclose(f);
+}
 static int modeget_hook(long p) {
-    /* Read the caller's return address before making any call: on aarch64
-     * every `bl` overwrites x30, so reading it later would yield an address
-     * inside this function, which never matches an EP147 window. */
-    uintptr_t caller_lr;
-    __asm__ volatile("mov %0, x30" : "=r"(caller_lr));
+    /* Use the compiler-preserved entry address: instrumentation may call a
+     * helper in the prologue and overwrite x30 before the first C statement. */
+    uintptr_t caller_lr = (uintptr_t) __builtin_return_address(0);
     unsigned seq =
         __atomic_load_n(&g_mode_seq, __ATOMIC_ACQUIRE); /* before the read: stems_page freshness */
     int m = g_orig_modeget(p);
-    ds_pad_fresh((uintptr_t)p);
-    __atomic_store_n(&g_true_mode, m, __ATOMIC_RELAXED);
-    /* ...and per deck, for "is this deck in slip loop" questions. The pad-title
-     * field's own mode object resolves to -1 and does not publish. */
-    {
-        int dk = deck_for_modeobj(p);
-        if (dk >= 0 && dk < AZMOD_STEM_DECKS) {
-            __atomic_store_n(&g_true_mode_deck[dk], m + 1, __ATOMIC_RELEASE);
-            __atomic_store_n(&g_tm_seq[dk], seq, __ATOMIC_RELEASE);
-        }
-    }
+    ds_pad_fresh((uintptr_t) p);
+    modeget_publish(p, m, seq);
     int from_deck_screen = modeget_from_deck_screen(caller_lr);
     if (from_deck_screen)
         wave_mark(); /* the deck screen's widgets read the mode only while it is up */
@@ -857,35 +894,9 @@ static int modeget_hook(long p) {
      * CUE, GATE CUE and the rest would render the stems tile set too. */
     if (__atomic_load_n(&g_force_truemode, __ATOMIC_ACQUIRE))
         return m; /* rebuild flip */
-    if (__atomic_load_n(&g_wave_forcestems, __ATOMIC_ACQUIRE) &&
-        m == stems_bl_mode()) { /* the stems page only */
-        /* No-stem gate, per deck, for both consumers: the grid's children via
-         * WAVE_SWITCH and the grid's title via TITLE_UPDATE. Both pass a mode
-         * object anchored at that deck's per-deck +0x10b0. */
-        int deck = deck_for_modeobj(p);
-        if (deck >= 0 && g_state.stems_available[deck] &&
-            !bl_on_native_vpage(deck)) { /* unknown => native, see waveswitch_hook */
-            if (from_deck_screen)
-                return 0x0b; /* stems-basic enum: native case in the dispatcher */
-        }
-    }
-    /* Deliberately no drum-roll hijack of SLIP LOOP to 0x0b: SLIP LOOP keeps its
-     * own grid (pngpatched slip art plus an index write). Forcing PadStemWidget
-     * onto a deck whose stem state was not set up for it crashes EP147. */
-    {
-        static int last;
-        if (m != last) {
-            last = m;
-            static _Atomic int mlog = 30;
-            if (__atomic_fetch_sub(&mlog, 1, __ATOMIC_RELAXED) > 0) {
-                FILE *f = azlog_open("/tmp/azmod-drumtile.log", "a");
-                if (f) {
-                    fprintf(f, "MODE m=%d\n", m);
-                    fclose(f);
-                }
-            }
-        }
-    }
+    if (modeget_stems(p, m, from_deck_screen)) return 0x0b;
+    /* SLIP LOOP retains its native grid; only the actual stems page is substituted. */
+    modeget_log(m);
     /* BEAT JUMP 2 First: each page's beat-jump tiles show the other page's
      * lengths, matching the swapped pad action (bj_padpress_hook). Only the tile
      * refresh's own call is swapped; every other caller, and the published true

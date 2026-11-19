@@ -31,7 +31,7 @@ table && /^[ ]+\.(abi|size|command_[a-z_]+) =/ { print }
 core && /^};/ { core = 0; print; next }
 core && /^[ ]+\.(abi|size|library_service|command_submit) =/ { print }
 ' src/azmod/community.c > "$task_tmp/library.inc"
-awk '/^\/\* X input can start an early frame/,/^}$/' src/azmod/mod_menu_overlay.c > "$task_tmp/overlay.inc"
+awk -v source="$PWD/src/azmod/mod_menu_overlay.c" '/^\/\* X input can start an early frame/ {p=1; printf "#line %d \"%s\"\n", NR, source} /^static void ov_frame\(/ {p=0} p' src/azmod/mod_menu_overlay.c > "$task_tmp/overlay.inc"
 "${HOST_CC:-cc}" -std=gnu11 "${flags[@]}" \
     -DSDK_OWNER_INC="\"$task_tmp/owner.inc\"" -DSDK_SUBMIT_INC="\"$task_tmp/submit.inc\"" \
     -DSDK_LIBRARY_INC="\"$task_tmp/library.inc\"" -DSDK_OVERLAY_INC="\"$task_tmp/overlay.inc\"" \

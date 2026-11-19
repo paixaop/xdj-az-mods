@@ -94,7 +94,7 @@ static int ds_publish_file(unsigned deck, uint64_t epoch, const az_track_ref *re
             const az_waveform *w = f->value;
             assert(w->sample_count == 2 && w->samples);
             int extent = compare_timestamps((long double) w->seconds_per_sample * w->sample_count, 0.,
-                                             1, f->clock->window_rate, f->clock->window_samples);
+                                            1, f->clock->window_rate, f->clock->window_samples);
             assert(extent != AZ_TIME_INVALID && extent == AZ_TIME_AFTER);
             preview[deck] = w->samples[1];
         }
@@ -119,7 +119,7 @@ static int ds_publish(unsigned deck, uint64_t epoch, unsigned flags, uint64_t no
     return AZ_OK;
 }
 static unsigned origin_refresh[4];
-void azfile_native_refresh(unsigned deck, uint64_t epoch) {
+__attribute__((visibility("hidden"))) void azfile_native_refresh(unsigned deck, uint64_t epoch) {
     assert(deck < 4 && epoch);
     ++origin_refresh[deck];
 }
@@ -181,8 +181,8 @@ static void wait_key(unsigned deck, const char *key) {
         assert(pthread_cond_timedwait(&test_cv, &test_mu, &end) == 0);
     pthread_mutex_unlock(&test_mu);
 }
-#ifdef __linux__
 static int (*real_step)(void *);
+#ifdef __linux__
 static struct {
     const char *root, *path;
     const uint16_t *audio, *analysis;
@@ -673,7 +673,14 @@ static void map_origin_cases(const struct st_source *src, sqlite3 *writer, const
     cb->hold(other, 1, 0);
     sql(writer, "UPDATE key SET name='stick A'");
 }
+#include "sdkstatus_store_validation_test.inc"
+#include "sdkstatus_save_install_test.inc"
 int main(int argc, char **argv) {
+#if defined(__linux__)
+    if (argc == 2 && !strcmp(argv[1], "install")) return test_save_hooks();
+#endif
+    test_unicode_paths();
+    test_observation_retry();
     atomic_store(&ds_proof_enabled, 1);
     assert(argc == 2);
     integer_source_clock_cases();
@@ -762,7 +769,14 @@ int main(int argc, char **argv) {
     struct sw_batch save = {0}, wrong = {0};
     sw_start(&wrong, access_root, strlen(access_root) - 1, au, audio_n, an, 6);
     assert(!wrong.count);
-    sw_start(&save, access_root, strlen(access_root), au, audio_n, an, 6);
+    uintptr_t storage[] = {0, (uintptr_t) access_root, strlen(access_root)};
+    uintptr_t accessor[] = {0, 0, 0, (uintptr_t) storage};
+    uintptr_t identity[] = {(uintptr_t) au, audio_n, 0, 0, (uintptr_t) an, 6};
+    sw_capture(&save, (uintptr_t) accessor, (uintptr_t) identity);
+    assert(!save.count); /* Disabled observation never adopts the borrowed paths. */
+    atomic_store(&sw_ready, 1);
+    sw_capture(&save, (uintptr_t) accessor, (uintptr_t) identity);
+    atomic_store(&sw_ready, 0);
     assert(save.count == 1);
     grid[73] = 79;
     FILE *edit = fopen(dat, "r+b");

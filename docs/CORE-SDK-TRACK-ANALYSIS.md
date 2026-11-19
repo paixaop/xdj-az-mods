@@ -121,7 +121,7 @@ ten-phrase map without launching another worker. Native CloudDirectPlay and Beat
 login required matching private `cabinet/encryption/csdk.dat` and `bpck.dat` provisioning
 in the emulator; these files are not included in packages.
 
-Physical acceptance on 2026-11-16 used the same qualified EP147 image on a deck
+Physical acceptance used the same qualified EP147 image on a deck
 reporting firmware 2.01. Six Beatport loads automatically generated native phrase
 maps and phrase-based Cues plans. The two fresh final-build witnesses generated
 15/13 phrases and 8/8 hot plus 10/5 memory cues without reloading; native grid

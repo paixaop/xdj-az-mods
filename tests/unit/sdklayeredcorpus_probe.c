@@ -19,7 +19,11 @@
 #include "../../src/azmod/sdk_analysis.h"
 #include "../../src/azmod/sdk_wave_provider.h"
 
-enum { CORPUS_WINDOW = 4096, RAW_ENCODING = 3, LAYERED_ENCODING = 8 };
+enum {
+    CORPUS_WINDOW = 4096,
+    RAW_ENCODING = 3,
+    LAYERED_ENCODING = 8
+};
 _Static_assert(AZ_WAVE_WINDOW_MAX == CORPUS_WINDOW, "public bounded window contract");
 _Static_assert((unsigned) AZ_WAVE_PWV7_BANDS == (unsigned) RAW_ENCODING,
                "original raw encoding remains 3");
@@ -31,14 +35,14 @@ _Static_assert(sizeof(((struct st_data *) 0)->detail) >= CORPUS_WINDOW * 6,
 static uint64_t checks, total_windows, total_columns, zero_columns, by_layers[3];
 static const char *active_path;
 static uint32_t active_column;
-#define CHECK(condition)                                                         \
-    do {                                                                         \
-        ++checks;                                                                \
-        if (!(condition)) {                                                      \
+#define CHECK(condition)                                                          \
+    do {                                                                          \
+        ++checks;                                                                 \
+        if (!(condition)) {                                                       \
             fprintf(stderr, "FAIL layered-corpus:%d column=%" PRIu32 " %s; %s\n", \
                     __LINE__, active_column, #condition, active_path);            \
-            exit(1);                                                             \
-        }                                                                        \
+            exit(1);                                                              \
+        }                                                                         \
     } while (0)
 
 struct raw_pwv7 {
@@ -100,7 +104,8 @@ static uint8_t *corpus_read(const char *path, size_t *size) {
     }
     uint8_t tail;
     ssize_t n;
-    do n = read(fd, &tail, 1); while (n < 0 && errno == EINTR);
+    do n = read(fd, &tail, 1);
+    while (n < 0 && errno == EINTR);
     CHECK(n == 0 && close(fd) == 0);
     return p;
 }
@@ -112,7 +117,7 @@ static void corpus_prepare(struct guarded_data *g, uint32_t encoding, uint32_t f
     g->data.view.metadata.valid = AZ_META_DURATION;
     g->data.view.metadata.duration_s = 987654.0;
     g->data.wave_query = (az_wave_query) {sizeof(az_wave_query), AZ_DATA_VERSION,
-                                         encoding, first, CORPUS_WINDOW, 0};
+                                          encoding, first, CORPUS_WINDOW, 0};
     memset(g->data.detail, 0xa5, sizeof g->data.detail);
     /* Detect a write immediately beyond the detail buffer inside st_data. */
     memset(g->data.beats, 0x7c, 32);
@@ -226,7 +231,8 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; ++i) corpus_file(argv[i]);
     printf("WAVE_LAYER_CORPUS_PASS files=%d windows=%" PRIu64 " columns=%" PRIu64
            " allzero=%" PRIu64 " layers1=%" PRIu64 " layers2=%" PRIu64 " layers3=%" PRIu64
-           " checks=%" PRIu64 "\n", argc - 1, total_windows, total_columns, zero_columns,
+           " checks=%" PRIu64 "\n",
+           argc - 1, total_windows, total_columns, zero_columns,
            by_layers[0], by_layers[1], by_layers[2], checks);
     return 0;
 }

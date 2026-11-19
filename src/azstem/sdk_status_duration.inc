@@ -102,15 +102,18 @@ static void duration_publish_value(DurationState *v) {
     atomic_store_explicit(&(out->valid), v->valid, memory_order_relaxed);
     atomic_fetch_add_explicit(&(out->serial), 1, memory_order_release);
 }
+static bool duration_value_identity(const DurationValue *value, const azsdk_load_sample load, uintptr_t buffer) {
+    return atomic_load_explicit(&(value->unit), memory_order_relaxed) == load.unit_generation &&
+           atomic_load_explicit(&(value->epoch), memory_order_relaxed) == load.invalidation_epoch &&
+           atomic_load_explicit(&(value->load), memory_order_relaxed) == load.load_generation &&
+           atomic_load_explicit(&(value->buffer), memory_order_relaxed) == buffer && atomic_load_explicit(&(value->valid), memory_order_relaxed) == 1;
+}
 static bool duration_repeat(const DurationState *v, const azsdk_load_sample load, uintptr_t buffer, int64_t samples, bool invalidate) {
     if (invalidate) return false;
     __auto_type value = &(v->value);
     const uint64_t serial = atomic_load_explicit(&(value->serial), memory_order_acquire);
     if (!serial || (serial & 1)) return false;
-    const bool identity = atomic_load_explicit(&(value->unit), memory_order_relaxed) == load.unit_generation &&
-                          atomic_load_explicit(&(value->epoch), memory_order_relaxed) == load.invalidation_epoch &&
-                          atomic_load_explicit(&(value->load), memory_order_relaxed) == load.load_generation &&
-                          atomic_load_explicit(&(value->buffer), memory_order_relaxed) == buffer && atomic_load_explicit(&(value->valid), memory_order_relaxed) == 1;
+    const bool identity = duration_value_identity(value, load, buffer);
     const int64_t prior = atomic_load_explicit(&(value->samples), memory_order_relaxed);
     const uint32_t rate = atomic_load_explicit(&(value->rate), memory_order_relaxed);
     atomic_thread_fence(memory_order_acquire);
@@ -118,66 +121,98 @@ static bool duration_repeat(const DurationState *v, const azsdk_load_sample load
     const int order = compare_timestamps(prior, samples, rate, rate, 1);
     return order != AZ_TIME_INVALID && order == AZ_TIME_EQUAL;
 }
+struct DurationCommit {
+    azsdk_load_sample load;
+    int64_t samples;
+    uint32_t rate;
+    bool valid, same;
+    uint64_t seed;
+    uintptr_t buffer;
+};
+static void duration_defer(unsigned d, DurationState *v, uint64_t snapshot) {
+    /* A reader seed has no native mutation to lose. Its independent retry
+     * cannot suppress a later changed/reset writer's capture gap. */
+    if (snapshot != UINT64_MAX) atomic_store_explicit(&(v->retry), 1, memory_order_release);
+    else duration_lost(d);
+}
+static bool duration_snapshot_current(uint64_t snapshot) {
+    return snapshot == UINT64_MAX || (!atomic_load_explicit(&(duration_writers), memory_order_acquire) &&
+                                      snapshot == atomic_load_explicit(&(duration_mutation), memory_order_acquire));
+}
+static bool duration_load_matches(unsigned d, const azsdk_load_sample load) {
+    azsdk_load_sample current = {0};
+    return azsdk_load_read((int) d, &current) && current.unit_generation == load.unit_generation &&
+           current.load_generation == load.load_generation && current.invalidation_epoch == load.invalidation_epoch;
+}
+static void duration_publish_binding(DurationState *v, const azsdk_load_sample load, uintptr_t buffer) {
+    /* Keep membership readable during unrelated scalar publication. Replace
+     * this certificate only at an owned source/lifetime change. */
+    if (atomic_load_explicit(&(v->bound_load), memory_order_acquire) == load.load_generation &&
+        atomic_load_explicit(&(v->bound_unit), memory_order_relaxed) == load.unit_generation &&
+        atomic_load_explicit(&(v->bound_epoch), memory_order_relaxed) == load.invalidation_epoch &&
+        atomic_load_explicit(&(v->bound_buffer), memory_order_relaxed) == buffer) return;
+    atomic_store_explicit(&(v->bound_load), 0, memory_order_release);
+    atomic_store_explicit(&(v->bound_unit), load.unit_generation, memory_order_relaxed);
+    atomic_store_explicit(&(v->bound_epoch), load.invalidation_epoch, memory_order_relaxed);
+    atomic_store_explicit(&(v->bound_buffer), buffer, memory_order_relaxed);
+    if (buffer) atomic_store_explicit(&(v->bound_load), load.load_generation, memory_order_release);
+}
+static bool duration_same_samples(const DurationState *v, const struct DurationCommit *value) {
+    if (!value->valid) return true;
+    if (v->rate != value->rate) return false;
+    const int order = compare_timestamps(v->samples, value->samples, value->rate, value->rate, 1);
+    return order != AZ_TIME_INVALID && order == AZ_TIME_EQUAL;
+}
+static bool duration_same_value(const DurationState *v, const struct DurationCommit *value) {
+    return v->unit == value->load.unit_generation && v->load == value->load.load_generation && v->epoch == value->load.invalidation_epoch &&
+           v->buffer == value->buffer && v->valid == (int) value->valid && duration_same_samples(v, value);
+}
+static bool duration_redundant(const DurationState *v, const struct DurationCommit *value) {
+    return value->same && v->seed == value->seed && !atomic_load_explicit(&(v->refresh), memory_order_acquire) &&
+           !atomic_load_explicit(&(v->retry), memory_order_acquire);
+}
+static void duration_publish(unsigned d, DurationState *v, const struct DurationCommit *value) {
+    azstatus_native_receipt receipt = {0};
+    receipt.kind = AZN_DURATION;
+    receipt.deck = d;
+    receipt.unit = value->load.unit_generation;
+    receipt.epoch = value->load.invalidation_epoch;
+    receipt.load_generation = value->load.load_generation;
+    receipt.valid = value->valid;
+    receipt.points[0] = (azn_point) {value->valid ? AZN_COORD : AZN_INVALID, value->rate, value->samples};
+    v->unit = receipt.unit;
+    v->epoch = receipt.epoch;
+    v->load = receipt.load_generation;
+    v->buffer = value->buffer;
+    v->samples = value->samples;
+    v->rate = value->rate;
+    v->valid = value->valid;
+    v->seed = value->seed;
+    /* Replaying an identical value for a new seed or retry must leave the
+     * sealed certificate readable to a concurrent page-filled callback. */
+    if (!value->same) duration_publish_value(v);
+    atomic_store_explicit(&(v->retry), 0, memory_order_release);
+    atomic_store_explicit(&(v->refresh), 0, memory_order_release);
+    if (!azn_offer(&receipt)) duration_lost(d);
+}
+static bool duration_capture_current(unsigned d, const azsdk_load_sample load, uint64_t snapshot) {
+    return duration_snapshot_current(snapshot) && load.unit_generation && load.load_generation && duration_load_matches(d, load);
+}
 static void duration_commit(unsigned d, const azsdk_load_sample load, int64_t samples, uint32_t rate, bool valid, uint64_t snapshot, uintptr_t buffer) {
     if (!atomic_load_explicit(&(duration_enabled), memory_order_acquire) || !(azn_interest(d) & duration_routes)) return;
-    __auto_type v = &(duration_state[d]);
+    DurationState *v = &duration_state[d];
     if (atomic_flag_test_and_set_explicit(&(v->busy), memory_order_acquire)) {
-        /* uintptr_t reader seed has no native mutation to lose. Its independent
-         * retry cannot suppress a later changed/reset writer's capture gap. */
-        if (snapshot != UINT64_MAX) atomic_store_explicit(&(v->retry), 1, memory_order_release);
-        else duration_lost(d);
+        duration_defer(d, v, snapshot);
         return;
     }
     EXIT_FLAG_GUARD(unlock, &v->busy);
-    if (snapshot != UINT64_MAX && (atomic_load_explicit(&(duration_writers), memory_order_acquire) ||
-                                   snapshot != atomic_load_explicit(&(duration_mutation), memory_order_acquire))) return;
-    azsdk_load_sample current = {0};
-    if (!load.unit_generation || !load.load_generation || !azsdk_load_read((int) (d), &current) ||
-        current.unit_generation != load.unit_generation || current.load_generation != load.load_generation ||
-        current.invalidation_epoch != load.invalidation_epoch) return;
-    valid = valid && duration_length(samples, rate);
-    /* Keep source membership readable while an unrelated scalar publication
-     * holds busy. uintptr_t changed writer must still identify its selected stream.
-     * Replace this certificate only at an owned source/lifetime change. */
-    if (atomic_load_explicit(&(v->bound_load), memory_order_acquire) != load.load_generation ||
-        atomic_load_explicit(&(v->bound_unit), memory_order_relaxed) != load.unit_generation ||
-        atomic_load_explicit(&(v->bound_epoch), memory_order_relaxed) != load.invalidation_epoch ||
-        atomic_load_explicit(&(v->bound_buffer), memory_order_relaxed) != buffer) {
-        atomic_store_explicit(&(v->bound_load), 0, memory_order_release);
-        atomic_store_explicit(&(v->bound_unit), load.unit_generation, memory_order_relaxed);
-        atomic_store_explicit(&(v->bound_epoch), load.invalidation_epoch, memory_order_relaxed);
-        atomic_store_explicit(&(v->bound_buffer), buffer, memory_order_relaxed);
-        if (buffer) atomic_store_explicit(&(v->bound_load), load.load_generation, memory_order_release);
-    }
-    const uint64_t seed = azn_seed_id(d);
-    const int order = valid && v->rate == rate ? compare_timestamps(v->samples, samples, rate, rate, 1) : AZ_TIME_INVALID;
-    const bool same = v->unit == load.unit_generation && v->load == load.load_generation && v->epoch == load.invalidation_epoch &&
-                      v->buffer == buffer &&
-                      v->valid == (int) (valid) && (!valid || (order != AZ_TIME_INVALID && order == AZ_TIME_EQUAL));
+    if (!duration_capture_current(d, load, snapshot)) return;
+    struct DurationCommit value = {.load = load, .samples = samples, .rate = rate, .valid = valid && duration_length(samples, rate), .buffer = buffer};
+    duration_publish_binding(v, load, buffer);
+    value.seed = azn_seed_id(d);
+    value.same = duration_same_value(v, &value);
     azn_capability(d, AZN_CAP_DURATION, 1);
-    if (same && v->seed == seed && !atomic_load_explicit(&(v->refresh), memory_order_acquire) && !atomic_load_explicit(&(v->retry), memory_order_acquire)) return;
-    azstatus_native_receipt r = {0};
-    r.kind = AZN_DURATION;
-    r.deck = d;
-    r.unit = load.unit_generation;
-    r.epoch = load.invalidation_epoch;
-    r.load_generation = load.load_generation;
-    r.valid = valid;
-    r.points[0] = (__typeof__(r.points[0])) {valid ? AZN_COORD : AZN_INVALID, rate, samples};
-    v->unit = r.unit;
-    v->epoch = r.epoch;
-    v->load = r.load_generation;
-    v->buffer = buffer;
-    v->samples = samples;
-    v->rate = rate;
-    v->valid = valid;
-    v->seed = seed;
-    /* Replaying an identical value for a new seed or retry must leave the
-     * sealed certificate readable to a concurrent page-filled callback. */
-    if (!same) duration_publish_value(v);
-    atomic_store_explicit(&(v->retry), 0, memory_order_release);
-    atomic_store_explicit(&(v->refresh), 0, memory_order_release);
-    if (!azn_offer(&r)) duration_lost(d);
+    if (!duration_redundant(v, &value)) duration_publish(d, v, &value);
 }
 enum DurationBinding {
     DURATION_UNQUALIFIED,
@@ -185,17 +220,17 @@ enum DurationBinding {
     DURATION_SELECTED,
     DURATION_UNCHANGED
 };
+static bool duration_bound_current(const DurationState *v, const azsdk_load_sample load, uint64_t bound_load, uintptr_t bound_buffer) {
+    return bound_buffer && bound_load == load.load_generation &&
+           atomic_load_explicit(&(v->bound_unit), memory_order_relaxed) == load.unit_generation &&
+           atomic_load_explicit(&(v->bound_epoch), memory_order_relaxed) == load.invalidation_epoch &&
+           atomic_load_explicit(&(v->bound_load), memory_order_acquire) == bound_load;
+}
 static enum DurationBinding duration_writer_binding(unsigned d, const azsdk_load_sample load, uintptr_t parent, const unsigned char identity[12], int64_t samples, bool invalidate) {
     __auto_type v = &(duration_state[d]);
     const uint64_t bound_load = atomic_load_explicit(&(v->bound_load), memory_order_acquire);
     const uintptr_t bound_buffer = atomic_load_explicit(&(v->bound_buffer), memory_order_relaxed);
-    azsdk_load_sample current = {0};
-    if (!bound_buffer || bound_load != load.load_generation ||
-        atomic_load_explicit(&(v->bound_unit), memory_order_relaxed) != load.unit_generation ||
-        atomic_load_explicit(&(v->bound_epoch), memory_order_relaxed) != load.invalidation_epoch ||
-        atomic_load_explicit(&(v->bound_load), memory_order_acquire) != bound_load ||
-        !azsdk_load_read((int) (d), &current) || current.unit_generation != load.unit_generation ||
-        current.load_generation != load.load_generation || current.invalidation_epoch != load.invalidation_epoch ||
+    if (!duration_bound_current(v, load, bound_load, bound_buffer) || !duration_load_matches(d, load) ||
         !azn_load_track_matches(d, load.invalidation_epoch, load.load_generation, identity)) return DURATION_UNQUALIFIED;
     if (bound_buffer != parent) return DURATION_OTHER;
     if (duration_repeat(v, load, parent, samples, invalidate)) return DURATION_UNCHANGED;
@@ -206,6 +241,34 @@ static enum DurationBinding duration_writer_binding(unsigned d, const azsdk_load
 }
 /* The native row is owned by the writer; the owner lease protects only the
  * separate core/adapter join. Copy its TrackID before reset can erase it. */
+static void duration_writer_owned(unsigned d, const azsdk_load_sample load, uintptr_t parent,
+                                  const unsigned char identity[12], int64_t samples, bool invalidate, enum DurationBinding binding) {
+    __auto_type slot = &(state().decks[d]);
+    AZ_OWNER_LEASE(lease);
+    if (!az_owner_held(&slot->gate) && az_owner_enter(&slot->gate, &lease) != AZ_OK) {
+        if (binding == DURATION_SELECTED) duration_lost(d);
+        else atomic_store_explicit(&(duration_state[d].retry), 1, memory_order_release);
+        return;
+    }
+    const uintptr_t core = atomic_load_explicit(&(slot->core), memory_order_acquire);
+    if (!core) return;
+    const uintptr_t buffer = duration_buffer(slot, core);
+    if (buffer != parent || memcmp(identity, ((const void *) (core + 0x18)), 12)) return;
+    const uint32_t rate = (uint32_t) (integer(core + 0x68));
+    duration_commit(d, load, samples, rate, !invalidate, UINT64_MAX, parent);
+}
+static void duration_writer_deck(unsigned d, uintptr_t parent, const unsigned char identity[12], int64_t samples, bool invalidate) {
+    if (!(azn_interest(d) & duration_routes)) return;
+    azsdk_load_sample load = {0};
+    if (!azsdk_load_read((int) (d), &load) || !load.load_generation ||
+        !azn_load_track_matches(d, load.invalidation_epoch, load.load_generation, identity)) return;
+    const enum DurationBinding binding = duration_writer_binding(d, load, parent, identity, samples, invalidate);
+    /* Page-filled callbacks repeat the already committed total length.
+     * They do not need a new Unit reservation or a recovery publication.
+     * uintptr_t different owned buffer is not this deck's duration stream. */
+    if (binding == DURATION_OTHER || binding == DURATION_UNCHANGED) return;
+    duration_writer_owned(d, load, parent, identity, samples, invalidate, binding);
+}
 static void duration_writer(uintptr_t row, bool invalidate) {
     if (word(row) != duration_track_table) return;
     /* Track's native constructor receives PageBuffer's embedded config at
@@ -218,30 +281,7 @@ static void duration_writer(uintptr_t row, bool invalidate) {
     unsigned char identity[12];
     memcpy(identity, ((const void *) (row + 0x20)), sizeof identity);
     const int64_t samples = ((int64_t) (word(row + 0x30)));
-    for (unsigned d = 0; d < 4; ++d) {
-        if (!(azn_interest(d) & duration_routes)) continue;
-        azsdk_load_sample load = {0};
-        if (!azsdk_load_read((int) (d), &load) || !load.load_generation ||
-            !azn_load_track_matches(d, load.invalidation_epoch, load.load_generation, identity)) continue;
-        const enum DurationBinding binding = duration_writer_binding(d, load, parent, identity, samples, invalidate);
-        /* Page-filled callbacks repeat the already committed total length.
-         * They do not need a new Unit reservation or a recovery publication.
-         * uintptr_t different owned buffer is not this deck's duration stream. */
-        if (binding == DURATION_OTHER || binding == DURATION_UNCHANGED) continue;
-        __auto_type slot = &(state().decks[d]);
-        AZ_OWNER_LEASE(lease);
-        if (!az_owner_held(&slot->gate) && az_owner_enter(&slot->gate, &lease) != AZ_OK) {
-            if (binding == DURATION_SELECTED) duration_lost(d);
-            else atomic_store_explicit(&(duration_state[d].retry), 1, memory_order_release);
-            continue;
-        }
-        const uintptr_t core = atomic_load_explicit(&(slot->core), memory_order_acquire);
-        if (!core) continue;
-        const uintptr_t buffer = duration_buffer(slot, core);
-        if (buffer != parent || memcmp(identity, ((const void *) (core + 0x18)), 12)) continue;
-        const uint32_t rate = (uint32_t) (integer(core + 0x68));
-        duration_commit(d, load, samples, rate, !invalidate, UINT64_MAX, parent);
-    }
+    for (unsigned d = 0; d < 4; ++d) duration_writer_deck(d, parent, identity, samples, invalidate);
 }
 typedef struct DurationMutation DurationMutation;
 struct DurationMutation {
@@ -295,23 +335,27 @@ static void duration_retire(unsigned d) {
     atomic_store_explicit(&(v->refresh), 0, memory_order_release);
     atomic_store_explicit(&(v->retry), 0, memory_order_release);
 }
+static bool duration_entries_match(const State *s, int build, const uintptr_t *profile) {
+    static const uint32_t entries[][4] = {
+        {0xa9b97bfd, 0x910003fd, 0xa90153f3, 0xaa0003f4},
+        {0xa9b47bfd, 0x910003fd, 0xa90363f7, 0xaa0003f7},
+        {0xa9be7bfd, 0x910003fd, 0xa90153f3, 0xaa0103f3}};
+    for (unsigned i = 0; i < 3; ++i)
+        if (!duration_original[i] && memcmp(((const void *) (s->bias + profile[i])), entries[i], sizeof entries[i])) return false;
+    static const uint32_t destroy_entries[][4] = {
+        {0xa9be7bfd, 0xf000f481, 0x913a4021, 0x910003fd},
+        {0xa9be7bfd, 0xf0010c41, 0x9113a021, 0x910003fd}};
+    if (!duration_original[3] && memcmp(((const void *) (s->bias + profile[3])),
+                                        destroy_entries[build - 1], sizeof destroy_entries[0])) return false;
+    return true;
+}
 static void duration_install(State *s, int build, azn_setting_patch_fn patch) {
     if (atomic_load_explicit(&(duration_enabled), memory_order_acquire)) return;
     static const uintptr_t sites[][7] = {
         {0x778660, 0x773fc0, 0x770eb8, 0x7668a8, 0x27b82e8, 0x25f9c00, 0x25f9e90},
         {0x7b9f60, 0x7b58c0, 0x7b27b8, 0x7a8128, 0x2b04fa0, 0x2933258, 0x29334e8}};
-    static const uint32_t entries[][4] = {
-        {0xa9b97bfd, 0x910003fd, 0xa90153f3, 0xaa0003f4},
-        {0xa9b47bfd, 0x910003fd, 0xa90363f7, 0xaa0003f7},
-        {0xa9be7bfd, 0x910003fd, 0xa90153f3, 0xaa0103f3}};
     const uintptr_t *profile = sites[build - 1];
-    for (unsigned i = 0; i < 3; ++i)
-        if (!duration_original[i] && memcmp(((const void *) (s->bias + profile[i])), entries[i], sizeof entries[i])) return;
-    static const uint32_t destroy_entries[][4] = {
-        {0xa9be7bfd, 0xf000f481, 0x913a4021, 0x910003fd},
-        {0xa9be7bfd, 0xf0010c41, 0x9113a021, 0x910003fd}};
-    if (!duration_original[3] && memcmp(((const void *) (s->bias + profile[3])),
-                                        destroy_entries[build - 1], sizeof destroy_entries[0])) return;
+    if (!duration_entries_match(s, build, profile)) return;
     void *hooks[] = {((void *) (duration_set)), ((void *) (duration_reset)),
                      ((void *) (duration_get_length)), ((void *) (duration_destroy))};
     for (unsigned i = 0; i < 4; ++i)

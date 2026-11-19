@@ -9,6 +9,20 @@ struct HolderEdit {
     unsigned component, count, mask;
     uint64_t bracket;
 };
+static bool holder_retain_pair(Pair *next, const Pair *p) {
+    next->binding = p->binding;
+    Object *to[] = {&next->pack, &next->holder[0], &next->holder[1], &next->content[0], &next->content[1]};
+    const Object *from[] = {&p->pack, &p->holder[0], &p->holder[1], &p->content[0], &p->content[1]};
+    for (unsigned n = 0; n < 5; n++) {
+        if (!from[n]->token) continue;
+        if (!azn_pin_hold(from[n]->token, &to[n]->address)) {
+            discard(next);
+            return false;
+        }
+        to[n]->token = from[n]->token;
+    }
+    return true;
+}
 static void holder_capture(struct HolderEdit *edit, unsigned deck, uintptr_t holder, const struct azn_pack_view *view) {
     for (unsigned i = 0; i < edit->count; i++) {
         if (edit->entries[i].prior.pack.address == view->object) {
@@ -26,17 +40,9 @@ static void holder_capture(struct HolderEdit *edit, unsigned deck, uintptr_t hol
     const Pair *p = &slot->pair;
     if (p->pack.address != view->object || p->holder[edit->component].address != holder || !azn_pack_current(deck, view)) return;
     Pair *next = &edit->entries[edit->count].prior;
-    next->binding = p->binding;
-    Object *to[] = {&next->pack, &next->holder[0], &next->holder[1], &next->content[0], &next->content[1]};
-    const Object *from[] = {&p->pack, &p->holder[0], &p->holder[1], &p->content[0], &p->content[1]};
-    for (unsigned n = 0; n < 5; n++) {
-        if (!from[n]->token) continue;
-        if (!azn_pin_hold(from[n]->token, &to[n]->address)) {
-            discard(next);
-            azn_map_gap(deck);
-            return;
-        }
-        to[n]->token = from[n]->token;
+    if (!holder_retain_pair(next, p)) {
+        azn_map_gap(deck);
+        return;
     }
     edit->entries[edit->count++].decks = 1u << deck;
     edit->mask |= 1u << deck;
@@ -52,14 +58,17 @@ static void holder_begin(struct HolderEdit *edit, unsigned component, uintptr_t 
     }
     edit->bracket = azn_map_begin_mask(edit->mask);
 }
+static void holder_gap(unsigned decks) {
+    for (unsigned d = 0; d < 4; d++)
+        if (decks & (1u << d)) azn_map_gap(d);
+}
 static void holder_finish(struct HolderEdit *edit, uintptr_t replacement, bool preserve) {
     for (unsigned i = 0; i < edit->count; i++) {
         const Pair *p = &edit->entries[i].prior;
         uintptr_t gc = edit->component == 0 && !preserve ? replacement : p->content[0].address;
         uintptr_t pc = edit->component == 1 && !preserve ? replacement : p->content[1].address;
         if (!edit->bracket || !update_pair(0, p->pack.address, p->holder[0].address, gc, p->holder[1].address, pc, p->binding))
-            for (unsigned d = 0; d < 4; d++)
-                if (edit->entries[i].decks & (1u << d)) azn_map_gap(d);
+            holder_gap(edit->entries[i].decks);
     }
 }
 static void holder_drop(struct HolderEdit *edit) {

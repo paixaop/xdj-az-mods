@@ -7,30 +7,33 @@ static struct scmd_engine g_sdk_commands = SCMD_ENGINE_INIT;
 static int sdk_command_has_pending_notification(void);
 #include "sdk_exit_bridge.c"
 
-static int sdk_command_has_pending_notification(void) {
-    int pending = 0;
-    pthread_mutex_lock(&g_sdk_commands.mu);
+static int sdk_command_terminal_pending(const struct scmd_record *r) {
+    return r->asynchronous && r->phase == SCMD_FINAL && r->callback && !r->retired &&
+           !r->terminal_delivered && scmd_owner_deliverable(&g_sdk_commands, r->owner, r->owner_lifetime);
+}
+static int sdk_command_pending_locked(void) {
+    for (unsigned i = 0; i < SCMD_SLOTS; ++i)
+        if (sdk_command_terminal_pending(&g_sdk_commands.records[i])) return 1;
     for (unsigned i = 0; i < SCMD_SLOTS; ++i) {
-        struct scmd_record *r = &g_sdk_commands.records[i];
-        if (r->asynchronous && r->phase == SCMD_FINAL && r->callback && !r->retired &&
-            !r->terminal_delivered && scmd_owner_deliverable(&g_sdk_commands, r->owner, r->owner_lifetime)) {
-            pending = 1;
-            break;
-        }
+        struct scmd_pending_delivery *p = &g_sdk_commands.pending[i];
+        if (p->occupied && !p->released_delivered &&
+            scmd_owner_deliverable(&g_sdk_commands, p->owner, p->owner_lifetime)) return 1;
     }
-    if (!pending) {
-        for (unsigned i = 0; i < SCMD_SLOTS; ++i) {
-            struct scmd_pending_delivery *p = &g_sdk_commands.pending[i];
-            if (p->occupied && !p->released_delivered &&
-                scmd_owner_deliverable(&g_sdk_commands, p->owner, p->owner_lifetime)) {
-                pending = 1;
-                break;
-            }
-        }
-    }
+    return 0;
+}
+static int sdk_command_has_pending_notification(void) {
+    pthread_mutex_lock(&g_sdk_commands.mu);
+    int pending = sdk_command_pending_locked();
     pthread_mutex_unlock(&g_sdk_commands.mu);
     return pending;
 }
+#ifdef CM_MAX
+static int sdk_command_async_authorized(cm_mod *mod, const az_command_request *request,
+                                        az_command_completion_fn callback, az_command_result *output) {
+    return g_cm_on_ui && mod && callback && scmd_output_ok(output) && scmd_request_valid(request) &&
+           cm_command_code(mod, (uintptr_t) callback);
+}
+#endif
 
 static int sdk_command_poll(const char *id, uint64_t request_id, az_command_result *out) {
     int owner = st_mod_owner(id, CM_RA(), "command_poll");
@@ -50,8 +53,7 @@ static __attribute__((unused)) int sdk_command_submit_async(const char *id, cons
                                                             az_command_result *out) {
 #ifdef CM_MAX
     cm_mod *mod = cm_self(id, CM_RA(), "command_submit_async");
-    if (!g_cm_on_ui || !mod || !callback || !scmd_output_ok(out) || !scmd_request_valid(r) ||
-        !cm_command_code(mod, (uintptr_t) callback)) return AZ_INVALID;
+    if (!sdk_command_async_authorized(mod, r, callback, out)) return AZ_INVALID;
     int owner = (int) (mod - g_cm);
     if (mod->state != AZCM_LOADED && (!g_sdk_in_init || g_cm_loading != owner)) return AZ_INVALID;
     return sdk_exit_submit_async(owner, r, callback, user, out);

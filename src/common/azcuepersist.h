@@ -51,8 +51,7 @@ __attribute__((visibility("hidden"))) uint64_t azsdk_cue_persist_capabilities(vo
 __attribute__((visibility("hidden"))) int azsdk_cue_persist_submit(
     const struct azexit_cue_request *, void *manager, void *maintainer,
     unsigned kind, const void *owned_property, uint64_t source_cookie,
-    const struct azcuepersist_witness *witness
-    ) AZCUEPERSIST_NOEXCEPT;
+    const struct azcuepersist_witness *witness) AZCUEPERSIST_NOEXCEPT;
 /* During confirm on the owner continuation: 0 rejects; 1 proves exact owned
  * receipt content identity; 2 proves the correlated receipt and owned source/
  * publication roots after invalidation or reload. Both positive cases MUST be
@@ -99,15 +98,18 @@ static inline bool azcue_samples_equal(uint64_t first, uint64_t second, uint32_t
                                          (uint64_t) first_rate * second_rate, source_rate, 1);
     return order != AZ_TIME_INVALID && order == AZ_TIME_EQUAL;
 }
-static inline bool azcue_timestamps_equal(struct azcue_native_timestamps a, struct azcue_native_timestamps b, uint32_t source_rate) {
-    if (!source_rate || source_rate >= 0x7fffffffu) return false;
+static inline bool azcue_sample_cache_equal(uint64_t first_us, uint64_t second_us, uint64_t first_sample, uint64_t second_sample,
+                                            uint32_t first_rate, uint32_t second_rate, uint32_t source_rate) {
     const uint64_t absent = UINT64_C(0x7fffffffffffffff);
     /* Native points can have unused, non-marker values in the OUT sample cache. */
-    const bool in_absent = a.in_us == absent && b.in_us == absent;
-    const bool out_absent = a.out_us == absent && b.out_us == absent;
+    if (first_us == absent && second_us == absent) return true;
+    return azcue_samples_equal(first_sample, second_sample, first_rate, second_rate, source_rate);
+}
+static inline bool azcue_timestamps_equal(struct azcue_native_timestamps a, struct azcue_native_timestamps b, uint32_t source_rate) {
+    if (!source_rate || source_rate >= 0x7fffffffu) return false;
     return azcue_microseconds_equal(a.in_us, b.in_us, source_rate) && azcue_microseconds_equal(a.out_us, b.out_us, source_rate) &&
-           (in_absent || azcue_samples_equal(a.in_sample, b.in_sample, a.sample_rate, b.sample_rate, source_rate)) &&
-           (out_absent || azcue_samples_equal(a.out_sample, b.out_sample, a.sample_rate, b.sample_rate, source_rate));
+           azcue_sample_cache_equal(a.in_us, b.in_us, a.in_sample, b.in_sample, a.sample_rate, b.sample_rate, source_rate) &&
+           azcue_sample_cache_equal(a.out_us, b.out_us, a.out_sample, b.out_sample, a.sample_rate, b.sample_rate, source_rate);
 }
 #undef AZCUEPERSIST_NOEXCEPT
 #endif

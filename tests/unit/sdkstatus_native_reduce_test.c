@@ -70,66 +70,73 @@ static int coord_at(const az_status_coord_v1 *point, int64_t expected) {
     return point && compare_timestamps(point->samples, expected, point->rate_hz, point->rate_hz, 1) == AZ_TIME_EQUAL;
 }
 static void test_stationary_terminal_reducer(void) {
-    ds.enabled=1;
-    const unsigned d=0;
-    const uint64_t load=ds.deck[d].last_epoch+1,fence=ds_native_fence[d]+1;
-    az_status_grid_ref_v1 grid={load,10,1,AZ_PROV_NATIVE,AZ_STATUS_GRID_CURRENT};
-    az_beat beats[]={{0,120,1,0},{500.0/44100,120,2,0},{900.0/44100,120,3,0}};
-    const int64_t ticks[]={0,500,900};
-    const struct ds_time_axis clock={44100, ticks, 1, 44100, NULL};
-    az_phrase rows[]={{0,1,1,1,0,0},{1,2,2,1,0,0}};
-    az_status_coord_v1 head={.samples=1000,.rate_hz=44100};
-    struct ds_field fields[]={
-        {AZ_STATUS_GRID,AZ_STATUS_GRID_CURRENT,{.count=3},beats,&clock},
-        {AZ_STATUS_PHRASES,AZ_STATUS_PHRASES_CURRENT,{.count=2},rows,NULL},
-        {AZ_STATUS_PHRASES,AZ_STATUS_PHRASES_CURRENT_GRID,{.count=1},&grid,NULL},
-        {AZ_STATUS_POSITION,AZ_STATUS_POSITION_HEAD,{.count=1},&head,NULL}};
-    for(unsigned n=0;n<4;++n){
-        fields[n].info.info=(az_component_info){AZ_AVAIL_READY,AZ_PROV_NATIVE,1,1};
-        fields[n].info.scope=AZ_STATUS_LOAD_SCOPE;fields[n].info.scope_id=load;
-        fields[n].info.provider_id=n==3?4:10;
+    ds.enabled = 1;
+    const unsigned d = 0;
+    const uint64_t load = ds.deck[d].last_epoch + 1, fence = ds_native_fence[d] + 1;
+    az_status_grid_ref_v1 grid = {load, 10, 1, AZ_PROV_NATIVE, AZ_STATUS_GRID_CURRENT};
+    az_beat beats[] = {{0, 120, 1, 0}, {500.0 / 44100, 120, 2, 0}, {900.0 / 44100, 120, 3, 0}};
+    const int64_t ticks[] = {0, 500, 900};
+    const struct ds_time_axis clock = {44100, ticks, 1, 44100, NULL};
+    az_phrase rows[] = {{0, 1, 1, 1, 0, 0}, {1, 2, 2, 1, 0, 0}};
+    az_status_coord_v1 head = {.samples = 1000, .rate_hz = 44100};
+    struct ds_field fields[] = {
+        {AZ_STATUS_GRID, AZ_STATUS_GRID_CURRENT, {.count = 3}, beats, &clock},
+        {AZ_STATUS_PHRASES, AZ_STATUS_PHRASES_CURRENT, {.count = 2}, rows, NULL},
+        {AZ_STATUS_PHRASES, AZ_STATUS_PHRASES_CURRENT_GRID, {.count = 1}, &grid, NULL},
+        {AZ_STATUS_POSITION, AZ_STATUS_POSITION_HEAD, {.count = 1}, &head, NULL}};
+    for (unsigned n = 0; n < 4; ++n) {
+        fields[n].info.info = (az_component_info) {AZ_AVAIL_READY, AZ_PROV_NATIVE, 1, 1};
+        fields[n].info.scope = AZ_STATUS_LOAD_SCOPE;
+        fields[n].info.scope_id = load;
+        fields[n].info.provider_id = n == 3 ? 4 : 10;
     }
-    assert(ds_publish(d,load,DS_BOUNDARY,1,fields,4,NULL,NULL,0,0)==AZ_OK);
-    ds_native_epoch[d]=load;ds_native_fence[d]=fence;
-    ds_native_motion_load[d]=load;ds_native_motion_order[d]=0;
-    struct azstatus_native_receipt r={.size=sizeof r,.version=1,.kind=AZN_END,.deck=d,
-        .unit=4,.epoch=fence,.load_generation=load,.a=1,.valid=1,.motion_order=1,.motion_generation=1,
-        .map={.owner=6,.grid={.provider=10,.revision=1},.phrases={.provider=10,.revision=1}},
-        .points={{AZN_COORD,44100,1000},{AZN_COORD,44100,1000}},
-        .observed_window_samples=1,.observed_window_rate=44100,.from_window_samples=1,.from_window_rate=44100,
-        .motion_flags=AZN_TERMINAL_CONFIRMED};
+    assert(ds_publish(d, load, DS_BOUNDARY, 1, fields, 4, NULL, NULL, 0, 0) == AZ_OK);
+    ds_native_epoch[d] = load;
+    ds_native_fence[d] = fence;
+    ds_native_motion_load[d] = load;
+    ds_native_motion_order[d] = 0;
+    struct azstatus_native_receipt r = {.size = sizeof r, .version = 1, .kind = AZN_END, .deck = d, .unit = 4, .epoch = fence, .load_generation = load, .a = 1, .valid = 1, .motion_order = 1, .motion_generation = 1, .map = {.owner = 6, .grid = {.provider = 10, .revision = 1}, .phrases = {.provider = 10, .revision = 1}}, .points = {{AZN_COORD, 44100, 1000}, {AZN_COORD, 44100, 1000}}, .observed_window_samples = 1, .observed_window_rate = 44100, .from_window_samples = 1, .from_window_rate = 44100, .motion_flags = AZN_TERMINAL_CONFIRMED};
     ds_native_apply(&r);
-    const az_status_phrase_endpoint_v1 *active=ds_value(&ds.deck[d].current,AZ_STATUS_PHRASE_TRANSITION,AZ_STATUS_PHRASE_TRANSITION_ACTIVE);
-    assert(active&&active->kind==AZ_PHRASE_END);
+    const az_status_phrase_endpoint_v1 *active = ds_value(&ds.deck[d].current, AZ_STATUS_PHRASE_TRANSITION, AZ_STATUS_PHRASE_TRANSITION_ACTIVE);
+    assert(active && active->kind == AZ_PHRASE_END);
     struct azstatus_native_receipt confirmed = r;
-    for (unsigned repeat=0;repeat<4;++repeat) {
-        r.kind=AZN_MOTION;r.a=AZN_MEASURE;r.valid=0;++r.motion_order;
-        r.observed_window_samples=r.from_window_samples=64;r.motion_flags=0;
+    for (unsigned repeat = 0; repeat < 4; ++repeat) {
+        r.kind = AZN_MOTION;
+        r.a = AZN_MEASURE;
+        r.valid = 0;
+        ++r.motion_order;
+        r.observed_window_samples = r.from_window_samples = 64;
+        r.motion_flags = 0;
         ds_native_apply(&r);
-        active=ds_value(&ds.deck[d].current,AZ_STATUS_PHRASE_TRANSITION,AZ_STATUS_PHRASE_TRANSITION_ACTIVE);
-        assert(active&&active->kind==AZ_PHRASE_END);
+        active = ds_value(&ds.deck[d].current, AZ_STATUS_PHRASE_TRANSITION, AZ_STATUS_PHRASE_TRANSITION_ACTIVE);
+        assert(active && active->kind == AZ_PHRASE_END);
     }
     /* The sample-sized equality proof must not accept one sample of travel,
      * a different writer generation, a replaced map, or an invalid clock. */
-    for (unsigned mode=0;mode<4;++mode) {
-        confirmed.motion_order=r.motion_order+1;
+    for (unsigned mode = 0; mode < 4; ++mode) {
+        confirmed.motion_order = r.motion_order + 1;
         ds_native_apply(&confirmed);
-        r=confirmed;r.kind=AZN_MOTION;r.a=AZN_MEASURE;r.valid=0;++r.motion_order;
-        r.observed_window_samples=r.from_window_samples=64;r.motion_flags=0;
-        if (mode==0) ++r.points[1].samples;
-        if (mode==1) ++r.motion_generation;
-        if (mode==2) ++r.map.phrases.revision;
-        if (mode==3) r.points[1].rate=0;
-        if (mode==1) {
-            const uint64_t before=ds.deck[d].current.sequence;
-            assert(ds_native_motion(&r,r.motion_order)==AZ_PENDING);
-            assert(ds.deck[d].current.sequence==before);
-            r.motion_order=ds_native_motion_order[d];
+        r = confirmed;
+        r.kind = AZN_MOTION;
+        r.a = AZN_MEASURE;
+        r.valid = 0;
+        ++r.motion_order;
+        r.observed_window_samples = r.from_window_samples = 64;
+        r.motion_flags = 0;
+        if (mode == 0) ++r.points[1].samples;
+        if (mode == 1) ++r.motion_generation;
+        if (mode == 2) ++r.map.phrases.revision;
+        if (mode == 3) r.points[1].rate = 0;
+        if (mode == 1) {
+            const uint64_t before = ds.deck[d].current.sequence;
+            assert(ds_native_motion(&r, r.motion_order) == AZ_PENDING);
+            assert(ds.deck[d].current.sequence == before);
+            r.motion_order = ds_native_motion_order[d];
             continue;
         }
         ds_native_apply(&r);
-        active=ds_value(&ds.deck[d].current,AZ_STATUS_PHRASE_TRANSITION,AZ_STATUS_PHRASE_TRANSITION_ACTIVE);
-        assert(!active||active->kind!=AZ_PHRASE_END);
+        active = ds_value(&ds.deck[d].current, AZ_STATUS_PHRASE_TRANSITION, AZ_STATUS_PHRASE_TRANSITION_ACTIVE);
+        assert(!active || active->kind != AZ_PHRASE_END);
     }
     puts("PASS confirmed END survives repeated stationary renders; travel, generation, map and invalid clock do not inherit it");
 }
@@ -439,12 +446,10 @@ static void test_native_order(void) {
 static void test_original_bpm_reducer(void) {
     const unsigned d = 3;
     struct ds_image *im = &ds.deck[d].current;
-    struct azstatus_native_receipt r = {.size = sizeof r, .version = 1, .kind = AZN_LOAD,
-        .deck = d, .unit = 98, .epoch = 200001, .load_generation = 200002, .valid = 1,
-        .a = AZN_LOADED, .original_bpm = 129.25, .original_bpm_state = AZN_BPM_READY};
+    struct azstatus_native_receipt r = {.size = sizeof r, .version = 1, .kind = AZN_LOAD, .deck = d, .unit = 98, .epoch = 200001, .load_generation = 200002, .valid = 1, .a = AZN_LOADED, .original_bpm = 129.25, .original_bpm_state = AZN_BPM_READY};
     ds_native_apply(&r);
     const struct ds_cell *bpm = ds_ready(im, AZ_STATUS_TEMPO, AZ_STATUS_TEMPO_ORIGINAL_BPM);
-    assert(bpm && *(const double *)bpm->data == 129.25 && bpm->info.scope == AZ_STATUS_LOAD_SCOPE &&
+    assert(bpm && *(const double *) bpm->data == 129.25 && bpm->info.scope == AZ_STATUS_LOAD_SCOPE &&
            bpm->info.scope_id == 200002 && bpm->info.info.provenance == AZ_PROV_NATIVE);
     struct azstatus_native_receipt old = r;
     ++r.epoch;
@@ -477,12 +482,10 @@ static void test_original_bpm_reducer(void) {
 }
 
 static void test_native_cue_clocks(void) {
-    az_cue_entry rows[2] = {{.size = sizeof(az_cue_entry), .version = AZ_DATA_VERSION,
-        .classification = AZ_CUE_MEMORY, .entry_id = 1, .type = AZ_CUE_LOOP, .valid = AZ_CUE_START | AZ_CUE_END},
-        {.size = sizeof(az_cue_entry), .version = AZ_DATA_VERSION, .classification = AZ_CUE_MEMORY,
-         .entry_id = 2, .type = AZ_CUE_LOOP, .valid = AZ_CUE_START | AZ_CUE_END}};
+    az_cue_entry rows[2] = {{.size = sizeof(az_cue_entry), .version = AZ_DATA_VERSION, .classification = AZ_CUE_MEMORY, .entry_id = 1, .type = AZ_CUE_LOOP, .valid = AZ_CUE_START | AZ_CUE_END},
+                            {.size = sizeof(az_cue_entry), .version = AZ_DATA_VERSION, .classification = AZ_CUE_MEMORY, .entry_id = 2, .type = AZ_CUE_LOOP, .valid = AZ_CUE_START | AZ_CUE_END}};
     struct azn_point points[2][2] = {{{AZN_COORD, 44100, 44101}, {AZN_COORD, 44100, 88201}},
-                                    {{AZN_COORD, 48000, 48001}, {AZN_COORD, 48000, 96001}}};
+                                     {{AZN_COORD, 48000, 48001}, {AZN_COORD, 48000, 96001}}};
     int64_t ticks[4];
     struct ds_time_axis clock = {0};
     assert(ds_native_cue_clock(2, rows, points, ticks, &clock));
@@ -490,15 +493,13 @@ static void test_native_cue_clocks(void) {
     for (unsigned i = 0; i < 2; ++i)
         for (unsigned j = 0; j < 2; ++j) {
             int order = ds_compare_source_times(ticks[2 * i + j], clock.units_per_second,
-                points[i][j].samples, points[i][j].rate, points[i][j].rate, 1);
+                                                points[i][j].samples, points[i][j].rate, points[i][j].rate, 1);
             assert(order != AZ_TIME_INVALID && order == AZ_TIME_EQUAL);
         }
     assert(!ds_axis_equal(&clock, &clock, 0)); /* no guessed mixed-bank observation window */
     const unsigned deck = 3;
     const uint64_t epoch = ds.deck[deck].current.epoch + 1;
-    struct ds_field f = {.topic = AZ_STATUS_CUES, .field = AZ_STATUS_CUES_LIVE_MEMORY,
-        .info = {.info = {AZ_AVAIL_READY, AZ_PROV_NATIVE, 9, 1}, .scope = AZ_STATUS_LOAD_SCOPE,
-                 .scope_id = epoch, .provider_id = 71, .count = 2}, .value = rows, .clock = &clock};
+    struct ds_field f = {.topic = AZ_STATUS_CUES, .field = AZ_STATUS_CUES_LIVE_MEMORY, .info = {.info = {AZ_AVAIL_READY, AZ_PROV_NATIVE, 9, 1}, .scope = AZ_STATUS_LOAD_SCOPE, .scope_id = epoch, .provider_id = 71, .count = 2}, .value = rows, .clock = &clock};
     assert(ds_publish(deck, epoch, DS_BOUNDARY, 1, &f, 1, NULL, NULL, 0, 0) == AZ_OK);
     struct ds_image pinned = {0};
     ds_image_select(&pinned, &ds.deck[deck].current, AZ_STATUS_TOPIC(AZ_STATUS_CUES));
@@ -518,9 +519,7 @@ static void test_native_cue_clocks(void) {
 }
 static void test_source_authority(void) {
     const struct ds_image *image = &ds.deck[0].current;
-    struct azstatus_native_receipt load = {.size = sizeof load, .kind = AZN_LOAD, .a = AZN_LOADED,
-        .unit = 4, .epoch = 1, .load_generation = 1, .valid = 1, .source_kind = AZ_STATUS_SOURCE_USB2,
-        .source_pin = 11};
+    struct azstatus_native_receipt load = {.size = sizeof load, .kind = AZN_LOAD, .a = AZN_LOADED, .unit = 4, .epoch = 1, .load_generation = 1, .valid = 1, .source_kind = AZ_STATUS_SOURCE_USB2, .source_pin = 11};
     ds_native_apply(&load);
     assert(last_source_pin == 11);
     const az_track_ref ref = {sizeof ref, AZ_DATA_VERSION, 1, 2, 3, 4, 0};
@@ -591,8 +590,7 @@ static void loop_seed_callback(const az_deck_status_event_v1 *event, void *user)
 }
 static void test_delayed_loop_seed(void) {
     ds.enabled = 1;
-    struct azstatus_native_receipt r = {.size = sizeof r, .kind = AZN_LOAD,
-        .a = AZN_LOADED, .valid = 1, .unit = 4, .epoch = 1, .load_generation = 1};
+    struct azstatus_native_receipt r = {.size = sizeof r, .kind = AZN_LOAD, .a = AZN_LOADED, .valid = 1, .unit = 4, .epoch = 1, .load_generation = 1};
     ds_native_apply(&r);
     const az_deck_watch_v1 watch = {sizeof watch, AZ_DATA_VERSION, 1, 0, AZ_STATUS_TOPIC(AZ_STATUS_LOOP)};
     struct loop_seed_trace trace = {0};
@@ -658,8 +656,7 @@ static void test_slip_barrier(void) {
     for (unsigned k = 0; k < sizeof native_kinds / sizeof native_kinds[0]; k++) {
         for (unsigned i = 0; i < sizeof rates / sizeof rates[0]; i++) {
             uint64_t epoch = ds.deck[0].last_epoch + 1;
-            struct azstatus_native_receipt head = {.size = sizeof head, .version = 1, .kind = AZN_LOAD,
-                .a = AZN_LOADED, .valid = 1, .unit = 4, .epoch = epoch, .load_generation = epoch};
+            struct azstatus_native_receipt head = {.size = sizeof head, .version = 1, .kind = AZN_LOAD, .a = AZN_LOADED, .valid = 1, .unit = 4, .epoch = epoch, .load_generation = epoch};
             ds_native_apply(&head);
             head.kind = AZN_MOTION;
             head.a = AZN_MOTION_SEED;
@@ -675,8 +672,7 @@ static void test_slip_barrier(void) {
             slip.b = 1;
             slip.points[0] = (struct azn_point) {AZN_COORD, 44100, 125};
             ds_native_apply(&slip);
-            az_deck_watch_v1 watch = {.size = sizeof watch, .version = AZ_DATA_VERSION,
-                .deck_mask = 1, .topics = AZ_STATUS_TOPIC(AZ_STATUS_POSITION), .position_hz = rates[i]};
+            az_deck_watch_v1 watch = {.size = sizeof watch, .version = AZ_DATA_VERSION, .deck_mask = 1, .topics = AZ_STATUS_TOPIC(AZ_STATUS_POSITION), .position_hz = rates[i]};
             az_deck_subscription handle;
             struct slip_barrier_trace trace = {.kind = public_kinds[k]};
             assert(ds_register(1, &watch, slip_barrier_callback, &trace, &handle) == AZ_OK);
@@ -730,8 +726,7 @@ static void test_slip_barrier(void) {
 }
 static void test_early_native_head(void) {
     struct ds_deck *deck = &ds.deck[0];
-    struct azstatus_native_receipt load = {.size = sizeof load, .version = 1, .kind = AZN_LOAD,
-        .a = AZN_LOADED, .valid = 1, .unit = 4, .epoch = 5, .load_generation = 7};
+    struct azstatus_native_receipt load = {.size = sizeof load, .version = 1, .kind = AZN_LOAD, .a = AZN_LOADED, .valid = 1, .unit = 4, .epoch = 5, .load_generation = 7};
     ds_native_apply(&load);
     struct azstatus_native_receipt motion = load;
     motion.kind = AZN_MOTION;
@@ -778,8 +773,7 @@ static void test_early_native_head(void) {
     motion.points[1].samples = 600;
     ds_native_apply(&motion);
     assert(deck->path_order == 4);
-    struct azstatus_native_receipt gap = {.size = sizeof gap, .version = 1, .kind = AZN_GAP,
-        .b = AZN_MOTION, .lost_topics = DS_ACTION_ROUTES | DS_PHRASE_ROUTE | AZ_STATUS_TOPIC(AZ_STATUS_PHASE)};
+    struct azstatus_native_receipt gap = {.size = sizeof gap, .version = 1, .kind = AZN_GAP, .b = AZN_MOTION, .lost_topics = DS_ACTION_ROUTES | DS_PHRASE_ROUTE | AZ_STATUS_TOPIC(AZ_STATUS_PHASE)};
     ds_native_apply(&gap);
     assert(!ds_pending_head[0].count && !ds_ready(&deck->current, AZ_STATUS_POSITION, AZ_STATUS_POSITION_HEAD));
     motion.motion_order = 7;
@@ -809,13 +803,11 @@ static void test_hot_metadata(void) {
     ds_native_epoch[deck] = load;
     ds_native_fence[deck] = epoch;
     struct azn_hot_receipt packet = {
-        .base = {.size = sizeof packet, .kind = AZN_HOT_CUES, .unit = 4, .epoch = epoch,
-                 .load_generation = load, .attempt = 5, .valid = 1, .revision = 1},
+        .base = {.size = sizeof packet, .kind = AZN_HOT_CUES, .unit = 4, .epoch = epoch, .load_generation = load, .attempt = 5, .valid = 1, .revision = 1},
         .details = {.comments = {[0] = "live comment"}, .stored_ms = {[0] = {0, 20}}},
     };
     struct azstatus_native_receipt *r = &packet.base;
-    r->hot[0] = (struct azn_hot_slot) {{AZN_COORD, 48000, 0}, {AZN_COORD, 48000, 960},
-                                      0x101112, AZN_HOT_COMMENT | AZN_HOT_AUTO_ACTIVE};
+    r->hot[0] = (struct azn_hot_slot) {{AZN_COORD, 48000, 0}, {AZN_COORD, 48000, 960}, 0x101112, AZN_HOT_COMMENT | AZN_HOT_AUTO_ACTIVE};
     ds_native_apply(r);
     const struct ds_cell *live = cell(AZ_STATUS_CUES, AZ_STATUS_CUES_LIVE_HOT);
     assert(live->info.info.provenance == AZ_PROV_NATIVE && live->info.count == 1);
@@ -842,16 +834,13 @@ static void test_cue_storage_flags(void) {
     const unsigned deck = 0;
     const uint64_t load = 20;
     const az_track_ref ref = {sizeof ref, AZ_DATA_VERSION, 7, 2, 8, 10, 0};
-    const struct ds_field binding = {AZ_STATUS_LOAD, AZ_STATUS_LOAD_TRACK,
-        {.info = {AZ_AVAIL_READY, AZ_PROV_NATIVE, 1, 1}, .scope = AZ_STATUS_LOAD_SCOPE,
-         .count = 1, .scope_id = load, .provider_id = 4}, &ref, NULL};
+    const struct ds_field binding = {AZ_STATUS_LOAD, AZ_STATUS_LOAD_TRACK, {.info = {AZ_AVAIL_READY, AZ_PROV_NATIVE, 1, 1}, .scope = AZ_STATUS_LOAD_SCOPE, .count = 1, .scope_id = load, .provider_id = 4}, &ref, NULL};
     ds.enabled = 1;
     assert(ds_publish(deck, load, DS_BOUNDARY, 1, &binding, 1, NULL, NULL, 0, 0) == AZ_OK);
     ds_native_epoch[deck] = load;
     ds_native_fence[deck] = 5;
-    struct azn_hot_receipt hot = {.base = {.size = sizeof hot, .kind = AZN_HOT_CUES, .unit = 4,
-        .epoch = 5, .load_generation = load, .attempt = 9, .valid = 1, .revision = 1},
-        .details = {.comments = {[0] = "Before"}, .stored_ms = {[0] = {1000, 0}, [7] = {2000, 0}}}};
+    struct azn_hot_receipt hot = {.base = {.size = sizeof hot, .kind = AZN_HOT_CUES, .unit = 4, .epoch = 5, .load_generation = load, .attempt = 9, .valid = 1, .revision = 1},
+                                  .details = {.comments = {[0] = "Before"}, .stored_ms = {[0] = {1000, 0}, [7] = {2000, 0}}}};
     hot.base.hot[0] = (struct azn_hot_slot) {{AZN_COORD, 44100, 44100}, {0}, 0x112233, AZN_HOT_COMMENT};
     hot.base.hot[7] = (struct azn_hot_slot) {{AZN_COORD, 48000, 96000}, {0}, 0x332211, 0};
     ds_native_apply(&hot.base);
@@ -863,9 +852,7 @@ static void test_cue_storage_flags(void) {
     saved.valid |= AZ_CUE_SAVED;
     const int64_t saved_ms[2] = {1000, 0};
     const struct ds_time_axis file_clock = {1000, saved_ms, 1, 1000, NULL};
-    struct ds_field file = {AZ_STATUS_CUES, AZ_STATUS_CUES_SAVED_HOT,
-        {.info = {AZ_AVAIL_READY, AZ_PROV_FILE, 5, 2}, .scope = AZ_STATUS_LOAD_SCOPE,
-         .count = 1, .scope_id = load, .provider_id = 8}, &saved, &file_clock};
+    struct ds_field file = {AZ_STATUS_CUES, AZ_STATUS_CUES_SAVED_HOT, {.info = {AZ_AVAIL_READY, AZ_PROV_FILE, 5, 2}, .scope = AZ_STATUS_LOAD_SCOPE, .count = 1, .scope_id = load, .provider_id = 8}, &saved, &file_clock};
     assert(ds_publish_file(deck, load, &ref, 2, &file, 1, 0, 0) == AZ_OK);
     bank = cell(AZ_STATUS_CUES, AZ_STATUS_CUES_LIVE_HOT);
     live = (const void *) bank->data;
@@ -900,9 +887,7 @@ static void test_cue_storage_flags(void) {
     memory.saved = memory.modified = -1;
     const int64_t sample_ticks[2] = {48000, 0};
     const struct ds_time_axis native_clock = {48000, sample_ticks, 1, 48000, saved_ms};
-    const struct ds_field current = {AZ_STATUS_CUES, AZ_STATUS_CUES_LIVE_MEMORY,
-        {.info = {AZ_AVAIL_READY, AZ_PROV_NATIVE, 1, 1}, .scope = AZ_STATUS_LOAD_SCOPE,
-         .count = 1, .scope_id = load, .provider_id = 11}, &memory, &native_clock};
+    const struct ds_field current = {AZ_STATUS_CUES, AZ_STATUS_CUES_LIVE_MEMORY, {.info = {AZ_AVAIL_READY, AZ_PROV_NATIVE, 1, 1}, .scope = AZ_STATUS_LOAD_SCOPE, .count = 1, .scope_id = load, .provider_id = 11}, &memory, &native_clock};
     assert(ds_publish(deck, load, DS_NATIVE_INPUT, 4, &current, 1, NULL, NULL, 0, 0) == AZ_OK);
     az_cue_entry stored[2] = {memory, memory};
     stored[0].entry_id = 7;
@@ -951,15 +936,10 @@ static void on_native_load_join(const az_deck_status_event_v1 *event, void *user
 }
 static void test_native_load_join(void) {
     ds.enabled = 1;
-    struct azstatus_native_receipt native = {.size = sizeof native, .version = 1,
-        .kind = AZN_LOAD, .deck = 0, .unit = 4, .epoch = 51, .load_generation = 701,
-        .valid = 1, .attempt = 20, .a = AZN_LOADED, .observed_ns = 1};
+    struct azstatus_native_receipt native = {.size = sizeof native, .version = 1, .kind = AZN_LOAD, .deck = 0, .unit = 4, .epoch = 51, .load_generation = 701, .valid = 1, .attempt = 20, .a = AZN_LOADED, .observed_ns = 1};
     ds_native_apply(&native);
-    az_track_ref ref = {.size = sizeof ref, .version = AZ_DATA_VERSION, .source_id = 1,
-        .source_generation = 11, .library_id = 99, .track_id = 36};
-    struct ds_field track = {AZ_STATUS_LOAD, AZ_STATUS_LOAD_TRACK,
-        {.info = {AZ_AVAIL_READY, AZ_PROV_DERIVED, 1, 1}, .scope = AZ_STATUS_LOAD_SCOPE,
-         .count = 1, .scope_id = 701, .provider_id = 55}, &ref, NULL};
+    az_track_ref ref = {.size = sizeof ref, .version = AZ_DATA_VERSION, .source_id = 1, .source_generation = 11, .library_id = 99, .track_id = 36};
+    struct ds_field track = {AZ_STATUS_LOAD, AZ_STATUS_LOAD_TRACK, {.info = {AZ_AVAIL_READY, AZ_PROV_DERIVED, 1, 1}, .scope = AZ_STATUS_LOAD_SCOPE, .count = 1, .scope_id = 701, .provider_id = 55}, &ref, NULL};
     assert(ds_publish(0, 701, 0, 1, &track, 1, NULL, NULL, 0, 0) == AZ_OK);
     struct load_join_trace trace = {.generation = 701, .track = 36};
     az_deck_watch_v1 watch = {sizeof watch, AZ_DATA_VERSION, 1, 0, AZ_STATUS_TOPIC(AZ_STATUS_LOAD)};
@@ -1008,7 +988,30 @@ static void test_native_load_join(void) {
     assert(ds_release(1, handle) == AZ_OK);
     puts("PASS native load generation joins qualified tracks across INITIAL, CHANGE and RESYNC; delayed old track publication is rejected");
 }
+#include "sdkstatus_native_fields_test.inc"
+#include "sdkstatus_native_service_test.inc"
+#include "sdkstatus_native_maps_test.inc"
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "map-clocks")) {
+        test_native_map_clocks();
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "gap-seeds")) {
+        test_native_gap_seeds();
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "service-lifecycle")) {
+        test_native_service_lifecycle();
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "unit-receipts")) {
+        test_native_unit_receipts();
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "duration-overshoot")) {
+        test_native_duration_overshoot();
+        return 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "native-load-join")) {
         test_native_load_join();
         return 0;
@@ -1174,8 +1177,7 @@ int main(int argc, char **argv) {
     double speed = 1.0;
     memcpy(&rate.points[0].samples, &speed, sizeof speed);
     ds_native_apply(&rate);
-    struct azstatus_native_receipt slip = {.size = sizeof slip, .kind = AZN_SLIP_HEAD, .deck = 0, .epoch = 42,
-        .load_generation = 9001, .unit = 4, .attempt = 18, .valid = AZ_AVAIL_EMPTY, .b = 1, .motion_generation = 4};
+    struct azstatus_native_receipt slip = {.size = sizeof slip, .kind = AZN_SLIP_HEAD, .deck = 0, .epoch = 42, .load_generation = 9001, .unit = 4, .attempt = 18, .valid = AZ_AVAIL_EMPTY, .b = 1, .motion_generation = 4};
     ds_native_apply(&slip);
     struct azstatus_native_receipt cut = {.kind = AZN_GAP, .deck = 0, .b = AZN_MOTION, .lost_topics = DS_ACTION_ROUTES | DS_PHRASE_ROUTE | AZ_STATUS_TOPIC(AZ_STATUS_PHASE)};
     ds_native_apply(&cut);
@@ -1303,7 +1305,7 @@ int main(int argc, char **argv) {
      * the physical FILE target selected by this working-copy witness. */
     assert(cell(AZ_STATUS_LOOP, AZ_STATUS_LOOP_SAVED_ENTRY)->info.info.availability == AZ_AVAIL_STALE);
     assert(cell(AZ_STATUS_CUES, AZ_STATUS_CUES_LIVE_MEMORY)->info.info.availability == AZ_AVAIL_READY);
-    assert(!strcmp(((const az_cue_entry *)cell(AZ_STATUS_CUES, AZ_STATUS_CUES_LIVE_MEMORY)->data)->comment, "held"));
+    assert(!strcmp(((const az_cue_entry *) cell(AZ_STATUS_CUES, AZ_STATUS_CUES_LIVE_MEMORY)->data)->comment, "held"));
     file_ref_valid = 1;
     atomic_store(&ds_file_refresh[0], 1);
     ds_file_loop_refresh(0);

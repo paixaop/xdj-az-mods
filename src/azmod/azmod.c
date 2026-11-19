@@ -2574,6 +2574,86 @@ static int install_library_hooks(void) {
 static void (*g_orig_setgridadj)(void *, int);
 /* Constructor phase (install_static_hooks): EP147's code is mapped before any constructor runs
  * and none of it has executed yet, so there is nothing to wait for. */
+static void install_wave_identity(void) {
+    {
+        static int reqan_installed;
+        if (!reqan_installed) {
+            reqan_installed = 1;
+            int ar = azm_install_hook(EP_c85838, (void *) reqan_hook, (void **) &g_orig_reqan);
+            dbg("reqan (identity) hook: %d\n", ar);
+        }
+    }
+}
+static void install_wave_grid(void) {
+    int dd = 0;
+    if (access("/home/root/settings/azmod-dedupe4.off", F_OK) != 0)
+        dd = azm_install_hook(WAVEVIEW_UPDATE, (void *) wvupd_hook, (void **) &g_orig_wvupd);
+    dbg("dedupe4: screen-root hook=%d\n", dd);
+    /* makeGridImage is shared: Bright Grid brightens the ticks, Day Mode themes the
+     * ruler background. Installed when either needs it; each feature's work inside
+     * gridmake_hook is gated on its own flag, so neither depends on the other
+     * (g_gridaa_hooked = Bright Grid's own switch, Day Mode reads g_dm_on). */
+    int gridaa_off = access("/home/root/settings/azmod-gridaa.off", F_OK) == 0;
+    int ga = 0;
+    if (!gridaa_off || daymode_wanted())
+        ga = azm_install_hook(GRID_MAKE, (void *) gridmake_hook, (void **) &g_orig_gridmake);
+    g_gridaa_hooked = ga == 1 && !gridaa_off;
+    dbg("gridaa: makeGridImage hook=%d\n", ga);
+}
+static int install_wave_renderers(int nowave) {
+    int wp = 0;
+    if (!nowave) {
+        azm_install_hook(SW2D_PAINT, (void *) sw2d_paint_hook,
+                         (void **) &g_orig_sw2d_paint); /* per-deck paint -> deck ctx */
+        azm_install_hook(WAVE_OVERVIEW, (void *) azm_ov_entry, (void **) &g_orig_ov);
+        /* preview/overview -> deck: the owner parks the deck, the tile ctor records
+         * (tile + 0x280) -> deck. ~4 calls each per process, never a hot path. */
+        az_install_segv(); /* backtrace on EP147 SIGSEGV; observes only */
+        azm_install_hook(OV_TILE_OWNER, (void *) tileowner_hook, (void **) &g_orig_tileowner);
+        azm_install_hook(OV_TILE_CTOR, (void *) tilector_hook, (void **) &g_orig_tilector);
+        /* Stem height scaling: the render hook (1) or the point hooks (0). */
+        wp = install_wave_scale();
+    } /* end azmod-nowave.on guard */
+    return wp;
+}
+static void install_wave_timers(void) {
+    g_scroll60_ok = access("/home/root/settings/azmod-scroll60.off", F_OK) != 0;
+    int g =
+        azm_install_hook(JUCE_STARTTIMER, (void *) starttimer_hook, (void **) &g_orig_starttimer);
+    int fl = g_scroll60_ok
+                 ? azm_install_hook(FLING_REL, (void *) flrel_hook, (void **) &g_orig_flrel)
+                 : -2;
+    int ps = g_scroll60_ok
+                 ? azm_install_hook(RM_PAINTNOW, (void *) rmpaint_hook, (void **) &g_orig_rmpaint)
+                 : -2;
+    {
+        FILE *sf = azlog_open("/tmp/azmod-scroll60.log", "w");
+        if (sf) {
+            fprintf(
+                sf,
+                "scroll60: %s starttimer=%d fling=%d paintstamp=%d rowcache+slowdrag at start=%d\n",
+                g_scroll60_ok ? "on" : "KILLED (settings/azmod-scroll60.off)", g, fl, ps,
+                ui60ui_at_start());
+            fclose(sf);
+        }
+    }
+    int rp = 0; /* the peer-repaint census is not installed (it frame-walked a 131/s path): logged as 0 */
+    int dr = azm_install_hook(DISPREFRESH_TIMERCB, (void *) disprefresh_hook,
+                              (void **) &g_orig_disprefresh);
+    int dt = 0;
+    g_feedlock_ok = access("/home/root/settings/azmod-feedlock.off", F_OK) != 0;
+    int lp = g_feedlock_ok ? azm_install_hook(LOCALPLAYER_TIMERCB, (void *) lptick_hook,
+                                              (void **) &g_orig_lptick)
+                           : -2;
+    {
+        FILE *hf = azlog_open("/tmp/azmod-hooks2", "w");
+        if (hf) {
+            fprintf(hf, "starttimer=%d peerrepaint=%d disprefresh=%d divpatch=%d feedlock=%d\n", g, rp,
+                    dr, dt, lp);
+            fclose(hf);
+        }
+    }
+}
 static void install_wavestems_hook(void) {
     int a = azm_install_hook(WAVE_SWITCH, (void *) waveswitch_hook, (void **) &g_orig_waveswitch);
     azm_install_hook(
@@ -2588,14 +2668,7 @@ static void install_wavestems_hook(void) {
     /* requestAnalyze is half of native track identity (TrackID -> path, read by
      * azstem), so it installs unconditionally; behind a diagnostic flag it would
      * silently do nothing on a clean install. */
-    {
-        static int reqan_installed;
-        if (!reqan_installed) {
-            reqan_installed = 1;
-            int ar = azm_install_hook(EP_c85838, (void *) reqan_hook, (void **) &g_orig_reqan);
-            dbg("reqan (identity) hook: %d\n", ar);
-        }
-    }
+    install_wave_identity();
     int sr = 0;
     /* stemref_hook is half of the native stem tiles (stem_tile_fix_one runs only
      * inside it; stem_tiles_poke returns without it), so it is unconditional.
@@ -2684,20 +2757,7 @@ static void install_wavestems_hook(void) {
      * the deck lookup to two pointer compares against the ctor's key table, and
      * avoids trampolining update() itself, which crashes EP147. */
     int uc = azm_install_hook(WWB_UPDATE_CALLER, (void *) azm_upd_shim, (void **) &g_orig_wavupd);
-    int dd = 0;
-    if (access("/home/root/settings/azmod-dedupe4.off", F_OK) != 0)
-        dd = azm_install_hook(WAVEVIEW_UPDATE, (void *) wvupd_hook, (void **) &g_orig_wvupd);
-    dbg("dedupe4: screen-root hook=%d\n", dd);
-    /* makeGridImage is shared: Bright Grid brightens the ticks, Day Mode themes the
-     * ruler background. Installed when either needs it; each feature's work inside
-     * gridmake_hook is gated on its own flag, so neither depends on the other
-     * (g_gridaa_hooked = Bright Grid's own switch, Day Mode reads g_dm_on). */
-    int gridaa_off = access("/home/root/settings/azmod-gridaa.off", F_OK) == 0;
-    int ga = 0;
-    if (!gridaa_off || daymode_wanted())
-        ga = azm_install_hook(GRID_MAKE, (void *) gridmake_hook, (void **) &g_orig_gridmake);
-    g_gridaa_hooked = ga == 1 && !gridaa_off;
-    dbg("gridaa: makeGridImage hook=%d\n", ga);
+    install_wave_grid();
     dbg("wavestems: wwbctor=%d wpaint=%d updcaller=%d\n", wc, wp2, uc);
     /* Probe only, off by default: hooking update() directly crashes EP147, even
      * as a fully register-preserving asm shim. Kept to re-check the binding the
@@ -2714,57 +2774,10 @@ static void install_wavestems_hook(void) {
      * crash persists, azmod's waveform code is cleared. Costs: no per-stem mini
      * waveforms, no preview/overview re-render, no tile art re-apply. Never ship
      * with it set. */
-    int wp = 0;
-    if (!nowave) {
-        azm_install_hook(SW2D_PAINT, (void *) sw2d_paint_hook,
-                         (void **) &g_orig_sw2d_paint); /* per-deck paint -> deck ctx */
-        azm_install_hook(WAVE_OVERVIEW, (void *) azm_ov_entry, (void **) &g_orig_ov);
-        /* preview/overview -> deck: the owner parks the deck, the tile ctor records
-         * (tile + 0x280) -> deck. ~4 calls each per process, never a hot path. */
-        az_install_segv(); /* backtrace on EP147 SIGSEGV; observes only */
-        azm_install_hook(OV_TILE_OWNER, (void *) tileowner_hook, (void **) &g_orig_tileowner);
-        azm_install_hook(OV_TILE_CTOR, (void *) tilector_hook, (void **) &g_orig_tilector);
-        /* Stem height scaling: the render hook (1) or the point hooks (0). */
-        wp = install_wave_scale();
-    } /* end azmod-nowave.on guard */
+    int wp = install_wave_renderers(nowave);
     int e = azm_install_hook(JUCE_SETVISIBLE, (void *) setvis_hook, (void **) &g_orig_setvis);
     int f = azm_install_hook(JUCE_REPAINT_TIMERCB, (void *) rtick_hook, (void **) &g_orig_rtick);
-    g_scroll60_ok = access("/home/root/settings/azmod-scroll60.off", F_OK) != 0;
-    int g =
-        azm_install_hook(JUCE_STARTTIMER, (void *) starttimer_hook, (void **) &g_orig_starttimer);
-    int fl = g_scroll60_ok
-                 ? azm_install_hook(FLING_REL, (void *) flrel_hook, (void **) &g_orig_flrel)
-                 : -2;
-    int ps = g_scroll60_ok
-                 ? azm_install_hook(RM_PAINTNOW, (void *) rmpaint_hook, (void **) &g_orig_rmpaint)
-                 : -2;
-    {
-        FILE *sf = azlog_open("/tmp/azmod-scroll60.log", "w");
-        if (sf) {
-            fprintf(
-                sf,
-                "scroll60: %s starttimer=%d fling=%d paintstamp=%d rowcache+slowdrag at start=%d\n",
-                g_scroll60_ok ? "on" : "KILLED (settings/azmod-scroll60.off)", g, fl, ps,
-                ui60ui_at_start());
-            fclose(sf);
-        }
-    }
-    int rp = 0; /* the peer-repaint census is not installed (it frame-walked a 131/s path): logged as 0 */
-    int dr = azm_install_hook(DISPREFRESH_TIMERCB, (void *) disprefresh_hook,
-                              (void **) &g_orig_disprefresh);
-    int dt = 0;
-    g_feedlock_ok = access("/home/root/settings/azmod-feedlock.off", F_OK) != 0;
-    int lp = g_feedlock_ok ? azm_install_hook(LOCALPLAYER_TIMERCB, (void *) lptick_hook,
-                                              (void **) &g_orig_lptick)
-                           : -2;
-    {
-        FILE *hf = azlog_open("/tmp/azmod-hooks2", "w");
-        if (hf) {
-            fprintf(hf, "starttimer=%d peerrepaint=%d disprefresh=%d divpatch=%d feedlock=%d\n", g, rp,
-                    dr, dt, lp);
-            fclose(hf);
-        }
-    }
+    install_wave_timers();
     g_wave_hooked = (d == 1) || (c == 1);
     if (e != 1)
         __atomic_store_n(&g_wave_vis, -1, __ATOMIC_RELAXED); /* stay on the fallback */
@@ -2955,53 +2968,65 @@ static int sdk_passive_sources;
 #include "sdk_connections.c"
 #include "sdk_cache_startup.c"
 #include "sdk_slip_startup.c"
+static void sdk_sources_configure_at_start(int b) {
+    if (sdk_passive_sources || (access("/home/root/settings/azmod.track-data.on", F_OK) == 0 &&
+                                access("/home/root/settings/azmod.native-sources.on", F_OK) == 0)) {
+        unsigned policy = sdk_passive_sources || access("/home/root/settings/azmod.native-source-files.on", F_OK) == 0
+                              ? AZS_CAPTURE_PHYSICAL_ON_LIBRARY_WORKER
+                              : 0u;
+        g_sdk_sources_on = azsdk_sources_configure(1, b, policy) == AZS_OK;
+    }
+}
+static void sdk_source_capture_at_start(int b) {
+    if (sdk_passive_sources) {
+        int physical = g_sdk_sources_on && azsdk_sources_physical_ready();
+        int cache = g_sdk_sources_on && azsdk_cache_capture_ready();
+        int installed = physical && cache && azjs_install(b, sdk_source_join_patch);
+        int map_installed = sdk_status_map_source_install(b, sdk_source_join_patch);
+        int save_installed = sdk_status_save_install(b, sdk_source_join_patch);
+        FILE *source_log = azlog_open("/tmp/azmod-build.log", "a");
+        if (source_log) {
+            fprintf(source_log, "[status-source] registry=%d physical=%d cache=%d capture=%d map=%d save=%d\n",
+                    g_sdk_sources_on, physical, cache, installed, map_installed, save_installed);
+            fclose(source_log);
+        }
+    }
+}
+static int azmod_bind_build(void) {
+    char md5[33];
+    long sz = 0;
+    int b = ep147_identify("/proc/self/exe", md5, &sz);
+    int ok = ep147_addr_init(b);
+    FILE *f = azlog_open("/tmp/azmod-build.log", "a");
+    if (f) {
+        fprintf(f, "[%ld] EP147 %s md5=%s size=%ld -> %s\n", (long) time(NULL),
+                ep147_build_name(b), md5, sz,
+                ok ? "mods ON" : "INERT (unknown EP147 build or incomplete address table)");
+        fclose(f);
+    }
+    if (!ok)
+        return 0; /* g_azm_inert stays 1 */
+    g_ep147_build = b;
+    ep147_late_init();
+    ep_img_init();     /* img_q: EP147's own image bounds */
+    return 1;
+}
+static void azmod_bind_sources(void) {
+    int b = g_ep147_build;
+    sdk_passive_sources = access("/home/root/settings/azmod.deck-status.off", F_OK) != 0;
+    sdk_sources_configure_at_start(b);
+    sdk_connections_at_start();
+    sdk_cache_at_start();
+    sdk_source_capture_at_start(b);
+    sdk_slip_at_start();
+    msg_thread_note(); /* Constructor is EP147's main/JUCE message thread. */
+    g_azm_inert = 0;
+}
 __attribute__((constructor)) static void azmod_init(void) {
     if (!is_ep147())
         return;
-    { /* Which EP147? Exact md5 identity; anything without a complete table stays inert. */
-        char md5[33];
-        long sz = 0;
-        int b = ep147_identify("/proc/self/exe", md5, &sz);
-        int ok = ep147_addr_init(b);
-        FILE *f = azlog_open("/tmp/azmod-build.log", "a");
-        if (f) {
-            fprintf(f, "[%ld] EP147 %s md5=%s size=%ld -> %s\n", (long) time(NULL),
-                    ep147_build_name(b), md5, sz,
-                    ok ? "mods ON" : "INERT (unknown EP147 build or incomplete address table)");
-            fclose(f);
-        }
-        if (!ok)
-            return; /* g_azm_inert stays 1 */
-        g_ep147_build = b;
-        ep147_late_init();
-        ep_img_init();     /* img_q: EP147's own image bounds */
-        sdk_passive_sources = access("/home/root/settings/azmod.deck-status.off", F_OK) != 0;
-        if (sdk_passive_sources || (access("/home/root/settings/azmod.track-data.on", F_OK) == 0 &&
-                                    access("/home/root/settings/azmod.native-sources.on", F_OK) == 0)) {
-            unsigned policy = sdk_passive_sources || access("/home/root/settings/azmod.native-source-files.on", F_OK) == 0
-                                  ? AZS_CAPTURE_PHYSICAL_ON_LIBRARY_WORKER
-                                  : 0u;
-            g_sdk_sources_on = azsdk_sources_configure(1, b, policy) == AZS_OK;
-        }
-        sdk_connections_at_start();
-        sdk_cache_at_start();
-        if (sdk_passive_sources) {
-            int physical = g_sdk_sources_on && azsdk_sources_physical_ready();
-            int cache = g_sdk_sources_on && azsdk_cache_capture_ready();
-            int installed = physical && cache && azjs_install(b, sdk_source_join_patch);
-            int map_installed = sdk_status_map_source_install(b, sdk_source_join_patch);
-            int save_installed = sdk_status_save_install(b, sdk_source_join_patch);
-            FILE *source_log = azlog_open("/tmp/azmod-build.log", "a");
-            if (source_log) {
-                fprintf(source_log, "[status-source] registry=%d physical=%d cache=%d capture=%d map=%d save=%d\n",
-                        g_sdk_sources_on, physical, cache, installed, map_installed, save_installed);
-                fclose(source_log);
-            }
-        }
-        sdk_slip_at_start();
-        msg_thread_note(); /* this constructor runs on EP147's main thread = JUCE's message thread */
-        g_azm_inert = 0;
-    }
+    if (!azmod_bind_build()) return;
+    azmod_bind_sources();
     bt_uart_recover(); /* before EP147 can open /dev/ttyS0 (synchronous, <= ~1 s) */
     install_browse_columns();  /* PREVIEW and the sub column remembered; Column Edit's columns */
     install_browse_edit();     /* Column Edit (after browse_columns.c: it hooks its layout) */

@@ -31,15 +31,24 @@ static int key_semitones(uint64_t ratio) {
     }
     return INT32_MAX;
 }
-static bool key_sample(unsigned deck, KeyProjection *p, uintptr_t address, uint64_t owner, const azsdk_load_sample before, uint64_t fault, bool seed) {
-    if (!owner || !before.load_generation || atomic_load_explicit(&(p->address), memory_order_acquire) != address ||
+static bool key_sample_owner(const KeyProjection *p, uintptr_t address, uint64_t owner, uint64_t load, uint64_t fault) {
+    if (!owner || !load || atomic_load_explicit(&(p->address), memory_order_acquire) != address ||
         atomic_load_explicit(&(p->provider), memory_order_acquire) != owner || atomic_load_explicit(&(p->fault), memory_order_acquire) != fault) return false;
-    const int step = key_semitones(word(address + 8));
-    azsdk_load_sample after = {0};
-    if (!azsdk_load_read((int) (deck), &after) || before.load_generation != after.load_generation ||
-        before.unit_generation != after.unit_generation || before.invalidation_epoch != after.invalidation_epoch ||
+    return true;
+}
+static bool key_sample_current(unsigned deck, const KeyProjection *p, uintptr_t address, uint64_t owner,
+                               const azsdk_load_sample *before, uint64_t fault, azsdk_load_sample *after) {
+    if (!azsdk_load_read((int) (deck), after) || before->load_generation != after->load_generation ||
+        before->unit_generation != after->unit_generation || before->invalidation_epoch != after->invalidation_epoch ||
         atomic_load_explicit(&(p->fault), memory_order_acquire) != fault || atomic_load_explicit(&(p->provider), memory_order_acquire) != owner ||
         atomic_load_explicit(&(p->address), memory_order_acquire) != address) return false;
+    return true;
+}
+static bool key_sample(unsigned deck, KeyProjection *p, uintptr_t address, uint64_t owner, const azsdk_load_sample before, uint64_t fault, bool seed) {
+    if (!key_sample_owner(p, address, owner, before.load_generation, fault)) return false;
+    const int step = key_semitones(word(address + 8));
+    azsdk_load_sample after = {0};
+    if (!key_sample_current(deck, p, address, owner, &before, fault, &after)) return false;
     if (seed || p->sampled_load != after.load_generation || p->last != step) {
         azstatus_native_receipt r = {0};
         r.deck = deck;
@@ -76,6 +85,27 @@ static void key_retire(unsigned deck) {
         azn_capability(deck, AZN_CAP_KEY_SHIFT, 0);
     }
 }
+static void key_replace_owner(unsigned deck, KeyProjection *p, uintptr_t address) {
+    key_retire(deck);
+    p->sampled_load = p->sampled_seed = 0;
+    p->last = INT32_MAX;
+    if (address) {
+        uint64_t n = atomic_fetch_add_explicit(&(key_incarnations), 1, memory_order_relaxed) + 1;
+        if (n && n <= AZSP_SERIAL_MAX) {
+            atomic_store_explicit(&(p->provider), AZSP_KEY | n, memory_order_release);
+            atomic_store_explicit(&(p->address), address, memory_order_release);
+            azn_capability(deck, AZN_CAP_KEY_SHIFT, 1);
+        }
+    }
+}
+static void key_seed_frame(unsigned deck, KeyProjection *p, uintptr_t address, uint64_t fault) {
+    azsdk_load_sample live = {0};
+    uint64_t seed = azn_seed_id(deck);
+    if (address && azsdk_load_read((int) (deck), &live) && (p->sampled_seed != seed || p->sampled_load != live.load_generation)) {
+        if (key_sample(deck, p, address, atomic_load_explicit(&(p->provider), memory_order_relaxed), live, fault, true))
+            p->sampled_seed = seed;
+    }
+}
 static void key_frame(unsigned deck, Slot *slot) {
     if (!atomic_load_explicit(&(key_hooked), memory_order_acquire) || !(azn_interest(deck) & AZ_STATUS_TOPIC(AZ_STATUS_KEY))) return;
     uintptr_t mt = setting_object(slot, 1), address = mt ? mt + 16 : 0;
@@ -83,24 +113,9 @@ static void key_frame(unsigned deck, Slot *slot) {
     if (atomic_flag_test_and_set_explicit(&(p->busy), memory_order_acquire)) return;
     uint64_t fault = atomic_load_explicit(&(p->fault), memory_order_acquire);
     if (address != atomic_load_explicit(&(p->address), memory_order_acquire)) {
-        key_retire(deck);
-        p->sampled_load = p->sampled_seed = 0;
-        p->last = INT32_MAX;
-        if (address) {
-            uint64_t n = atomic_fetch_add_explicit(&(key_incarnations), 1, memory_order_relaxed) + 1;
-            if (n && n <= AZSP_SERIAL_MAX) {
-                atomic_store_explicit(&(p->provider), AZSP_KEY | n, memory_order_release);
-                atomic_store_explicit(&(p->address), address, memory_order_release);
-                azn_capability(deck, AZN_CAP_KEY_SHIFT, 1);
-            }
-        }
+        key_replace_owner(deck, p, address);
     }
-    azsdk_load_sample live = {0};
-    uint64_t seed = azn_seed_id(deck);
-    if (address && azsdk_load_read((int) (deck), &live) && (p->sampled_seed != seed || p->sampled_load != live.load_generation)) {
-        if (key_sample(deck, p, address, atomic_load_explicit(&(p->provider), memory_order_relaxed), live, fault, true))
-            p->sampled_seed = seed;
-    }
+    key_seed_frame(deck, p, address, fault);
     atomic_flag_clear_explicit(&(p->busy), memory_order_release);
 }
 typedef struct KeyCapture KeyCapture;

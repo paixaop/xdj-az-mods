@@ -93,7 +93,7 @@ uintptr_t map_test_ticket_grid(uintptr_t ticket) {
                              ((uintptr_t) mf.block.bytes), (unsigned) (object_word(((uintptr_t) mf.block.bytes) + 8)),
                              ((uintptr_t) mf.output_block.bytes), ((uintptr_t) (&size))));
     MapTestResult output = {0};
-    azn_file_map_content(ticket, ((uintptr_t) mf.output_block.bytes), ((uintptr_t) (&status)), ((uintptr_t) (&output)), 0);
+    azn_invoke_map_content((void *) azn_file_grid_content_entry, ticket, ((uintptr_t) mf.output_block.bytes), ((uintptr_t) (&status)), ((uintptr_t) (&output)));
     assert(!status && output.object == ((uintptr_t) mf.grid.bytes));
     return 0;
 }
@@ -101,7 +101,7 @@ uintptr_t map_test_ticket_phrase(uintptr_t ticket) {
     MapTestResult output = {0};
     uint32_t status = 1;
     if (mf.mutate) mf.bytes.bytes[20] ^= 1;
-    azn_file_map_content(ticket, ((uintptr_t) mf.block.bytes), ((uintptr_t) (&status)), ((uintptr_t) (&output)), 1);
+    azn_invoke_map_content((void *) azn_file_phrase_content_entry, ticket, ((uintptr_t) mf.block.bytes), ((uintptr_t) (&status)), ((uintptr_t) (&output)));
     assert(!status && output.object == (mf.phrase_object ? mf.phrase_object : ((uintptr_t) mf.phrase.bytes)));
     return 0;
 }
@@ -138,6 +138,56 @@ void map_test_encoded(unsigned tag) {
     put(((uintptr_t) mf.bytes.bytes) + 12, __builtin_bswap32((uint32_t) (60)));
     put(((uintptr_t) mf.block.bytes), ((uintptr_t) mf.bytes.bytes));
     put(((uintptr_t) mf.block.bytes) + 8, (uint64_t) (64));
+}
+static unsigned map_bad_get_mode;
+static int map_bad_get(uintptr_t accessor, uintptr_t identity, uintptr_t output) {
+    assert(accessor == 808 && identity == 909);
+    if (map_bad_get_mode == 0) {
+        put(output, (uintptr_t) 0);
+        return 0;
+    }
+    put(output, (uintptr_t) mf.block.bytes);
+    return map_bad_get_mode == 2 ? 17 : 0;
+}
+static void map_get_failure_cases(void) {
+    void *original = file_map_original[2];
+    file_map_original[2] = (void *) map_bad_get;
+    int held = mf.held;
+    for (map_bad_get_mode = 0; map_bad_get_mode < 4; ++map_bad_get_mode) {
+        MapServe serving = {.kind = 0x2204, .identity = 909};
+        map_serving = &serving;
+        uintptr_t output = 0;
+        put((uintptr_t) mf.block.bytes, (uintptr_t) mf.bytes.bytes);
+        put((uintptr_t) mf.block.bytes + 8, map_bad_get_mode == 1 ? UINT64_MAX : UINT64_C(64));
+        int rc = file_map_get_grid(808, 909, (uintptr_t) &output);
+        assert(rc == (map_bad_get_mode == 2 ? 17 : 0));
+        assert(serving.getters == 1 && serving.accessor == 808 && !serving.tokens[0]);
+        if (map_bad_get_mode == 0) assert(serving.observed && !serving.bad && !serving.wire.size);
+        if (map_bad_get_mode == 1) assert(serving.bad && !serving.observed);
+        if (map_bad_get_mode == 2) assert(serving.observed && !serving.bad);
+        if (map_bad_get_mode == 3) assert(serving.observed && serving.bad); /* no observed atom */
+        assert(mf.held == held && !file_map_inputs);
+        map_serving = NULL;
+    }
+    file_map_original[2] = original;
+}
+static void map_route_failure_cases(void) {
+    Object query = {0}, response = {0};
+    for (unsigned seq = 107; seq < 109; ++seq) {
+        map_test_message(&query, 0x2204, seq);
+        map_test_message(&response, 0x4602, seq);
+        uintptr_t q = (uintptr_t) query.bytes, r = (uintptr_t) response.bytes;
+        file_map_transport(AZN_FILE_SEND, q, 0);
+        MapRoute *route = &map_routes[seq % 32];
+        assert(route->phase == FileSent);
+        /* Observations at the opposite endpoint cannot invalidate a route. */
+        file_map_transport(AZN_FILE_CLIENT, q, 0);
+        file_map_transport(AZN_FILE_SERVER, r, 0);
+        assert(route->phase == FileSent);
+        if (seq == 107) file_map_transport(AZN_FILE_SERVER, q, 0); /* skipped wire */
+        else file_map_transport(AZN_FILE_WIRE, r, 0); /* unsolicited response */
+        assert(!route->phase && !route->tokens[0]);
+    }
 }
 void map_adapter_cases(int build, const struct azn_file_cue_callbacks *common) {
     __auto_type prior = atomic_load_explicit(&(file_callbacks), memory_order_seq_cst);
@@ -235,6 +285,8 @@ void map_adapter_cases(int build, const struct azn_file_cue_callbacks *common) {
     file_map_transport(AZN_FILE_SEND, ((uintptr_t) first_query.bytes), 0);
     file_map_transport(AZN_FILE_SEND, ((uintptr_t) first_query.bytes), 0);
     assert(!map_routes[106 % 32].phase);
+    map_get_failure_cases();
+    map_route_failure_cases();
     for (unsigned r_index = 0; r_index < sizeof(map_routes) / sizeof(map_routes)[0]; ++r_index) {
         MapRoute *r = &(map_routes[r_index]);
         map_retire(r);

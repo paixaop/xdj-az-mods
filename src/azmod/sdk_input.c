@@ -110,6 +110,22 @@ static void sdk_strike(cm_mod *c, unsigned *strikes, int *off, const char *what)
 }
 
 /* ---- registration (from init() only) ------------------------------------------------- */
+static const char *sdk_frame_refusal(unsigned buses, unsigned known, az_frame_fn fn) {
+    if (!g_sdk_in_init) return "only from init()";
+    if (!fn) return "no function";
+    return !buses || (buses & ~known) ? "unknown bus in the mask" : NULL;
+}
+static int sdk_frame_reuse(cm_mod *c, unsigned mask, az_frame_fn fn, void *user, int count) {
+    for (int i = 0; i < count; i++) {
+        struct sdk_filter *ff = &g_sdk_ff[i];
+        if (ff->c != c || ff->mask != mask || !__atomic_load_n(&ff->gone, __ATOMIC_ACQUIRE)) continue;
+        ff->fn = fn;
+        ff->user = user;
+        __atomic_store_n(&ff->gone, 0, __ATOMIC_RELEASE);
+        return 1;
+    }
+    return 0;
+}
 static int cm_frame_filter(const char *id, unsigned bus_mask, az_frame_fn fn, void *user) {
     cm_mod *c = cm_self(id, CM_RA(), "frame_filter");
     if (!c)
@@ -118,24 +134,15 @@ static int cm_frame_filter(const char *id, unsigned bus_mask, az_frame_fn fn, vo
     const unsigned known = (1u << AZ_BUS_ERP_LED) | (1u << AZ_BUS_ERP_IN) |
                            (1u << AZ_BUS_MIXER_IN) | (1u << AZ_BUS_MIXER_LED) |
                            (1u << AZ_BUS_DECK_IN);
-    if (!g_sdk_in_init || !fn || !buses || (buses & ~known)) {
-        cm_logf(c, 1, "frame_filter refused: %s",
-                !g_sdk_in_init ? "only from init()" : !fn ? "no function"
-                                                          : "unknown bus in the mask");
+    const char *refusal = sdk_frame_refusal(buses, known, fn);
+    if (refusal) {
+        cm_logf(c, 1, "frame_filter refused: %s", refusal);
         return -1;
     }
     int n = __atomic_load_n(&g_sdk_ff_n, __ATOMIC_RELAXED);
-    /* turned on again after a live stop: its old filter on the same buses takes the new function.
-     * The bus thread reads fn and user only through cm_enter, which fails until init() returns. */
-    for (int i = 0; i < n; i++) {
-        struct sdk_filter *ff = &g_sdk_ff[i];
-        if (ff->c == c && ff->mask == bus_mask && __atomic_load_n(&ff->gone, __ATOMIC_ACQUIRE)) {
-            ff->fn = fn;
-            ff->user = user;
-            __atomic_store_n(&ff->gone, 0, __ATOMIC_RELEASE);
-            return 0;
-        }
-    }
+    /* A restarted mod reuses its bus registration. cm_enter keeps its callback
+     * unavailable until init has completed. */
+    if (sdk_frame_reuse(c, bus_mask, fn, user, n)) return 0;
     if (n >= SDK_FILTER_MAX) {
         cm_logf(c, 1, "frame_filter refused: %d filters are registered already", SDK_FILTER_MAX);
         return -1;
@@ -175,6 +182,11 @@ static int cm_touch_filter(const char *id, az_touch_fn fn, void *user) {
 
 /* ---- frame dispatch (bus threads) ----------------------------------------------------- */
 
+static int sdk_filter_enter(struct sdk_filter *ff, unsigned bit) {
+    return (ff->mask & bit) && !__atomic_load_n(&ff->off, __ATOMIC_ACQUIRE) &&
+           !__atomic_load_n(&ff->gone, __ATOMIC_ACQUIRE) && cm_enter(ff->c);
+}
+
 /* Run the editing filters of `bus` over the frame. Returns 0 if none ran, 1 if any ran (the
  * caller re-stamps the CRC), 2 if one returned AZ_FRAME_EATEN (the chain stopped there). */
 static int sdk_filter_run(int bus, unsigned char *f, int len) {
@@ -184,9 +196,7 @@ static int sdk_filter_run(int bus, unsigned char *f, int len) {
     int n = __atomic_load_n(&g_sdk_ff_n, __ATOMIC_ACQUIRE), ran = 0;
     for (int i = 0; i < n; i++) {
         struct sdk_filter *ff = &g_sdk_ff[i];
-        if (!(ff->mask & bit) || (ff->mask & AZ_FILTER_RAW) ||
-            __atomic_load_n(&ff->off, __ATOMIC_ACQUIRE) || __atomic_load_n(&ff->gone, __ATOMIC_ACQUIRE) ||
-            !cm_enter(ff->c))
+        if ((ff->mask & AZ_FILTER_RAW) || !sdk_filter_enter(ff, bit))
             continue;
         g_cm_in_frame = 1;
         uint64_t t0 = sdk_ticks();
@@ -202,6 +212,11 @@ static int sdk_filter_run(int bus, unsigned char *f, int len) {
     return ran;
 }
 
+static int sdk_filter_observe_enter(struct sdk_filter *ff, unsigned bit, int every_filter) {
+    if (!every_filter && !(ff->mask & AZ_FILTER_RAW)) return 0;
+    return sdk_filter_enter(ff, bit);
+}
+
 /* Hand filters a read-only copy of the frame. With every_filter = 0, only the AZ_FILTER_RAW
  * filters of `bus` (input as it arrived, before the core edits it); with 1, every filter of a
  * bus mods may only observe (the deck MCU buses, the mixer LED frame). */
@@ -214,9 +229,7 @@ static void sdk_filter_copy(int bus, const unsigned char *f, int len, int every_
     int m = len < SDK_FRAME_MAX ? len : SDK_FRAME_MAX, copied = 0;
     for (int i = 0; i < n; i++) {
         struct sdk_filter *ff = &g_sdk_ff[i];
-        if (!(ff->mask & bit) || (!every_filter && !(ff->mask & AZ_FILTER_RAW)) ||
-            __atomic_load_n(&ff->off, __ATOMIC_ACQUIRE) || __atomic_load_n(&ff->gone, __ATOMIC_ACQUIRE) ||
-            !cm_enter(ff->c))
+        if (!sdk_filter_observe_enter(ff, bit, every_filter))
             continue;
         if (!copied) {
             memcpy(copy, f, (size_t) m);
@@ -259,57 +272,62 @@ static int sdk_touch_decide(const az_touch *t) {
     return -1;
 }
 
-/* One read() of the touch panel's input events: track contact 0, offer a new touch to the
- * filters, send the owner every report while it holds the touch, and blank the events EP147
- * would have seen. */
-static void sdk_touch_read(void *buf, ssize_t r) {
-    if (r <= 0 || !__atomic_load_n(&g_sdk_tf_n, __ATOMIC_ACQUIRE))
+static void sdk_touch_position(const struct input_event *e) {
+    if (e->code == ABS_MT_SLOT) {
+        g_sdk_touch_slot = e->value;
         return;
+    }
+    if (g_sdk_touch_slot != 0) return;
+    switch (e->code) {
+    case ABS_MT_POSITION_X: g_sdk_touch_x = e->value; break;
+    case ABS_MT_POSITION_Y: g_sdk_touch_y = e->value; break;
+    case ABS_MT_TRACKING_ID: g_sdk_touch_down = e->value >= 0; break;
+    }
+}
+static void sdk_touch_deliver(const az_touch *t) {
+    struct sdk_touch_filter *tf = &g_sdk_tf[g_sdk_touch_owner];
+    if (__atomic_load_n(&tf->off, __ATOMIC_ACQUIRE) || __atomic_load_n(&tf->gone, __ATOMIC_ACQUIRE) ||
+        !cm_enter(tf->c)) return;
+    g_cm_in_frame = 1;
+    uint64_t t0 = sdk_ticks();
+    tf->fn(t, tf->user);
+    if (compare_timestamps(sdk_elapsed_ticks(t0, sdk_ticks()), g_sdk_budget_ticks, 1, 1, 1) == AZ_TIME_AFTER)
+        sdk_strike(tf->c, &tf->strikes, &tf->off, "touch filter");
+    g_cm_in_frame = 0;
+    cm_leave(tf->c);
+}
+static void sdk_touch_report(void) {
+    az_touch t = {0, g_sdk_touch_x, g_sdk_touch_y, g_sdk_touch_down};
+    if (t.down && !g_sdk_touch_decided) {
+        g_sdk_touch_owner = sdk_touch_decide(&t);
+        g_sdk_touch_decided = 1;
+    } else if (g_sdk_touch_owner >= 0) {
+        /* A disabled owner is not called, but still owns this touch through lift. */
+        sdk_touch_deliver(&t);
+    }
+}
+static void sdk_touch_event(const struct input_event *e) {
+    if (e->type == EV_ABS) sdk_touch_position(e);
+    else if (e->type == EV_KEY && e->code == BTN_TOUCH) g_sdk_touch_down = e->value != 0;
+    else if (e->type == EV_SYN && e->code == SYN_REPORT) sdk_touch_report();
+}
+static void sdk_touch_blank(struct input_event *ev, int n) {
+    if (g_sdk_touch_owner < 0) return;
+    for (int i = 0; i < n; i++) {
+        ev[i].type = EV_SYN;
+        ev[i].code = SYN_REPORT;
+        ev[i].value = 0;
+    }
+}
+/* One read of panel events. Offer only the first contact; an owned touch remains
+ * blanked through its release even if its mod has stopped meanwhile. */
+static void sdk_touch_read(void *buf, ssize_t r) {
+    if (r <= 0 || !__atomic_load_n(&g_sdk_tf_n, __ATOMIC_ACQUIRE)) return;
     struct input_event *ev = buf;
     int n = (int) (r / (ssize_t) sizeof *ev);
-    for (int i = 0; i < n; i++) {
-        struct input_event *e = &ev[i];
-        if (e->type == EV_ABS) {
-            if (e->code == ABS_MT_SLOT)
-                g_sdk_touch_slot = e->value;
-            else if (g_sdk_touch_slot == 0 && e->code == ABS_MT_POSITION_X)
-                g_sdk_touch_x = e->value;
-            else if (g_sdk_touch_slot == 0 && e->code == ABS_MT_POSITION_Y)
-                g_sdk_touch_y = e->value;
-            else if (g_sdk_touch_slot == 0 && e->code == ABS_MT_TRACKING_ID)
-                g_sdk_touch_down = e->value >= 0;
-        } else if (e->type == EV_KEY && e->code == BTN_TOUCH) {
-            g_sdk_touch_down = e->value != 0;
-        } else if (e->type == EV_SYN && e->code == SYN_REPORT) {
-            az_touch t = {0, g_sdk_touch_x, g_sdk_touch_y, g_sdk_touch_down};
-            if (t.down && !g_sdk_touch_decided) { /* decided once, when the finger lands */
-                g_sdk_touch_owner = sdk_touch_decide(&t);
-                g_sdk_touch_decided = 1;
-            } else if (g_sdk_touch_owner >= 0) {
-                /* The owner keeps the touch whatever it returns, and EP147 never gets the rest
-                 * of it (no half touches). An owner switched off meanwhile, or whose mod is no
-                 * longer loaded, is not called again; its touch stays blanked until it lifts. */
-                struct sdk_touch_filter *tf = &g_sdk_tf[g_sdk_touch_owner];
-                if (!__atomic_load_n(&tf->off, __ATOMIC_ACQUIRE) && !__atomic_load_n(&tf->gone, __ATOMIC_ACQUIRE) &&
-                    cm_enter(tf->c)) {
-                    g_cm_in_frame = 1;
-                    uint64_t t0 = sdk_ticks();
-                    tf->fn(&t, tf->user);
-                    if (compare_timestamps(sdk_elapsed_ticks(t0, sdk_ticks()), g_sdk_budget_ticks, 1, 1, 1) == AZ_TIME_AFTER)
-                        sdk_strike(tf->c, &tf->strikes, &tf->off, "touch filter");
-                    g_cm_in_frame = 0;
-                    cm_leave(tf->c);
-                }
-            }
-        }
-    }
-    if (g_sdk_touch_owner >= 0)
-        for (int i = 0; i < n; i++) { /* EP147 sees only empty reports for a taken touch */
-            ev[i].type = EV_SYN;
-            ev[i].code = SYN_REPORT;
-            ev[i].value = 0;
-        }
-    if (!g_sdk_touch_down) { /* lifted: the next touch is offered again */
+    for (int i = 0; i < n; i++) sdk_touch_event(&ev[i]);
+    sdk_touch_blank(ev, n);
+    if (!g_sdk_touch_down) {
         g_sdk_touch_owner = -1;
         g_sdk_touch_decided = 0;
     }

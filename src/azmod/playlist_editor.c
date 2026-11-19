@@ -1786,14 +1786,24 @@ static void pst_tick(void) {
     if (due && !plrenew_kick())
         pst_log("STOCK sync: no renewal handler to wake the library thread\n");
 }
-static void mlserver_onmsg_hook(void *server, void *msg, unsigned param) {
-    struct pst_scope pst_sc __attribute__((cleanup(pst_scope_end))) = {t_pst_server, t_pst_slots};
-    t_pst_server = (uintptr_t) server;
-    t_pst_slots = 0;
-    if (__atomic_load_n(&g_pst_armed, __ATOMIC_ACQUIRE))
-        pst_lib_service(server); /* a stock write's export.pdb sync, due on this stick */
-    if (g_sm_on || __atomic_load_n(&g_rs_on, __ATOMIC_RELAXED))
-        mm_note(server);
+static void mv_log_result(FILE *lg) {
+    if (lg) {
+        if (g_mv.op == MV_OP_TARGET)
+            fprintf(lg, "TARGET pl=%u rc=%d\n", g_mv.pl, g_mv.rc);
+        else if (g_mv.op == MV_OP_ADD)
+            fprintf(lg, "ADD pl=%u cid=%u rc=%d%s\n", g_mv.pl, g_mv.cid, g_mv.rc,
+                    g_mv.rc == 0 ? " (appended and read back)" : " (NOTHING WRITTEN)");
+        else if (g_mv.op == MV_OP_REMOVE)
+            fprintf(lg, "REMOVE pl=%u cid=%u seq %u rc=%d%s\n", g_mv.pl, g_mv.cid, g_mv.from,
+                    g_mv.rc, g_mv.rc == 0 ? " (removed and read back)" : " (NOTHING WRITTEN)");
+        else
+            fprintf(lg, "COMMIT pl=%u cid=%u %u->%u rc=%d%s\n", g_mv.pl, g_mv.cid, g_mv.from,
+                    g_mv.to, g_mv.rc,
+                    g_mv.rc == 0 ? " (written and read back)" : " (NOTHING WRITTEN)");
+        fclose(lg);
+    }
+}
+static void mv_service_armed(void *server) {
     int want = MV_ARMED;
     uintptr_t c_svc = 0, c_lib = 0, c_db = 0;
     unsigned c_media = 0;
@@ -1808,25 +1818,21 @@ static void mlserver_onmsg_hook(void *server, void *msg, unsigned param) {
         t_pst_own++; /* our own edit syncs export.pdb itself (mv_pdb_sync) */
         g_mv.rc = mv_execute(server, lg);
         t_pst_own--;
-        if (lg) {
-            if (g_mv.op == MV_OP_TARGET)
-                fprintf(lg, "TARGET pl=%u rc=%d\n", g_mv.pl, g_mv.rc);
-            else if (g_mv.op == MV_OP_ADD)
-                fprintf(lg, "ADD pl=%u cid=%u rc=%d%s\n", g_mv.pl, g_mv.cid, g_mv.rc,
-                        g_mv.rc == 0 ? " (appended and read back)" : " (NOTHING WRITTEN)");
-            else if (g_mv.op == MV_OP_REMOVE)
-                fprintf(lg, "REMOVE pl=%u cid=%u seq %u rc=%d%s\n", g_mv.pl, g_mv.cid, g_mv.from,
-                        g_mv.rc, g_mv.rc == 0 ? " (removed and read back)" : " (NOTHING WRITTEN)");
-            else
-                fprintf(lg, "COMMIT pl=%u cid=%u %u->%u rc=%d%s\n", g_mv.pl, g_mv.cid, g_mv.from,
-                        g_mv.to, g_mv.rc,
-                        g_mv.rc == 0 ? " (written and read back)" : " (NOTHING WRITTEN)");
-            fclose(lg);
-        }
+        mv_log_result(lg);
         if (g_mv.rc == 0 && mv_op_writes(g_mv.op))
             mv_pdb_sync(server); /* Device Library follows the edit */
         __atomic_store_n(&g_mv_state, MV_DONE, __ATOMIC_RELEASE);
     }
+}
+static void mlserver_onmsg_hook(void *server, void *msg, unsigned param) {
+    struct pst_scope pst_sc __attribute__((cleanup(pst_scope_end))) = {t_pst_server, t_pst_slots};
+    t_pst_server = (uintptr_t) server;
+    t_pst_slots = 0;
+    if (__atomic_load_n(&g_pst_armed, __ATOMIC_ACQUIRE))
+        pst_lib_service(server); /* a stock write's export.pdb sync, due on this stick */
+    if (g_sm_on || __atomic_load_n(&g_rs_on, __ATOMIC_RELAXED))
+        mm_note(server);
+    mv_service_armed(server);
     fc_refresh_service(server); /* a FOLDER-view copy landed on this stick: re-list it */
     if (__atomic_load_n(&g_ls_armed, __ATOMIC_ACQUIRE)) {
         t_pst_own++;        /* the spool syncs export.pdb itself (ls_pdb_sync) */

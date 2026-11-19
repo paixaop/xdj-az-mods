@@ -2288,31 +2288,39 @@ static int ov_deck_via_tile(long self) {
 static _Atomic int g_ovprobe = 12;
 static struct azov_lease_api g_ovlease;
 static int g_ovlease_bound;
+static int ov_lease_compatible(const struct azov_lease_api *api) {
+    return api->struct_size == sizeof *api && api->abi_version == AZOV_LEASE_ABI &&
+           !api->reserved && api->begin && api->install && api->finish;
+}
+static int ov_lease_query(void) {
+    int (*query)(uint32_t, struct azov_lease_api *, size_t) = NULL;
+    *(void **) &query = dlsym(RTLD_DEFAULT, "azstem_overview_lease_v1");
+    if (!query) return OV_LEASE_MISSING;
+    struct azov_lease_api api = {0};
+    if (!query(AZOV_LEASE_ABI, &api, sizeof api)) return OV_LEASE_QUERY_REJECTED;
+    if (!ov_lease_compatible(&api)) return OV_LEASE_INCOMPATIBLE;
+    if (api.flags == AZOV_LEASE_PROFILE_UNAVAILABLE) return OV_LEASE_PROFILE_UNAVAILABLE;
+    if (api.flags) return OV_LEASE_INCOMPATIBLE;
+    g_ovlease = api;
+    return OV_LEASE_READY;
+}
 static int ov_lease_bind(void) {
     if (!g_ovlease_bound) {
         g_ovlease_bound = 1; /* Message thread only; older helpers render stock. */
-        int (*query)(uint32_t, struct azov_lease_api *, size_t) = NULL;
-        *(void **) &query = dlsym(RTLD_DEFAULT, "azstem_overview_lease_v1");
-        struct azov_lease_api api = {0};
-        int binding = OV_LEASE_MISSING;
-        if (query) {
-            binding = OV_LEASE_QUERY_REJECTED;
-            if (query(AZOV_LEASE_ABI, &api, sizeof api)) {
-                binding = OV_LEASE_INCOMPATIBLE;
-                if (api.struct_size == sizeof api && api.abi_version == AZOV_LEASE_ABI &&
-                    !api.reserved && api.begin && api.install && api.finish) {
-                    if (api.flags == AZOV_LEASE_PROFILE_UNAVAILABLE)
-                        binding = OV_LEASE_PROFILE_UNAVAILABLE;
-                    else if (!api.flags) {
-                        g_ovlease = api;
-                        binding = OV_LEASE_READY;
-                    }
-                }
-            }
-        }
-        __atomic_store_n(&g_ov_bind_status, binding, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_ov_bind_status, ov_lease_query(), __ATOMIC_RELEASE);
     }
     return g_ovlease.begin != NULL;
+}
+static int ov_owned_slot(long self) {
+    int n = __atomic_load_n(&g_ovi_n, __ATOMIC_ACQUIRE);
+    for (int i = 0; i < n; i++)
+        if (g_ovi[i].self == self) return i;
+    if (n >= OVINST_MAX) return -1;
+    g_ovi[n].self = self;
+    g_ovi[n].content = 0;
+    g_ovi[n].deck = -1;
+    __atomic_store_n(&g_ovi_n, n + 1, __ATOMIC_RELEASE);
+    return n;
 }
 struct ov_lease_scope {
     uint64_t token[2];
@@ -2352,19 +2360,7 @@ static void ov_hook_owned(long self, uintptr_t held, uintptr_t native_return, ui
                 (unsigned long) content, (unsigned long) (self - OV_IN_TILE), ov_deck_via_tile(self),
                 __atomic_load_n(&g_ovtile_n, __ATOMIC_RELAXED));
     }
-    int n = __atomic_load_n(&g_ovi_n, __ATOMIC_ACQUIRE), slot = -1;
-    for (int i = 0; i < n; i++)
-        if (g_ovi[i].self == self) {
-            slot = i;
-            break;
-        }
-    if (slot < 0 && n < OVINST_MAX) {
-        slot = n;
-        g_ovi[n].self = self;
-        g_ovi[n].content = 0;
-        g_ovi[n].deck = -1;
-        __atomic_store_n(&g_ovi_n, n + 1, __ATOMIC_RELEASE);
-    }
+    int slot = ov_owned_slot(self);
     if (slot < 0 || !content) {
         g_orig_ov(self);
         return;
@@ -2443,27 +2439,21 @@ static void wave_repaint_if_needed(void) {
  * census, not by which widgets drew last: an overview renders once per track
  * load into a cached image, so earlier-loaded decks never draw again. Content
  * pointers are re-read live, so track changes are picked up too. */
+static void ov_refresh_tile(int tile, int decks) {
+    /* A nonzero weak slot still names a live widget on the message thread. */
+    long self = (long) wref_get(&g_ovtile_w[tile]);
+    int deck = g_ovtile[tile].deck;
+    if (!self || deck < 0 || deck >= AZMOD_STEM_DECKS || !(decks & (1 << deck))) return;
+    unsigned vt = 0;
+    if (!own_u32((uintptr_t) self, &vt) || vt != (unsigned) OV_WIDGET_VT) return;
+    if (ov_slot_for(self, deck) < 0) return;
+    /* This path has no owning Content boundary: retain stock rendering. */
+    ov_repaint(self);
+}
 static void ov_refresh_if_needed(void) {
     int decks = __atomic_exchange_n(&g_ov_refresh, 0, __ATOMIC_ACQ_REL);
     if (!decks)
         return;
     int nt = __atomic_load_n(&g_ovtile_n, __ATOMIC_RELAXED);
-    for (int t = 0; t < nt; t++) {
-        /* Tile widgets are torn down on a view change; the widget's destructor clears its
-         * wref slot, so a non-zero slot here (message thread) is a live widget. */
-        long self = (long) wref_get(&g_ovtile_w[t]);
-        int deck = g_ovtile[t].deck;
-        if (!self || deck < 0 || deck >= AZMOD_STEM_DECKS || !(decks & (1 << deck)))
-            continue;
-        {
-            unsigned vt = 0;
-            if (!own_u32((uintptr_t) self, &vt) || vt != (unsigned) OV_WIDGET_VT)
-                continue;
-        }
-        if (ov_slot_for(self, deck) < 0)
-            continue;
-        /* The native renderer handles absent/empty analysis. The refresh path has no
-         * owning Content boundary of its own and must not preflight that borrowed slot. */
-        ov_repaint(self); /* Manual refresh uses the stock native renderer. */
-    }
+    for (int t = 0; t < nt; t++) ov_refresh_tile(t, decks);
 }

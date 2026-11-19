@@ -23,7 +23,7 @@ static int init(const az_core_v1 *core) {
     if (!AZ_LIB_HAS(lib, on_deck_status) || !AZ_LIB_HAS(lib, deck_status_release)) return -1;
     const az_deck_watch_v1 watch = {sizeof watch, AZ_DATA_VERSION, 2, 0, AZ_STATUS_TOPIC(AZ_STATUS_LOOP)};
     az_deck_subscription untouched = 123;
-    if (lib->on_deck_status(ID, &watch, (az_deck_status_fn)(uintptr_t)&handle, NULL, &untouched) != AZ_INVALID ||
+    if (lib->on_deck_status(ID, &watch, (az_deck_status_fn) (uintptr_t) &handle, NULL, &untouched) != AZ_INVALID ||
         untouched != 123) return -1;
     return lib->on_deck_status(ID, &watch, changed, &handle, &handle) == AZ_OK ? 0 : -1;
 }

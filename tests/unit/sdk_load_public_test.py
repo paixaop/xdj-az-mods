@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Public load receipt regression; --native also uses real native-entry dispatch."""
 from pathlib import Path
+from sdk_deck_extract import projection
 import os
 import re
 import subprocess
@@ -15,7 +16,7 @@ def fn(text, name):
 with tempfile.TemporaryDirectory(prefix='az-sdk-public-load-') as tmp:
     out = Path(tmp)
     deck = (root / 'src/azmod/sdk_deck.c').read_text()
-    (out / 'deck.inc').write_text(fn(deck, 'sd_bind') + fn(deck, 'sd_native_load_read') + fn(deck, 'sd_native_cue_read') + fn(deck, 'sd_live_fields') + fn(deck, 'sd_deck_snapshot_v1'))
+    (out / 'deck.inc').write_text(projection(deck, include_bind=True))
     common = ['-O1', '-g', '-Wall', '-Wextra', '-Werror', '-pthread',
               '-Wno-unused-function', '-Wno-unused-variable', '-I' + str(root / 'src/azmod'),
               '-I' + str(root / 'src/common')]

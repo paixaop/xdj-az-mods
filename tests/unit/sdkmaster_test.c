@@ -18,7 +18,10 @@
 #include <string.h>
 #define AZMOD_STEM_DECKS 4
 static FILE *azlog_open(const char *path, const char *mode) {
-    (void) path; (void) mode; errno = EIO; return NULL;
+    (void) path;
+    (void) mode;
+    errno = EIO;
+    return NULL;
 }
 static uint64_t clock_ns = 1000000000;
 static int clock_ok = 1;
@@ -33,10 +36,13 @@ static int test_clock_gettime(clockid_t id, struct timespec *out) {
 #endif
 static int test_install(uintptr_t, void *, void **);
 #define MASTER_EXCHANGED ((uintptr_t) 0xaabb78)
-#define azm_install_hook(target,hook,out) test_install(target,hook,out)
+#define azm_install_hook(target, hook, out) test_install(target, hook, out)
 #define clock_gettime test_clock_gettime
-static void ds_master_capture(uint64_t revision,uint64_t observed,int master,int captured) {
-    (void)revision; (void)observed; (void)master; (void)captured;
+static void ds_master_capture(uint64_t revision, uint64_t observed, int master, int captured) {
+    (void) revision;
+    (void) observed;
+    (void) master;
+    (void) captured;
 }
 #include MASTER_INC
 #undef clock_gettime
@@ -53,9 +59,14 @@ static _Atomic(azstem_live_observer_mask_v1_fn) g_sd_live_mask;
 static _Atomic(azstem_sync_observation_v1_fn) g_sd_sync_observation;
 static _Atomic(azstem_tempo_lock_observation_v1_fn) g_sd_tempo_lock_observation;
 static int cm_tempo_read(int d, double *bpm, uint64_t *generation, uint64_t *revision, uint64_t *ns) {
-    (void) d; *bpm = 0; *generation = *revision = *ns = 0; return 0;
+    (void) d;
+    *bpm = 0;
+    *generation = *revision = *ns = 0;
+    return 0;
 }
-static struct { int ok; } g_sdk_sq;
+static struct {
+    int ok;
+} g_sdk_sq;
 static uint64_t sdk_command_capabilities(void) { return 0; }
 #include DECK_DATA_INC
 static unsigned calls;
@@ -72,7 +83,8 @@ static long original(void *self, void *id) {
         event(&newer);
         expected_id = saved_id;
     }
-    errno = EDOM; return 12345;
+    errno = EDOM;
+    return 12345;
 }
 static int install_result = -1, install_null;
 static int test_install(uintptr_t target, void *hook, void **out) {
@@ -86,7 +98,8 @@ static int supported(void) {
     return !!(c.live_fields & AZ_LIVE_MASTER);
 }
 static void event(void *id) {
-    expected_self = &calls; expected_id = id;
+    expected_self = &calls;
+    expected_id = id;
     assert(master_xm_hook(expected_self, id) == 12345);
     assert(errno == EDOM);
     ++clock_ns;
@@ -123,12 +136,20 @@ int main(void) {
     g_orig_master_xm = original;
     assert(!(sd_live_fields() & AZ_LIVE_MASTER));
     for (int d = 0; d < 4; ++d) assert(!(snapshot(d).valid & AZ_LIVE_MASTER));
-    install_master_hook();assert(!supported());
-    install_result = 1;install_null = 1;install_master_hook();assert(!supported());
-    install_null = 0;install_master_hook();
-    puts("master native hook installed, before any receipt");fflush(stdout);
+    install_master_hook();
+    assert(!supported());
+    install_result = 1;
+    install_null = 1;
+    install_master_hook();
+    assert(!supported());
+    install_null = 0;
+    install_master_hook();
+    puts("master native hook installed, before any receipt");
+    fflush(stdout);
     assert(supported() && "registered master support must not require a current master receipt");
-    install_result = -1;install_master_hook();assert(supported()); /* A refusal does not undo an existing hook. */
+    install_result = -1;
+    install_master_hook();
+    assert(supported()); /* A refusal does not undo an existing hook. */
     for (int d = 0; d < 4; ++d) {
         az_deck_snapshot empty = snapshot(d);
         assert(!(empty.valid & AZ_LIVE_MASTER) && empty.master == -1 && !empty.master_revision && !empty.master_observed_ns);
@@ -147,7 +168,8 @@ int main(void) {
     }
     const uint64_t bad[] = {0, 2, (UINT64_C(4) << 32) | 1, (UINT64_C(0xfffe) << 32) | 1};
     for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; ++i) {
-        uint64_t id = bad[i]; event(&id);
+        uint64_t id = bad[i];
+        event(&id);
         for (int d = 0; d < 4; ++d) {
             az_deck_snapshot s = snapshot(d);
             assert(!(s.valid & AZ_LIVE_MASTER) && s.master == -1);
@@ -159,7 +181,8 @@ int main(void) {
     assert(calls == 9);
     event((void *) 1); /* Refused address, never dereferenced. */
     assert(!(snapshot(0).valid & AZ_LIVE_MASTER));
-    uint64_t id = 1; event(&id);
+    uint64_t id = 1;
+    event(&id);
     g_st_enabled = 0;
     assert(!supported());
     assert(!(snapshot(0).valid & AZ_LIVE_MASTER));
@@ -184,28 +207,34 @@ int main(void) {
     assert(snapshot(3).valid & AZ_LIVE_MASTER);
     /* Failed/backwards clocks clear the public value, and the later clock must
      * advance past the last sampled boundary before the receipt can recover. */
-    clock_ok = 0; event(&id);
+    clock_ok = 0;
+    event(&id);
     assert(!(snapshot(3).valid & AZ_LIVE_MASTER));
     clock_ok = 1;
     uint64_t saved_ns = clock_ns;
-    clock_ns = 1; event(&id);
+    clock_ns = 1;
+    event(&id);
     assert(!(snapshot(3).valid & AZ_LIVE_MASTER));
-    clock_ns = saved_ns; event(&id);
+    clock_ns = saved_ns;
+    event(&id);
     assert(snapshot(3).valid & AZ_LIVE_MASTER);
     /* A later reentrant confirmation wins even when the older original returns
      * last. Its outer borrowed argument must not overwrite the newer master. */
     uint64_t before_nested = snapshot(3).master_revision;
-    nested = 1; id = 1; event(&id);
+    nested = 1;
+    id = 1;
+    event(&id);
     az_deck_snapshot newer = snapshot(3);
     assert((newer.valid & AZ_LIVE_MASTER) && newer.master == 1 &&
            newer.master_revision == before_nested + 2 && atomic_load(&g_master_deck) == 3);
     /* Older caller prefixes receive only their declared bytes. */
     const size_t prefixes[] = {offsetof(az_deck_snapshot, loop_unit_generation),
-                              offsetof(az_deck_snapshot, master_revision), sizeof(az_deck_snapshot)};
+                               offsetof(az_deck_snapshot, master_revision), sizeof(az_deck_snapshot)};
     for (unsigned i = 0; i < sizeof prefixes / sizeof prefixes[0]; ++i) {
         _Alignas(az_deck_snapshot) unsigned char bytes[sizeof(az_deck_snapshot) + 32];
         memset(bytes, 0xa5, sizeof bytes);
-        uint32_t size = prefixes[i]; memcpy(bytes, &size, sizeof size);
+        uint32_t size = prefixes[i];
+        memcpy(bytes, &size, sizeof size);
         assert(sd_deck_snapshot_v1(3, (az_deck_snapshot *) bytes) == AZ_OK);
         for (size_t p = size; p < sizeof bytes; ++p) assert(bytes[p] == 0xa5);
     }

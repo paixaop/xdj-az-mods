@@ -9,3 +9,7 @@ if [[ $(uname) == Linux ]]; then flags+=(-D_GNU_SOURCE); libs+=(-ldl); fi
 case ${SAN:-plain} in plain) ;; asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all);; *) exit 2;; esac
 "${HOST_CC:-cc}" "${flags[@]}" tests/unit/sdkstatus_map_source_test.c "${libs[@]}" -o "$work/test"
 "$work/test"
+if [[ $(uname) == Linux ]]; then
+    "${HOST_CC:-cc}" "${flags[@]}" -rdynamic tests/unit/sdkstatus_source_install_test.c "${libs[@]}" -o "$work/install"
+    "$work/install"
+fi

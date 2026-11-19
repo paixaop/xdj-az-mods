@@ -67,7 +67,7 @@ int azsdk_load_read(int d, struct azsdk_load_sample *out) {
     *out = (struct azsdk_load_sample) {.unit_generation = 2, .load_generation = 4, .invalidation_epoch = 6, .native_request_id = 1};
     return 1;
 }
-static atomic_int paused, resume_probe;
+static atomic_int paused, resume_probe, hide_stems;
 static int probe(const char *path, int *found) {
     if (!strcmp(path, "/a.wav")) {
         atomic_store(&paused, 1);
@@ -75,7 +75,7 @@ static int probe(const char *path, int *found) {
         *found = 1;
         return AZ_AVAIL_READY;
     }
-    *found = !strcmp(path, "/c.wav");
+    *found = !strcmp(path, "/c.wav") && !atomic_load(&hide_stems);
     return AZ_AVAIL_READY;
 }
 static struct azstatus_native_receipt take_stems(const struct azstatus_native_v1 *api, unsigned cut) {
@@ -96,6 +96,7 @@ static struct azstatus_native_receipt take_stems(const struct azstatus_native_v1
 int main(void) {
     const struct azstatus_native_v1 *api = azstem_status_service_v1();
     api->interest(0, AZ_STATUS_TOPIC(AZ_STATUS_STEMS));
+    azn_stems_rescan(); /* No subscription means no worker or file work. */
     azn_stems_start(probe);
     azn_stems_control(0, 0);
     api->bind_stems(0, 1, 4, "/a.wav");
@@ -138,5 +139,10 @@ int main(void) {
     api->bind_stems(0, 9, 4, "/c.wav");
     r = take_stems(api, 9);
     assert(r.a && !r.b && r.c == AZ_AVAIL_LOADING);
-    puts("PASS qualified stems, delayed discovery, empty lookup, engine enable/disable and invalidation");
+    while (api->take(0, &r)) {}
+    atomic_store(&hide_stems, 1);
+    azn_stems_rescan();
+    r = take_stems(api, 9);
+    assert(!r.a && !r.b && r.c == AZ_AVAIL_READY);
+    puts("PASS qualified stems, delayed discovery, empty lookup, engine enable/disable, rescan and invalidation");
 }

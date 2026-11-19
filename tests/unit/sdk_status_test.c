@@ -448,6 +448,13 @@ static void map_race(int new_first, int jump) {
     const struct ds_cell *grid_copy = ds_ready(im, AZ_STATUS_GRID, AZ_STATUS_GRID_CURRENT);
     int order = compare_timestamps(grid_copy->clock.ticks[1], 12 * 48000, 48000, 48000, 1);
     assert(order != AZ_TIME_INVALID && order == AZ_TIME_EQUAL);
+    /* A map replacement without a matching path cannot keep the endpoint from
+     * the old edition, even when its row index remains in bounds. */
+    data[0].info.info.revision++;
+    assert(ds_publish(0, epoch, 0, ds_now(), data, 1, NULL, NULL, 0, 0) == AZ_OK);
+    assert(!ds_value(im, AZ_STATUS_PHRASE_TRANSITION, AZ_STATUS_PHRASE_TRANSITION_ACTIVE));
+    ds_drain(8);
+    assert(ds.metrics[0].last_lost_topics & DS_PHRASE_ROUTE);
     ds_retire(2);
 }
 struct action_trace {
@@ -488,15 +495,13 @@ static void partial_discontinuities(void) {
     const az_phrase rows[] = {{0, 1, 1, 1, 0, 0}, {2, 3, 2, 1, 0, 0}};
     const az_status_grid_ref_v1 grid = {epoch, 10, 1, AZ_PROV_NATIVE, AZ_STATUS_GRID_CURRENT};
     struct ds_field fields[] = {ready(AZ_STATUS_GRID, AZ_STATUS_GRID_CURRENT, beats, 5),
-                               ready(AZ_STATUS_PHRASES, AZ_STATUS_PHRASES_CURRENT, rows, 2),
-                               ready(AZ_STATUS_PHRASES, AZ_STATUS_PHRASES_CURRENT_GRID, &grid, 1)};
+                                ready(AZ_STATUS_PHRASES, AZ_STATUS_PHRASES_CURRENT, rows, 2),
+                                ready(AZ_STATUS_PHRASES, AZ_STATUS_PHRASES_CURRENT_GRID, &grid, 1)};
     fields[0].clock = &clock;
     for (unsigned i = 0; i < 3; ++i) fields[i].info.scope_id = epoch;
     const az_status_coord_v1 intro = {0.5, 24000, 48000, 0}, verse = {2.5, 120000, 48000, 0};
     const az_status_coord_v1 gaps[] = {{1.5, 72000, 48000, 0}, {3.5, 168000, 48000, 0}};
-    struct ds_path path = {.order = 1, .generation = 1, .phrase_provider = 10, .phrase_revision = 1, .grid = grid,
-        .kind = DS_PATH_BASELINE, .endpoints = AZ_STATUS_OCCURRENCE_TO, .to = intro,
-        .observed_window_samples = 1, .observed_window_rate = 48000, .from_window_samples = 1, .from_window_rate = 48000};
+    struct ds_path path = {.order = 1, .generation = 1, .phrase_provider = 10, .phrase_revision = 1, .grid = grid, .kind = DS_PATH_BASELINE, .endpoints = AZ_STATUS_OCCURRENCE_TO, .to = intro, .observed_window_samples = 1, .observed_window_rate = 48000, .from_window_samples = 1, .from_window_rate = 48000};
     assert(ds_publish_checked(&path, NULL, 0, deck, epoch, DS_BOUNDARY, ds_now(), fields, 3, NULL, NULL, 0, 0) == AZ_OK);
     struct ds_map map;
     assert(ds_map_at(&ds.deck[deck].current, &path, &map));
@@ -537,9 +542,7 @@ static void partial_discontinuities(void) {
             if (!(path.endpoints & AZ_STATUS_OCCURRENCE_FROM)) path.departure = &from;
             if (!(path.endpoints & AZ_STATUS_OCCURRENCE_TO)) path.landing = &to;
         }
-        az_status_occurrence_v1 action = {.size = sizeof action, .version = AZ_DATA_VERSION,
-            .kind = same_phrase ? AZ_STATUS_WRAP : AZ_STATUS_JUMP,
-            .endpoints = path.endpoints, .ordinal = i + 1};
+        az_status_occurrence_v1 action = {.size = sizeof action, .version = AZ_DATA_VERSION, .kind = same_phrase ? AZ_STATUS_WRAP : AZ_STATUS_JUMP, .endpoints = path.endpoints, .ordinal = i + 1};
         if (path.endpoints & AZ_STATUS_OCCURRENCE_FROM) action.from = path.from;
         if (path.endpoints & AZ_STATUS_OCCURRENCE_TO) action.to = path.to;
         for (unsigned j = 0; j < 4; ++j) traces[j] = (struct action_trace) {.topics = topics[j], .mask = path.endpoints};
@@ -652,13 +655,11 @@ static void motion_generation_order(unsigned kind, unsigned hz) {
     fields[2].clock = &duration_clock;
     fields[3].clock = &precision_clock;
     for (unsigned i = 0; i < 4; ++i) fields[i].info.scope_id = epoch;
-    struct ds_path path = {.order = 1, .generation = 1, .kind = DS_PATH_BASELINE, .endpoints = 3,
-        .from = start, .to = start, .observed_window_samples = 1, .observed_window_rate = 48000,
-        .from_window_samples = 1, .from_window_rate = 48000};
+    struct ds_path path = {.order = 1, .generation = 1, .kind = DS_PATH_BASELINE, .endpoints = 3, .from = start, .to = start, .observed_window_samples = 1, .observed_window_rate = 48000, .from_window_samples = 1, .from_window_rate = 48000};
     assert(ds_publish_checked(&path, NULL, 0, deck, epoch, DS_BOUNDARY, ds_now(), fields, 4, NULL, NULL, 0, 0) == AZ_OK);
     struct trace trace = {0};
     const az_deck_watch_v1 watch = {sizeof watch, AZ_DATA_VERSION, 1u << deck, hz,
-        AZ_STATUS_TOPIC(AZ_STATUS_POSITION) | AZ_STATUS_TOPIC(AZ_STATUS_PHASE)};
+                                    AZ_STATUS_TOPIC(AZ_STATUS_POSITION) | AZ_STATUS_TOPIC(AZ_STATUS_PHASE)};
     az_deck_subscription handle;
     assert(ds_register(0, &watch, capture, &trace, &handle) == AZ_OK);
     ds_drain(8);
@@ -684,8 +685,7 @@ static void motion_generation_order(unsigned kind, unsigned hz) {
     path.generation = 2;
     path.kind = DS_PATH_ACTION;
     path.to = landing;
-    const az_status_occurrence_v1 action = {.size = sizeof action, .version = AZ_DATA_VERSION, .kind = kind,
-        .ordinal = ds.deck[deck].last_ordinal + 1, .endpoints = 3, .from = path.from, .to = path.to};
+    const az_status_occurrence_v1 action = {.size = sizeof action, .version = AZ_DATA_VERSION, .kind = kind, .ordinal = ds.deck[deck].last_ordinal + 1, .endpoints = 3, .from = path.from, .to = path.to};
     fields[0].value = &landing;
     assert(ds_publish_checked(&path, NULL, 0, deck, epoch, 0, ds_now(), fields, 1, &action, NULL, 0, 0) == AZ_OK);
     ds_drain(8);
@@ -826,17 +826,14 @@ static void queued_loss(void) {
 static void canonical_loop_reference(void) {
     const unsigned deck = 3;
     const uint64_t epoch = ds.deck[deck].current.epoch + 1;
-    az_cue_entry row = {.size = sizeof row, .version = AZ_DATA_VERSION, .classification = AZ_CUE_MEMORY,
-        .entry_id = 1, .type = AZ_CUE_LOOP, .valid = AZ_CUE_START | AZ_CUE_END,
-        .start_s = 0, .end_s = 2, .saved = 1, .modified = 0, .auto_active = 0};
+    az_cue_entry row = {.size = sizeof row, .version = AZ_DATA_VERSION, .classification = AZ_CUE_MEMORY, .entry_id = 1, .type = AZ_CUE_LOOP, .valid = AZ_CUE_START | AZ_CUE_END, .start_s = 0, .end_s = 2, .saved = 1, .modified = 0, .auto_active = 0};
     int64_t ticks[] = {0, 88200};
     struct ds_time_axis clock = {44100, ticks, 1, 44100, NULL};
-    az_status_cue_ref_v1 ref = {.load_epoch = epoch, .provider_id = 42, .collection_revision = 7,
-        .provenance = AZ_PROV_NATIVE, .cue_field = AZ_STATUS_CUES_LIVE_MEMORY, .entry = row};
+    az_status_cue_ref_v1 ref = {.load_epoch = epoch, .provider_id = 42, .collection_revision = 7, .provenance = AZ_PROV_NATIVE, .cue_field = AZ_STATUS_CUES_LIVE_MEMORY, .entry = row};
     ref.entry.start_s = -0.0; /* Representation does not establish row identity. */
     ref.entry.end_s = 2.0 + 1.0 / 44100;
     struct ds_field fields[] = {ready(AZ_STATUS_LOOP, AZ_STATUS_LOOP_SAVED_ENTRY, &ref, 1),
-        ready(AZ_STATUS_CUES, AZ_STATUS_CUES_LIVE_MEMORY, &row, 1)};
+                                ready(AZ_STATUS_CUES, AZ_STATUS_CUES_LIVE_MEMORY, &row, 1)};
     fields[0].info.scope_id = fields[1].info.scope_id = epoch;
     fields[1].info.provider_id = 42;
     fields[1].info.info.revision = 7;
@@ -864,8 +861,21 @@ static void canonical_loop_reference(void) {
     assert(!ds_value(im, AZ_STATUS_LOOP, AZ_STATUS_LOOP_SAVED_ENTRY));
     puts("PASS canonical saved-loop row, exact edition fences and noncanonical timestamp copies");
 }
+#include "sdk_status_retention_test.inc"
 int main(int argc, char **argv) {
     ds.enabled = 1;
+    if (argc == 2 && !strcmp(argv[1], "payload-identity")) {
+        payload_identity();
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "memory-budget")) {
+        memory_budget();
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "stem-source")) {
+        stem_source_binding();
+        return 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "grid-association")) {
         grid_association();
         return 0;

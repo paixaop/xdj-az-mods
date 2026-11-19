@@ -276,21 +276,14 @@ static void azm_hooks_dump(const char *path) {
 #ifndef azm_install_hook
 #define azm_install_hook(f, h, o) azm_install_hook_at((f), (h), (o), #h)
 #endif
-static int azm_install_entry_hook_at(uintptr_t FUNC, void *hook, void **orig, const char *name,
-                                     int island_only) {
-    if (!FUNC || (FUNC & 3))
-        return azm_rec(FUNC, name, AZM_DECLINED); /* an unresolved EP_ entry is 0: never hook it */
-    if (island_only && (!hook || ((uintptr_t) hook & 3) || !orig ||
-                        ((uintptr_t) orig & (sizeof(void *) - 1))))
-        return azm_rec(FUNC, name, AZM_DECLINED);
-    uint32_t *func = (uint32_t *) FUNC;
-    if (island_only ? azm_pcrel_kind(func[0]) == 1 : !azm_patch_ok(func, 1))
-        return azm_rec(FUNC, name, AZM_DECLINED);
-    uint32_t *isl = azm_island_slot(FUNC);
+static int azm_entry_arguments(uintptr_t FUNC, void *hook, void **orig, int island_only) {
+    if (!FUNC || (FUNC & 3)) return 0;
+    if (!island_only) return 1;
+    return hook && !((uintptr_t) hook & 3) && orig && !((uintptr_t) orig & (sizeof(void *) - 1));
+}
+static int azm_entry_width(uintptr_t FUNC, uint32_t *func, uint32_t *isl, int island_only, const char *name) {
     if (!isl && island_only)
-        return azm_rec(FUNC, name, __atomic_load_n(&g_azm_late, __ATOMIC_ACQUIRE)
-                                       ? AZM_REFUSED_LATE : AZM_DECLINED);
-    int ncopy = isl ? 1 : 4, out = 0;
+        return azm_rec(FUNC, name, __atomic_load_n(&g_azm_late, __ATOMIC_ACQUIRE) ? AZM_REFUSED_LATE : AZM_DECLINED);
     if (!isl && __atomic_load_n(&g_azm_late, __ATOMIC_ACQUIRE)) {
         dbg("hook %lx: refused, no island in reach and EP147 is running (a 16-byte write is not atomic)\n",
             (unsigned long) FUNC);
@@ -301,9 +294,12 @@ static int azm_install_entry_hook_at(uintptr_t FUNC, void *hook, void **orig, co
             (unsigned long) FUNC);
         return azm_rec(FUNC, name, AZM_DECLINED);
     }
+    return isl ? 1 : 4;
+}
+static uint32_t *azm_entry_trampoline(uintptr_t FUNC, const uint32_t *func, int ncopy) {
     uint32_t *tramp = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (tramp == MAP_FAILED)
-        return azm_rec(FUNC, name, AZM_DECLINED);
+    if (tramp == MAP_FAILED) return NULL;
+    int out = 0;
     /* Copy the instructions the patch will cover into the trampoline (1 with an island, 4
      * without), expanding where needed: an adrp is re-encoded if it still reaches, otherwise
      * its absolute result is materialized with movz/movk. */
@@ -325,34 +321,38 @@ static int azm_install_entry_hook_at(uintptr_t FUNC, void *hook, void **orig, co
         }
     }
     azm_abs_jump(&tramp[out], FUNC + 4 * (uintptr_t) ncopy);
-    if (!azm_tramp_seal(tramp, out + 4))
-        return azm_rec(FUNC, name, AZM_DECLINED);
+    return azm_tramp_seal(tramp, out + 4);
+}
+static int azm_entry_island(uintptr_t FUNC, uint32_t *func, uint32_t *isl, uint32_t *tramp,
+                            void *hook, void **orig, const char *name) {
     azprot_t pt;
-    if (isl) {
         /* the island is ready before anyone can reach it */
-        if (azprot_unlock((uintptr_t) isl, 16, &pt) != 0) {
-            munmap(tramp, 4096);
-            return azm_rec(FUNC, name, AZM_DECLINED);
-        }
-        azm_abs_jump(isl, (uint64_t) (uintptr_t) hook);
-        __builtin___clear_cache((char *) isl, (char *) isl + 16);
-        if (azprot_relock(&pt) != 0)
-            dbg("hook %lx: island page left writable (mprotect failed)\n", (unsigned long) FUNC);
-        uint32_t b = 0x14000000u | (uint32_t) ((((intptr_t) isl - (intptr_t) FUNC) >> 2) & 0x03FFFFFF);
-        if (azprot_unlock(FUNC, 4, &pt) != 0) {
-            munmap(tramp, 4096);
-            return azm_rec(FUNC, name, AZM_DECLINED);
-        }
-        /* the original before the store that makes it reachable */
-        __atomic_store_n(orig, (void *) tramp, __ATOMIC_RELAXED);
-        __atomic_store_n(func, b, __ATOMIC_RELEASE); /* the one store that redirects it */
-        __builtin___clear_cache((char *) func, (char *) func + 4);
-        if (azprot_relock(&pt) != 0)
-            dbg("hook %lx: code page left writable (mprotect failed)\n", (unsigned long) FUNC);
-        azm_note_hooked(FUNC);
-        azm_rec(FUNC, name, AZM_ISLAND);
-        return 1;
+    if (azprot_unlock((uintptr_t) isl, 16, &pt) != 0) {
+        munmap(tramp, 4096);
+        return azm_rec(FUNC, name, AZM_DECLINED);
     }
+    azm_abs_jump(isl, (uint64_t) (uintptr_t) hook);
+    __builtin___clear_cache((char *) isl, (char *) isl + 16);
+    if (azprot_relock(&pt) != 0)
+        dbg("hook %lx: island page left writable (mprotect failed)\n", (unsigned long) FUNC);
+    uint32_t b = 0x14000000u | (uint32_t) ((((intptr_t) isl - (intptr_t) FUNC) >> 2) & 0x03FFFFFF);
+    if (azprot_unlock(FUNC, 4, &pt) != 0) {
+        munmap(tramp, 4096);
+        return azm_rec(FUNC, name, AZM_DECLINED);
+    }
+        /* the original before the store that makes it reachable */
+    __atomic_store_n(orig, (void *) tramp, __ATOMIC_RELAXED);
+    __atomic_store_n(func, b, __ATOMIC_RELEASE); /* the one store that redirects it */
+    __builtin___clear_cache((char *) func, (char *) func + 4);
+    if (azprot_relock(&pt) != 0)
+        dbg("hook %lx: code page left writable (mprotect failed)\n", (unsigned long) FUNC);
+    azm_note_hooked(FUNC);
+    azm_rec(FUNC, name, AZM_ISLAND);
+    return 1;
+}
+static int azm_entry_direct(uintptr_t FUNC, uint32_t *func, uint32_t *tramp,
+                            void *hook, void **orig, const char *name) {
+    azprot_t pt;
     /* no island in reach, constructor phase: the 16-byte absolute jump (safe only while no
      * other thread can be running the function, which the phase check above guarantees) */
     if (azprot_unlock(FUNC, 16, &pt) != 0) {
@@ -370,6 +370,20 @@ static int azm_install_entry_hook_at(uintptr_t FUNC, void *hook, void **orig, co
     azm_note_hooked(FUNC);
     azm_rec(FUNC, name, AZM_FALLBACK);
     return 1;
+}
+static int azm_install_entry_hook_at(uintptr_t FUNC, void *hook, void **orig, const char *name,
+                                     int island_only) {
+    if (!azm_entry_arguments(FUNC, hook, orig, island_only)) return azm_rec(FUNC, name, AZM_DECLINED);
+    uint32_t *func = (uint32_t *) FUNC;
+    if (island_only ? azm_pcrel_kind(func[0]) == 1 : !azm_patch_ok(func, 1))
+        return azm_rec(FUNC, name, AZM_DECLINED);
+    uint32_t *isl = azm_island_slot(FUNC);
+    int ncopy = azm_entry_width(FUNC, func, isl, island_only, name);
+    if (ncopy < 0) return ncopy;
+    uint32_t *tramp = azm_entry_trampoline(FUNC, func, ncopy);
+    if (!tramp) return azm_rec(FUNC, name, AZM_DECLINED);
+    if (isl) return azm_entry_island(FUNC, func, isl, tramp, hook, orig, name);
+    return azm_entry_direct(FUNC, func, tramp, hook, orig, name);
 }
 static int azm_install_hook_at(uintptr_t FUNC, void *hook, void **orig, const char *name) {
     return azm_install_entry_hook_at(FUNC, hook, orig, name, 0);

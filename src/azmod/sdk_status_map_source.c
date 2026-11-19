@@ -38,20 +38,24 @@ static _Atomic(const struct azn_maps_api *) sm_maps;
 static uintptr_t sm_ptr(uintptr_t object, unsigned offset) {
     return __atomic_load_n((const uintptr_t *) (object + offset), __ATOMIC_ACQUIRE);
 }
+static int sm_native_service_valid(const struct azstatus_native_v1 *service) {
+    return service && service->version == 1 &&
+           service->size >= offsetof(struct azstatus_native_v1, maps) + sizeof service->maps && service->maps;
+}
+static int sm_map_service_valid(const struct azn_maps_api *maps) {
+    return maps && maps->version == 1 && maps->size >= offsetof(struct azn_maps_api, retire_pair) + sizeof maps->retire_pair &&
+           maps->prove_pair && maps->retire_pair;
+}
 static const struct azn_maps_api *sm_service(void) {
     const struct azn_maps_api *maps = atomic_load_explicit(&sm_maps, memory_order_acquire);
     if (maps) return maps;
     azstatus_native_fn get = (azstatus_native_fn) dlsym(RTLD_DEFAULT, "azstem_status_service_v1");
-    const struct azstatus_native_v1 *s = get ? get() : NULL;
-    if (s && s->version == 1 && s->size >= offsetof(struct azstatus_native_v1, maps) + sizeof s->maps && s->maps) {
-        maps = s->maps();
-        if (maps && maps->version == 1 && maps->size >= offsetof(struct azn_maps_api, retire_pair) + sizeof maps->retire_pair &&
-            maps->prove_pair && maps->retire_pair) {
-            atomic_store_explicit(&sm_maps, maps, memory_order_release);
-            return maps;
-        }
-    }
-    return NULL;
+    const struct azstatus_native_v1 *service = get ? get() : NULL;
+    if (!sm_native_service_valid(service)) return NULL;
+    maps = service->maps();
+    if (!sm_map_service_valid(maps)) return NULL;
+    atomic_store_explicit(&sm_maps, maps, memory_order_release);
+    return maps;
 }
 static void sm_drop(uintptr_t content) {
     if (content && ((unsigned char (*)(uintptr_t)) sm_profile->functions[3].address)(content))
@@ -71,17 +75,18 @@ static uintptr_t sm_take(uintptr_t holder) {
 static int sm_retain(uintptr_t object) {
     return object && ((unsigned char (*)(uintptr_t)) sm_profile->functions[2].address)(object);
 }
+static unsigned sm_binding_slot(uintptr_t owner) {
+    unsigned slot = 16;
+    for (unsigned i = 0; i < 16; i++) {
+        if (sm_bindings[i].owner == owner) return i;
+        if (!sm_bindings[i].owner && slot == 16) slot = i;
+    }
+    return slot;
+}
 static void sm_binding(uintptr_t owner, uintptr_t pack) {
     uintptr_t old = 0;
     pthread_mutex_lock(&sm_binding_mu);
-    unsigned slot = 16;
-    for (unsigned i = 0; i < 16; i++) {
-        if (sm_bindings[i].owner == owner) {
-            slot = i;
-            break;
-        }
-        if (!sm_bindings[i].owner && slot == 16) slot = i;
-    }
+    unsigned slot = sm_binding_slot(owner);
     if (slot < 16 && sm_bindings[slot].pack != pack) {
         if (pack && !sm_retain(pack)) pack = 0;
         old = sm_bindings[slot].pack;
@@ -120,24 +125,38 @@ static void sm_leave(struct sm_scope *scope) {
 static int sm_owner(uintptr_t owner) {
     return owner && sm_ptr(owner, 0) == sm_profile->owner_vptr;
 }
+static int sm_pair_current(uintptr_t owner, uintptr_t pack, uintptr_t phrase, uintptr_t grid) {
+    return sm_ptr(owner, 0x60) == phrase && sm_ptr(owner, 0x68) == grid &&
+           sm_ptr(pack, 0x120) == phrase && sm_ptr(pack, 0xd8) == grid;
+}
+static int sm_contents_current(uintptr_t phrase, uintptr_t phrase_content, uintptr_t grid, uintptr_t grid_content) {
+    return (grid_content || phrase_content) && (!grid || sm_ptr(grid, 0x28) == grid_content) &&
+           (!phrase || sm_ptr(phrase, 0x28) == phrase_content);
+}
 static void sm_publish(const struct azn_maps_api *maps, uintptr_t owner, uintptr_t pack,
                        uintptr_t ph, uintptr_t gh) {
-    if (sm_ptr(owner, 0x60) != ph || sm_ptr(owner, 0x68) != gh ||
-        sm_ptr(pack, 0x120) != ph || sm_ptr(pack, 0xd8) != gh) return;
+    if (!sm_pair_current(owner, pack, ph, gh)) return;
     uintptr_t gc = sm_take(gh), pc = sm_take(ph);
-    if ((gc || pc) && (!gh || sm_ptr(gh, 0x28) == gc) && (!ph || sm_ptr(ph, 0x28) == pc)) {
+    if (sm_contents_current(ph, pc, gh, gc)) {
         atomic_fetch_add(&sm_seen[2], 1);
         if (maps->prove_pair(owner, pack, gh, gc, ph, pc)) atomic_fetch_add(&sm_seen[3], 1);
     }
     sm_drop(pc);
     sm_drop(gc);
 }
+static int sm_set_qualified(uintptr_t owner, uintptr_t pack, const uintptr_t *phrase, uintptr_t caller) {
+    return atomic_load_explicit(&sm_ready, memory_order_acquire) && caller == sm_profile->set_return &&
+           (uintptr_t) phrase == pack + 0x120 && sm_owner(owner) && sm_ptr(pack, 0) == sm_profile->pack_vptr;
+}
+static int sm_pair_changing(const struct azn_maps_api *maps, uintptr_t owner, const uintptr_t *phrase, const uintptr_t *grid) {
+    return maps && (sm_ptr(owner, 0x60) != sm_ptr((uintptr_t) phrase, 0) ||
+                    sm_ptr(owner, 0x68) != sm_ptr((uintptr_t) grid, 0));
+}
 static uint64_t sm_set_forward(uintptr_t model, const uintptr_t *phrase, const uintptr_t *grid, uintptr_t caller) {
     const struct azn_maps_api *maps = NULL;
     uintptr_t owner = model + 0x268, pack = (uintptr_t) grid - 0xd8;
     atomic_fetch_add(&sm_seen[0], 1);
-    int qualified = atomic_load_explicit(&sm_ready, memory_order_acquire) && caller == sm_profile->set_return &&
-                    (uintptr_t) phrase == pack + 0x120 && sm_owner(owner) && sm_ptr(pack, 0) == sm_profile->pack_vptr;
+    int qualified = sm_set_qualified(owner, pack, phrase, caller);
     if (qualified) {
         atomic_fetch_add(&sm_seen[1], 1);
         maps = sm_service();
@@ -145,8 +164,7 @@ static uint64_t sm_set_forward(uintptr_t model, const uintptr_t *phrase, const u
     /* Both supported native setters change GUI references and listeners only.
      * The native service serializes pair publication and retirement; another
      * deck retaining this pack has no analysis mutation to bracket here. */
-    if (maps && (sm_ptr(owner, 0x60) != sm_ptr((uintptr_t) phrase, 0) ||
-                 sm_ptr(owner, 0x68) != sm_ptr((uintptr_t) grid, 0))) maps->retire_pair(owner);
+    if (sm_pair_changing(maps, owner, phrase, grid)) maps->retire_pair(owner);
     uint64_t result = ((uint64_t (*)(uintptr_t, const uintptr_t *, const uintptr_t *)) sm_original[0])(model, phrase, grid);
     if (qualified) {
         sm_binding(owner, pack);
@@ -208,18 +226,16 @@ static uint64_t sm_destroy(uintptr_t model) {
     }
     return ((uint64_t (*)(uintptr_t)) sm_original[4])(model);
 }
-static int sdk_status_map_source_install(int build, azjs_installer install) {
-    if ((build != 1 && build != 2) || !install) return 0;
-    sm_profile = &sm_profiles[build - 1];
+static int sm_targets_valid(const struct sm_profile *profile, const struct sm_continuations *updates) {
     for (unsigned i = 0; i < 6; i++) {
-        const struct sm_target *fn = &sm_profile->functions[i];
-        if (memcmp((void *) fn->address, fn->words, sizeof fn->words)) return 0;
+        const struct sm_target *function = &profile->functions[i];
+        if (memcmp((void *) function->address, function->words, sizeof function->words)) return 0;
     }
-    const struct sm_continuations *updates = &sm_updates[build - 1];
     for (unsigned i = 0; i < 2; i++)
         if (*(const uintptr_t *) updates->slot[i] != updates->target[i]) return 0;
-    uintptr_t destroy = sm_profile->functions[5].address;
-    if (!install(destroy, destroy, sm_destroy, &sm_original[4], 0) || !sm_original[4]) return 0;
+    return 1;
+}
+static int sm_install_setters(azjs_installer install, const struct sm_continuations *updates) {
     void *hooks[] = {sm_set, sm_clear, sm_phrase_update, sm_grid_update};
     for (unsigned i = 0; i < 2; i++) {
         uintptr_t at = sm_profile->functions[i].address;
@@ -227,6 +243,16 @@ static int sdk_status_map_source_install(int build, azjs_installer install) {
     }
     for (unsigned i = 0; i < 2; i++)
         if (!install(updates->slot[i], updates->target[i], hooks[2 + i], &sm_original[2 + i], 1) || !sm_original[2 + i]) return 0;
+    return 1;
+}
+static int sdk_status_map_source_install(int build, azjs_installer install) {
+    if ((build != 1 && build != 2) || !install) return 0;
+    sm_profile = &sm_profiles[build - 1];
+    const struct sm_continuations *updates = &sm_updates[build - 1];
+    if (!sm_targets_valid(sm_profile, updates)) return 0;
+    uintptr_t destroy = sm_profile->functions[5].address;
+    if (!install(destroy, destroy, sm_destroy, &sm_original[4], 0) || !sm_original[4]) return 0;
+    if (!sm_install_setters(install, updates)) return 0;
     atomic_store_explicit(&sm_ready, 1, memory_order_release);
     return 1;
 }

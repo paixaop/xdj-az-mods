@@ -24,13 +24,16 @@ struct ds_map {
     uint64_t provider, revision;
     az_status_grid_ref_v1 grid;
 };
+static int ds_path_map_edition(const struct ds_cell *phrases, const az_status_grid_ref_v1 *grid, const struct ds_path *p) {
+    return phrases->info.provider_id == p->phrase_provider && phrases->info.info.revision == p->phrase_revision &&
+           p->phrase_provider && p->phrase_revision && !memcmp(grid, &p->grid, sizeof *grid);
+}
 static int ds_map_at(const struct ds_image *im, const struct ds_path *p, struct ds_map *map) {
     const struct ds_cell *phrases = ds_ready(im, AZ_STATUS_PHRASES, AZ_STATUS_PHRASES_CURRENT);
     const struct ds_cell *beats = ds_ready(im, AZ_STATUS_GRID, AZ_STATUS_GRID_CURRENT);
     const az_status_grid_ref_v1 *grid = ds_value(im, AZ_STATUS_PHRASES, AZ_STATUS_PHRASES_CURRENT_GRID);
     if (!phrases || !beats || !beats->clock.ticks || !grid || !ds_grid_matches(im, grid, AZ_STATUS_GRID_CURRENT) ||
-        phrases->info.provider_id != p->phrase_provider || phrases->info.info.revision != p->phrase_revision ||
-        !p->phrase_provider || !p->phrase_revision || memcmp(grid, &p->grid, sizeof *grid)) return 0;
+        !ds_path_map_edition(phrases, grid, p)) return 0;
     *map = (struct ds_map) {(const void *) phrases->data, &beats->clock, phrases->info.count,
                             p->phrase_provider, p->phrase_revision, *grid};
     return 1;
@@ -57,23 +60,27 @@ static int ds_opening_at(const struct ds_map *m, const az_status_coord_v1 *point
     if (at_zero == AZ_TIME_INVALID || at_first == AZ_TIME_INVALID) return 0;
     return at_zero == AZ_TIME_EQUAL || at_first == AZ_TIME_EQUAL;
 }
+static unsigned ds_phrase_at(const struct ds_map *m, const az_status_coord_v1 *point, unsigned rate, unsigned window) {
+    unsigned lo = 0, hi = m->count;
+    while (lo + 1 < hi) {
+        unsigned mid = lo + (hi - lo) / 2;
+        az_status_coord_v1 edge = ds_grid_point(m, m->rows[mid].start_beat);
+        int order = ds_coord_order(point, &edge, rate, window);
+        if (order == AZ_TIME_INVALID) return UINT_MAX;
+        if (order == AZ_TIME_BEFORE) hi = mid;
+        else lo = mid;
+    }
+    return lo;
+}
 static az_status_phrase_endpoint_v1 ds_at(const struct ds_map *m, const az_status_coord_v1 *point,
                                           int opening, int ended, unsigned rate, unsigned window) {
     az_status_coord_v1 edge = ds_grid_point(m, m->rows[0].start_beat);
     int first = ds_coord_order(point, &edge, rate, window);
     if (first == AZ_TIME_INVALID) return (az_status_phrase_endpoint_v1) {0};
     if (ended) return ds_endpoint(m, AZ_PHRASE_END, 0);
-    if ((opening && ds_opening_at(m, point, rate, window)) || first == AZ_TIME_BEFORE)
-        return ds_endpoint(m, AZ_PHRASE_START, 0);
-    unsigned lo = 0, hi = m->count;
-    while (lo + 1 < hi) {
-        unsigned mid = lo + (hi - lo) / 2;
-        edge = ds_grid_point(m, m->rows[mid].start_beat);
-        int order = ds_coord_order(point, &edge, rate, window);
-        if (order == AZ_TIME_INVALID) return (az_status_phrase_endpoint_v1) {0};
-        if (order == AZ_TIME_BEFORE) hi = mid;
-        else lo = mid;
-    }
+    if ((opening && ds_opening_at(m, point, rate, window)) || first == AZ_TIME_BEFORE) return ds_endpoint(m, AZ_PHRASE_START, 0);
+    unsigned lo = ds_phrase_at(m, point, rate, window);
+    if (lo == UINT_MAX) return (az_status_phrase_endpoint_v1) {0};
     edge = ds_grid_point(m, m->rows[lo].end_beat);
     int end = ds_coord_order(point, &edge, rate, window);
     if (end == AZ_TIME_INVALID) return (az_status_phrase_endpoint_v1) {0};
@@ -93,8 +100,10 @@ static int ds_endpoint_known(const struct ds_map *m, const az_status_phrase_endp
     az_status_phrase_endpoint_v1 expected = ds_endpoint(m, e->kind, e->index);
     return !memcmp(&expected, e, sizeof expected);
 }
-static int ds_inside_item(const struct ds_map *m, const az_status_phrase_endpoint_v1 *active,
-                          const struct ds_path *p) {
+static int ds_point_inside(int start, int end) {
+    return ds_time_nonnegative(start) && end != AZ_TIME_INVALID && end == AZ_TIME_BEFORE;
+}
+static int ds_inside_item(const struct ds_map *m, const az_status_phrase_endpoint_v1 *active, const struct ds_path *p) {
     if (!active || active->kind != AZ_PHRASE_ITEM || active->index >= m->count || p->ended) return 0;
     const az_phrase *row = &m->rows[active->index];
     az_status_coord_v1 start = ds_grid_point(m, row->start_beat), end = ds_grid_point(m, row->end_beat);
@@ -102,40 +111,45 @@ static int ds_inside_item(const struct ds_map *m, const az_status_phrase_endpoin
     int to_start = ds_coord_order(&p->to, &start, p->observed_window_rate, p->observed_window_samples);
     int from_end = ds_coord_order(&p->from, &end, p->from_window_rate, p->from_window_samples);
     int to_end = ds_coord_order(&p->to, &end, p->observed_window_rate, p->observed_window_samples);
-    if (from_start == AZ_TIME_INVALID || to_start == AZ_TIME_INVALID || from_end == AZ_TIME_INVALID || to_end == AZ_TIME_INVALID)
-        return 0;
-    return (from_start == AZ_TIME_EQUAL || from_start == AZ_TIME_AFTER) &&
-           (to_start == AZ_TIME_EQUAL || to_start == AZ_TIME_AFTER) &&
-           from_end == AZ_TIME_BEFORE && to_end == AZ_TIME_BEFORE;
+    return ds_point_inside(from_start, from_end) && ds_point_inside(to_start, to_end);
 }
-static int ds_classify(const struct ds_map *map, const struct ds_path *p, int from,
-                       az_status_phrase_endpoint_v1 *out) {
+static void ds_classify_terminal(const struct ds_map *map, const struct ds_path *p, int from,
+                                 const az_status_coord_v1 *point, unsigned rate, unsigned window,
+                                 az_status_phrase_endpoint_v1 *out) {
+    if (out->kind != AZ_PHRASE_GAP || !ds_terminal_edge(map, p, map->count - 1)) return;
+    /* A terminal arrival can span consecutive native measurements.
+     * Its prior landing remains the last ITEM while the source reader
+     * refines/clamps the end. Classifying that same departure as GAP
+     * would invent a missing crossing inside the prior sample window. */
+    int terminal = ds_coord_order(point, &p->terminal, rate, window);
+    az_status_coord_v1 start = ds_grid_point(map, map->rows[map->count - 1].start_beat);
+    int final_start = ds_coord_order(point, &start, rate, window);
+    if (!from || (terminal != AZ_TIME_INVALID && terminal <= AZ_TIME_EQUAL &&
+                  final_start != AZ_TIME_INVALID && final_start >= AZ_TIME_EQUAL))
+        *out = ds_endpoint(map, AZ_PHRASE_ITEM, map->count - 1);
+}
+static int ds_path_point_observed(const struct ds_path *p, uint32_t bit, const az_status_coord_v1 *point, unsigned rate, unsigned window) {
+    az_status_coord_v1 origin = {.rate_hz = point->rate_hz};
+    int zero = ds_coord_order(point, &origin, rate, window);
+    return (p->endpoints & bit) && zero != AZ_TIME_INVALID && zero != AZ_TIME_BEFORE;
+}
+static int ds_classify_point(const struct ds_map *map, const struct ds_path *p, int from, az_status_phrase_endpoint_v1 *out) {
+    uint32_t bit = from ? AZ_STATUS_OCCURRENCE_FROM : AZ_STATUS_OCCURRENCE_TO;
+    const az_status_coord_v1 *point = from ? &p->from : &p->to;
+    unsigned rate = from ? p->from_window_rate : p->observed_window_rate;
+    unsigned window = from ? p->from_window_samples : p->observed_window_samples;
+    if (!ds_path_point_observed(p, bit, point, rate, window)) return 0;
+    *out = ds_at(map, point, !from && p->opening, !from && p->ended, rate, window);
+    ds_classify_terminal(map, p, from, point, rate, window, out);
+    return out->kind != 0;
+}
+static int ds_classify(const struct ds_map *map, const struct ds_path *p, int from, az_status_phrase_endpoint_v1 *out) {
     const az_status_phrase_endpoint_v1 *known = from ? p->departure : p->landing;
     if (known && ds_endpoint_known(map, known)) {
         *out = *known;
         return 1;
     }
-    uint32_t bit = from ? AZ_STATUS_OCCURRENCE_FROM : AZ_STATUS_OCCURRENCE_TO;
-    const az_status_coord_v1 *point = from ? &p->from : &p->to;
-    az_status_coord_v1 origin = {.rate_hz = point->rate_hz};
-    unsigned rate = from ? p->from_window_rate : p->observed_window_rate;
-    unsigned window = from ? p->from_window_samples : p->observed_window_samples;
-    int zero = ds_coord_order(point, &origin, rate, window);
-    if (!(p->endpoints & bit) || zero == AZ_TIME_INVALID || zero == AZ_TIME_BEFORE) return 0;
-    *out = ds_at(map, point, !from && p->opening, !from && p->ended, rate, window);
-    if (out->kind == AZ_PHRASE_GAP && ds_terminal_edge(map, p, map->count - 1)) {
-        /* A terminal arrival can span consecutive native measurements.
-         * Its prior landing remains the last ITEM while the source reader
-         * refines/clamps the end. Classifying that same departure as GAP
-         * would invent a missing crossing inside the prior sample window. */
-        int terminal = ds_coord_order(point, &p->terminal, rate, window);
-        az_status_coord_v1 start = ds_grid_point(map, map->rows[map->count - 1].start_beat);
-        int final_start = ds_coord_order(point, &start, rate, window);
-        if (!from || (terminal != AZ_TIME_INVALID && terminal <= AZ_TIME_EQUAL &&
-                      final_start != AZ_TIME_INVALID && final_start >= AZ_TIME_EQUAL))
-            *out = ds_endpoint(map, AZ_PHRASE_ITEM, map->count - 1);
-    }
-    return out->kind != 0;
+    return ds_classify_point(map, p, from, out);
 }
 static void ds_cross(struct ds_deck *d, az_status_phrase_endpoint_v1 *active,
                      const az_status_phrase_endpoint_v1 *to, uint64_t now, uint64_t *loss) {
@@ -152,101 +166,165 @@ static void ds_cross(struct ds_deck *d, az_status_phrase_endpoint_v1 *active,
 }
 /* Cross every proven boundary on a monotone leg, before applying the measured
  * landing to POSITION. A half-open interval belongs to the later item. */
+struct ds_crossing_bounds {
+    az_status_coord_v1 start, end;
+    int start_from, start_to, end_from, end_to;
+};
+static int ds_crossing_bounds(const struct ds_map *m, const struct ds_path *p, unsigned i, struct ds_crossing_bounds *b) {
+    b->start = ds_grid_point(m, m->rows[i].start_beat);
+    b->end = ds_grid_point(m, m->rows[i].end_beat);
+    b->start_from = ds_coord_order(&b->start, &p->from, p->from_window_rate, p->from_window_samples);
+    b->start_to = ds_coord_order(&b->start, &p->to, p->observed_window_rate, p->observed_window_samples);
+    b->end_from = ds_coord_order(&b->end, &p->from, p->from_window_rate, p->from_window_samples);
+    b->end_to = ds_coord_order(&b->end, &p->to, p->observed_window_rate, p->observed_window_samples);
+    return b->start_from != AZ_TIME_INVALID && b->start_to != AZ_TIME_INVALID && b->end_from != AZ_TIME_INVALID && b->end_to != AZ_TIME_INVALID;
+}
+static int ds_forward_entry(const struct ds_crossing_bounds *b) {
+    return (b->start_from == AZ_TIME_EQUAL || b->start_from == AZ_TIME_AFTER) &&
+           (b->start_to == AZ_TIME_EQUAL || b->start_to == AZ_TIME_BEFORE);
+}
+static int ds_forward_exit(const struct ds_map *m, const struct ds_path *p, unsigned i, const struct ds_crossing_bounds *b) {
+    return b->end_from == AZ_TIME_AFTER && (b->end_to == AZ_TIME_EQUAL || b->end_to == AZ_TIME_BEFORE) && !ds_terminal_edge(m, p, i);
+}
+static void ds_cross_forward(struct ds_deck *d, const struct ds_map *m, const struct ds_path *p, unsigned i,
+                             const struct ds_crossing_bounds *b, az_status_phrase_endpoint_v1 *active, uint64_t now, uint64_t *loss) {
+    if (ds_forward_entry(b)) {
+        az_status_phrase_endpoint_v1 dest = ds_endpoint(m, AZ_PHRASE_ITEM, i);
+        ds_cross(d, active, &dest, now, loss);
+    }
+    if (ds_forward_exit(m, p, i, b)) {
+        az_status_phrase_endpoint_v1 dest = ds_at(m, &b->end, 0, p->ended && b->end_to == AZ_TIME_EQUAL,
+                                                  p->observed_window_rate, p->observed_window_samples);
+        if (dest.kind) ds_cross(d, active, &dest, now, loss);
+    }
+}
+static int ds_backward_exit(const struct ds_map *m, const struct ds_path *p, unsigned i,
+                            const struct ds_crossing_bounds *b, az_status_phrase_endpoint_v1 *dest) {
+    unsigned kind = AZ_PHRASE_START;
+    if (i) {
+        az_status_coord_v1 previous_end = ds_grid_point(m, m->rows[i - 1].end_beat);
+        int adjacent = ds_coord_order(&previous_end, &b->start, p->observed_window_rate, p->observed_window_samples);
+        if (adjacent == AZ_TIME_INVALID) return 0;
+        kind = adjacent == AZ_TIME_EQUAL ? AZ_PHRASE_ITEM : AZ_PHRASE_GAP;
+    }
+    *dest = ds_endpoint(m, kind, i ? i - 1 : 0);
+    return 1;
+}
+static int ds_cross_backward(struct ds_deck *d, const struct ds_map *m, const struct ds_path *p, unsigned i,
+                             const struct ds_crossing_bounds *b, az_status_phrase_endpoint_v1 *active, uint64_t now, uint64_t *loss) {
+    if ((b->end_from == AZ_TIME_BEFORE || b->end_from == AZ_TIME_EQUAL) && b->end_to == AZ_TIME_AFTER) {
+        az_status_phrase_endpoint_v1 dest = ds_endpoint(m, AZ_PHRASE_ITEM, i);
+        ds_cross(d, active, &dest, now, loss);
+    }
+    if ((b->start_from == AZ_TIME_BEFORE || b->start_from == AZ_TIME_EQUAL) && b->start_to == AZ_TIME_AFTER) {
+        az_status_phrase_endpoint_v1 dest;
+        if (!ds_backward_exit(m, p, i, b, &dest)) return 0;
+        ds_cross(d, active, &dest, now, loss);
+    }
+    return 1;
+}
+static int ds_cross_leg(struct ds_deck *d, const struct ds_map *m, const struct ds_path *p, int forward,
+                        az_status_phrase_endpoint_v1 *active, uint64_t now, uint64_t *loss) {
+    for (unsigned n = 0; n < m->count; ++n) {
+        unsigned i = forward ? n : m->count - n - 1;
+        struct ds_crossing_bounds b;
+        if (!ds_crossing_bounds(m, p, i, &b)) return 0;
+        if (forward) ds_cross_forward(d, m, p, i, &b, active, now, loss);
+        else if (!ds_cross_backward(d, m, p, i, &b, active, now, loss)) return 0;
+    }
+    return 1;
+}
 static void ds_crossings(struct ds_deck *d, const struct ds_map *m, const struct ds_path *p,
                          az_status_phrase_endpoint_v1 *active, uint64_t now, uint64_t *loss) {
     if (ds_inside_item(m, active, p)) return;
     int direction = ds_coord_order(&p->to, &p->from, p->observed_window_rate, p->observed_window_samples);
     if (direction == AZ_TIME_INVALID) return;
-    if (direction == AZ_TIME_EQUAL || direction == AZ_TIME_AFTER) {
-        for (unsigned i = 0; i < m->count; i++) {
-            az_status_coord_v1 start = ds_grid_point(m, m->rows[i].start_beat);
-            az_status_coord_v1 end = ds_grid_point(m, m->rows[i].end_beat);
-            int start_from = ds_coord_order(&start, &p->from, p->from_window_rate, p->from_window_samples);
-            int start_to = ds_coord_order(&start, &p->to, p->observed_window_rate, p->observed_window_samples);
-            int end_from = ds_coord_order(&end, &p->from, p->from_window_rate, p->from_window_samples);
-            int end_to = ds_coord_order(&end, &p->to, p->observed_window_rate, p->observed_window_samples);
-            if (start_from == AZ_TIME_INVALID || start_to == AZ_TIME_INVALID || end_from == AZ_TIME_INVALID || end_to == AZ_TIME_INVALID) return;
-            if ((start_from == AZ_TIME_EQUAL || start_from == AZ_TIME_AFTER) &&
-                (start_to == AZ_TIME_EQUAL || start_to == AZ_TIME_BEFORE)) {
-                az_status_phrase_endpoint_v1 dest = ds_endpoint(m, AZ_PHRASE_ITEM, i);
-                ds_cross(d, active, &dest, now, loss);
-            }
-            if (end_from == AZ_TIME_AFTER && (end_to == AZ_TIME_EQUAL || end_to == AZ_TIME_BEFORE) && !ds_terminal_edge(m, p, i)) {
-                az_status_phrase_endpoint_v1 dest = ds_at(m, &end, 0, p->ended && end_to == AZ_TIME_EQUAL,
-                                                          p->observed_window_rate, p->observed_window_samples);
-                if (dest.kind) ds_cross(d, active, &dest, now, loss);
-            }
-        }
-    } else {
-        for (unsigned n = m->count; n > 0; n--) {
-            unsigned i = n - 1;
-            az_status_coord_v1 start = ds_grid_point(m, m->rows[i].start_beat);
-            az_status_coord_v1 end = ds_grid_point(m, m->rows[i].end_beat);
-            int end_from = ds_coord_order(&end, &p->from, p->from_window_rate, p->from_window_samples);
-            int end_to = ds_coord_order(&end, &p->to, p->observed_window_rate, p->observed_window_samples);
-            int start_from = ds_coord_order(&start, &p->from, p->from_window_rate, p->from_window_samples);
-            int start_to = ds_coord_order(&start, &p->to, p->observed_window_rate, p->observed_window_samples);
-            if (start_from == AZ_TIME_INVALID || start_to == AZ_TIME_INVALID || end_from == AZ_TIME_INVALID || end_to == AZ_TIME_INVALID) return;
-            if ((end_from == AZ_TIME_BEFORE || end_from == AZ_TIME_EQUAL) && end_to == AZ_TIME_AFTER) {
-                az_status_phrase_endpoint_v1 dest = ds_endpoint(m, AZ_PHRASE_ITEM, i);
-                ds_cross(d, active, &dest, now, loss);
-            }
-            if ((start_from == AZ_TIME_BEFORE || start_from == AZ_TIME_EQUAL) && start_to == AZ_TIME_AFTER) {
-                unsigned kind = AZ_PHRASE_START;
-                if (i) {
-                    az_status_coord_v1 previous_end = ds_grid_point(m, m->rows[i - 1].end_beat);
-                    int adjacent = ds_coord_order(&previous_end, &start, p->observed_window_rate, p->observed_window_samples);
-                    if (adjacent == AZ_TIME_INVALID) return;
-                    kind = adjacent == AZ_TIME_EQUAL ? AZ_PHRASE_ITEM : AZ_PHRASE_GAP;
-                }
-                az_status_phrase_endpoint_v1 dest = ds_endpoint(m, kind, i ? i - 1 : 0);
-                ds_cross(d, active, &dest, now, loss);
-            }
-        }
-    }
+    int forward = direction == AZ_TIME_EQUAL || direction == AZ_TIME_AFTER;
+    if (!ds_cross_leg(d, m, p, forward, active, now, loss)) return;
     az_status_phrase_endpoint_v1 dest;
     if (ds_classify(m, p, 0, &dest)) ds_cross(d, active, &dest, now, loss);
 }
 /* Discrete actions classify each endpoint independently. A qualified landing
  * can seed active even without proof of departure. Only the phrase route loses
  * continuity in that case. The action remains deliverable to its own routes. */
+struct ds_path_reduction {
+    const struct ds_path *path;
+    struct ds_map map;
+    const az_status_phrase_endpoint_v1 *previous;
+    az_status_phrase_endpoint_v1 from, to;
+    int mapped, has_from, has_to, endpoint_order;
+};
+static void ds_path_prepare(struct ds_deck *d, const struct ds_path *p, struct ds_path_reduction *r) {
+    r->path = p;
+    r->previous = ds_value(&d->current, AZ_STATUS_PHRASE_TRANSITION, AZ_STATUS_PHRASE_TRANSITION_ACTIVE);
+    r->mapped = r->has_from = r->has_to = 0;
+    r->endpoint_order = AZ_TIME_INVALID;
+    if (!p) return;
+    r->mapped = ds_map_at(&d->current, p, &r->map);
+    r->has_from = r->mapped && ds_classify(&r->map, p, 1, &r->from);
+    r->has_to = r->mapped && ds_classify(&r->map, p, 0, &r->to);
+    r->endpoint_order = ds_coord_order(&p->from, &p->to, p->observed_window_rate, p->observed_window_samples);
+}
+static int ds_path_travel_ready(const struct ds_path_reduction *r) {
+    return r->path && r->path->kind == DS_PATH_TRAVEL && r->has_from && r->has_to && r->previous &&
+           ds_endpoint_known(&r->map, r->previous);
+}
+static int ds_path_still_at_opening(const struct ds_path_reduction *r) {
+    const struct ds_path *p = r->path;
+    return !p->ended && r->previous->kind == AZ_PHRASE_START &&
+           ds_opening_at(&r->map, &p->to, p->observed_window_rate, p->observed_window_samples);
+}
+static void ds_path_confirm_terminal(struct ds_deck *d, const struct ds_path_reduction *r, uint64_t now,
+                                     az_status_phrase_transition_v1 *pair, uint64_t *routes, uint64_t *fail) {
+    if (!memcmp(r->previous, &r->to, sizeof r->to)) return;
+    *pair = (az_status_phrase_transition_v1) {.size = sizeof *pair, .version = AZ_DATA_VERSION, .from = *r->previous, .to = r->to};
+    *routes |= DS_PHRASE_ROUTE;
+    if (ds_derived(d, AZ_STATUS_PHRASE_TRANSITION, AZ_STATUS_PHRASE_TRANSITION_ACTIVE, now, &r->to, sizeof r->to, fail))
+        *routes |= DS_PHRASE_ROUTE;
+}
+static int ds_path_stationary(struct ds_deck *d, const struct ds_path_reduction *r, uint64_t now,
+                              az_status_phrase_transition_v1 *pair, uint64_t *routes, uint64_t *fail) {
+    if (!ds_path_travel_ready(r) || r->endpoint_order == AZ_TIME_INVALID || r->endpoint_order != AZ_TIME_EQUAL) return 0;
+    if (r->path->confirm_terminal) {
+        ds_path_confirm_terminal(d, r, now, pair, routes, fail);
+        return 1;
+    }
+    return !r->path->began_play && (!memcmp(r->previous, &r->to, sizeof r->to) || ds_path_still_at_opening(r));
+}
+static int ds_path_contiguous(const struct ds_path_reduction *r) {
+    if (!ds_path_travel_ready(r)) return 0;
+    const struct ds_path *p = r->path;
+    return !memcmp(r->previous, &r->from, sizeof r->from) || (r->previous->kind == AZ_PHRASE_START &&
+                                                              ds_opening_at(&r->map, &p->from, p->from_window_rate, p->from_window_samples));
+}
+static int ds_path_action_ready(const struct ds_path_reduction *r, const az_status_occurrence_v1 *action) {
+    return r->path && r->path->kind == DS_PATH_ACTION && action && r->has_from && r->has_to &&
+           r->previous && ds_endpoint_known(&r->map, r->previous) && memcmp(&r->from, &r->to, sizeof r->from);
+}
+static int ds_path_lost(const struct ds_path_reduction *r) {
+    if (!r->previous) return 0;
+    if (!r->path) return 1;
+    if (r->path->kind == DS_PATH_BASELINE) return 0;
+    if (!r->has_from || !r->has_to || !r->mapped || !ds_endpoint_known(&r->map, r->previous)) return 1;
+    return r->path->kind == DS_PATH_TRAVEL && memcmp(r->previous, &r->from, sizeof r->from);
+}
 static void ds_path_reduce(struct ds_deck *d, const struct ds_path *p, const az_status_occurrence_v1 *action,
                            uint64_t now, az_status_phrase_transition_v1 *pair, uint64_t *routes, uint64_t *lost) {
-    struct ds_map map;
-    const az_status_phrase_endpoint_v1 *previous = ds_value(&d->current, AZ_STATUS_PHRASE_TRANSITION, AZ_STATUS_PHRASE_TRANSITION_ACTIVE);
-    az_status_phrase_endpoint_v1 from, to;
-    int mapped = p && ds_map_at(&d->current, p, &map);
-    int has_from = mapped && ds_classify(&map, p, 1, &from), has_to = mapped && ds_classify(&map, p, 0, &to);
-    int was_active = previous != NULL;
+    struct ds_path_reduction r;
+    ds_path_prepare(d, p, &r);
     uint64_t fail = 0;
-    int endpoint_order = p ? ds_coord_order(&p->from, &p->to, p->observed_window_rate, p->observed_window_samples) : AZ_TIME_INVALID;
-    if (p && p->confirm_terminal && p->kind == DS_PATH_TRAVEL && has_from && has_to && previous &&
-        ds_endpoint_known(&map, previous) && endpoint_order != AZ_TIME_INVALID && endpoint_order == AZ_TIME_EQUAL) {
-        if (memcmp(previous, &to, sizeof to)) {
-            *pair = (az_status_phrase_transition_v1) {.size = sizeof *pair, .version = AZ_DATA_VERSION, .from = *previous, .to = to};
-            *routes |= DS_PHRASE_ROUTE;
-            if (ds_derived(d, AZ_STATUS_PHRASE_TRANSITION, AZ_STATUS_PHRASE_TRANSITION_ACTIVE, now, &to, sizeof to, &fail))
-                *routes |= DS_PHRASE_ROUTE;
-        }
+    if (ds_path_stationary(d, &r, now, pair, routes, &fail)) {
         *lost |= fail;
         return;
-    } else if (p && p->kind == DS_PATH_TRAVEL && has_from && has_to && previous &&
-               ds_endpoint_known(&map, previous) && endpoint_order != AZ_TIME_INVALID && endpoint_order == AZ_TIME_EQUAL && !p->began_play &&
-               (!memcmp(previous, &to, sizeof to) || (!p->ended && previous->kind == AZ_PHRASE_START &&
-                                                      ds_opening_at(&map, &p->to, p->observed_window_rate, p->observed_window_samples)))) return;
-    if (p && p->kind == DS_PATH_TRAVEL && has_from && has_to && previous &&
-        ds_endpoint_known(&map, previous) &&
-        (!memcmp(previous, &from, sizeof from) || (previous->kind == AZ_PHRASE_START && ds_opening_at(&map, &p->from, p->from_window_rate, p->from_window_samples)))) {
-        az_status_phrase_endpoint_v1 active = *previous;
-        ds_crossings(d, &map, p, &active, now, &fail);
-    } else if (p && p->kind == DS_PATH_ACTION && action && has_from && has_to &&
-               previous && ds_endpoint_known(&map, previous) && memcmp(&from, &to, sizeof from)) {
-        *pair = (az_status_phrase_transition_v1) {.size = sizeof *pair, .version = AZ_DATA_VERSION, .discontinuity = action->kind, .from = from, .to = to};
+    }
+    if (ds_path_contiguous(&r)) {
+        az_status_phrase_endpoint_v1 active = *r.previous;
+        ds_crossings(d, &r.map, p, &active, now, &fail);
+    } else if (ds_path_action_ready(&r, action)) {
+        *pair = (az_status_phrase_transition_v1) {.size = sizeof *pair, .version = AZ_DATA_VERSION, .discontinuity = action->kind, .from = r.from, .to = r.to};
         *routes |= DS_PHRASE_ROUTE;
-    } else if (was_active && (!p || (p->kind != DS_PATH_BASELINE &&
-                                     (!has_from || !has_to || !mapped || !ds_endpoint_known(&map, previous) ||
-                                      (p->kind == DS_PATH_TRAVEL && memcmp(previous, &from, sizeof from)))))) *lost |= DS_PHRASE_ROUTE;
+    } else if (ds_path_lost(&r)) *lost |= DS_PHRASE_ROUTE;
     if (ds_derived(d, AZ_STATUS_PHRASE_TRANSITION, AZ_STATUS_PHRASE_TRANSITION_ACTIVE, now,
-                   has_to ? &to : NULL, has_to ? sizeof to : 0, &fail)) *routes |= DS_PHRASE_ROUTE;
+                   r.has_to ? &r.to : NULL, r.has_to ? sizeof r.to : 0, &fail)) *routes |= DS_PHRASE_ROUTE;
     *lost |= fail;
 }

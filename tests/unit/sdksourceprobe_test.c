@@ -23,10 +23,12 @@ static int overflow_clock, invalid_candidate;
 static int probe_clock_gettime(clockid_t id, struct timespec *out) {
     if (!fake_clock) return clock_gettime(id, out);
     assert(id == CLOCK_MONOTONIC);
-    if (++clock_reads == fail_clock_at) { errno = EIO; return -1; }
-    out->tv_sec = (time_t)(overflow_clock ? UINT64_MAX / UINT64_C(1000000000) + 1 :
-                           fake_ns / UINT64_C(1000000000));
-    out->tv_nsec = (long)(fake_ns % UINT64_C(1000000000));
+    if (++clock_reads == fail_clock_at) {
+        errno = EIO;
+        return -1;
+    }
+    out->tv_sec = (time_t) (overflow_clock ? UINT64_MAX / UINT64_C(1000000000) + 1 : fake_ns / UINT64_C(1000000000));
+    out->tv_nsec = (long) (fake_ns % UINT64_C(1000000000));
     return 0;
 }
 static int probe_clock_nanosleep(clockid_t id, int flags, const struct timespec *until,
@@ -34,19 +36,25 @@ static int probe_clock_nanosleep(clockid_t id, int flags, const struct timespec 
     if (!fake_clock) return clock_nanosleep(id, flags, until, remaining);
     assert(id == CLOCK_MONOTONIC && flags == TIMER_ABSTIME && !remaining);
     ++sleep_calls;
-    if (interrupt_sleeps) { --interrupt_sleeps; return EINTR; }
-    uint64_t ns = (uint64_t)until->tv_sec * UINT64_C(1000000000) + (uint64_t)until->tv_nsec;
+    if (interrupt_sleeps) {
+        --interrupt_sleeps;
+        return EINTR;
+    }
+    uint64_t ns = (uint64_t) until->tv_sec * UINT64_C(1000000000) + (uint64_t) until->tv_nsec;
     if (ns > fake_ns) fake_ns = ns;
     return 0;
 }
 static int timed_candidate(uint16_t media, void *out, size_t size) {
-    (void)out;
+    (void) out;
     assert(size == sizeof(struct azsdk_source_sample));
     assert(media && media == expected_media);
     if (++expected_media > UINT16_MAX) expected_media = 1;
     ++query_count;
     if (backward_query && query_count == backward_query) --fake_ns;
-    else { assert(query_cost <= UINT64_MAX - fake_ns); fake_ns += query_cost; }
+    else {
+        assert(query_cost <= UINT64_MAX - fake_ns);
+        fake_ns += query_cost;
+    }
     if (invalid_candidate && media == 1) {
         struct azsdk_source_sample *sample = out;
         if (invalid_candidate == 2) {
@@ -56,7 +64,8 @@ static int timed_candidate(uint16_t media, void *out, size_t size) {
         memset(sample, 0, sizeof *sample);
         sample->struct_size = sizeof *sample;
         sample->flags = AZS_OWNER_OBSERVED | AZS_CURRENT | AZS_HISTORY_INCOMPLETE;
-        sample->owner_epoch = 9; sample->revision = 2;
+        sample->owner_epoch = 9;
+        sample->revision = 2;
         sample->observed_ns = fake_ns + 1; /* One-nanosecond future record. */
         sample->native_media_id = media;
         sample->physical_status = AZS_PHYSICAL_DISABLED;
@@ -78,23 +87,24 @@ static char *run_fake_scan(void) {
     assert(file);
     struct source_log log = {file, 0, 0};
     struct source_budget budget;
-    (void)source_budget_start(&budget);
+    (void) source_budget_start(&budget);
     assert(startup_cost <= UINT64_MAX - fake_ns);
     fake_ns += startup_cost;
     source_scan(timed_candidate, &log, &budget);
     assert(!fflush(file));
     long bytes = ftell(file);
-    assert(bytes > 0 && (unsigned long)bytes <= SOURCE_LOG_LIMIT);
-    char *text = calloc((size_t)bytes + 1, 1);
+    assert(bytes > 0 && (unsigned long) bytes <= SOURCE_LOG_LIMIT);
+    char *text = calloc((size_t) bytes + 1, 1);
     assert(text);
     rewind(file);
-    assert(fread(text, 1, (size_t)bytes, file) == (size_t)bytes);
+    assert(fread(text, 1, (size_t) bytes, file) == (size_t) bytes);
     fclose(file);
     return text;
 }
 static void test_invalid_record_evidence(void) {
     for (int kind = 1; kind <= 2; ++kind) {
-        reset_fake_scan(); invalid_candidate = kind;
+        reset_fake_scan();
+        invalid_candidate = kind;
         char *text = run_fake_scan();
         unsigned records = 0;
         for (char *at = text; (at = strstr(at, "source_invalid ")) != NULL; ++at) ++records;

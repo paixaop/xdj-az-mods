@@ -68,26 +68,32 @@ struct RateRenderScope {
     bool other;
 };
 static _Thread_local RateRenderScope *rate_render_current;
-static bool rate_render_unchanged_source(RateRenderScope *ctx);
+static bool rate_render_unchanged_source(const RateRenderScope *ctx);
 static void rate_render_init(RateRenderScope *ctx, void *self);
 static void rate_render_drop(RateRenderScope *ctx);
 static void rate_render_generated(uintptr_t self, int64_t frames);
 static int rate_render_measured_frames(RateRenderScope *ctx, int requested);
 static bool rate_render_stationary(uintptr_t core, unsigned frames);
-static bool rate_render_unchanged_source(RateRenderScope *ctx) {
-    (void) ctx;
-
-    if (!ctx->internal || !ctx->slot || processing != ctx->slot || atomic_load_explicit(&(ctx->slot->core), memory_order_acquire) != ctx->core) return false;
-    __auto_type s = &(state());
-    if (s->build < 1 || s->build > 2) return false;
-    __auto_type profile = &(rate_profiles[s->build - 1]);
-    azsdk_load_sample after = {0};
-    return rate_engine(ctx->core, &((*s)), (*profile)) == ctx->engine &&
+static bool rate_render_engine_current(const RateRenderScope *ctx, const State *s, const RateProfile *profile) {
+    return rate_engine(ctx->core, s, *profile) == ctx->engine &&
            !(word(ctx->engine) == s->bias + profile->scratch && byte(ctx->engine + 0x58)) &&
-           !memcmp(ctx->source, ((const void *) (ctx->core + 0x18)), sizeof ctx->source) &&
-           azsdk_load_read((int) (ctx->deck), &after) && after.unit_generation == ctx->load.unit_generation &&
+           !memcmp(ctx->source, (const void *) (ctx->core + 0x18), sizeof ctx->source);
+}
+static bool rate_render_load_current(const RateRenderScope *ctx) {
+    azsdk_load_sample after = {0};
+    return azsdk_load_read((int) ctx->deck, &after) && after.unit_generation == ctx->load.unit_generation &&
            after.invalidation_epoch == ctx->load.invalidation_epoch && after.load_generation == ctx->load.load_generation &&
            azn_load_track_matches(ctx->deck, after.invalidation_epoch, after.load_generation, ctx->source);
+}
+static bool rate_render_unchanged_source(const RateRenderScope *ctx) {
+    if (!ctx->internal || !ctx->slot || processing != ctx->slot || atomic_load_explicit(&(ctx->slot->core), memory_order_acquire) != ctx->core) return false;
+    State *s = &state();
+    if (s->build < 1 || s->build > 2) return false;
+    return rate_render_engine_current(ctx, s, &rate_profiles[s->build - 1]) && rate_render_load_current(ctx);
+}
+static bool rate_render_owned(const RateRenderScope *ctx, const State *s) {
+    return atomic_load_explicit(&(rate_generator_hooked), memory_order_acquire) && processing &&
+           atomic_load_explicit(&(processing->core), memory_order_acquire) == ctx->core && s->build >= 1 && s->build <= 2;
 }
 static void rate_render_init(RateRenderScope *ctx, void *self) {
     (void) ctx;
@@ -96,8 +102,7 @@ static void rate_render_init(RateRenderScope *ctx, void *self) {
     if (ctx->previous) ctx->previous->nested = true;
     rate_render_current = ctx;
     __auto_type s = &(state());
-    if (!atomic_load_explicit(&(rate_generator_hooked), memory_order_acquire) || !processing ||
-        atomic_load_explicit(&(processing->core), memory_order_acquire) != ctx->core || s->build < 1 || s->build > 2) return;
+    if (!rate_render_owned(ctx, s)) return;
     ctx->slot = processing;
     ctx->deck = (unsigned) (ctx->slot - s->decks);
     if (!azsdk_load_read((int) (ctx->deck), &ctx->load)) return;
@@ -125,11 +130,14 @@ static int rate_render_measured_frames(RateRenderScope *ctx, int requested) {
     if (requested <= 0 || ctx->calls || ctx->nested || ctx->other || !rate_render_unchanged_source(ctx)) return requested;
     return 0;
 }
+static bool rate_render_can_measure(const RateRenderScope *r, uintptr_t core, unsigned frames) {
+    return r && r->core == core && frames && frames <= 1024 && r->calls <= 1 && !r->nested && !r->other &&
+           rate_render_unchanged_source(r);
+}
 static bool rate_render_stationary(uintptr_t core, unsigned frames) {
 
     __auto_type r = rate_render_current;
-    if (!r || r->core != core || !frames || frames > 1024 || r->calls > 1 || r->nested || r->other ||
-        !rate_render_unchanged_source(r)) return false;
+    if (!rate_render_can_measure(r, core, frames)) return false;
         /* The qualified internal no-generator branch clears an unreadable
          * block. Otherwise require this call's actual generated advances;
          * an old zero vector cannot hide a source excursion. */
@@ -147,105 +155,144 @@ static void rate_generator(void *self, int64_t frames) {
     ((void (*)(void *, int64_t)) trampoline_address(&rate_generator_original))(self, frames);
     rate_render_generated(((uintptr_t) (self)), frames);
 }
+struct RateObservation {
+    azsdk_load_sample load;
+    uintptr_t core, engine;
+    const RateProfile *profile;
+    uint64_t fault, seed, bits;
+    unsigned availability, direction_avail;
+    double speed;
+    int direction;
+    bool loss;
+};
+static bool rate_capture_engine(unsigned deck, Slot *slot, uintptr_t event_engine, struct RateObservation *value) {
+    State *s = &state();
+    value->core = atomic_load_explicit(&(slot->core), memory_order_acquire);
+    if (!value->core || s->build < 1 || s->build > 2) return false;
+    value->profile = &rate_profiles[s->build - 1];
+    value->engine = rate_engine(value->core, s, *value->profile);
+    atomic_store_explicit(&(rate_state[deck].bound_engine), value->engine, memory_order_release);
+    if (event_engine && event_engine != value->engine) return false;
+    return azn_load_track_matches(deck, value->load.invalidation_epoch, value->load.load_generation, (const unsigned char *) (value->core + 0x18));
+}
+static void rate_read_samples(uintptr_t samples, int frames, struct RateObservation *value) {
+    /* +0x10 is the last committed advance. Read the actual vector to retain
+     * direction history through ramps; pauses do not change nonzero direction. */
+    int direction_seen = 0;
+    double last = 0;
+    for (int n = 0; n < frames; ++n) {
+        double sample = rate_double(samples + sizeof(double) * (unsigned) n);
+        if (!rate_number(sample)) {
+            value->availability = value->direction_avail = AZ_AVAIL_STALE;
+            break;
+        }
+        int sign = rate_sign(sample);
+        if (sign && direction_seen && sign != direction_seen) value->direction_avail = AZ_AVAIL_STALE;
+        if (sign) direction_seen = sign;
+        last = sample;
+    }
+    if (last != value->speed) value->availability = value->direction_avail = AZ_AVAIL_STALE;
+}
+static void rate_measure_block(int frames, struct RateObservation *value) {
+    const bool external = word(value->engine) == state().bias + value->profile->scratch && byte(value->engine + 0x58);
+    uintptr_t samples = word(value->engine + (external ? 0x60u : 0x18u));
+    if (!pointer(samples) || frames > 1024 || (uint64_t) frames > word(value->engine + 0x20)) {
+        value->availability = value->direction_avail = AZ_AVAIL_STALE;
+        return;
+    }
+    rate_read_samples(samples, frames, value);
+}
+static void rate_read_engine(RateState *r, int frames, struct RateObservation *value) {
+    if (!value->engine) {
+        value->availability = value->direction_avail = AZ_AVAIL_UNSUPPORTED;
+        return;
+    }
+    value->speed = rate_double(value->engine + 0x10);
+    if (!rate_number(value->speed)) value->availability = value->direction_avail = AZ_AVAIL_STALE;
+    if (value->availability == AZ_AVAIL_READY && frames > 0) {
+        rate_measure_block(frames, value);
+        r->rate_ramp = value->availability == AZ_AVAIL_STALE;
+        r->direction_ramp = value->direction_avail == AZ_AVAIL_STALE;
+    }
+    if (r->rate_ramp) value->availability = AZ_AVAIL_STALE;
+    if (r->direction_ramp) value->direction_avail = AZ_AVAIL_STALE;
+}
+static void rate_read_motion(RateState *r, int frames, struct RateObservation *value) {
+    value->availability = value->direction_avail = AZ_AVAIL_READY;
+    if (value->load.load_generation != r->load || !byte(value->core + 9)) r->rate_ramp = r->direction_ramp = false;
+    if (byte(value->core + 9)) rate_read_engine(r, frames, value);
+    if (value->availability != AZ_AVAIL_READY) value->speed = value->direction_avail == AZ_AVAIL_READY ? rate_sign(value->speed) : 0;
+    value->direction = rate_sign(value->speed);
+    double magnitude = value->availability == AZ_AVAIL_READY ? fabs(value->speed) : 0;
+    memcpy(&value->bits, &magnitude, sizeof value->bits);
+}
+static bool rate_observation_current(unsigned deck, const RateState *r, const struct RateObservation *value) {
+    azsdk_load_sample after = {0};
+    return azsdk_load_read((int) deck, &after) && after.load_generation == value->load.load_generation &&
+           after.invalidation_epoch == value->load.invalidation_epoch && after.unit_generation == value->load.unit_generation &&
+           azn_load_track_matches(deck, after.invalidation_epoch, after.load_generation, (const unsigned char *) (value->core + 0x18)) &&
+           atomic_load_explicit(&(r->fault), memory_order_acquire) == value->fault;
+}
+static bool rate_history_lost(const RateState *r, const struct RateObservation *value) {
+    return r->observed_fault != value->fault || (r->availability == AZ_AVAIL_READY && value->availability == AZ_AVAIL_STALE) ||
+           (r->direction_avail == AZ_AVAIL_READY && value->direction_avail == AZ_AVAIL_STALE);
+}
+static bool rate_unchanged(const RateState *r, struct RateObservation *value) {
+    if (r->load != value->load.load_generation) return false;
+    value->loss = rate_history_lost(r, value);
+    return !value->loss && r->seed == value->seed && r->availability == value->availability &&
+           r->direction_avail == value->direction_avail && r->direction == value->direction && r->bits == value->bits;
+}
+static void rate_publish(unsigned deck, RateState *r, const struct RateObservation *value) {
+    azstatus_native_receipt out = {0};
+    out.kind = AZN_RATE;
+    out.deck = deck;
+    out.unit = value->load.unit_generation;
+    out.epoch = value->load.invalidation_epoch;
+    out.load_generation = value->load.load_generation;
+    out.attempt = value->load.unit_generation;
+    out.valid = (int) value->availability;
+    out.b = (int) value->direction_avail;
+    out.a = value->direction;
+    memcpy(&out.points[0].samples, &value->bits, sizeof value->bits);
+    if (value->loss) out.lost_topics = AZ_STATUS_TOPIC(AZ_STATUS_TRANSPORT);
+    if (!azn_offer(&out)) return;
+    r->load = value->load.load_generation;
+    r->seed = value->seed;
+    r->observed_fault = value->fault;
+    r->availability = value->availability;
+    r->direction_avail = value->direction_avail;
+    r->direction = value->direction;
+    r->bits = value->bits;
+}
 static void rate_capture(unsigned deck, Slot *slot, uintptr_t event_engine, int frames) {
-    State *s = &(state());
     if (atomic_load_explicit(&(rate_hooks), memory_order_acquire) != 15 || !atomic_load_explicit(&(rate_generator_hooked), memory_order_acquire) ||
         !(azn_interest(deck) & AZ_STATUS_TOPIC(AZ_STATUS_TRANSPORT))) return;
-    azsdk_load_sample load = {0};
-    if (!azsdk_load_read((int) (deck), &load)) return;
-    __auto_type r = &(rate_state[deck]);
+    struct RateObservation value = {0};
+    if (!azsdk_load_read((int) deck, &value.load)) return;
+    RateState *r = &rate_state[deck];
     if (atomic_flag_test_and_set_explicit(&(r->busy), memory_order_acquire)) {
         atomic_fetch_add_explicit(&(r->fault), 1, memory_order_acq_rel);
         azn_rate_gap(deck);
         return;
     }
     EXIT_FLAG_GUARD(guard, &r->busy);
-    const uintptr_t core = atomic_load_explicit(&(slot->core), memory_order_acquire);
-    if (!core || s->build < 1 || s->build > 2) return;
-    const RateProfile *profile = &(rate_profiles[s->build - 1]);
-    const uintptr_t engine = rate_engine(core, &((*s)), (*profile));
-    atomic_store_explicit(&(r->bound_engine), engine, memory_order_release);
-    if (event_engine && event_engine != engine) return;
-    if (!azn_load_track_matches(deck, load.invalidation_epoch, load.load_generation,
-                                ((const unsigned char *) (core + 0x18)))) return;
-    uint64_t fault = atomic_load_explicit(&(r->fault), memory_order_acquire), seed = azn_seed_id(deck);
-    unsigned avail = AZ_AVAIL_READY, dir_avail = AZ_AVAIL_READY;
-    bool loss = false;
-    double speed = 0;
-    if (load.load_generation != r->load || !byte(core + 9)) r->rate_ramp = r->direction_ramp = false;
-    if (byte(core + 9)) {
-        if (!engine) avail = dir_avail = AZ_AVAIL_UNSUPPORTED;
-        else {
-            speed = rate_double(engine + 0x10);
-            if (!rate_number(speed)) avail = dir_avail = AZ_AVAIL_STALE;
-            if (avail == AZ_AVAIL_READY && frames > 0) {
-                const bool external = word(engine) == s->bias + profile->scratch && byte(engine + 0x58);
-                uintptr_t samples = word(engine + (external ? 0x60u : 0x18u));
-                if (!pointer(samples) || frames > 1024 || (uint64_t) (frames) > word(engine + 0x20)) avail = dir_avail = AZ_AVAIL_STALE;
-                else {
-                    /* +0x10 is the last committed advance, not a promise that
-                     * the whole block used one speed. The native ramp writer
-                     * stores every advance here and leaves the final one in
-                     * +0x10. Publish that measured current rate through ramps.
-                     * Opposite nonzero signs still invalidate the block's
-                     * direction history; pauses within one direction do not. */
-                    int direction_seen = 0;
-                    double last = 0;
-                    for (int n = 0; n < frames; ++n) {
-                        double sample = rate_double(samples + sizeof(double) * (unsigned) (n));
-                        if (!rate_number(sample)) {
-                            avail = dir_avail = AZ_AVAIL_STALE;
-                            break;
-                        }
-                        int sign = rate_sign(sample);
-                        if (sign && direction_seen && sign != direction_seen) dir_avail = AZ_AVAIL_STALE;
-                        if (sign) direction_seen = sign;
-                        last = sample;
-                    }
-                    if (last != speed) avail = dir_avail = AZ_AVAIL_STALE;
-                }
-                r->rate_ramp = avail == AZ_AVAIL_STALE;
-                r->direction_ramp = dir_avail == AZ_AVAIL_STALE;
-            }
-            if (r->rate_ramp) avail = AZ_AVAIL_STALE;
-            if (r->direction_ramp) dir_avail = AZ_AVAIL_STALE;
+    if (!rate_capture_engine(deck, slot, event_engine, &value)) return;
+    value.fault = atomic_load_explicit(&(r->fault), memory_order_acquire);
+    value.seed = azn_seed_id(deck);
+    rate_read_motion(r, frames, &value);
+    if (!rate_observation_current(deck, r, &value) || rate_unchanged(r, &value)) return;
+    rate_publish(deck, r, &value);
+}
+static void rate_unbound_writer(unsigned kind, uintptr_t self) {
+    State *s = &state();
+    for (unsigned d = 0; d < 4; ++d) {
+        bool ours = kind < 2 ? atomic_load_explicit(&(s->decks[d].core), memory_order_acquire) == self : atomic_load_explicit(&(rate_state[d].bound_engine), memory_order_acquire) == self;
+        if (ours && (azn_interest(d) & AZ_STATUS_TOPIC(AZ_STATUS_TRANSPORT))) {
+            atomic_fetch_add_explicit(&(rate_state[d].fault), 1, memory_order_acq_rel);
+            azn_rate_gap(d);
         }
     }
-    if (avail != AZ_AVAIL_READY) speed = dir_avail == AZ_AVAIL_READY ? rate_sign(speed) : 0;
-    int dir = rate_sign(speed);
-    double magnitude = avail == AZ_AVAIL_READY ? fabs(speed) : 0;
-    uint64_t bits;
-    memcpy(&bits, &magnitude, sizeof bits);
-    azsdk_load_sample after = {0};
-    if (!azsdk_load_read((int) (deck), &after) || after.load_generation != load.load_generation ||
-        after.invalidation_epoch != load.invalidation_epoch || after.unit_generation != load.unit_generation ||
-        !azn_load_track_matches(deck, after.invalidation_epoch, after.load_generation, ((const unsigned char *) (core + 0x18))) ||
-        atomic_load_explicit(&(r->fault), memory_order_acquire) != fault) return;
-    if (r->load == load.load_generation) {
-        loss = (r->observed_fault != fault || (r->availability == AZ_AVAIL_READY && avail == AZ_AVAIL_STALE) ||
-                (r->direction_avail == AZ_AVAIL_READY && dir_avail == AZ_AVAIL_STALE));
-        if (!loss && r->seed == seed && r->availability == avail && r->direction_avail == dir_avail && r->direction == dir && r->bits == bits) return;
-    }
-    azstatus_native_receipt out = {0};
-    out.kind = AZN_RATE;
-    out.deck = deck;
-    out.unit = load.unit_generation;
-    out.epoch = load.invalidation_epoch;
-    out.load_generation = load.load_generation;
-    out.attempt = load.unit_generation;
-    out.valid = (int) (avail);
-    out.b = (int) (dir_avail);
-    out.a = dir;
-    memcpy(&out.points[0].samples, &bits, sizeof bits);
-    if (loss) out.lost_topics = AZ_STATUS_TOPIC(AZ_STATUS_TRANSPORT);
-    if (!azn_offer(&out)) return;
-    r->load = load.load_generation;
-    r->seed = seed;
-    r->observed_fault = fault;
-    r->availability = avail;
-    r->direction_avail = dir_avail;
-    r->direction = dir;
-    r->bits = bits;
 }
 static void rate_writer_done(unsigned kind, uintptr_t self) {
     State *s = &(state());
@@ -255,13 +302,7 @@ static void rate_writer_done(unsigned kind, uintptr_t self) {
             rate_capture(d, &(*processing), kind >= 2 ? self : 0, 0);
         return;
     }
-    for (unsigned d = 0; d < 4; ++d) {
-        bool ours = kind < 2 ? atomic_load_explicit(&(s->decks[d].core), memory_order_acquire) == self : atomic_load_explicit(&(rate_state[d].bound_engine), memory_order_acquire) == self;
-        if (ours && (azn_interest(d) & AZ_STATUS_TOPIC(AZ_STATUS_TRANSPORT))) {
-            atomic_fetch_add_explicit(&(rate_state[d].fault), 1, memory_order_acq_rel);
-            azn_rate_gap(d);
-        }
-    }
+    rate_unbound_writer(kind, self);
 }
 typedef struct RateActiveWrite RateActiveWrite;
 struct RateActiveWrite {
@@ -287,97 +328,50 @@ static void rate_active_write_drop(RateActiveWrite *ctx) {
     }
 }
 
-static void rate_writer_0(void *self, unsigned arg0) {
-    /* These two originals own Core+9. Fence every actual start/stop call,
-     * including calls outside the current render owner and with no watch. */
-    Motion *motion = NULL;
-    if (0 < 2) {
-        {
-            for (unsigned range_index_1 = 0; range_index_1 < sizeof(state().decks) / sizeof(state().decks)[0]; ++range_index_1) {
-                __auto_type slot = &(state().decks[range_index_1]);
-
-                if (atomic_load_explicit(&(slot->core), memory_order_acquire) == ((uintptr_t) (self))) {
-                    motion = &slot->motion;
-                    break;
-                }
-            }
-        }
+/* Both start/stop writers own Core+9, even outside the render owner and
+ * without a watch. Engine speed writers do not mutate that active latch. */
+static Motion *rate_active_motion(uintptr_t core) {
+    for (unsigned d = 0; d < 4; ++d) {
+        Slot *slot = &state().decks[d];
+        if (atomic_load_explicit(&(slot->core), memory_order_acquire) == core) return &slot->motion;
     }
+    return NULL;
+}
+static void rate_writer_0(void *self, unsigned arg0) {
     {
         RateActiveWrite guard __attribute__((cleanup(rate_active_write_drop)));
-        rate_active_write_init(&guard, motion);
+        rate_active_write_init(&guard, rate_active_motion((uintptr_t) self));
         ((void (*)(void *, unsigned)) trampoline_address(&rate_original[0]))(self, arg0);
     }
-    rate_writer_done(0, ((uintptr_t) (self)));
+    rate_writer_done(0, (uintptr_t) self);
 }
 static void rate_writer_1(void *self) {
-    /* These two originals own Core+9. Fence every actual start/stop call,
-     * including calls outside the current render owner and with no watch. */
-    Motion *motion = NULL;
-    if (1 < 2) {
-        {
-            for (unsigned range_index_2 = 0; range_index_2 < sizeof(state().decks) / sizeof(state().decks)[0]; ++range_index_2) {
-                __auto_type slot = &(state().decks[range_index_2]);
-
-                if (atomic_load_explicit(&(slot->core), memory_order_acquire) == ((uintptr_t) (self))) {
-                    motion = &slot->motion;
-                    break;
-                }
-            }
-        }
-    }
     {
         RateActiveWrite guard __attribute__((cleanup(rate_active_write_drop)));
-        rate_active_write_init(&guard, motion);
+        rate_active_write_init(&guard, rate_active_motion((uintptr_t) self));
         ((void (*)(void *)) trampoline_address(&rate_original[1]))(self);
     }
-    rate_writer_done(1, ((uintptr_t) (self)));
+    rate_writer_done(1, (uintptr_t) self);
 }
 static void rate_writer_2(void *self, double arg0, unsigned arg1) {
-    /* These two originals own Core+9. Fence every actual start/stop call,
-     * including calls outside the current render owner and with no watch. */
-    Motion *motion = NULL;
-    if (2 < 2) {
-        {
-            for (unsigned range_index_3 = 0; range_index_3 < sizeof(state().decks) / sizeof(state().decks)[0]; ++range_index_3) {
-                __auto_type slot = &(state().decks[range_index_3]);
-
-                if (atomic_load_explicit(&(slot->core), memory_order_acquire) == ((uintptr_t) (self))) {
-                    motion = &slot->motion;
-                    break;
-                }
-            }
-        }
-    }
-    {
-        RateActiveWrite guard __attribute__((cleanup(rate_active_write_drop)));
-        rate_active_write_init(&guard, motion);
-        ((void (*)(void *, double, unsigned)) trampoline_address(&rate_original[2]))(self, arg0, arg1);
-    }
-    rate_writer_done(2, ((uintptr_t) (self)));
+    ((void (*)(void *, double, unsigned)) trampoline_address(&rate_original[2]))(self, arg0, arg1);
+    rate_writer_done(2, (uintptr_t) self);
 }
 static void rate_writer_3(void *self, double arg0, unsigned arg1) {
-    /* These two originals own Core+9. Fence every actual start/stop call,
-     * including calls outside the current render owner and with no watch. */
-    Motion *motion = NULL;
-    if (3 < 2) {
-        {
-            for (unsigned range_index_4 = 0; range_index_4 < sizeof(state().decks) / sizeof(state().decks)[0]; ++range_index_4) {
-                __auto_type slot = &(state().decks[range_index_4]);
-
-                if (atomic_load_explicit(&(slot->core), memory_order_acquire) == ((uintptr_t) (self))) {
-                    motion = &slot->motion;
-                    break;
-                }
-            }
-        }
+    ((void (*)(void *, double, unsigned)) trampoline_address(&rate_original[3]))(self, arg0, arg1);
+    rate_writer_done(3, (uintptr_t) self);
+}
+static bool rate_install_generator(const State *s, int build, azn_setting_patch_fn patch) {
+    if (!atomic_load_explicit(&(rate_generator_hooked), memory_order_acquire)) {
+        const uintptr_t site = s->bias + (build == 1 ? 0xdb21e0u : 0xe3ca30u);
+        const uint32_t first[2][4] = {{0x6d408002, 0xd2e7d002, 0x9e670043, 0xd10043ff},
+                                      {0x6d408402, 0xd2e7d002, 0x9e670044, 0x7ee1d440}};
+        if (memcmp(((const void *) (site)), first[build - 1], sizeof first[0]) ||
+            patch(site, ((void *) (rate_generator)), &rate_generator_original, "status-rate-render") != 1 ||
+            !rate_generator_original) return false;
+        atomic_store_explicit(&(rate_generator_hooked), true, memory_order_release);
     }
-    {
-        RateActiveWrite guard __attribute__((cleanup(rate_active_write_drop)));
-        rate_active_write_init(&guard, motion);
-        ((void (*)(void *, double, unsigned)) trampoline_address(&rate_original[3]))(self, arg0, arg1);
-    }
-    rate_writer_done(3, ((uintptr_t) (self)));
+    return true;
 }
 static void rate_install(State *s, int build, azn_setting_patch_fn patch) {
     const RateProfile *p = &(rate_profiles[build - 1]);
@@ -390,15 +384,7 @@ static void rate_install(State *s, int build, azn_setting_patch_fn patch) {
                 patch(site, hooks[i], &rate_original[i], "status-rate") != 1 || !rate_original[i]) return;
             atomic_fetch_or_explicit(&(rate_hooks), 1u << i, memory_order_release);
         }
-    if (!atomic_load_explicit(&(rate_generator_hooked), memory_order_acquire)) {
-        const uintptr_t site = s->bias + (build == 1 ? 0xdb21e0u : 0xe3ca30u);
-        const uint32_t first[2][4] = {{0x6d408002, 0xd2e7d002, 0x9e670043, 0xd10043ff},
-                                      {0x6d408402, 0xd2e7d002, 0x9e670044, 0x7ee1d440}};
-        if (memcmp(((const void *) (site)), first[build - 1], sizeof first[0]) ||
-            patch(site, ((void *) (rate_generator)), &rate_generator_original, "status-rate-render") != 1 ||
-            !rate_generator_original) return;
-        atomic_store_explicit(&(rate_generator_hooked), true, memory_order_release);
-    }
+    if (!rate_install_generator(s, build, patch)) return;
     for (unsigned d = 0; d < 4; ++d)
         if (atomic_load_explicit(&(s->decks[d].core), memory_order_acquire)) azn_capability(d, AZN_CAP_RATE, 1);
 }

@@ -58,6 +58,26 @@ static int ds_tempo_load(unsigned d, struct azstatus_native_receipt *r) {
     *r = (struct azstatus_native_receipt) {.size = sizeof *r, .version = 1};
     return api && api->load_seed && api->load_seed(d, r) && r->load_generation;
 }
+static int ds_tempo_owner_current(unsigned deck, void *self, uint64_t owner) {
+    return owner && owner != atomic_load_explicit(&ds_tempo_slots[deck].retired, memory_order_acquire) &&
+           (uintptr_t) self == __atomic_load_n(&g_bpmstate[deck], __ATOMIC_ACQUIRE) &&
+           owner == __atomic_load_n(&g_bpmstate_generation[deck], __ATOMIC_ACQUIRE);
+}
+static int ds_tempo_same_load(unsigned deck, const struct azstatus_native_receipt *before) {
+    struct azstatus_native_receipt after;
+    return ds_tempo_load(deck, &after) && after.epoch == before->epoch &&
+           after.unit == before->unit && after.load_generation == before->load_generation;
+}
+static void ds_tempo_publish_current(unsigned deck, void *self, uint64_t owner, const struct azstatus_native_receipt *before) {
+    uint64_t raw = __atomic_load_n((uint64_t *) ((uintptr_t) self + BPMSTATE_LIVE), __ATOMIC_RELAXED);
+    double bpm;
+    memcpy(&bpm, &raw, sizeof bpm);
+    int ok = isfinite(bpm) && bpm > 0 && bpm < DBL_MAX;
+    int fenced = ds_tempo_same_load(deck, before);
+    if (atomic_exchange_explicit(&ds_tempo_slots[deck].collision, 0, memory_order_acq_rel)) fenced = 0;
+    ds_tempo_store(deck, owner, fenced ? before->load_generation : 0, fenced && ok ? bpm : 0,
+                   fenced && ok ? AZ_AVAIL_READY : AZ_AVAIL_STALE);
+}
 static void ds_tempo_writer(void *self, void *input) {
     int d = ds_tempo_deck((uintptr_t) self);
     if (d < 0 || !atomic_load_explicit(&ds_tempo_ready, memory_order_acquire)) {
@@ -73,22 +93,12 @@ static void ds_tempo_writer(void *self, void *input) {
         ds_tempo_gap(d);
         return;
     }
-    struct azstatus_native_receipt before, after;
+    struct azstatus_native_receipt before;
     int armed = ds_tempo_load(d, &before);
     ds_tempo_original(self, input);
-    if (owner && armed && owner != atomic_load_explicit(&s->retired, memory_order_acquire) &&
-        (uintptr_t) self == __atomic_load_n(&g_bpmstate[d], __ATOMIC_ACQUIRE) &&
-        owner == __atomic_load_n(&g_bpmstate_generation[d], __ATOMIC_ACQUIRE)) {
-        uint64_t raw = __atomic_load_n((uint64_t *) ((uintptr_t) self + BPMSTATE_LIVE), __ATOMIC_RELAXED);
-        double bpm;
-        memcpy(&bpm, &raw, sizeof bpm);
-        int ok = isfinite(bpm) && bpm > 0 && bpm < DBL_MAX;
-        int fenced = ds_tempo_load(d, &after) && after.epoch == before.epoch &&
-                     after.unit == before.unit && after.load_generation == before.load_generation;
-        if (atomic_exchange_explicit(&s->collision, 0, memory_order_acq_rel)) fenced = 0;
-        ds_tempo_store(d, owner, fenced ? before.load_generation : 0, fenced && ok ? bpm : 0,
-                       fenced && ok ? AZ_AVAIL_READY : AZ_AVAIL_STALE);
-    } else ds_tempo_store(d, owner, 0, 0, AZ_AVAIL_STALE);
+    if (armed && ds_tempo_owner_current(d, self, owner))
+        ds_tempo_publish_current(d, self, owner, &before);
+    else ds_tempo_store(d, owner, 0, 0, AZ_AVAIL_STALE);
     atomic_store_explicit(&s->busy, 0, memory_order_release);
 }
 static void ds_tempo_dispose(void *ctrl) {
@@ -126,15 +136,18 @@ static void ds_tempo_apply(const struct ds_gui_record *r, int gap) {
     ds_publish(r->deck, r->epoch, r->epoch ? 0 : DS_UNIT_INPUT, r->observed, &f, 1, NULL, NULL,
                gap ? AZ_STATUS_TOPIC(AZ_STATUS_TEMPO) : 0, gap ? AZ_STATUS_CAPTURE_GAP : 0);
 }
+static int ds_tempo_target_valid(uintptr_t writer, uintptr_t dispose) {
+    const uint32_t expected[] = {0xa9b87bfd, 0x910003fd, 0xa90153f3, 0xaa0003f3};
+    uintptr_t target;
+    return img_q(BPMCTRL_VT + 16, &target) && target == dispose && writer >= g_ep_img_lo &&
+           writer + sizeof expected <= g_ep_img_hi && !memcmp((void *) writer, expected, sizeof expected);
+}
 static void ds_tempo_install(void) {
     if (access("/home/root/settings/azmod.deck-status.off", F_OK) == 0 ||
         (g_ep147_build != EPB_V130 && g_ep147_build != EPB_V200)) return;
     const uintptr_t writer = g_ep147_build == EPB_V130 ? 0x1f5c8c8 : 0x20c8c40;
     const uintptr_t dispose = g_ep147_build == EPB_V130 ? 0x1fcbe20 : 0x21394f0;
-    const uint32_t expected[] = {0xa9b87bfd, 0x910003fd, 0xa90153f3, 0xaa0003f3};
-    uintptr_t target;
-    if (!img_q(BPMCTRL_VT + 16, &target) || target != dispose || writer < g_ep_img_lo ||
-        writer + sizeof expected > g_ep_img_hi || memcmp((void *) writer, expected, sizeof expected)) return;
+    if (!ds_tempo_target_valid(writer, dispose)) return;
     if (azm_patch_vtable(BPMCTRL_VT + 16, (void *) ds_tempo_dispose, (void **) &ds_tempo_dispose_original) != 1 ||
         azm_install_hook(writer, (void *) ds_tempo_writer, (void **) &ds_tempo_original) != 1) return;
     atomic_store_explicit(&ds_tempo_ready, 1, memory_order_release);

@@ -79,7 +79,10 @@ static int loop(int deck, struct azstem_loop_observation_v2 *out) {
 static unsigned mask(void) { return registered_mask; }
 static int tempo_ready;
 static int __attribute__((unused)) master_state_read(int *deck, uint64_t *revision, uint64_t *observed_ns) {
-    (void) deck; (void) revision; (void) observed_ns; return 0;
+    (void) deck;
+    (void) revision;
+    (void) observed_ns;
+    return 0;
 }
 static double tempo_values[4] = {123.45, 97.25, 141.75, 128.125};
 static uint64_t tempo_generations[4] = {401, 402, 403, 404};
@@ -87,7 +90,7 @@ static uint64_t tempo_revisions[4] = {501, 502, 503, 504};
 static uint64_t tempo_times[4] = {601, 602, 603, 604};
 /* Public projection uses a copied GUI receipt; no native object is exposed. */
 static int __attribute__((unused)) cm_tempo_read(int deck, double *bpm, uint64_t *generation,
-                                               uint64_t *revision, uint64_t *observed_ns) {
+                                                 uint64_t *revision, uint64_t *observed_ns) {
     *bpm = tempo_ready ? tempo_values[deck] : 0.0;
     *generation = tempo_ready ? tempo_generations[deck] : 0;
     *revision = tempo_ready ? tempo_revisions[deck] : 0;
@@ -202,8 +205,8 @@ static void tempo_lock_projection(void) {
         assert(!(out.valid & AZ_LIVE_TEMPO_SLIDER_LOCKED) && out.tempo_slider_locked == -1);
         tempo_lock_ready = 1;
         for (int value = 0; value <= 2; ++value) {
-            tempo_lock_samples[deck] = (struct azstem_tempo_lock_observation_v1){sizeof out, 1,
-                100u + deck, 200u + deck, 300u + deck, value, 1};
+            tempo_lock_samples[deck] = (struct azstem_tempo_lock_observation_v1) {sizeof out, 1,
+                                                                                  100u + deck, 200u + deck, 300u + deck, value, 1};
             assert(sd_deck_snapshot_v1(deck, &out) == AZ_OK);
             assert(!!(out.valid & AZ_LIVE_TEMPO_SLIDER_LOCKED) == (value <= 1));
             assert(out.tempo_slider_locked == (value <= 1 ? value : -1));

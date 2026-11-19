@@ -38,14 +38,14 @@ typedef struct Source {
 } Source;
 typedef struct Lease {
     uint64_t token, revision, epoch, load;
-    unsigned source, deck;
-    int fd;
     dev_t device;
     ino_t inode;
     off_t bytes;
+    Track track;
+    unsigned source, deck;
+    int fd;
     unsigned char id[12];
     char path[1024];
-    Track track;
 } Lease;
 static Source sources[source_count];
 static Lease leases[lease_count];
@@ -89,25 +89,17 @@ static bool path_copy(const Track *track, char out[1024]) {
     memcpy(out, path, length + 1);
     return true;
 }
-static void capture(uintptr_t owner, const WeakTrack *weak, int generation,
-                    const unsigned char before[12]) {
-    if (!atomic_load_explicit(&(installed), memory_order_acquire) || !owner || !weak) return;
+static bool capture_identity_current(uintptr_t owner, int generation, const unsigned char before[12]) {
     const uintptr_t counter = scalar(uintptr_t, owner + 0x28);
     if (!counter || __atomic_load_n(((const int *) (counter)), __ATOMIC_ACQUIRE) != generation ||
-        memcmp(before, ((const void *) (owner + 0x68)), 12)) return;
+        memcmp(before, ((const void *) (owner + 0x68)), 12)) return false;
     /* Only local Beatport media is admitted. Other services and linked source
      * families need independently verified resource lifetime profiles. */
-    if (before[0] != 1 || (before[4] & 31u) != 6) return;
-    Track track __attribute__((cleanup(az_native_owner_reset))) = az_native_lock(weak);
-    if (!completed(&track) || scalar(uint64_t, ((uintptr_t) (track.object)) + 0x28) !=
-                                  scalar(uint64_t, owner + 0x160)) return;
-    char path[1024] = {0};
-    if (!path_copy(&track, path)) return;
-    /* This is the native download worker, never the audio or UI thread. Do
-     * not lose its only completion observation to a simultaneous lease read. */
-    AZ_MUTEX_GUARD(lock, mutex, false);
-    if (lock.error) return;
-    if (serial == UINT64_MAX) return;
+    if (before[0] != 1 || (before[4] & 31u) != 6) return false;
+    return true;
+}
+
+static unsigned source_slot(uintptr_t owner) {
     unsigned slot = source_count;
     for (unsigned i = 0; i < source_count; ++i)
         if (sources[i].owner == owner) {
@@ -120,13 +112,34 @@ static void capture(uintptr_t owner, const WeakTrack *weak, int generation,
                 slot = i;
                 break;
             }
+    return slot;
+}
+
+static void retain_source(uintptr_t owner, const unsigned char before[12], const char path[1024], const Track *track) {
+    /* This is the native download worker, never the audio or UI thread. Do
+     * not lose its only completion observation to a simultaneous lease read. */
+    AZ_MUTEX_GUARD(lock, mutex, false);
+    if (lock.error) return;
+    if (serial == UINT64_MAX) return;
+    unsigned slot = source_slot(owner);
     if (slot == source_count) return;
     Source *s = &sources[slot];
     s->owner = owner;
     s->revision = ++serial;
     memcpy(s->id, before, 12);
-    memcpy(s->path, path, sizeof path);
-    az_native_weak_copy(&s->track, &track);
+    memcpy(s->path, path, sizeof s->path);
+    az_native_weak_copy(&s->track, track);
+}
+static void capture(uintptr_t owner, const WeakTrack *weak, int generation,
+                    const unsigned char before[12]) {
+    if (!atomic_load_explicit(&(installed), memory_order_acquire) || !owner || !weak) return;
+    if (!capture_identity_current(owner, generation, before)) return;
+    Track track __attribute__((cleanup(az_native_owner_reset))) = az_native_lock(weak);
+    if (!completed(&track) || scalar(uint64_t, ((uintptr_t) (track.object)) + 0x28) !=
+                                  scalar(uint64_t, owner + 0x160)) return;
+    char path[1024] = {0};
+    if (!path_copy(&track, path)) return;
+    retain_source(owner, before, path, &track);
 }
 struct Capture {
     uintptr_t owner;
@@ -148,75 +161,96 @@ static int wait_decrypt(uintptr_t owner, const WeakTrack *weak, int generation) 
     }
     return result;
 }
+static bool lease_file_matches(const Lease *lease, const struct stat *file) {
+    return S_ISREG(file->st_mode) && file->st_dev == lease->device &&
+           file->st_ino == lease->inode && file->st_size == lease->bytes;
+}
+static bool same_file(const struct stat *file, const struct stat *path) {
+    return S_ISREG(path->st_mode) && path->st_dev == file->st_dev &&
+           path->st_ino == file->st_ino && path->st_size == file->st_size;
+}
+
 static bool current_copy(const Lease *lease) {
     if (!load_matches(lease->deck, lease->epoch, lease->load, lease->id) || !completed(&lease->track)) return false;
     struct stat fd = {0}, path = {0};
-    if (lease->fd < 0 || fstat(lease->fd, &fd) || lstat(lease->path, &path) ||
-        !S_ISREG(fd.st_mode) || !S_ISREG(path.st_mode) || fd.st_dev != lease->device ||
-        fd.st_ino != lease->inode || fd.st_size != lease->bytes ||
-        path.st_dev != fd.st_dev || path.st_ino != fd.st_ino || path.st_size != fd.st_size) return false;
+    if (lease->fd < 0 || fstat(lease->fd, &fd) || lstat(lease->path, &path)) return false;
+    if (!lease_file_matches(lease, &fd) || !same_file(&fd, &path)) return false;
     return load_matches(lease->deck, lease->epoch, lease->load, lease->id);
 }
-static int open_source(unsigned deck, uint64_t epoch, uint64_t load, struct azn_analysis_source *out) {
-    if (!out || out->size < sizeof *out || out->version != 1 || deck >= 4 || !epoch || !load) return AZ_INVALID;
-    if (!atomic_load_explicit(&(installed), memory_order_acquire)) return AZ_UNSUPPORTED;
-    Lease next __attribute__((cleanup(lease_release))) = {.fd = -1};
+static int acquire_source(unsigned i, unsigned deck, uint64_t epoch, uint64_t load, Lease *next) {
+    AZ_MUTEX_GUARD(lock, mutex, true);
+    if (!lock.held) return AZ_BUSY;
+    Source *s = &sources[i];
+    if (!s->revision || !load_matches(deck, epoch, load, s->id)) return AZ_NOT_FOUND;
+    Track held __attribute__((cleanup(az_native_owner_reset))) = az_native_lock(&s->track);
+    if (!held.object) return AZ_NOT_FOUND;
+    next->source = i;
+    next->revision = s->revision;
+    next->deck = deck;
+    next->epoch = epoch;
+    next->load = load;
+    next->track = held;
+    held = (Track) {0};
+    (void) held; /* Ownership moved to next; the cleanup guard must release nothing. */
+    memcpy(next->id, s->id, sizeof next->id);
+    memcpy(next->path, s->path, sizeof next->path);
+    return AZ_OK;
+}
+
+static int find_source(unsigned deck, uint64_t epoch, uint64_t load, Lease *next) {
     for (unsigned i = 0; i < source_count; ++i) {
-        {
-            AZ_MUTEX_GUARD(lock, mutex, true);
-            if (!lock.held) return AZ_BUSY;
-            Source *s = &sources[i];
-            if (!s->revision || !load_matches(deck, epoch, load, s->id)) continue;
-            Track held __attribute__((cleanup(az_native_owner_reset))) = az_native_lock(&s->track);
-            if (!held.object) continue;
-            next.source = i;
-            next.revision = s->revision;
-            next.deck = deck;
-            next.epoch = epoch;
-            next.load = load;
-            next.track = held;
-            held = (Track) {0};
-            memcpy(next.id, s->id, sizeof next.id);
-            memcpy(next.path, s->path, sizeof next.path);
-        }
-        if (completed(&next.track)) break;
+        int rc = acquire_source(i, deck, epoch, load, next);
+        if (rc == AZ_BUSY) return rc;
+        if (rc != AZ_OK) continue;
+        if (completed(&next->track)) break;
         /* A retired download on another deck must not mask a newer complete
          * resource for the same full TrackID. Release outside our mutex. */
-        az_native_owner_reset(&next.track);
+        az_native_owner_reset(&next->track);
     }
-    if (!next.track.object) return AZ_NOT_FOUND;
-    next.fd = open(next.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    struct stat st = {0};
-    if (next.fd < 0 || fstat(next.fd, &st) || !S_ISREG(st.st_mode) || st.st_size <= 0) {
+    return next->track.object ? AZ_OK : AZ_NOT_FOUND;
+}
 
-        return AZ_STALE;
+static bool open_source_file(Lease *next) {
+    next->fd = open(next->path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat st = {0};
+    if (next->fd < 0 || fstat(next->fd, &st) || !S_ISREG(st.st_mode) || st.st_size <= 0) {
+
+        return false;
     }
-    next.device = st.st_dev;
-    next.inode = st.st_ino;
-    next.bytes = st.st_size;
+    next->device = st.st_dev;
+    next->inode = st.st_ino;
+    next->bytes = st.st_size;
+    return true;
+}
+
+static void commit_source(Lease *next, Lease *lease, struct azn_analysis_source *out) {
+    next->token = ++serial;
+    struct azn_analysis_source result = {0};
+    result.size = sizeof result;
+    result.version = 1;
+    result.token = next->token;
+    result.epoch = next->epoch;
+    result.load = next->load;
+    result.source_kind = AZ_STATUS_SOURCE_STREAMING;
+    memcpy(result.track_id, next->id, sizeof result.track_id);
+    memcpy(result.audio_path, next->path, sizeof result.audio_path);
+    *lease = *next;
+    next->track = (Track) {0};
+    next->fd = -1;
+    *out = result;
+}
+
+static int publish_source(Lease *next, struct azn_analysis_source *out) {
     int rc = AZ_STALE;
-    if (current_copy(&next)) {
+    if (current_copy(next)) {
         AZ_MUTEX_GUARD(lock, mutex, true);
         if (!lock.held) rc = AZ_BUSY;
-        else if (sources[next.source].revision == next.revision) {
+        else if (sources[next->source].revision == next->revision) {
             rc = AZ_LIMIT;
             for (unsigned li = 0; li < lease_count; ++li) {
                 Lease *lease = &leases[li];
                 if (lease->token || serial == UINT64_MAX) continue;
-                next.token = ++serial;
-                struct azn_analysis_source result = {0};
-                result.size = sizeof result;
-                result.version = 1;
-                result.token = next.token;
-                result.epoch = epoch;
-                result.load = load;
-                result.source_kind = AZ_STATUS_SOURCE_STREAMING;
-                memcpy(result.track_id, next.id, sizeof result.track_id);
-                memcpy(result.audio_path, next.path, sizeof result.audio_path);
-                *lease = next;
-                next.track = (Track) {0};
-                next.fd = -1;
-                *out = result;
+                commit_source(next, lease, out);
                 rc = AZ_OK;
                 break;
             }
@@ -224,6 +258,19 @@ static int open_source(unsigned deck, uint64_t epoch, uint64_t load, struct azn_
     }
 
     return rc;
+}
+
+static bool source_request_valid(unsigned deck, uint64_t epoch, uint64_t load, const struct azn_analysis_source *out) {
+    return out && out->size >= sizeof *out && out->version == 1 && deck < 4 && epoch && load;
+}
+static int open_source(unsigned deck, uint64_t epoch, uint64_t load, struct azn_analysis_source *out) {
+    if (!source_request_valid(deck, epoch, load, out)) return AZ_INVALID;
+    if (!atomic_load_explicit(&(installed), memory_order_acquire)) return AZ_UNSUPPORTED;
+    Lease next __attribute__((cleanup(lease_release))) = {.fd = -1};
+    int found = find_source(deck, epoch, load, &next);
+    if (found != AZ_OK) return found;
+    if (!open_source_file(&next)) return AZ_STALE;
+    return publish_source(&next, out);
 }
 static int current_source(uint64_t token) {
     if (!token) return AZ_INVALID;
@@ -250,6 +297,7 @@ static void close_source(uint64_t token) {
     }
     /* Last counted release can delete native files and run callbacks. It must
      * happen outside our registry lock and away from audio/panel callbacks. */
+    (void) retired;
 }
 #if defined(__linux__)
 static int main_image(struct dl_phdr_info *info, size_t size, void *out) {

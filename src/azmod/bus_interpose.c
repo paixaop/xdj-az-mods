@@ -145,11 +145,7 @@ static void bus_fd_forget(int fd) {
 /* Called by open() with every descriptor it returns: a number that comes back from
  * open() is no longer whatever was tracked under it, so forget first, then record
  * it again only if this path is a tracked device. */
-static void bus_fd_note(int fd, const char *path) {
-    bus_fd_forget(fd);
-    if (!path)
-        return;
-    tg_note(fd, path);
+static void bus_note_panel(int fd, const char *path) {
     if (strcmp(path, "/dev/subucom_spi3.0") == 0) {
         g_mixer_fd = fd; /* panel-input bus: knob position @34, click @31 */
         if (g_ep147_build == EPB_V200) panel_note(fd, 0);
@@ -160,6 +156,8 @@ static void bus_fd_note(int fd, const char *path) {
         if (g_ep147_build == EPB_V200) panel_note(fd, 1);
         dbg("[%ld] open(%s) -> fd=%d (g_erp_fd set)\n", (long) time(NULL), path, fd);
     }
+}
+static void bus_note_device(int fd, const char *path) {
     if (strcmp(path, "/dev/gpiodrv") == 0)
         gpiodrv_slot(fd);
     if (strcmp(path, "/dev/subucom_spi2.0") == 0)
@@ -171,6 +169,13 @@ static void bus_fd_note(int fd, const char *path) {
         if (fstat(fd, &st) == 0 && S_ISCHR(st.st_mode) && major(st.st_rdev) == 13)
             g_touchin_fd = fd;
     }
+}
+static void bus_fd_note(int fd, const char *path) {
+    bus_fd_forget(fd);
+    if (!path) return;
+    tg_note(fd, path);
+    bus_note_panel(fd, path);
+    bus_note_device(fd, path);
 }
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wnonnull-compare"
@@ -1660,15 +1665,31 @@ int epoll_wait(int epfd, struct epoll_event *events, int count, int timeout) {
     return rc;
 }
 
-ssize_t read(int fd, void *buf, size_t n) {
-    NEXT(next_read, "read");
-    if (g_azm_inert)
-        return next_read(fd, buf, n);
+static void bus_route_frame(int fd, void *buf, ssize_t r, uint64_t cfg) {
+    if (fd == g_mixer_fd)
+        bus_mixer_frame(buf, r, cfg);
+    else if (fd == g_erp_fd)
+        bus_erp_frame(buf, r);
+    else if (fd == g_deckbus_fd[0] || fd == g_deckbus_fd[1])
+        sdk_filter_view(AZ_BUS_DECK_IN, buf, (int) r);
+    else if (fd == g_touchin_fd)
+        sdk_touch_read(buf, r);
+}
+
+static ssize_t bus_read_frame(int fd, void *buf, size_t n) {
     ssize_t r = panel_read(fd, buf, n);
     if (r == -2) {
         r = next_read(fd, buf, n);
         if (fd == g_mixer_fd || fd == g_erp_fd) panel_observe(fd, buf, r);
     }
+    return r;
+}
+
+ssize_t read(int fd, void *buf, size_t n) {
+    NEXT(next_read, "read");
+    if (g_azm_inert)
+        return next_read(fd, buf, n);
+    ssize_t r = bus_read_frame(fd, buf, n);
     /* The Mod Menu settings for this frame, all from one published word (bus_cfg.h): the
      * overlay thread may change them at any moment, and this thread must not see half of a
      * change or wait for one. */
@@ -1681,13 +1702,6 @@ ssize_t read(int fd, void *buf, size_t n) {
         return tg_result(fd, r);
     if (r == 0 || fd < 0)
         return r;
-    if (fd == g_mixer_fd)
-        bus_mixer_frame(buf, r, cfg);
-    else if (fd == g_erp_fd)
-        bus_erp_frame(buf, r);
-    else if (fd == g_deckbus_fd[0] || fd == g_deckbus_fd[1])
-        sdk_filter_view(AZ_BUS_DECK_IN, buf, (int) r);
-    else if (fd == g_touchin_fd)
-        sdk_touch_read(buf, r);
+    bus_route_frame(fd, buf, r, cfg);
     return r;
 }

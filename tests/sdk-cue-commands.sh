@@ -15,8 +15,10 @@ admission) selection=(admission) ;;
 priority) selection=(priority) ;;
 selection) selection=(selection) ;;
 refresh) selection=(refresh) ;;
+retirement) selection=(retirement) ;;
 *) echo 'select all, hot-set, admission, priority, selection or refresh' >&2; exit 2 ;;
 esac
+if [[ ${CUE_DIAGNOSTIC:-0} == 1 ]]; then flags+=(-DAZSDK_CUE_DIAGNOSTIC); fi
 case ${SAN:-plain} in
 plain|'') ;;
 asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer) ;;
@@ -24,5 +26,5 @@ tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 *) exit 2 ;;
 esac
 "${HOST_CC:-cc}" "${flags[@]}" src/azstem/sdk_cue_commands.c tests/unit/sdkcuecommands_test.c -o "$task_tmp/commands"
-if [[ ${1:-all} == all ]]; then "$task_tmp/commands" clock; "$task_tmp/commands" create; "$task_tmp/commands" priority; "$task_tmp/commands" admission; "$task_tmp/commands" selection; "$task_tmp/commands" refresh; fi
+if [[ ${1:-all} == all ]]; then "$task_tmp/commands" hot-set; "$task_tmp/commands" retirement; "$task_tmp/commands" clock; "$task_tmp/commands" create; "$task_tmp/commands" priority; "$task_tmp/commands" admission; "$task_tmp/commands" selection; "$task_tmp/commands" refresh; fi
 "$task_tmp/commands" "${selection[@]}"

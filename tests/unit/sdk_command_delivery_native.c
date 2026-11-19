@@ -25,16 +25,16 @@ _Atomic(unsigned) stopped[4];
 _Atomic(bool) advertised = true;
 int activity;
 
-void signal() {
+void signal(void) {
     uint64_t one = 1;
     while (write(activity, &one, sizeof one) < 0 && errno == EINTR) {}
 }
-uint64_t clock_ns() {
+uint64_t clock_ns(void) {
     struct timespec ts = {0};
     assert(!clock_gettime(CLOCK_MONOTONIC, &ts));
     return (uint64_t) (ts.tv_sec) * UINT64_C(1000000000) + (uint64_t) (ts.tv_nsec);
 }
-unsigned mask() {
+unsigned mask(void) {
     return atomic_load_explicit(&(delivery_transport.bound), memory_order_acquire) && atomic_load_explicit(&(advertised), memory_order_acquire) ? 15u : 0u;
 }
 uint64_t ready(unsigned deck) { return deck < 4 && mask() ? UINT64_C(1) << AZ_CMD_LOOP_EXIT : 0; }
@@ -60,7 +60,7 @@ int old_control(unsigned unused, uint64_t token) {
     (void) token;
     abort();
 }
-void drive() {
+void drive(void) {
     unsigned decks = atomic_exchange_explicit(&(delivery_transport.decks), 0, memory_order_acq_rel);
     for (unsigned deck = 0; deck < 4; ++deck) {
         if (!(decks & (1u << deck))) continue;
@@ -110,9 +110,34 @@ void fixture_settle(unsigned deck, uint64_t token) {
     azexit_receipt value = delivery_receipt(cell->request, AZEXIT_RECEIPT_SETTLED, 1, deck + 100, clock_ns(), 0, 0, 0);
     assert(delivery_publish(&value, false, 0) == AZ_OK);
 }
+static void fixture_commit_deadlines(void) {
+    for (unsigned scenario = 0; scenario < 4; ++scenario) {
+        azexit_request request = {2000 + scenario, 10, 200, 0, 0};
+        assert(delivery_reserve(&request) == AZ_OK && delivery_attach(request, 100));
+        assert(delivery_claim(request, 100) == AZ_OK);
+        uint64_t observed = scenario == 1 ? 0 : scenario == 2 ? 200
+                                                              : 199;
+        uint64_t committed = scenario == 0 ? 200 : scenario == 3 ? 0
+                                                                 : 199;
+        azexit_receipt applied = delivery_receipt(request, AZEXIT_RECEIPT_TERMINAL, 1, 100, observed, AZ_COMMAND_APPLIED, AZ_OK, 7);
+        assert(delivery_publish(&applied, false, committed) == AZ_OK);
+        delivery_Token *cell = delivery_find(request.token);
+        azexit_receipt winner = {0};
+        assert(delivery_copy_winner(cell, atomic_load(&cell->decision), &winner));
+        assert(winner.outcome == AZ_COMMAND_UNCERTAIN && !winner.revision);
+        assert(winner.reason == (scenario == 1 ? AZ_FAILED : AZ_STALE));
+        delivery_evidence(cell, delivery_Retired, 201);
+        azexit_receipt value = {.size = sizeof value};
+        assert(delivery_consume(&value) == AZ_OK && value.kind == AZEXIT_RECEIPT_TERMINAL);
+        assert(delivery_consume(&value) == AZ_OK && value.kind == AZEXIT_RECEIPT_SETTLED);
+        assert(delivery_consume(&value) == AZ_OK && value.kind == AZEXIT_RECEIPT_RESOURCES_RETIRED);
+        assert(delivery_reclaim(&value) == AZ_OK);
+    }
+}
 void fixture_arbitration(void) {
     azexit_binding core = {sizeof core, AZEXIT_DELIVERY_VERSION, AZEXIT_DELIVERY_CAPACITY, AZEXIT_DELIVERY_PER_OWNER};
     assert(delivery_bind(&core) == AZ_OK);
+    fixture_commit_deadlines();
     for (uint64_t token = 1000; token < 1003; ++token) {
         azexit_request request = {token, 10, 200, 0, 0};
         assert(delivery_reserve(&request) == AZ_OK && delivery_attach(request, 100));

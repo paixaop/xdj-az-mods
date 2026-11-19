@@ -13,10 +13,10 @@ from pathlib import Path
 import sys
 s=Path(sys.argv[1]).read_text()
 before='    CacheBinding *slot = NULL;'
-after='    if (!slot || s->next_cache_birth == UINT64_MAX) return AZS_LIMIT;'
+after='    int status = cache_birth_slot(pins, generation, &slot);'
 assert s.count(before)==s.count(after)==1
 s=s.replace(before,before+'\n        if (cache_reclaim_test_boundary) cache_reclaim_test_boundary(0);')
-s=s.replace(after,'        if (cache_reclaim_test_boundary) cache_reclaim_test_boundary(1);\n'+after)
+s=s.replace(after,after+'\n    if (cache_reclaim_test_boundary) cache_reclaim_test_boundary(1);')
 Path(sys.argv[2]).write_text(s.replace('"../common/','"'))
 PY
 "${HOST_CC:-gcc}" "${flags[@]}" -DSOURCES_INC="\"$task_tmp/source.c\"" tests/unit/sdkcachebirth_test.c src/azmod/sdk_connection_hooks.c tests/unit/sdkcachebirth_return.S tests/unit/native_unwind.c src/common/azcache_scopes.c -lstdc++ -ldl -o "$task_tmp/test"

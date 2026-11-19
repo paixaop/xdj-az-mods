@@ -148,37 +148,40 @@ static inline int sww_tag_header(const uint8_t *p, size_t available,
 /* Canonical stored layouts only. A zero stride or inconsistent payload is
  * malformed; unfamiliar nonzero strides, headers or header words are unsupported.
  * Header words are recognized, not generalized into a rate formula. */
+static inline int sww_index_header(const uint8_t *p, size_t available, const struct sww_tag *tag, uint32_t header) {
+    if (tag->header_size < header || available < header) return SDKW_MALFORMED;
+    if (sww_be32(p) != tag->fourcc || sww_be32(p + 4) != tag->header_size || sww_be32(p + 8) != tag->size) return SDKW_MALFORMED;
+    return tag->header_size == header ? SDKW_OK : SDKW_UNSUPPORTED;
+}
+static inline int sww_index_mono_preview(const uint8_t *p, const struct sww_tag *tag, uint32_t encoding,
+                                         struct sww_format format, struct sww_index *out) {
+    /* Mono preview count precedes its opaque header word. */
+    uint32_t count = sww_be32(p + 12);
+    if (count != tag->size - tag->header_size) return SDKW_MALFORMED;
+    if (sww_be32(p + 16) != format.header_word) return SDKW_UNSUPPORTED;
+    *out = (struct sww_index) {*tag, encoding, 1, count};
+    return count ? SDKW_OK : SDKW_EMPTY;
+}
+static inline int sww_index_strided(const uint8_t *p, const struct sww_tag *tag, uint32_t encoding,
+                                    struct sww_format format, struct sww_index *out) {
+    uint32_t stride = sww_be32(p + 12), count = sww_be32(p + 16);
+    uint32_t payload = tag->size - tag->header_size;
+    if (!stride || payload % stride || count != payload / stride) return SDKW_MALFORMED;
+    if (stride != format.entry_size || (tag->header_size == 24 && sww_be32(p + 20) != format.header_word)) return SDKW_UNSUPPORTED;
+    *out = (struct sww_index) {*tag, encoding, stride, count};
+    return count ? SDKW_OK : SDKW_EMPTY;
+}
 static inline int sww_index_detail(const uint8_t *p, size_t available,
-                                   const struct sww_tag *tag, uint32_t encoding,
-                                   struct sww_index *out) {
+                                   const struct sww_tag *tag, uint32_t encoding, struct sww_index *out) {
     if (!p || !out || !sww_tag_valid(tag)) return SDKW_INVALID;
     struct sww_format format = {0};
     int rc = sww_format_for(encoding, &format);
     if (rc != SDKW_OK) return rc;
     if (tag->fourcc != format.fourcc) return SDKW_UNSUPPORTED;
-    uint32_t header = sww_header_bytes(encoding);
-    if (tag->header_size < header || available < header) return SDKW_MALFORMED;
-    if (sww_be32(p) != tag->fourcc || sww_be32(p + 4) != tag->header_size ||
-        sww_be32(p + 8) != tag->size) return SDKW_MALFORMED;
-    if (tag->header_size != header) return SDKW_UNSUPPORTED;
-    /* PWAV/PWV2 predate the stride/count layout. Their count is at +12,
-     * followed by the canonical opaque word at +16. Preserve the raw bytes;
-     * no gain, intensity or pixel interpretation follows from this index. */
-    if (sww_is_mono_preview(encoding)) {
-        uint32_t count = sww_be32(p + 12);
-        if (count != tag->size - tag->header_size) return SDKW_MALFORMED;
-        if (sww_be32(p + 16) != format.header_word) return SDKW_UNSUPPORTED;
-        struct sww_index index = {*tag, encoding, 1, count};
-        *out = index;
-        return count ? SDKW_OK : SDKW_EMPTY;
-    }
-    uint32_t stride = sww_be32(p + 12), count = sww_be32(p + 16);
-    uint32_t payload = tag->size - tag->header_size;
-    if (!stride || payload % stride || count != payload / stride) return SDKW_MALFORMED;
-    if (stride != format.entry_size || (header == 24 && sww_be32(p + 20) != format.header_word)) return SDKW_UNSUPPORTED;
-    struct sww_index index = {*tag, encoding, stride, count};
-    *out = index;
-    return count ? SDKW_OK : SDKW_EMPTY;
+    rc = sww_index_header(p, available, tag, sww_header_bytes(encoding));
+    if (rc != SDKW_OK) return rc;
+    return sww_is_mono_preview(encoding) ? sww_index_mono_preview(p, tag, encoding, format, out)
+                                         : sww_index_strided(p, tag, encoding, format, out);
 }
 /* Original mono entry point remains source-compatible. */
 static inline int sww_index_pwv3(const uint8_t *p, size_t available,
@@ -196,30 +199,34 @@ static inline int sww_index_valid(const struct sww_index *index) {
 }
 /* Full-memory convenience. Validate the entire envelope chain, including tags
  * after the requested encoding. Duplicate targets are ambiguous. */
-static inline int sww_find_detail(const uint8_t *p, size_t size, uint32_t encoding,
-                                  struct sww_index *out) {
+static inline int sww_find_tag(const uint8_t *p, size_t size, const struct sww_file *file,
+                               uint32_t fourcc, struct sww_tag *selected) {
+    uint32_t found = 0, tags = 0, offset = file->header_size;
+    while (offset < file->size) {
+        if (++tags > SDKW_TAGS_MAX) return SDKW_LIMIT;
+        struct sww_tag tag = {0};
+        int rc = sww_tag_header(p + offset, size - offset, file, offset, &tag);
+        if (rc != SDKW_OK) return rc;
+        if (tag.fourcc == fourcc) {
+            *selected = tag;
+            found++;
+        }
+        offset += tag.size;
+    }
+    if (!found) return SDKW_NOT_FOUND;
+    return found == 1 ? SDKW_OK : SDKW_AMBIGUOUS;
+}
+static inline int sww_find_detail(const uint8_t *p, size_t size, uint32_t encoding, struct sww_index *out) {
     if (!p || !out) return SDKW_INVALID;
     struct sww_format format = {0};
     int rc = sww_format_for(encoding, &format);
     if (rc != SDKW_OK) return rc;
-    struct sww_file f = {0};
-    rc = sww_file_header(p, size, size, &f);
+    struct sww_file file = {0};
+    rc = sww_file_header(p, size, size, &file);
     if (rc != SDKW_OK) return rc;
     struct sww_tag selected = {0};
-    uint32_t found = 0, tags = 0, off = f.header_size;
-    while (off < f.size) {
-        if (++tags > SDKW_TAGS_MAX) return SDKW_LIMIT;
-        struct sww_tag t = {0};
-        rc = sww_tag_header(p + off, size - off, &f, off, &t);
-        if (rc != SDKW_OK) return rc;
-        if (t.fourcc == format.fourcc) {
-            selected = t;
-            found++;
-        }
-        off += t.size; /* t.size <= f.size-off; the sum cannot overflow. */
-    }
-    if (!found) return SDKW_NOT_FOUND;
-    if (found != 1) return SDKW_AMBIGUOUS;
+    rc = sww_find_tag(p, size, &file, format.fourcc, &selected);
+    if (rc != SDKW_OK) return rc;
     return sww_index_detail(p + selected.offset, size - selected.offset, &selected, encoding, out);
 }
 static inline int sww_find_pwv3(const uint8_t *p, size_t size, struct sww_index *out) {
@@ -228,14 +235,20 @@ static inline int sww_find_pwv3(const uint8_t *p, size_t size, struct sww_index 
 /* Requests name source columns, not seconds or output pixels. A tail window is
  * clipped to EOF; nonempty first>=total is out of range. Empty source accepts
  * only first=0. Time is stored-analysis source time, not player/DAC alignment. */
+static inline int sww_axis_valid(const struct sww_index *index, double seconds_per_sample) {
+    return isfinite(seconds_per_sample) && seconds_per_sample >= 0 &&
+           (!index->sample_count || seconds_per_sample != 0);
+}
+static inline int sww_first_valid(uint32_t total, uint32_t first) {
+    return total ? first < total : first == 0;
+}
 static inline int sww_plan_window_axis(const struct sww_index *index, uint32_t first,
                                        uint32_t requested, double seconds_per_sample, struct sww_window *out) {
     if (!out || !sww_index_valid(index) || !requested) return SDKW_INVALID;
-    if (!isfinite(seconds_per_sample) || seconds_per_sample < 0 ||
-        (index->sample_count && seconds_per_sample == 0)) return SDKW_INVALID;
+    if (!sww_axis_valid(index, seconds_per_sample)) return SDKW_INVALID;
     if (requested > SDKW_WINDOW_MAX) return SDKW_LIMIT;
     uint32_t total = index->sample_count;
-    if (total ? first >= total : first != 0) return SDKW_OUT_OF_RANGE;
+    if (!sww_first_valid(total, first)) return SDKW_OUT_OF_RANGE;
     uint32_t count = total - first;
     if (count > requested) count = requested;
     struct sww_window w = {index->encoding, total, first, count,
@@ -265,6 +278,16 @@ static inline int sww_plan_preview_window(const struct sww_index *index, uint32_
 }
 /* raw points to the beginning of the planned span, not the beginning of the file.
  * memmove permits an in-place/overlapping packed-byte copy. All checks precede writes. */
+static inline int sww_window_extent(const struct sww_window *window, uint32_t entry_size) {
+    return window->first_sample <= window->total_samples &&
+           window->sample_count <= window->total_samples - window->first_sample &&
+           window->byte_count == (size_t) window->sample_count * entry_size;
+}
+static inline int sww_copy_capacity(const uint8_t *raw, size_t available, uint8_t *out, size_t capacity, size_t bytes) {
+    if (!raw || !out) return SDKW_INVALID;
+    if (available < bytes) return SDKW_MALFORMED;
+    return capacity < bytes ? SDKW_LIMIT : SDKW_OK;
+}
 static inline int sww_copy_window(const struct sww_window *window, const uint8_t *raw,
                                   size_t available, uint8_t *out, size_t capacity) {
     if (!window) return SDKW_INVALID;
@@ -272,13 +295,10 @@ static inline int sww_copy_window(const struct sww_window *window, const uint8_t
     int rc = sww_format_for(window->encoding, &format);
     if (rc != SDKW_OK) return rc;
     if (window->sample_count > SDKW_WINDOW_MAX) return SDKW_LIMIT;
-    if (window->first_sample > window->total_samples ||
-        window->sample_count > window->total_samples - window->first_sample ||
-        window->byte_count != (size_t) window->sample_count * format.entry_size) return SDKW_INVALID;
+    if (!sww_window_extent(window, format.entry_size)) return SDKW_INVALID;
     if (!window->sample_count) return SDKW_EMPTY;
-    if (!raw || !out) return SDKW_INVALID;
-    if (available < window->byte_count) return SDKW_MALFORMED;
-    if (capacity < window->byte_count) return SDKW_LIMIT;
+    rc = sww_copy_capacity(raw, available, out, capacity, window->byte_count);
+    if (rc != SDKW_OK) return rc;
     memmove(out, raw, window->byte_count);
     return SDKW_OK;
 }
@@ -338,7 +358,46 @@ static inline int sww_decode_pwv7(const uint8_t *raw, size_t available, uint32_t
  * This helper does not acquire provider/content lifetime or invoke native code.
  */
 #define SDKW_LAYERED3_VERSION 1
-enum { SDKW_LAYER_CHANNELS = 3, SDKW_LAYER_RECORD_BYTES = 6 };
+enum {
+    SDKW_LAYER_CHANNELS = 3,
+    SDKW_LAYER_RECORD_BYTES = 6
+};
+static inline void sww_layer_sort(uint8_t levels[SDKW_LAYER_CHANNELS]) {
+    for (unsigned a = 0; a + 1 < SDKW_LAYER_CHANNELS; ++a)
+        for (unsigned b = a + 1; b < SDKW_LAYER_CHANNELS; ++b)
+            if (levels[a] < levels[b]) {
+                uint8_t temporary = levels[a];
+                levels[a] = levels[b];
+                levels[b] = temporary;
+            }
+}
+static inline unsigned sww_layer_subset(const uint8_t *input, uint8_t level) {
+    return (input[0] >= level ? 1u : 0u) | (input[1] >= level ? 2u : 0u) | (input[2] >= level ? 4u : 0u);
+}
+static inline void sww_layer_record(const uint8_t *input, uint8_t *record) {
+    static const uint8_t subset_id[8] = {0, 3, 2, 6, 1, 5, 4, 8};
+    uint8_t levels[SDKW_LAYER_CHANNELS] = {input[0], input[1], input[2]};
+    sww_layer_sort(levels);
+    uint8_t magnitude[SDKW_LAYER_CHANNELS] = {0, 0, 0};
+    uint16_t header = 0;
+    unsigned layers = 0;
+    for (unsigned j = 0; j < SDKW_LAYER_CHANNELS; ++j) {
+        uint8_t level = levels[j];
+        if (!level || (j && level == levels[j - 1])) continue;
+        header |= (uint16_t) (subset_id[sww_layer_subset(input, level)] << (4 * layers));
+        magnitude[layers++] = level;
+    }
+    if (!layers) { /* Native allzero record still has one layer. */
+        layers = 1;
+        header = 8;
+    }
+    header |= (uint16_t) (layers << 12);
+    record[0] = (uint8_t) header;
+    record[1] = (uint8_t) (header >> 8);
+    record[2] = magnitude[0];
+    record[3] = magnitude[1];
+    record[4] = magnitude[2];
+}
 static inline int sww_encode_pwv7_layers(const uint8_t *raw, size_t available, uint32_t count,
                                          uint8_t *out, size_t out_bytes) {
     if (count > SDKW_WINDOW_MAX) return SDKW_LIMIT;
@@ -346,58 +405,28 @@ static inline int sww_encode_pwv7_layers(const uint8_t *raw, size_t available, u
     if (!raw || !out) return SDKW_INVALID;
     if (available / SDKW_LAYER_CHANNELS < count) return SDKW_MALFORMED;
     if (out_bytes / SDKW_LAYER_RECORD_BYTES < count) return SDKW_LIMIT;
-    static const uint8_t subset_id[8] = {0, 3, 2, 6, 1, 5, 4, 8};
-    for (uint32_t i = 0; i < count; ++i) {
-        const uint8_t *input = raw + i * SDKW_LAYER_CHANNELS;
-        uint8_t levels[SDKW_LAYER_CHANNELS] = {input[0], input[1], input[2]};
-        for (unsigned a = 0; a + 1 < SDKW_LAYER_CHANNELS; ++a)
-            for (unsigned b = a + 1; b < SDKW_LAYER_CHANNELS; ++b)
-                if (levels[a] < levels[b]) {
-                    uint8_t temporary = levels[a];
-                    levels[a] = levels[b];
-                    levels[b] = temporary;
-                }
-        uint8_t magnitude[SDKW_LAYER_CHANNELS] = {0, 0, 0};
-        uint16_t header = 0;
-        unsigned layers = 0;
-        for (unsigned j = 0; j < SDKW_LAYER_CHANNELS; ++j) {
-            uint8_t level = levels[j];
-            if (!level || (j && level == levels[j - 1])) continue;
-            unsigned subset = (input[0] >= level ? 1u : 0u) |
-                              (input[1] >= level ? 2u : 0u) |
-                              (input[2] >= level ? 4u : 0u);
-            header |= (uint16_t) (subset_id[subset] << (4 * layers));
-            magnitude[layers++] = level;
-        }
-        if (!layers) { /* Native allzero record still has one layer. */
-            layers = 1;
-            header = 8;
-        }
-        header |= (uint16_t) (layers << 12);
-        uint8_t *record = out + i * SDKW_LAYER_RECORD_BYTES;
-        record[0] = (uint8_t) header;
-        record[1] = (uint8_t) (header >> 8);
-        record[2] = magnitude[0];
-        record[3] = magnitude[1];
-        record[4] = magnitude[2];
-    }
+    for (uint32_t i = 0; i < count; ++i)
+        sww_layer_record(raw + i * SDKW_LAYER_CHANNELS, out + i * SDKW_LAYER_RECORD_BYTES);
     return SDKW_OK;
 }
 /* Test/convenience wrapper; production streaming can use the stages above. */
+static inline int sww_readable(int status) {
+    return status == SDKW_OK || status == SDKW_EMPTY;
+}
 static inline int sww_read_memory(const uint8_t *p, size_t size, uint32_t first,
                                   uint32_t requested, struct sww_sample *samples,
                                   size_t capacity, struct sww_window *out) {
     if (!out) return SDKW_INVALID;
     struct sww_index index = {0};
     int rc = sww_find_pwv3(p, size, &index);
-    if (rc != SDKW_OK && rc != SDKW_EMPTY) return rc;
+    if (!sww_readable(rc)) return rc;
     struct sww_window w = {0};
     rc = sww_plan_window(&index, first, requested, &w);
-    if (rc != SDKW_OK && rc != SDKW_EMPTY) return rc;
+    if (!sww_readable(rc)) return rc;
     if (w.byte_offset > size || w.byte_count > size - (size_t) w.byte_offset) return SDKW_MALFORMED;
     rc = sww_decode_pwv3(p + (size_t) w.byte_offset, w.byte_count, w.sample_count,
                          samples, capacity);
-    if (rc == SDKW_OK || rc == SDKW_EMPTY) *out = w;
+    if (sww_readable(rc)) *out = w;
     return rc;
 }
 #endif

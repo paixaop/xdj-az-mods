@@ -18,7 +18,6 @@
 
 #ifdef AZSDK_CUE_ACTOR_TESTING
 int azsdk_exit_delivery_publish(const struct azexit_receipt *receipt __attribute__((unused))) { return AZ_UNSUPPORTED; }
-int azsdk_exit_delivery_claim(const struct azexit_request *request __attribute__((unused)), uint64_t clock __attribute__((unused))) { return AZ_OK; }
 void azsdk_cue_commands_notify(unsigned deck __attribute__((unused))) {}
 void azsdk_cue_commands_actor_finished(unsigned deck __attribute__((unused)), uint64_t token __attribute__((unused))) {}
 #endif
@@ -175,6 +174,37 @@ static uint64_t post_hook(void *box, void *task) {
     }
     return ((uint64_t (*)(void *, void *))(s->post))(box, task);
 }
+static bool execution_admitted(struct State *s, struct Slot *slot, const struct Tag *tag) {
+    if (!slot->work_started && !s->callbacks.current(tag->deck, tag->request.identity.load_generation, s->callbacks.context)) {
+        ACTOR_DIAG(tag->deck, 1, 1, "execute-current", tag->request, slot->work_started);
+        finish(slot, AZ_COMMAND_REJECTED, AZ_STALE);
+        return false;
+    }
+    uint64_t clock = now();
+    if (!slot->work_started && (!clock || compare_timestamps(clock, tag->request.identity.deadline_ns, 1000000000, 1000000000, 1) >= AZ_TIME_EQUAL)) {
+        ACTOR_DIAG(tag->deck, 1, 2, "execute-deadline", tag->request, slot->work_started);
+        finish(slot, AZ_COMMAND_REJECTED, AZ_STALE);
+        return false;
+    }
+    if (!slot->work_started && tag->request.operation &&
+        azsdk_exit_delivery_claim(&tag->request.identity, clock) != AZ_OK) {
+        finish(slot, AZ_COMMAND_CANCELLED, AZ_CANCELLED);
+        return false;
+    }
+    return true;
+}
+static void execution_result(struct Slot *slot, const struct Tag *tag, int rc, struct azexit_result result) {
+    if (slot->phase != Executing) return; /* callback may synchronously complete */
+    if (rc == AZ_PENDING) {
+        slot->work_started = true;
+        slot->phase = slot->continuation ? Queued : Waiting;
+        slot->continuation = false;
+        if (slot->phase == Queued) azsdk_cue_commands_notify(tag->deck);
+    } else if (rc == AZ_OK && result.token == tag->request.identity.token &&
+               result.load_generation == tag->request.identity.load_generation) {
+        finish_result(slot, result, 1);
+    } else finish(slot, AZ_COMMAND_REJECTED, rc == AZ_OK ? AZ_INVALID : rc);
+}
 static void execute_hook(void *task) {
     struct State *s = state();
     ACTOR_LOCK(lock, s, 4);
@@ -191,36 +221,12 @@ static void execute_hook(void *task) {
     tag->executed = true;
     struct Slot *slot = &(s->slots[tag->deck]);
     if (tag->cancelled || !matches(tag, slot) || slot->phase != Posted) return;
-    if (!slot->work_started && !s->callbacks.current(tag->deck, tag->request.identity.load_generation, s->callbacks.context)) {
-        ACTOR_DIAG(tag->deck, 1, 1, "execute-current", tag->request, slot->work_started);
-        finish(slot, AZ_COMMAND_REJECTED, AZ_STALE);
-        return;
-    }
-    uint64_t clock = now();
-    if (!slot->work_started && (!clock || compare_timestamps(clock, tag->request.identity.deadline_ns, 1000000000, 1000000000, 1) >= AZ_TIME_EQUAL)) {
-        ACTOR_DIAG(tag->deck, 1, 2, "execute-deadline", tag->request, slot->work_started);
-        finish(slot, AZ_COMMAND_REJECTED, AZ_STALE);
-        return;
-    }
-    if (!slot->work_started && tag->request.operation &&
-        azsdk_exit_delivery_claim(&tag->request.identity, clock) != AZ_OK) {
-        finish(slot, AZ_COMMAND_CANCELLED, AZ_CANCELLED);
-        return;
-    }
+    if (!execution_admitted(s, slot, tag)) return;
     ACTOR_DIAG(tag->deck, 1, 0, "execute-admitted", tag->request, slot->work_started);
     slot->phase = Executing;
     struct azexit_result result = {0};
     int rc = s->callbacks.execute(&tag->request, tag->manager, &result, s->callbacks.context);
-    if (slot->phase != Executing) return; /* callback may synchronously complete */
-    if (rc == AZ_PENDING) {
-        slot->work_started = true;
-        slot->phase = slot->continuation ? Queued : Waiting;
-        slot->continuation = false;
-        if (slot->phase == Queued) azsdk_cue_commands_notify(tag->deck);
-    } else if (rc == AZ_OK && result.token == tag->request.identity.token &&
-               result.load_generation == tag->request.identity.load_generation) {
-        finish_result(slot, result, 1);
-    } else finish(slot, AZ_COMMAND_REJECTED, rc == AZ_OK ? AZ_INVALID : rc);
+    execution_result(slot, tag, rc, result);
 }
 static void dtor_hook(void *task) {
     struct State *s = state();
@@ -243,26 +249,40 @@ static void dtor_hook(void *task) {
     ((void (*)(void *))(original))(task);
 }
 
+static bool actor_configuration_input(const struct azcue_actor_profile *p, azexit_install_fn install, const struct azcue_actor_callbacks *callbacks) {
+    return p && install && callbacks && callbacks->execute && callbacks->current;
+}
+static bool actor_profile_ready(const struct azcue_actor_profile *p) {
+    return p->manager_vptr && p->box_vptr && p->owner_vptr && p->task_vptr &&
+           p->memory_producer && p->post && p->execute && p->complete_dtor;
+}
+static bool install_execute(struct State *s, const struct azcue_actor_profile *p, azexit_install_fn install) {
+#if defined(__linux__) && defined(__aarch64__) && !defined(AZSDK_CUE_ACTOR_TESTING)
+    (void) install;
+    s->execute = (void *) p->execute;
+    return sdk_patch_slot(p->task_vptr + 16, (void *) execute_hook, &s->execute) == 1;
+#else
+    return install(p->execute, (void *) execute_hook, &s->execute) && s->execute;
+#endif
+}
+static bool install_actor_hooks(struct State *s, const struct azcue_actor_profile *p, azexit_install_fn install) {
+    /* Installer publishes each original before its patch becomes reachable. */
+    if (!install(p->post, ((void *) (post_hook)), &s->post) || !s->post) return false;
+    if (!install_execute(s, p, install)) return false;
+    if (!install(p->complete_dtor, ((void *) (dtor_hook)), &s->dtor) || !s->dtor) return false;
+    return true;
+}
 static int configure(const struct azcue_actor_profile *p, azexit_install_fn install,
                      const struct azcue_actor_callbacks *callbacks) {
     struct State *s = state();
     ACTOR_LOCK(lock, s, 4);
-    if (!p || !install || !callbacks || !callbacks->execute || !callbacks->current) return AZ_INVALID;
+    if (!actor_configuration_input(p, install, callbacks)) return AZ_INVALID;
     if (s->configured || s->installation_attempted) return AZ_BUSY;
-    if (!p->manager_vptr || !p->box_vptr || !p->owner_vptr || !p->task_vptr ||
-        !p->memory_producer || !p->post || !p->execute || !p->complete_dtor) return AZ_UNSUPPORTED;
+    if (!actor_profile_ready(p)) return AZ_UNSUPPORTED;
     s->profile = *p;
     s->callbacks = *callbacks;
     s->installation_attempted = true;
-    /* Installer publishes each original before its patch becomes reachable. */
-    if (!install(p->post, ((void *) (post_hook)), &s->post) || !s->post) return AZ_UNSUPPORTED;
-#if defined(__linux__) && defined(__aarch64__) && !defined(AZSDK_CUE_ACTOR_TESTING)
-    s->execute = ((void *) (p->execute));
-    if (sdk_patch_slot(p->task_vptr + 16, ((void *) (execute_hook)), &s->execute) != 1) return AZ_UNSUPPORTED;
-#else
-    if (!install(p->execute, ((void *) (execute_hook)), &s->execute) || !s->execute) return AZ_UNSUPPORTED;
-#endif
-    if (!install(p->complete_dtor, ((void *) (dtor_hook)), &s->dtor) || !s->dtor) return AZ_UNSUPPORTED;
+    if (!install_actor_hooks(s, p, install)) return AZ_UNSUPPORTED;
     s->configured = true;
     return AZ_OK;
 }
@@ -284,6 +304,37 @@ int azsdk_cue_actor_register(unsigned deck, void *manager, uint64_t generation) 
 unsigned azsdk_cue_actor_mask(void) {
     return atomic_load_explicit(&(state()->registered), memory_order_acquire);
 }
+static void retire_tags(struct State *s, unsigned deck, const struct Slot *slot) {
+    for (unsigned i = 0; i < TAGS; ++i) {
+        struct Tag *tag = &s->tags[i];
+        if (tag->reserved && tag->deck == deck && tag->epoch == slot->epoch) tag->cancelled = true;
+    }
+}
+static void retire_slot(struct Slot *slot, unsigned deck) {
+#ifndef AZSDK_CUE_ACTOR_TESTING
+    const struct azexit_request *request = &slot->request.identity;
+    if (slot->work_started && slot->request.operation) {
+        finish_result(slot, (struct azexit_result) {request->token, request->load_generation, 0, AZ_COMMAND_UNCERTAIN, AZ_STALE}, 0);
+        azsdk_cue_commands_actor_retired(deck, request->token, request->load_generation);
+        return;
+    }
+#else
+    (void) deck;
+#endif
+    finish(slot, AZ_COMMAND_REJECTED, AZ_STALE);
+}
+static bool token_reserved(struct State *s, unsigned deck, uint64_t token) {
+    for (unsigned i = 0; i < TAGS; ++i) {
+        struct Tag *tag = &s->tags[i];
+        if (tag->reserved && tag->deck == deck && tag->request.identity.token == token) return true;
+    }
+    return false;
+}
+static bool actor_request_valid(const struct azexit_cue_request *request) {
+    return request && request->size >= sizeof *request && request->identity.deck < 4 &&
+           request->identity.token && request->identity.load_generation && request->identity.deadline_ns &&
+           !request->identity.reserved && memchr(request->comment, 0, sizeof request->comment);
+}
 void azsdk_cue_actor_retire(unsigned deck, void *manager) {
     struct State *s = state();
     ACTOR_LOCK(lock, s, 4);
@@ -291,83 +342,53 @@ void azsdk_cue_actor_retire(unsigned deck, void *manager) {
     struct Slot *slot = &(s->slots[deck]);
     if (slot->manager != manager) return;
     atomic_fetch_and_explicit(&(s->registered), ~(1u << deck), memory_order_release);
-    for (unsigned i = 0; i < TAGS; ++i) {
-        struct Tag *tag = &s->tags[i];
-        if (tag->reserved && tag->deck == deck && tag->epoch == slot->epoch) tag->cancelled = true;
-    }
-    if (slot->phase != Idle && slot->phase != Ready) {
-#ifndef AZSDK_CUE_ACTOR_TESTING
-        const struct azexit_request *request = &slot->request.identity;
-        if (slot->work_started && slot->request.operation) {
-            finish_result(slot, (struct azexit_result) {request->token, request->load_generation, 0, AZ_COMMAND_UNCERTAIN, AZ_STALE}, 0);
-            azsdk_cue_commands_actor_retired(deck, request->token, request->load_generation);
-        } else
-#endif
-            finish(slot, AZ_COMMAND_REJECTED, AZ_STALE);
-    }
+    retire_tags(s, deck, slot);
+    if (slot->phase != Idle && slot->phase != Ready) retire_slot(slot, deck);
     slot->manager = NULL;
     slot->generation = 0;
 }
 int azsdk_cue_actor_enqueue(const struct azexit_cue_request *request) {
-    if (!request || request->size < sizeof *request || request->identity.deck >= 4 ||
-        !request->identity.token || !request->identity.load_generation || !request->identity.deadline_ns ||
-        request->identity.reserved || !memchr(request->comment, 0, sizeof request->comment)) return AZ_INVALID;
+    if (!actor_request_valid(request)) return AZ_INVALID;
     struct State *s = state();
     ACTOR_LOCK(lock, s, request->identity.deck);
     if (!lock.mutex.held) return AZ_BUSY;
     struct Slot *slot = &(s->slots[request->identity.deck]);
     if (!s->configured || !slot->manager) return AZ_UNSUPPORTED;
     if (slot->phase != Idle) return AZ_BUSY;
-    for (unsigned i = 0; i < TAGS; ++i) {
-        struct Tag *tag = &s->tags[i];
-        if (tag->reserved && tag->deck == request->identity.deck &&
-            tag->request.identity.token == request->identity.token) return AZ_STALE;
-    }
+    if (token_reserved(s, request->identity.deck, request->identity.token)) return AZ_STALE;
     slot->request = *request;
     slot->work_started = false;
     slot->continuation = false;
     slot->phase = Queued;
     return AZ_PENDING;
 }
-static void drive(unsigned deck) {
-    struct State *s = state();
-    if (deck >= 4) return;
-    ACTOR_LOCK(lock, s, deck);
-    if (!lock.mutex.held) return;
-    struct Slot *slot = &(s->slots[deck]);
-    if (slot->phase != Queued) return;
+static bool drive_admitted(struct State *s, struct Slot *slot, unsigned deck) {
     if (!slot->manager || (!slot->work_started && !s->callbacks.current(deck, slot->request.identity.load_generation, s->callbacks.context))) {
         ACTOR_DIAG(deck, 0, 1, "drive-current-or-manager", slot->request, slot->work_started);
         finish(slot, AZ_COMMAND_REJECTED, AZ_STALE);
-        return;
+        return false;
     }
     uint64_t clock = now();
     if (!slot->work_started && (!clock || compare_timestamps(clock, slot->request.identity.deadline_ns, 1000000000, 1000000000, 1) >= AZ_TIME_EQUAL)) {
         ACTOR_DIAG(deck, 0, 2, "drive-deadline", slot->request, slot->work_started);
         finish(slot, AZ_COMMAND_REJECTED, AZ_STALE);
-        return;
+        return false;
     }
-    ACTOR_DIAG(deck, 0, 0, "drive-admitted", slot->request, slot->work_started);
-    void *box = ((char *) (slot->manager)) + 8;
+    return true;
+}
+static bool producer_owner(struct State *s, struct Slot *slot) {
+    void *box = (char *) slot->manager + 8;
     uintptr_t owner = word(box, 0x28);
-    if (word(slot->manager, 0) != s->profile.manager_vptr || word(box, 0) != s->profile.box_vptr ||
-        !owner || word(((void *) (owner)), 0) != s->profile.owner_vptr ||
-        !((bool (*)(void *))(word(((void *) (s->profile.box_vptr)), 0x28)))(box)) {
-        finish(slot, AZ_COMMAND_REJECTED, AZ_UNSUPPORTED);
-        return;
-    }
-    struct Tag *tag = NULL;
-    for (unsigned i = 0; i < TAGS; ++i) {
-        struct Tag *candidate = &s->tags[i];
-        if (!candidate->reserved) {
-            tag = candidate;
-            break;
-        }
-    }
-    if (!tag) {
-        finish(slot, AZ_COMMAND_REJECTED, AZ_BUSY);
-        return;
-    }
+    return word(slot->manager, 0) == s->profile.manager_vptr && word(box, 0) == s->profile.box_vptr &&
+           owner && word((void *) owner, 0) == s->profile.owner_vptr &&
+           ((bool (*)(void *)) word((void *) s->profile.box_vptr, 0x28))(box);
+}
+static struct Tag *available_tag(struct State *s) {
+    for (unsigned i = 0; i < TAGS; i++)
+        if (!s->tags[i].reserved) return &s->tags[i];
+    return NULL;
+}
+static void dispatch_producer(struct State *s, struct Slot *slot, struct Tag *tag, unsigned deck) {
     tag->reserved = true;
     tag->deck = deck;
     tag->manager = slot->manager;
@@ -382,6 +403,32 @@ static void drive(unsigned deck) {
         finish(slot, AZ_COMMAND_REJECTED, AZ_UNSUPPORTED);
     }
 }
+static void drive(unsigned deck) {
+    struct State *s = state();
+    if (deck >= 4) return;
+    ACTOR_LOCK(lock, s, deck);
+    if (!lock.mutex.held) return;
+    struct Slot *slot = &(s->slots[deck]);
+    if (slot->phase != Queued) return;
+    if (!drive_admitted(s, slot, deck)) return;
+    ACTOR_DIAG(deck, 0, 0, "drive-admitted", slot->request, slot->work_started);
+    if (!producer_owner(s, slot)) {
+        finish(slot, AZ_COMMAND_REJECTED, AZ_UNSUPPORTED);
+        return;
+    }
+    struct Tag *tag = available_tag(s);
+    if (!tag) {
+        finish(slot, AZ_COMMAND_REJECTED, AZ_BUSY);
+        return;
+    }
+    dispatch_producer(s, slot, tag, deck);
+}
+static void cancel_tags(struct State *s, unsigned deck, const struct Slot *slot) {
+    for (unsigned i = 0; i < TAGS; ++i) {
+        struct Tag *tag = &s->tags[i];
+        if (tag->reserved && tag->deck == deck && matches(tag, slot)) tag->cancelled = true;
+    }
+}
 int azsdk_cue_actor_cancel(unsigned deck, uint64_t token) {
     struct State *s = state();
     if (deck >= 4 || !token) return AZ_INVALID;
@@ -390,10 +437,7 @@ int azsdk_cue_actor_cancel(unsigned deck, uint64_t token) {
     struct Slot *slot = &(s->slots[deck]);
     if (slot->phase == Idle || slot->request.identity.token != token) return AZ_STALE;
     if (slot->phase == Ready) return AZ_OK;
-    for (unsigned i = 0; i < TAGS; ++i) {
-        struct Tag *tag = &s->tags[i];
-        if (tag->reserved && tag->deck == deck && matches(tag, slot)) tag->cancelled = true;
-    }
+    cancel_tags(s, deck, slot);
     finish(slot, AZ_COMMAND_CANCELLED, AZ_CANCELLED);
     return AZ_OK;
 }
@@ -422,14 +466,15 @@ int azsdk_cue_actor_release(unsigned deck, uint64_t token) {
     if (slot->result.token != token) return AZ_STALE;
 #ifndef AZSDK_CUE_ACTOR_TESTING
     if (!(token & (UINT64_C(1) << 63))) {
-        for (unsigned i = 0; i < TAGS; ++i) {
-            struct Tag *tag = &s->tags[i];
-            if (tag->reserved && tag->deck == deck && tag->request.identity.token == token) return AZ_BUSY;
-        }
+        if (token_reserved(s, deck, token)) return AZ_BUSY;
     }
 #endif
     slot->phase = Idle;
     return AZ_OK;
+}
+static bool completion_matches(const struct Slot *slot, uint64_t token, const struct azexit_result *result) {
+    return (slot->phase == Waiting || slot->phase == Executing) && slot->request.identity.token == token &&
+           result->token == token && result->load_generation == slot->request.identity.load_generation;
 }
 int azsdk_cue_actor_complete(unsigned deck, uint64_t token, const struct azexit_result *result) {
     struct State *s = state();
@@ -437,8 +482,7 @@ int azsdk_cue_actor_complete(unsigned deck, uint64_t token, const struct azexit_
     ACTOR_LOCK(lock, s, deck);
     if (!lock.mutex.held) return AZ_BUSY;
     struct Slot *slot = &(s->slots[deck]);
-    if ((slot->phase != Waiting && slot->phase != Executing) || slot->request.identity.token != token ||
-        result->token != token || result->load_generation != slot->request.identity.load_generation) return AZ_STALE;
+    if (!completion_matches(slot, token, result)) return AZ_STALE;
     finish_result(slot, *result, 1);
     return AZ_OK;
 }

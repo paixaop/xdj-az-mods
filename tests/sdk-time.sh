@@ -28,7 +28,7 @@ b=s.index('\n}',a)+2
 helper=s[a:b]+'\n'
 (root/'sample.inc').write_text(helper)
 variants=[
- ('strict', 'return compare_timestamps(2u * source, 2u * cached, 1, 1, UINT64_C(2000000) + rate + 1) == AZ_TIME_EQUAL;', 'return source == cached;'),
+ ('strict', 'return order == AZ_TIME_EQUAL;', 'return source == cached;'),
  ('fixed', 'UINT64_C(2000000) + rate + 1', 'UINT64_C(10) * rate + 1'),
  ('boundary', 'UINT64_C(2000000) + rate + 1', 'UINT64_C(2000000) + rate'),
  ('narrow', 'unsigned __int128', 'uint64_t'),
@@ -53,8 +53,8 @@ for name,old,new in [
  (root/(name+'.inc')).write_text(input_time.replace(old,new))
 for name,filename,old,new in [
  ('clock', 'sdk_data_engine.h', 'if (clock_gettime(CLOCK_MONOTONIC, &ts) ||', 'if ((clock_gettime(CLOCK_MONOTONIC, &ts), 0) ||'),
- ('grid', 'sdk_analysis.h', 'if (span_order == AZ_TIME_INVALID || span_order != AZ_TIME_AFTER || !isfinite(span)) return AZ_FAILED;', '(void)span_order;'),
- ('interval', 'sdk_analysis.h', '(source_order == AZ_TIME_EQUAL || fpclassify(playback) != FP_ZERO)', '(fpclassify(playback) != FP_ZERO)'),
+ ('grid', 'sdk_analysis.h', 'if (order == AZ_TIME_INVALID || order != AZ_TIME_AFTER || !isfinite(span)) return AZ_FAILED;', '(void)order;'),
+ ('interval', 'sdk_analysis.h', '(source_order == AZ_TIME_EQUAL || fpclassify(playback) != FP_ZERO)', '((void) source_order, fpclassify(playback) != FP_ZERO)'),
 ]:
  target=root/name;target.mkdir()
  for dep in ['sdk_data_engine.h','sdk_analysis.h','azmod-mod.h','hc_anlz.h']:

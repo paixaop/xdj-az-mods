@@ -254,12 +254,12 @@ static int bpmstate_read(int d, double *live, double *track); /* stems_display.c
 static void install_bpmstate_hook(void);
 static _Atomic int g_master_deck; /* stems_display.c: master deck 0..3, -1 = none / unknown */
 static void install_master_hook(void);
-static void ds_tempo_birth(unsigned deck,uint64_t owner);
+static void ds_tempo_birth(unsigned deck, uint64_t owner);
 static void ds_tempo_install(void);
 static void ds_pad_install(void);
 static void ds_pad_fresh(uintptr_t object);
 static void ds_models_install(void);
-static void ds_master_capture(uint64_t revision,uint64_t observed,int master,int captured);
+static void ds_master_capture(uint64_t revision, uint64_t observed, int master, int captured);
 static float drum_feed_bpm(int d, double live, int master, int master_ok, double master_live);
 static int drum_feed_lead(int d, double live, int master, int master_ok, double master_live);
 static int drum_feed_paused_lead(int d, int master, int master_ok, double master_live, int on);

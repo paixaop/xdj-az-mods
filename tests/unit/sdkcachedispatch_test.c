@@ -228,12 +228,32 @@ void azsdk_cache_invoke_original(azce_call *call) {
     void azsdk_cache_entry_##n(void) { abort(); }
 UNUSED_ENTRY(0)
 UNUSED_ENTRY(1)
-UNUSED_ENTRY(2) UNUSED_ENTRY(3) UNUSED_ENTRY(4) UNUSED_ENTRY(5) UNUSED_ENTRY(6) UNUSED_ENTRY(7) UNUSED_ENTRY(8) UNUSED_ENTRY(9) UNUSED_ENTRY(10) UNUSED_ENTRY(11) UNUSED_ENTRY(12) UNUSED_ENTRY(13) UNUSED_ENTRY(14) UNUSED_ENTRY(15) UNUSED_ENTRY(16) UNUSED_ENTRY(17) UNUSED_ENTRY(18) UNUSED_ENTRY(19) UNUSED_ENTRY(20) UNUSED_ENTRY(21) UNUSED_ENTRY(22)
+UNUSED_ENTRY(2)
+UNUSED_ENTRY(3)
+UNUSED_ENTRY(4)
+UNUSED_ENTRY(5)
+UNUSED_ENTRY(6)
+UNUSED_ENTRY(7)
+UNUSED_ENTRY(8)
+UNUSED_ENTRY(9)
+UNUSED_ENTRY(10)
+UNUSED_ENTRY(11)
+UNUSED_ENTRY(12)
+UNUSED_ENTRY(13)
+UNUSED_ENTRY(14)
+UNUSED_ENTRY(15)
+UNUSED_ENTRY(16)
+UNUSED_ENTRY(17)
+UNUSED_ENTRY(18)
+UNUSED_ENTRY(19)
+UNUSED_ENTRY(20)
+UNUSED_ENTRY(21)
+UNUSED_ENTRY(22)
 #undef UNUSED_ENTRY
 #ifndef SDK_CACHE_DISPATCH_MAIN
 #define SDK_CACHE_DISPATCH_MAIN main
 #endif
-    int SDK_CACHE_DISPATCH_MAIN(int argc, char **argv) {
+int SDK_CACHE_DISPATCH_MAIN(int argc, char **argv) {
     REQUIRE(argc == 2 && (!strcmp(argv[1], "1") || !strcmp(argv[1], "2")), "separate process per supported build fixture");
     build_id = (unsigned) (argv[1][0] - '0');
     REQUIRE(azsdk_sources_configure(1, (int) build_id, 0) == AZS_OK && api()->version == 1, "actual source/cache helpers configured without physical policy");

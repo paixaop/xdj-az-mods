@@ -13,8 +13,8 @@ struct azsdk_cache_reply_code {
 };
 static int azsdk_cache_reply_code_profile(int build, struct azsdk_cache_reply_code *out) {
     static const struct azsdk_cache_reply_code profiles[2] = {
-        {0x10b3bd0,0x10b408c,2740,"c59631a94527a086d234aed973bbdb1939cbf1d635ec0076078b4bc658c7de42"},
-        {0x1143e20,0x1144490,2856,"56620fedbf85917fe0e8d3326dbe0055c7025c28aafbc6a0578d706429dbf991"},
+        {0x10b3bd0, 0x10b408c, 2740, "c59631a94527a086d234aed973bbdb1939cbf1d635ec0076078b4bc658c7de42"},
+        {0x1143e20, 0x1144490, 2856, "56620fedbf85917fe0e8d3326dbe0055c7025c28aafbc6a0578d706429dbf991"},
     };
     if (!out || (build != 1 && build != 2)) return 0;
     *out = profiles[build - 1];

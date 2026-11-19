@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Compile the actual confirmed-master hook and public deck-service projection."""
 from pathlib import Path
+from sdk_deck_extract import projection, mapped
 import os
 import re
 import subprocess
@@ -10,7 +11,7 @@ root = Path(__file__).resolve().parents[2]
 def fn(text, name):
     m = re.search(r'^static (?:int|uint32_t) ' + name + r'\([^;{]*\{', text, re.M)
     assert m, name
-    return text[m.start():text.index('\n}', m.start()) + 2] + '\n'
+    return mapped(text, root / 'src/azmod/sdk_track.c', m.start(), text.index('\n}', m.start()) + 2)
 with tempfile.TemporaryDirectory(prefix='az-sdk-master-') as tmp:
     out = Path(tmp)
     display = (root / 'src/azmod/stems_display.c').read_text()
@@ -20,10 +21,10 @@ with tempfile.TemporaryDirectory(prefix='az-sdk-master-') as tmp:
     own = memory[memory.index('static inline int ep_addr_ok('):memory.index('/* own_q for n addresses')]
     install_start = display.index('static void install_master_hook', start)
     install_end = display.index('\n}', install_start) + 2
-    (out / 'master.inc').write_text(own + display[start:install_end])
+    (out / 'master.inc').write_text(own + mapped(display, root / 'src/azmod/stems_display.c', start, install_end))
     deck = (root / 'src/azmod/sdk_deck.c').read_text()
     track = (root / 'src/azmod/sdk_track.c').read_text()
-    (out / 'deck.inc').write_text(fn(deck, 'sd_native_load_read') + fn(deck, 'sd_native_cue_read') + fn(deck, 'sd_live_fields') + fn(deck, 'sd_deck_snapshot_v1') + fn(track, 'sdk_data_capabilities'))
+    (out / 'deck.inc').write_text(projection(deck) + fn(track, 'sdk_data_capabilities'))
     command = [os.environ.get('HOST_CC', os.environ.get('CC', 'cc')), '-std=c11', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
                '-Wno-unused-function', '-Wno-unused-variable', '-pthread',
                '-I' + str(root / 'src/azmod'),

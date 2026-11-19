@@ -698,6 +698,17 @@ static void exact_alias_owner_and_root_aba(void) {
     observed_drop(&w.a);
 }
 int main(int argc, char **argv) {
+#ifdef AZSDK_HAVE_CACHE_SELECTION
+    struct azsel_vector empty = {0};
+    uintptr_t count = 123;
+    REQUIRE(!azsel_count(&empty, 0, &count) && count == 123, "zero element width refuses without output");
+    REQUIRE(azsel_count(&empty, 16, &count) && !count, "canonical empty vector contains zero owners");
+    empty.end = 16;
+    REQUIRE(!azsel_count(&empty, 16, &count), "empty storage cannot have a nonempty end");
+    empty.end = 0;
+    empty.capacity = 16;
+    REQUIRE(!azsel_count(&empty, 16, &count), "empty storage cannot retain a capacity address");
+#endif
     _Static_assert(sizeof(struct fixture_owner) == 16 && sizeof(struct Vector) == 24, "native owner and vector widths");
     _Static_assert(offsetof(struct Root, mount) == 0x28 && offsetof(struct Root, collector) == 0x40 && offsetof(struct Root, clients) == 0x50 && offsetof(struct Mount, database) == 0x30 && offsetof(struct Database, connection) == 0x38, "owned native root/Mount/DB prefixes");
     REQUIRE(argc == 2 && (!strcmp(argv[1], "1") || !strcmp(argv[1], "2")), "separate process per supplied build profile");

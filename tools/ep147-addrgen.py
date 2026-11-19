@@ -328,12 +328,16 @@ struct sdk_cache_target {
     unsigned char expected[16];
 };
 enum { SDK_CACHE_TARGET_COUNT = %d };
+static int sdk_cache_runtime_profile_matches(const uint32_t *table) {
+    for (int i = 0; i < EPI_N; ++i) if (!ep147_addr[i] || ep147_addr[i] != table[i]) return 0;
+    return 1;
+}
 static int sdk_cache_target_profile(int build, struct sdk_cache_target *out, size_t capacity) {
     const uint32_t *table = build == EPB_V130 ? ep147_addr_v130 : build == EPB_V200 ? ep147_addr_v200 : 0;
     if (!out || capacity < SDK_CACHE_TARGET_COUNT || !table) return 0;
     /* A requested signature profile must match the already-initialized runtime
      * table. This function never reinitializes or changes address selection. */
-    for (int i = 0; i < EPI_N; ++i) if (!ep147_addr[i] || ep147_addr[i] != table[i]) return 0;
+    if (!sdk_cache_runtime_profile_matches(table)) return 0;
     const uintptr_t addresses[SDK_CACHE_TARGET_COUNT] = {
 ''' % count
     text += ''.join('        ' + name + ',\n' for name, _ in rows) + '    };\n'

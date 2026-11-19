@@ -59,19 +59,23 @@ static void sdk_status_store_binding(unsigned d, uint64_t e, const az_track_ref 
     (void) c;
 }
 #endif
-static void sdk_status_start(void) {
-    if (ds.enabled || access(CM_ROOT "/azmod.deck-status.off", F_OK) == 0) return;
-#ifndef SDK_PROC_IMPL
-    if (g_ep147_build != EPB_V130 && g_ep147_build != EPB_V200) return;
-#endif
+static int ds_create_signals(void) {
     ds_event_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     ds_timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
     if (ds_event_fd < 0 || ds_timer_fd < 0) {
         if (ds_event_fd >= 0) close(ds_event_fd);
         if (ds_timer_fd >= 0) close(ds_timer_fd);
         ds_event_fd = ds_timer_fd = -1;
-        return;
+        return 0;
     }
+    return 1;
+}
+static void sdk_status_start(void) {
+    if (ds.enabled || access(CM_ROOT "/azmod.deck-status.off", F_OK) == 0) return;
+#ifndef SDK_PROC_IMPL
+    if (g_ep147_build != EPB_V130 && g_ep147_build != EPB_V200) return;
+#endif
+    if (!ds_create_signals()) return;
     ds.enabled = 1;
     ds_native_start();
     ds_start_metrics();
@@ -105,6 +109,11 @@ static int sdk_deck_status_release(const char *id, az_deck_subscription handle) 
 
 #ifndef SDK_PROC_IMPL
 /* Copy only the reducer's qualified identity for this exact accepted load. */
+static int sa_load_cell_ready(const struct ds_cell *cell, uint64_t load) {
+    return cell && cell->info.info.availability == AZ_AVAIL_READY &&
+           cell->info.scope == AZ_STATUS_LOAD_SCOPE && cell->info.scope_id == load &&
+           cell->bytes == sizeof(az_track_ref);
+}
 static int sa_loaded_ref(unsigned deck, uint64_t load, az_track_ref *out) {
     if (deck >= 4 || !load || !out) return AZ_INVALID;
     int rc = AZ_BUSY;
@@ -112,9 +121,10 @@ static int sa_loaded_ref(unsigned deck, uint64_t load, az_track_ref *out) {
     const struct ds_image *image = &ds.deck[deck].current;
     const struct ds_cell *cell = image->field[AZ_STATUS_LOAD][AZ_STATUS_LOAD_TRACK];
     if (image->epoch != load) rc = AZ_STALE;
-    else if (cell && cell->info.info.availability == AZ_AVAIL_READY &&
-             cell->info.scope == AZ_STATUS_LOAD_SCOPE && cell->info.scope_id == load &&
-             cell->bytes == sizeof *out) { memcpy(out, cell->data, sizeof *out); rc = AZ_OK; }
+    else if (sa_load_cell_ready(cell, load)) {
+        memcpy(out, cell->data, sizeof *out);
+        rc = AZ_OK;
+    }
     pthread_mutex_unlock(&ds.mu);
     return rc;
 }

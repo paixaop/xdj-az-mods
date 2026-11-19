@@ -60,10 +60,13 @@ static inline int azcr_forward_result(struct azcr_scope *s, int (*original)(void
     struct azcr_forward_scope frame __attribute__((cleanup(azcr_forward_end))) = azcr_forward_begin(s);
     return original(context);
 }
+static inline bool azcr_scope_matches(const struct azcr_scope *s, const struct azcr_promotion *native, const void *borrowed_receiver) {
+    return azcr_current == s && s->active && s->return_pc && native->caller_link == s->return_pc && native->control && borrowed_receiver &&
+           s->reception.object == borrowed_receiver && (uintptr_t) s->reception.control == native->control;
+}
 static inline bool azcr_receive_owned(struct azcr_scope *s, const struct azcr_promotion *native,
                                       const void *borrowed_receiver, struct azcr_receipt *out) {
-    if (azcr_current != s || !s->active || !s->return_pc || native->caller_link != s->return_pc || !native->control || !borrowed_receiver ||
-        s->reception.object != borrowed_receiver || (uintptr_t) s->reception.control != native->control) return false;
+    if (!azcr_scope_matches(s, native, borrowed_receiver)) return false;
     /* Native already owns this receiver during its callback. Promotion ends
      * before the caller forwards; output retains only a checked weak owner. */
     struct az_native_owner lease __attribute__((cleanup(az_native_owner_reset))) = az_native_lock(&s->reception);

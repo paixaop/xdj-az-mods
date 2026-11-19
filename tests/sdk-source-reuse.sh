@@ -18,8 +18,8 @@ python3 - src/azmod/sdk_native_sources.c "$task_tmp/src/azmod/sdk_native_sources
 from pathlib import Path
 import hashlib,json,sys
 source=Path(sys.argv[1]); original=source.read_text()
-start='    bool was_observed = false, status_was_observed = false;'
-end='    if ((!observed_generation && was_observed) || (!status_generation && status_was_observed)) {'
+start='    lookup->binding = source_binding(server);'
+end='    if (source_generation_unavailable(lookup)) return AZS_STALE;'
 if original.count(start)!=1 or original.count(end)!=1:
     raise SystemExit('FAIL: exact real source matching-key loop was not found once; no runtime RED possible')
 instrumented=original.replace(start,start+'\n    source_reuse_lookup_boundary(0);',1)

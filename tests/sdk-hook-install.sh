@@ -42,7 +42,8 @@ source=Path('src/azstem/azstem.c').read_text()
 start=source.index('static int pcrel_kind(')
 end=source.index('\nstatic int install_hook(void)',start)
 real=source[start:end]+'\n'
-(out/'installer-real.inc').write_text(real)
+production='#line {} "{}"\n'.format(source.count('\n',0,start)+1,Path('src/azstem/azstem.c').resolve())+real
+(out/'installer-real.inc').write_text(production)
 (out/'azprot.h').write_bytes(Path('src/common/azprot.h').read_bytes())
 begin=real.index('    if (azprot_relock(&pt) != 0) {')
 finish=real.index('    logln("install: hooked @',begin)
@@ -63,7 +64,7 @@ variants={
 for name,variant in variants.items():
  assert variant!=real,name
  (out/('installer-'+name+'.inc')).write_text(variant)
-manifest={'source_sha256':hashlib.sha256(source.encode()).hexdigest(),'installer_sha256':hashlib.sha256(real.encode()).hexdigest(),
+manifest={'source_sha256':hashlib.sha256(source.encode()).hexdigest(),'installer_sha256':hashlib.sha256(production.encode()).hexdigest(),
  'fixture_sha256':hashlib.sha256(Path('tests/unit/hookinstall_test.c').read_bytes()).hexdigest(),
  'runner_sha256':hashlib.sha256(Path('tests/sdk-hook-install.sh').read_bytes()).hexdigest(),
  'azprot_sha256':hashlib.sha256((out/'azprot.h').read_bytes()).hexdigest(),'sanitizer':__import__('os').environ.get('SAN','plain'),

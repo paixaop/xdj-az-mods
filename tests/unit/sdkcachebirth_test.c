@@ -866,11 +866,31 @@ static void sql_cache_reclamation_isolation(void) {
 }
 #endif
 
+static void count_public_forward(void *context) { ++*(unsigned *) context; }
+static void public_guarded_forwarding(void) {
+    for (unsigned build = 0; build <= 3; ++build) {
+        unsigned calls = 0;
+        Forward original = {count_public_forward, &calls};
+        BirthBorrow birth = {0};
+        QueryBorrow query = {0};
+        birth.source.build = query.source.build = build;
+        Observation out = {.row_value = 123}, before = out;
+        azcb_forward_library_owned(build, NULL, original);
+        REQUIRE(calls == 1, "unadmitted public library route still forwards exactly once");
+        REQUIRE(azcb_observe_birth_owned(&birth, original, &out) != AZS_OK,
+                "public birth without an owning source cannot publish");
+        REQUIRE(calls == 2 && !memcmp(&out, &before, sizeof out), "failed public birth preserves result and forwarding");
+        REQUIRE(azcb_observe_query_owned(&query, original, (CopyRowScalar) {0}, &out) != AZS_OK,
+                "public query without an owning source cannot publish");
+        REQUIRE(calls == 3 && !memcmp(&out, &before, sizeof out), "failed public query preserves result and forwarding");
+    }
+}
 int main(int argc, char **argv) {
     REQUIRE(argc == 2 && (!strcmp(argv[1], "1") || !strcmp(argv[1], "2")), "separate process per build profile");
     build_id = (unsigned) (argv[1][0] - '0');
     REQUIRE(azsdk_sources_configure(1, (int) build_id, 0) == AZS_OK, "existing source registry starts without physical policy");
     REQUIRE(api()->version == 1, "reviewed test-contract version");
+    public_guarded_forwarding();
     first_birth();
 #if defined(AZSDK_CACHE_RECLAIM_TESTING)
     sql_cache_reclamation_isolation();

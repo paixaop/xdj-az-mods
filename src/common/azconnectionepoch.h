@@ -52,6 +52,10 @@ static inline void az_connection_retire_locked(struct az_connection_state *s, co
         if (s->status_entries[i].connection == connection) s->status_entries[i] = (struct az_connection_entry) {0};
     }
 }
+static inline bool az_connection_has_capacity(const struct az_connection_state *s) {
+    return s->capacity && s->capacity <= AZ_CONNECTION_CAPACITY && s->max_generation && s->max_sequence && s->max_active &&
+           s->sequence != s->max_sequence && s->active != s->max_active;
+}
 static inline void az_connection_enter(struct az_connection_state *s, struct az_connection_operation *op,
                                        const void *connection, bool closing) {
     AZ_NATIVE_ERRNO(saved_errno);
@@ -60,8 +64,7 @@ static inline void az_connection_enter(struct az_connection_state *s, struct az_
     if (!az_connection_lock(s)) return;
     if (closing) az_connection_retire_locked(s, connection);
     if (!atomic_load_explicit(&s->saturated, memory_order_acquire)) {
-        if (!s->capacity || s->capacity > AZ_CONNECTION_CAPACITY || !s->max_generation || !s->max_sequence || !s->max_active ||
-            s->sequence == s->max_sequence || s->active == s->max_active) {
+        if (!az_connection_has_capacity(s)) {
             atomic_store_explicit(&s->saturated, true, memory_order_release);
         } else {
             op->eligible = !closing && s->active == 0;
@@ -78,72 +81,102 @@ static inline void az_connection_enter(struct az_connection_state *s, struct az_
     }
     az_connection_unlock(s);
 }
-static inline void az_connection_complete(struct az_connection_operation *op, bool offer, int result,
-                                          const void *connection, struct az_connection_receipt *receipt) {
-    AZ_NATIVE_ERRNO(saved_errno);
-    if (!op->tracked) return;
+/* These helpers run with the state lock held. Clearing duplicates precedes
+ * both birth contracts, including when native open returned an error. */
+static inline bool az_connection_clear_duplicate(struct az_connection_state *s, const void *connection) {
+    bool duplicate = false;
+    for (size_t i = 0; i < s->capacity; ++i) {
+        struct az_connection_entry *entry = &s->entries[i];
+        if (entry->connection == connection) {
+            /* Two births without retirement are ambiguous. */
+            *entry = (struct az_connection_entry) {0};
+            duplicate = true;
+        }
+    }
+    return duplicate;
+}
+static inline bool az_connection_legacy_eligible(const struct az_connection_operation *op) {
+    const struct az_connection_state *s = op->state;
+    return op->eligible && s->active == 1 && s->sequence == op->sequence &&
+           !atomic_load_explicit(&s->saturated, memory_order_acquire);
+}
+static inline void az_connection_publish_legacy(struct az_connection_state *s, const void *connection, struct az_connection_receipt *receipt) {
+    struct az_connection_entry *free_entry = NULL;
+    for (size_t i = 0; i < s->capacity; ++i)
+        if (!s->entries[i].generation) {
+            free_entry = &s->entries[i];
+            break;
+        }
+    /* Capacity refusal never evicts another live incarnation. */
+    if (!free_entry) return;
+    if (s->next_generation == s->max_generation) atomic_store_explicit(&s->saturated, true, memory_order_release);
+    else {
+        uint64_t generation = ++s->next_generation;
+        *free_entry = (struct az_connection_entry) {connection, generation};
+        if (receipt) *receipt = (struct az_connection_receipt) {generation};
+    }
+}
+static inline struct az_connection_entry *az_connection_status_slot(struct az_connection_state *s, const void *connection) {
+    struct az_connection_entry *slot = NULL;
+    bool duplicate = false;
+    for (size_t i = 0; i < s->capacity; ++i) {
+        struct az_connection_entry *entry = &s->status_entries[i];
+        if (entry->connection == connection) {
+            *entry = (struct az_connection_entry) {0};
+            duplicate = true;
+        }
+        if (!entry->connection && !slot) slot = entry;
+    }
+    return duplicate ? NULL : slot;
+}
+static inline bool az_connection_status_eligible(const struct az_connection_operation *op) {
+    const struct az_connection_state *s = op->state;
+    return op->status_eligible && !s->closing && s->last_close < op->sequence &&
+           s->next_status_generation < s->max_generation && !atomic_load_explicit(&s->saturated, memory_order_acquire);
+}
+static inline void az_connection_publish_status(const struct az_connection_operation *op, int result, const void *connection) {
+    /* Independent native workers may open distinct libraries concurrently.
+     * Status accepts those distinct births, but never an overlapping close.
+     * This namespace is separate from the stricter legacy receipt contract. */
+    struct az_connection_state *s = op->state;
+    struct az_connection_entry *slot = az_connection_status_slot(s, connection);
+    if (slot && !result && az_connection_status_eligible(op))
+        *slot = (struct az_connection_entry) {connection, ++s->next_status_generation};
+}
+static inline void az_connection_finish_locked(struct az_connection_operation *op) {
+    struct az_connection_state *s = op->state;
+    if (op->close) --s->closing;
+    --s->active;
+    op->tracked = false;
+    az_connection_unlock(s);
+}
+/* Return with the registry locked only for a balanced tracked operation. */
+static inline bool az_connection_begin_completion(struct az_connection_operation *op) {
+    if (!op->tracked) return false;
     struct az_connection_state *s = op->state;
     if (!az_connection_lock(s)) {
         op->tracked = false;
-        return;
+        return false;
     }
     if (!s->active) {
         atomic_store_explicit(&s->saturated, true, memory_order_release);
         op->tracked = false;
         az_connection_unlock(s);
-        return;
+        return false;
     }
-    bool duplicate = false;
-    if (offer && connection)
-        for (size_t i = 0; i < s->capacity; ++i) {
-            struct az_connection_entry *entry = &s->entries[i];
-            if (entry->connection == connection) {
-            /* Two births without retirement are ambiguous, including failed
-             * opens that return a nonnull output. */
-                *entry = (struct az_connection_entry) {0};
-                duplicate = true;
-            }
-        }
-    if (offer && result == 0 && connection && !duplicate && op->eligible && s->active == 1 && s->sequence == op->sequence &&
-        !atomic_load_explicit(&s->saturated, memory_order_acquire)) {
-        struct az_connection_entry *free_entry = NULL;
-        for (size_t i = 0; i < s->capacity; ++i)
-            if (!s->entries[i].generation) {
-                free_entry = &s->entries[i];
-                break;
-            }
-        if (free_entry) {
-            if (s->next_generation == s->max_generation) atomic_store_explicit(&s->saturated, true, memory_order_release);
-            else {
-                uint64_t generation = ++s->next_generation;
-                *free_entry = (struct az_connection_entry) {connection, generation};
-                if (receipt) *receipt = (struct az_connection_receipt) {generation};
-            }
-        }
-        /* Capacity refusal never evicts another live incarnation. */
-    }
-    /* Independent native workers may open distinct libraries concurrently.
-     * Status accepts those distinct births, but never an overlapping close.
-     * Keep this namespace separate from the stricter legacy receipt contract. */
+    return true;
+}
+static inline void az_connection_complete(struct az_connection_operation *op, bool offer, int result,
+                                          const void *connection, struct az_connection_receipt *receipt) {
+    AZ_NATIVE_ERRNO(saved_errno);
+    if (!az_connection_begin_completion(op)) return;
+    struct az_connection_state *s = op->state;
     if (offer && connection) {
-        struct az_connection_entry *slot = NULL;
-        bool duplicate_status = false;
-        for (size_t i = 0; i < s->capacity; ++i) {
-            struct az_connection_entry *entry = &s->status_entries[i];
-            if (entry->connection == connection) {
-                *entry = (struct az_connection_entry) {0};
-                duplicate_status = true;
-            }
-            if (!entry->connection && !slot) slot = entry;
-        }
-        if (slot && !duplicate_status && !result && op->status_eligible && !s->closing && s->last_close < op->sequence &&
-            s->next_status_generation < s->max_generation && !atomic_load_explicit(&s->saturated, memory_order_acquire))
-            *slot = (struct az_connection_entry) {connection, ++s->next_status_generation};
+        bool duplicate = az_connection_clear_duplicate(s, connection);
+        if (!result && !duplicate && az_connection_legacy_eligible(op)) az_connection_publish_legacy(s, connection, receipt);
+        az_connection_publish_status(op, result, connection);
     }
-    if (op->close) --s->closing;
-    --s->active;
-    op->tracked = false;
-    az_connection_unlock(s);
+    az_connection_finish_locked(op);
 }
 static inline void az_connection_operation_drop(struct az_connection_operation *op) {
     az_connection_complete(op, false, -1, NULL, NULL);

@@ -1174,6 +1174,27 @@ static void *hold_cache_lock(void *context) {
     azsdk_cue_commands_test_cache_lock(0, cache_lock_held, context);
     return NULL;
 }
+static unsigned settled_receipts;
+static struct azexit_receipt last_settled;
+int azsdk_exit_delivery_publish(const struct azexit_receipt *receipt) {
+    assert(receipt && receipt->size == sizeof *receipt);
+    last_settled = *receipt;
+    ++settled_receipts;
+    return AZ_OK;
+}
+static void retirement_settlement(void) {
+    struct azexit_cue_request r = request(7000, AZ_CMD_SAVED_SAVE, AZ_CUE_MEMORY, 0, false);
+    dispatch(&r);
+    azsdk_cue_commands_actor_retired(0, r.identity.token, r.identity.load_generation);
+    azsdk_cue_commands_tick();
+    assert(!settled_receipts); // repository ownership still fences the actor's retirement
+    azsdk_cue_commands_persist_retired(0, r.identity.token);
+    azsdk_cue_commands_tick();
+    assert(settled_receipts == 1 && last_settled.token == r.identity.token && last_settled.load_generation == r.identity.load_generation);
+    assert(last_settled.kind == AZEXIT_RECEIPT_SETTLED);
+    azsdk_cue_commands_tick();
+    assert(settled_receipts == 1); // settlement is consumed exactly once
+}
 int main(int argc, char **argv) {
     fixture_property(&(main_property), 48000, true);
     char long_comment[130] = {0};
@@ -1185,6 +1206,10 @@ int main(int argc, char **argv) {
     azsdk_cue_commands_tick();
     azsdk_cue_commands_tick(); // refresh captures scalar IDs; second releases internal result
     if (argc == 2) {
+        if (!strcmp(argv[1], "retirement")) {
+            retirement_settlement();
+            return 0;
+        }
         if (!strcmp(argv[1], "clock")) {
             cue_snapshot_clock_tail();
             return 0;

@@ -25,6 +25,11 @@ static unsigned checks;
             exit(1);                                                  \
         }                                                             \
     } while (0)
+static void timestamp_equal(double actual, double expected, uint64_t sample_rate) {
+    int order = compare_timestamps(actual, expected, 1, sample_rate, 1);
+    CHECK(order != AZ_TIME_INVALID);
+    CHECK(order == AZ_TIME_EQUAL);
+}
 static uint32_t be32(const uint8_t *p) {
     return ((uint32_t) p[0] << 24) | ((uint32_t) p[1] << 16) | ((uint32_t) p[2] << 8) | p[3];
 }
@@ -86,7 +91,8 @@ static void cues(void) {
         put16(a + 48 + 38, 1); /* Quantization does not imply automatic activation. */
         CHECK(parse(d, a, size, NULL, 0) == AZ_OK);
         CHECK(d->view.cue_count == 1 && d->cues[0].type == AZ_CUE_LOOP);
-        CHECK(d->cues[0].start_s == 0 && d->cues[0].end_s == .5);
+        timestamp_equal(d->cues[0].start_s, 0, 1000); /* ANLZ's millisecond clock. */
+        timestamp_equal(d->cues[0].end_s, .5, 1000);
         CHECK(!(d->cues[0].valid & AZ_CUE_COMMENT));
         CHECK(!(d->cues[0].valid & AZ_CUE_COLOR));
         CHECK((d->cues[0].valid & AZ_CUE_COLOR_ID) && d->cues[0].color_id == 0);
@@ -158,6 +164,38 @@ static void cues(void) {
     put32(a + 52 + 8, 1000); /* A discarded malformed annotation must not poison PCP2. */
     CHECK(parse(d, a, na, b, nb) == AZ_OK && d->cues[0].auto_active == -1);
     free(d);
+}
+static void cue_comments(void) {
+    static const struct {
+        uint8_t units[8];
+        unsigned bytes;
+        const char *expected;
+    } cases[] = {
+        {{0xd8, 0x3d, 0xde, 0x80}, 4, "\xf0\x9f\x9a\x80"},
+        {{0xd8, 0, 0, 'A'}, 4, "\xef\xbf\xbd"
+                               "A"},
+        {{0xdc, 0}, 2, "\xef\xbf\xbd"},
+        {{0xd8, 0}, 2, "\xef\xbf\xbd"},
+        {{0, 'A', 0, 0, 0, 'B'}, 6, "A"},
+        {{0, 0xa9, 0x20, 0xac}, 4, "\xc2\xa9\xe2\x82\xac"}};
+    struct st_data *data = malloc(sizeof *data);
+    CHECK(data);
+    uint8_t file[1024];
+    for (unsigned i = 0; i < sizeof cases / sizeof *cases; i++) {
+        size_t n = cue_file(file, 1, 0, 1, 44 + cases[i].bytes, 0, 0, 500);
+        put32(file + 48 + 40, cases[i].bytes);
+        memcpy(file + 48 + 44, cases[i].units, cases[i].bytes);
+        CHECK(parse(data, file, n, NULL, 0) == AZ_OK);
+        CHECK(data->view.cue_count == 1 && (data->cues[0].valid & AZ_CUE_COMMENT));
+        CHECK(!strcmp(data->cues[0].comment, cases[i].expected));
+    }
+    size_t n = cue_file(file, 1, 0, 1, 44 + 128, 0, 0, 500);
+    put32(file + 48 + 40, 128);
+    for (unsigned i = 0; i < 32; i++) memcpy(file + 48 + 44 + i * 4, cases[0].units, 4);
+    CHECK(parse(data, file, n, NULL, 0) == AZ_OK);
+    CHECK(strlen(data->cues[0].comment) == 124);
+    for (unsigned i = 0; i < 31; i++) CHECK(!memcmp(data->cues[0].comment + i * 4, cases[0].expected, 4));
+    free(data);
 }
 struct parse_task {
     uint8_t dat[256], ext[256];
@@ -324,7 +362,8 @@ static void previews(void) {
         before = w;
         CHECK(sww_plan_window(&index, 150, 32, &w) == SDKW_UNSUPPORTED && !memcmp(&w, &before, sizeof w));
         CHECK(sww_plan_preview_window(&index, 150, 32, 400, &w) == SDKW_OK);
-        CHECK(w.start_s == 50 && w.seconds_per_sample == 1.0 / 3.0 && w.byte_count == 32u * stride);
+        timestamp_equal(w.start_s, 50, 3); /* 1,200 preview samples over 400 seconds. */
+        CHECK(w.seconds_per_sample == 1.0 / 3.0 && w.byte_count == 32u * stride);
         CHECK(w.byte_offset == 28u + index.tag.header_size + 150u * stride);
         CHECK(sww_plan_preview_window(&index, 1199, 4096, 400, &w) == SDKW_OK && w.sample_count == 1);
         before = w;
@@ -348,8 +387,18 @@ static void previews(void) {
         CHECK(st_wave_read(path, data) == AZ_OK);
         CHECK(data->wave_view.encoding == encoding && data->wave_view.bytes_per_column == stride);
         CHECK(data->wave_view.column_count == 32 && data->wave_view.total_columns == 1200 && data->wave_view.data_bytes == stride * 32);
-        CHECK(data->wave_view.start_s == 50 && data->wave_view.seconds_per_column == 1.0 / 3.0);
+        timestamp_equal(data->wave_view.start_s, 50, 3);
+        CHECK(data->wave_view.seconds_per_column == 1.0 / 3.0);
         CHECK(!memcmp(data->wave_view.columns, p + 28 + index.tag.header_size + 150 * stride, 32 * stride));
+        az_wave_snapshot unchanged = data->wave_view;
+        data->wave_query.first_column = 1200;
+        CHECK(st_wave_read(path, data) == AZ_INVALID && !memcmp(&data->wave_view, &unchanged, sizeof unchanged));
+        data->wave_query.first_column = 0;
+        data->wave_query.column_count = 0;
+        CHECK(st_wave_read(path, data) == AZ_INVALID && !memcmp(&data->wave_view, &unchanged, sizeof unchanged));
+        data->wave_query.column_count = AZ_WAVE_WINDOW_MAX + 1;
+        CHECK(st_wave_read(path, data) == AZ_LIMIT && !memcmp(&data->wave_view, &unchanged, sizeof unchanged));
+        data->wave_query.column_count = 32;
         data->view.metadata.valid = 0; /* A nonzero but invalid value must not establish the axis. */
         CHECK(st_wave_read(path, data) == AZ_UNSUPPORTED);
         free(p);
@@ -526,6 +575,7 @@ static void real_phrase_version(const char *path) {
 int main(int argc, char **argv) {
     CHECK(argc == 1 || argc == 3 || argc == 4);
     cues();
+    cue_comments();
     concurrent_parsers();
     phrase_versions();
     preview_requests();

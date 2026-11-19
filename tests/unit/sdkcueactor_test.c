@@ -77,7 +77,13 @@ static void *install(uintptr_t address, void *hook, void **original) {
     else assert(false);
     return hook;
 }
-static int current(unsigned deck __attribute__((unused)), uint64_t generation, void *context __attribute__((unused))) { return generation == 42; }
+static bool load_current = true;
+static int delivery_claim = AZ_OK;
+int azsdk_exit_delivery_claim(const struct azexit_request *request, uint64_t clock) {
+    assert(request && clock);
+    return delivery_claim;
+}
+static int current(unsigned deck __attribute__((unused)), uint64_t generation, void *context __attribute__((unused))) { return load_current && generation == 42; }
 static int execute(const struct azexit_cue_request *request, void *m, struct azexit_result *out, void *context __attribute__((unused))) {
     assert(m == manager || m == replacement);
     ++executions;
@@ -338,4 +344,43 @@ int main(void) {
     azsdk_cue_actor_retire(1, replacement);
     assert(native_saves == 2);
     assert(destroyed == 527);
+    // Admission is rechecked at both queue dispatch and native execution.
+    unsigned before_executions = executions, before_saves = native_saves;
+    r = request(910);
+    r.identity.load_generation = 43;
+    assert(azsdk_cue_actor_enqueue(&r) == AZ_PENDING);
+    azsdk_cue_actor_drive(0);
+    assert(poll(910).outcome == AZ_COMMAND_REJECTED && poll(910).reason == AZ_STALE);
+    release(910);
+    r = request(911);
+    r.identity.deadline_ns = 1;
+    assert(azsdk_cue_actor_enqueue(&r) == AZ_PENDING);
+    azsdk_cue_actor_drive(0);
+    assert(poll(911).reason == AZ_STALE);
+    release(911);
+    r = request(912);
+    assert(azsdk_cue_actor_enqueue(&r) == AZ_PENDING);
+    azsdk_cue_actor_drive(0);
+    load_current = false;
+    drain();
+    assert(poll(912).reason == AZ_STALE);
+    release(912);
+    load_current = true;
+    r = request(913);
+    r.identity.deadline_ns = monotonic_ns() + UINT64_C(50000000);
+    assert(azsdk_cue_actor_enqueue(&r) == AZ_PENDING);
+    azsdk_cue_actor_drive(0);
+    struct timespec delay = {.tv_nsec = 60000000};
+    assert(!nanosleep(&delay, NULL));
+    drain();
+    assert(poll(913).reason == AZ_STALE);
+    release(913);
+    r = request(914);
+    assert(azsdk_cue_actor_enqueue(&r) == AZ_PENDING);
+    azsdk_cue_actor_drive(0);
+    delivery_claim = AZ_CANCELLED;
+    drain();
+    assert(poll(914).outcome == AZ_COMMAND_CANCELLED && poll(914).reason == AZ_CANCELLED);
+    release(914);
+    assert(executions == before_executions && native_saves == before_saves);
 }

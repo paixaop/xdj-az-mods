@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #include "../../src/common/azcuestore.h"
 #include "../../src/common/azcuepersist.h"
+#include "../../src/common/azcueprofile.h"
 #include <assert.h>
 #include <string.h>
 #include <stdio.h>
@@ -211,7 +212,54 @@ static void check_delta(azcs_snapshot *snapshot, const azcs_profile *p, azcs_rev
     assert(azcs_snapshot_auto_only_changed(snapshot, before, 1, true, 44100) == expected);
     azcs_snapshot_reset(snapshot);
 }
+static bool profile_available = true, nominal_available = true;
+int azsdk_cue_profile_get(int build, uintptr_t bias, struct azcue_profile *out) {
+    assert(build == 1 || build == 2);
+    if (!nominal_available) return 0;
+    *out = (struct azcue_profile) {0};
+    out->ctor.address = 0x5000 + bias;
+    for (unsigned i = 0; i < sizeof out->store / sizeof *out->store; ++i) out->store[i].address = 0x10000 + bias + i * 16;
+    out->persist.string_allocate = 0x6000 + bias;
+    out->persist.string_destroy = 0x7000 + bias;
+    out->persist.color_construct = 0x8000 + bias;
+    return 1;
+}
+int azsdk_cue_main_profile(int build, struct azcue_profile *out) {
+    if (!profile_available) return 0;
+    bool saved = nominal_available;
+    nominal_available = true;
+    int ok = azsdk_cue_profile_get(build, 0x20000, out);
+    nominal_available = saved;
+    return ok;
+}
+static void test_native_profile_binding(void) {
+    azcs_profile empty = {0};
+    azcs_profile actual = azcs_native_profile(0, 0);
+    assert(!memcmp(&actual, &empty, sizeof actual));
+#if defined(__aarch64__)
+    profile_available = false;
+    actual = azcs_native_profile(1, 0x20000);
+    assert(!memcmp(&actual, &empty, sizeof actual));
+    profile_available = true;
+    nominal_available = false;
+    actual = azcs_native_profile(1, 0x20000);
+    assert(!memcmp(&actual, &empty, sizeof actual));
+    nominal_available = true;
+    actual = azcs_native_profile(1, 0x30000);
+    assert(!memcmp(&actual, &empty, sizeof actual)); // requested bias must match the verified image
+    for (int build = 1; build <= 2; ++build) {
+        actual = azcs_native_profile(build, 0x20000);
+        const uintptr_t functions[] = {(uintptr_t) actual.copy_source, (uintptr_t) actual.copy_content, (uintptr_t) actual.release_ref,
+                                       (uintptr_t) actual.position, (uintptr_t) actual.get_cue, (uintptr_t) actual.destroy_cue, (uintptr_t) actual.convert,
+                                       (uintptr_t) actual.destroy_property, (uintptr_t) actual.has_cue, (uintptr_t) actual.get_current_cue,
+                                       (uintptr_t) actual.copy_property, (uintptr_t) actual.serialize_property, (uintptr_t) actual.where_from};
+        for (unsigned i = 0; i < sizeof functions / sizeof *functions; ++i) assert(functions[i] == 0x30000 + i * 16);
+        assert((uintptr_t) actual.string_allocate == 0x26000 && (uintptr_t) actual.string_destroy == 0x27000 && (uintptr_t) actual.color_construct == 0x28000);
+    }
+#endif
+}
 int main() {
+    test_native_profile_binding();
     struct azcue_native_timestamps a = {0}, b = {0};
     a.sample_rate = 96000;
     b.sample_rate = 48000;
@@ -818,5 +866,34 @@ int main() {
     azcs_snapshot_reset(&(snapshot));
     azcs_property_reset(&(wanted));
     clean();
+    // Hot creation may replace exactly one native absent placeholder.
+    for (unsigned marker = 0; marker < 3; ++marker) {
+        put(pack, 0xe8, (uintptr_t) publication);
+        put(pack, 0xe0, (uintptr_t) hot_publication);
+        put(publication, 0x28, (uintptr_t) content);
+        put(content, 0x28, (uintptr_t) rows);
+        put(content, 0x30, (uintptr_t) rows);
+        put(hot_publication, 0x28, (uintptr_t) hot_content);
+        put(hot_content, 0x28, (uintptr_t) hot_rows);
+        put(hot_content, 0x30, (uintptr_t) (hot_rows + 1));
+        hot_rows[0] = (azcs_native_cue) {0};
+        hot_rows[0].bytes[0] = marker == 0 ? 0xff : 1;
+        put(&hot_rows[0], marker == 2 ? 16 : 8, UINT64_C(0x7fffffffffffffff));
+        assert(azcs_snapshot_open(&snapshot, &p, manager, 8 + marker, NULL, &creation_state));
+        assert(azcs_snapshot_content_witness(&snapshot, azcs_snapshot_revision(&snapshot), &before_create, false));
+        assert(azcs_snapshot_timed_property(&snapshot, 1, 2., 0., false, 0, "", &wanted));
+        delta_hot_rows[0] = serialize(1, &wanted.native, true);
+        put(&delta_hot_rows[0], 0x78, 0xff000000u);
+        destroy_cue(NULL);
+        azcs_snapshot_reset(&snapshot);
+        put(delta_hot_content, 0x28, (uintptr_t) delta_hot_rows);
+        put(delta_hot_content, 0x30, (uintptr_t) (delta_hot_rows + 1));
+        put(hot_publication, 0x28, (uintptr_t) delta_hot_content);
+        assert(azcs_snapshot_open(&snapshot, &p, manager, 8 + marker, NULL, &creation_state));
+        assert(azcs_snapshot_creation_only_changed(&snapshot, &before_create, 1, &wanted, rate, "", 0));
+        azcs_snapshot_reset(&snapshot);
+        azcs_property_reset(&wanted);
+        clean();
+    }
     puts("SDK_CUE_STORE_OK");
 }

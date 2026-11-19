@@ -61,65 +61,72 @@ static void cache_write(struct azce_call *call, unsigned kind) {
     azcb_observe_construction_write_owned(&borrow, (struct azcb_forward) {write_original, &forward});
 }
 
-void azsdk_cache_dispatch_call(struct azce_call *call) {
-    if (!call) return;
-    switch (call->kind) {
-    case AZCE_KIND_REPLY_TICKET:
-        if (azcr_forward_ticket_owned)
-            azcr_forward_ticket_owned(call, (struct azcb_forward) {cache_original, call});
-        else azsdk_cache_invoke_original(call);
+enum CacheDispatchPolicy {
+    CACHE_FORWARD,
+    CACHE_TICKET,
+    CACHE_RECEPTION,
+    CACHE_OBSERVE,
+    CACHE_FACTORY,
+    CACHE_WRITE,
+    CACHE_SELECT,
+    CACHE_RETIRE
+};
+static enum CacheDispatchPolicy cache_dispatch_policy(unsigned kind) {
+    static const unsigned char policies[AZCE_KIND_COUNT] = {
+        [AZCE_KIND_REPLY_TICKET] = CACHE_TICKET,
+        [AZCE_KIND_REPLY_RECEPTION] = CACHE_RECEPTION,
+        [AZCE_KIND_SELECTION] = CACHE_OBSERVE,
+        [AZCE_KIND_CREATE] = CACHE_OBSERVE,
+        [AZCE_KIND_QUERY] = CACHE_OBSERVE,
+        [AZCE_KIND_GENERIC] = CACHE_OBSERVE,
+        [AZCE_KIND_TRACKINFO] = CACHE_OBSERVE,
+        [AZCE_KIND_PRIMARY_FACTORY] = CACHE_FACTORY,
+        [AZCE_KIND_STANDARD_FACTORY] = CACHE_FACTORY,
+        [AZCE_KIND_SETUP] = CACHE_WRITE,
+        [AZCE_KIND_LAYOUT] = CACHE_WRITE,
+        [AZCE_KIND_SELECTION_STORE] = CACHE_SELECT,
+        [AZCE_KIND_SELECTION_CLEAR] = CACHE_SELECT,
+        [AZCE_KIND_CLEAR] = CACHE_RETIRE,
+        [AZCE_KIND_CACHE_DESTROY] = CACHE_RETIRE,
+        [AZCE_KIND_POOL_GROW] = CACHE_RETIRE,
+        [AZCE_KIND_COLLECTOR_DISPOSE] = CACHE_RETIRE,
+        [AZCE_KIND_SERVER_RESET] = CACHE_RETIRE,
+        [AZCE_KIND_SERVER_DESTROY] = CACHE_RETIRE,
+        [AZCE_KIND_LOADINFO_DESTROY] = CACHE_RETIRE,
+        [AZCE_KIND_COLLECTOR_DESTROY] = CACHE_RETIRE,
+        [AZCE_KIND_COLLECTOR_DELETE] = CACHE_RETIRE,
+    };
+    return kind < AZCE_KIND_COUNT ? policies[kind] : CACHE_FORWARD;
+}
+static void cache_observer_dispatch(struct azce_call *call, void (*observer)(struct azce_call *, struct azcb_forward)) {
+    if (observer) observer(call, (struct azcb_forward) {cache_original, call});
+    else azsdk_cache_invoke_original(call);
+}
+static void cache_factory_dispatch(struct azce_call *call) {
+    cache_factory(call, call->kind == AZCE_KIND_PRIMARY_FACTORY ? AZCB_PRIMARY_FACTORY : AZCB_STANDARD_FALLBACK_FACTORY);
+}
+static void cache_write_dispatch(struct azce_call *call) {
+    cache_write(call, call->kind == AZCE_KIND_SETUP ? AZCB_SETUP_WRITE : AZCB_LAYOUT_WRITE);
+}
+static void cache_dispatch_action(struct azce_call *call, enum CacheDispatchPolicy policy) {
+    struct azcb_forward original = {cache_original, call};
+    switch (policy) {
+    case CACHE_TICKET: cache_observer_dispatch(call, azcr_forward_ticket_owned); return;
+    case CACHE_RECEPTION: cache_observer_dispatch(call, azcr_forward_reception_owned); return;
+    case CACHE_OBSERVE: cache_observer_dispatch(call, azcb_observe_entry_owned); return;
+    case CACHE_FACTORY: cache_factory_dispatch(call); return;
+    case CACHE_WRITE: cache_write_dispatch(call); return;
+    case CACHE_SELECT: azcb_selection_forward(original); return;
+    case CACHE_RETIRE:
+        /* Conservative retirement needs no receiver borrow. Its scope must
+         * include native mutation and exception unwinding. */
+        azcb_retire_forward(original);
         return;
-    case AZCE_KIND_REPLY_RECEPTION:
-        if (azcr_forward_reception_owned)
-            azcr_forward_reception_owned(call, (struct azcb_forward) {cache_original, call});
-        else azsdk_cache_invoke_original(call);
-        return;
-    case AZCE_KIND_SELECTION:
-    case AZCE_KIND_CREATE:
-    case AZCE_KIND_QUERY:
-    case AZCE_KIND_GENERIC:
-    case AZCE_KIND_TRACKINFO:
-        if (azcb_observe_entry_owned) {
-            azcb_observe_entry_owned(call, (struct azcb_forward) {cache_original, call});
-            return;
-        }
-        azsdk_cache_invoke_original(call);
-        return;
-    case AZCE_KIND_PRIMARY_FACTORY:
-        cache_factory(call, AZCB_PRIMARY_FACTORY);
-        return;
-    case AZCE_KIND_STANDARD_FACTORY:
-        cache_factory(call, AZCB_STANDARD_FALLBACK_FACTORY);
-        return;
-    case AZCE_KIND_SETUP:
-        cache_write(call, AZCB_SETUP_WRITE);
-        return;
-    case AZCE_KIND_LAYOUT:
-        cache_write(call, AZCB_LAYOUT_WRITE);
-        return;
-    case AZCE_KIND_SELECTION_STORE:
-    case AZCE_KIND_SELECTION_CLEAR:
-        azcb_selection_forward((struct azcb_forward) {cache_original, call});
-        return;
-    case AZCE_KIND_CLEAR:
-    case AZCE_KIND_CACHE_DESTROY:
-    case AZCE_KIND_POOL_GROW:
-    case AZCE_KIND_COLLECTOR_DISPOSE:
-    case AZCE_KIND_SERVER_RESET:
-    case AZCE_KIND_SERVER_DESTROY:
-    case AZCE_KIND_LOADINFO_DESTROY:
-    case AZCE_KIND_COLLECTOR_DESTROY:
-    case AZCE_KIND_COLLECTOR_DELETE:
-        // Global conservative retirement needs no native receiver borrow.
-        // Forward inside its scope so mutation and exception paths invalidate
-        // earlier witnesses before the original can alter native storage.
-        azcb_retire_forward((struct azcb_forward) {cache_original, call});
-        return;
-    default:
-        // Factory/query/selection observation still requires qualified owned
-        // context; register preservation alone cannot supply it.
-        azsdk_cache_invoke_original(call);
+    default: azsdk_cache_invoke_original(call);
     }
+}
+void azsdk_cache_dispatch_call(struct azce_call *call) {
+    if (call) cache_dispatch_action(call, cache_dispatch_policy(call->kind));
 }
 
 struct NativeMessage {

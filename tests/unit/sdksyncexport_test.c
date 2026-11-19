@@ -10,7 +10,7 @@ static struct azsdk_sync_sample receipt = {31, 70, 700, 2, 1};
 int azsdk_tempo_lock_read(int deck, struct azsdk_tempo_lock_sample *out) {
     assert(deck >= 0 && deck < 4);
     if (!ready) return 0;
-    *out = (struct azsdk_tempo_lock_sample){100u + deck, 200u + deck, 300u + deck, deck & 1, 1};
+    *out = (struct azsdk_tempo_lock_sample) {100u + deck, 200u + deck, 300u + deck, deck & 1, 1};
     return 1;
 }
 int azsdk_sync_read(int deck, struct azsdk_sync_sample *out) {
@@ -29,7 +29,10 @@ int main(void) {
     assert(azstem_sync_observation_v1(0, (struct azstem_sync_observation_v1 *) tiny) == -1 && *tiny == sizeof *tiny);
     free(tiny);
     for (int deck = 0; deck < 4; ++deck) {
-        struct { struct azstem_tempo_lock_observation_v1 value; uint64_t tail; } tempo = {{sizeof tempo, 1, 0, 0, 0, -1, 0}, UINT64_MAX};
+        struct {
+            struct azstem_tempo_lock_observation_v1 value;
+            uint64_t tail;
+        } tempo = {{sizeof tempo, 1, 0, 0, 0, -1, 0}, UINT64_MAX};
         assert(azstem_tempo_lock_observation_v1(deck, &tempo.value) == 0);
         assert(tempo.value.unit_generation == 100u + deck && tempo.value.raw_locked == (deck & 1));
         assert(tempo.value.revision == 200u + deck && tempo.value.observed_ns == 300u + deck && tempo.tail == UINT64_MAX);

@@ -7,14 +7,9 @@
 #endif
 static void ds_write_proof(FILE *file, const struct ds_proof_record *r) {
     const struct ds_proof_context *p = &r->context;
-    fprintf(file, "proof=%" PRIu64 " kind=%u deck=%u epoch=%" PRIu64 " sequence=%" PRIu64
-            " interval=%" PRIu64 " file_only=%u cause=0x%x flags=0x%x committed=%u"
-            " input_lost=0x%" PRIx64 " input_reason=0x%x lost=0x%" PRIx64 " reason=0x%x routes=0x%" PRIx64
-            " source_id=%" PRIu64 " source_generation=%" PRIu64 " library_id=%" PRIu64 " track_id=%u"
-            " binding_cut=%" PRIu64 " binding_serial=%" PRIu64 " connection=%" PRIu64 " db_before=%" PRIu64 " db_after=%" PRIu64
-            " device=%" PRIu64 " inode=%" PRIu64 " mount_id=%" PRIu64
-            " pending=0x%" PRIx64 " settled=0x%" PRIx64 " ready=0x%" PRIx64 " unavailable=0x%" PRIx64
-            " handle=%" PRIu64 " topics=0x%" PRIx64 " cursor_before=%" PRIu64,
+    fprintf(file, "proof=%" PRIu64 " kind=%u deck=%u epoch=%" PRIu64 " sequence=%" PRIu64 " interval=%" PRIu64 " file_only=%u cause=0x%x flags=0x%x committed=%u"
+                  " input_lost=0x%" PRIx64 " input_reason=0x%x lost=0x%" PRIx64 " reason=0x%x routes=0x%" PRIx64 " source_id=%" PRIu64 " source_generation=%" PRIu64 " library_id=%" PRIu64 " track_id=%u"
+                  " binding_cut=%" PRIu64 " binding_serial=%" PRIu64 " connection=%" PRIu64 " db_before=%" PRIu64 " db_after=%" PRIu64 " device=%" PRIu64 " inode=%" PRIu64 " mount_id=%" PRIu64 " pending=0x%" PRIx64 " settled=0x%" PRIx64 " ready=0x%" PRIx64 " unavailable=0x%" PRIx64 " handle=%" PRIu64 " topics=0x%" PRIx64 " cursor_before=%" PRIu64,
             r->id, r->kind, r->deck, r->epoch, r->sequence, r->interval, r->file_only, p->cause, r->flags, r->committed,
             r->input_lost, r->input_reason, r->lost, r->reason, r->routes,
             r->source.source_id, r->source.source_generation, r->source.library_id, r->source.track_id,
@@ -38,68 +33,85 @@ static int ds_percentile(const uint64_t *hist, uint64_t count, unsigned pct) {
     }
     return -1;
 }
-static void ds_write_metrics(void) {
-    struct ds_metrics snapshot[4];
+struct ds_metrics_snapshot {
+    struct ds_metrics deck[4];
     size_t bytes, peak;
     uint64_t slow[DS_SUBS], longest[DS_SUBS], sequence[4];
     unsigned proof_enabled, proof_count, proof_overflow;
+};
+static void ds_capture_metrics(struct ds_metrics_snapshot *snapshot) {
     pthread_mutex_lock(&ds.mu);
-    memcpy(snapshot, ds.metrics, sizeof snapshot);
-    memcpy(slow, ds.slow_callbacks, sizeof slow);
-    memcpy(longest, ds.max_callback_ns, sizeof longest);
-    for (unsigned d = 0; d < 4; d++) sequence[d] = ds.deck[d].current.sequence;
-    bytes = ds.bytes;
-    peak = ds.peak;
-    proof_enabled = ds_proofs.enabled;
-    proof_count = ds_proofs.count;
-    proof_overflow = ds_proofs.overflow;
+    memcpy(snapshot->deck, ds.metrics, sizeof snapshot->deck);
+    memcpy(snapshot->slow, ds.slow_callbacks, sizeof snapshot->slow);
+    memcpy(snapshot->longest, ds.max_callback_ns, sizeof snapshot->longest);
+    for (unsigned d = 0; d < 4; d++) snapshot->sequence[d] = ds.deck[d].current.sequence;
+    snapshot->bytes = ds.bytes;
+    snapshot->peak = ds.peak;
+    snapshot->proof_enabled = ds_proofs.enabled;
+    snapshot->proof_count = ds_proofs.count;
+    snapshot->proof_overflow = ds_proofs.overflow;
     pthread_mutex_unlock(&ds.mu);
-    char tmp[] = DS_METRICS_PATH ".XXXXXX";
-    int fd = mkstemp(tmp);
-    if (fd < 0) return;
-    FILE *file = fdopen(fd, "w");
+}
+static FILE *ds_metrics_file(char *temporary) {
+    int descriptor = mkstemp(temporary);
+    if (descriptor < 0) return NULL;
+    FILE *file = fdopen(descriptor, "w");
     if (!file) {
-        close(fd);
-        unlink(tmp);
-        return;
+        close(descriptor);
+        unlink(temporary);
     }
+    return file;
+}
+static void ds_write_metrics_header(FILE *file, const struct ds_metrics_snapshot *snapshot) {
     size_t fixed = sizeof ds + sizeof ds_pending + sizeof ds_proofs;
 #ifdef DS_NATIVE_PENDING_BYTES
     fixed += DS_NATIVE_PENDING_BYTES;
 #endif
     fprintf(file, "monotonic_ns=%" PRIu64 " revision_bytes=%zu revision_high_bytes=%zu revision_budget_bytes=%u fixed_reducer_bytes=%zu\n",
-            ds_now(), bytes, peak, DS_BYTES, fixed);
+            ds_now(), snapshot->bytes, snapshot->peak, DS_BYTES, fixed);
     fprintf(file, "provenance_version=1 provenance_enabled=%u provenance_count=%u provenance_capacity=%u provenance_overflow=%u provenance_bytes=%zu provenance_touched_bytes=%zu\n",
-            proof_enabled, proof_count, DS_PROOF_CAPACITY, proof_overflow, sizeof ds_proofs,
-            offsetof(__typeof__(ds_proofs), record) + proof_count * sizeof ds_proofs.record[0]);
+            snapshot->proof_enabled, snapshot->proof_count, DS_PROOF_CAPACITY, snapshot->proof_overflow, sizeof ds_proofs,
+            offsetof(__typeof__(ds_proofs), record) + snapshot->proof_count * sizeof ds_proofs.record[0]);
     for (unsigned d = 0; d < 4; d++)
         fprintf(file, "provenance_base_deck=%u capture_gap_cuts=%" PRIu64 " revision_loss_cuts=%" PRIu64 " resyncs=%" PRIu64 " sequence=%" PRIu64 "\n",
                 d, ds_proofs.capture_base[d], ds_proofs.revision_base[d], ds_proofs.resync_base[d], ds_proofs.sequence_base[d]);
     /* Published slots are immutable. The acquired count bounds this snapshot;
      * later appends touch distinct slots and require no long I/O mutex hold. */
-    for (unsigned i = 0; i < proof_count; i++) ds_write_proof(file, &ds_proofs.record[i]);
-    for (unsigned d = 0; d < 4; d++) {
-        const struct ds_metrics *m = &snapshot[d];
-        fprintf(file, "deck=%u sequence=%" PRIu64 " discrete_high=%" PRIu64 " evictions=%" PRIu64 " capture_gap_cuts=%" PRIu64 " revision_loss_cuts=%" PRIu64 " callbacks=%" PRIu64 " resyncs=%" PRIu64 " last_lost_topics=0x%" PRIx64 "\n",
-                d, sequence[d], m->high_water, m->evictions, m->capture_gaps, m->revision_losses, m->callbacks,
-                m->resyncs, m->last_lost_topics);
-        for (unsigned kind = 0; kind < 2; kind++) {
-            const uint64_t *hist = m->latency[kind], *dispatch = m->dispatch[kind];
-            uint64_t count = 0, dispatched = 0;
-            for (unsigned i = 0; i < DS_LATENCY_BUCKETS; i++) {
-                count += hist[i];
-                dispatched += dispatch[i];
-            }
-            fprintf(file, "deck=%u class=%s count=%" PRIu64 " p95_upper_ms=%d p99_upper_ms=%d over_250ms=%" PRIu64 " dispatch_p95_upper_ms=%d dispatch_p99_upper_ms=%d\n",
-                    d, kind ? "motion" : "discrete", count, ds_percentile(hist, count, 95), ds_percentile(hist, count, 99),
-                    hist[DS_LATENCY_BUCKETS - 1], ds_percentile(dispatch, dispatched, 95), ds_percentile(dispatch, dispatched, 99));
+    for (unsigned i = 0; i < snapshot->proof_count; i++) ds_write_proof(file, &ds_proofs.record[i]);
+}
+static void ds_write_latency(FILE *file, unsigned d, const struct ds_metrics *m) {
+    for (unsigned kind = 0; kind < 2; kind++) {
+        const uint64_t *hist = m->latency[kind], *dispatch = m->dispatch[kind];
+        uint64_t count = 0, dispatched = 0;
+        for (unsigned i = 0; i < DS_LATENCY_BUCKETS; i++) {
+            count += hist[i];
+            dispatched += dispatch[i];
         }
+        fprintf(file, "deck=%u class=%s count=%" PRIu64 " p95_upper_ms=%d p99_upper_ms=%d over_250ms=%" PRIu64 " dispatch_p95_upper_ms=%d dispatch_p99_upper_ms=%d\n",
+                d, kind ? "motion" : "discrete", count, ds_percentile(hist, count, 95), ds_percentile(hist, count, 99),
+                hist[DS_LATENCY_BUCKETS - 1], ds_percentile(dispatch, dispatched, 95), ds_percentile(dispatch, dispatched, 99));
     }
+}
+static void ds_write_metrics_deck(FILE *file, unsigned d, const struct ds_metrics *m, uint64_t sequence) {
+    fprintf(file, "deck=%u sequence=%" PRIu64 " discrete_high=%" PRIu64 " evictions=%" PRIu64 " capture_gap_cuts=%" PRIu64 " revision_loss_cuts=%" PRIu64 " callbacks=%" PRIu64 " resyncs=%" PRIu64 " last_lost_topics=0x%" PRIx64 "\n",
+            d, sequence, m->high_water, m->evictions, m->capture_gaps, m->revision_losses, m->callbacks,
+            m->resyncs, m->last_lost_topics);
+    ds_write_latency(file, d, m);
+}
+static void ds_write_metrics(void) {
+    struct ds_metrics_snapshot snapshot;
+    ds_capture_metrics(&snapshot);
+    char temporary[] = DS_METRICS_PATH ".XXXXXX";
+    FILE *file = ds_metrics_file(temporary);
+    if (!file) return;
+    ds_write_metrics_header(file, &snapshot);
+    for (unsigned d = 0; d < 4; d++) ds_write_metrics_deck(file, d, &snapshot.deck[d], snapshot.sequence[d]);
     for (unsigned i = 0; i < DS_SUBS; i++)
-        if (longest[i])
-            fprintf(file, "owner=%u callbacks_over_33ms=%" PRIu64 " longest_callback_ns=%" PRIu64 "\n", i, slow[i], longest[i]);
+        if (snapshot.longest[i])
+            fprintf(file, "owner=%u callbacks_over_33ms=%" PRIu64 " longest_callback_ns=%" PRIu64 "\n",
+                    i, snapshot.slow[i], snapshot.longest[i]);
     int ok = !ferror(file);
-    if (fclose(file) || !ok || rename(tmp, DS_METRICS_PATH)) unlink(tmp);
+    if (fclose(file) || !ok || rename(temporary, DS_METRICS_PATH)) unlink(temporary);
 }
 static void *ds_metrics_worker(void *unused) {
     (void) unused;

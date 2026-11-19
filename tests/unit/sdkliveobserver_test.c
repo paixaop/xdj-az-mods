@@ -4,6 +4,53 @@
 #include "aztimestamp.h"
 #include "live_native_fixture.h"
 #include <pthread.h>
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+#include "azstatus_native.h"
+/* The producer boundary consumes copied receipts; ownership and scalar reads
+ * below still run through the actual GNU listener and production observer. */
+static _Atomic unsigned native_play_receipts, native_retirements;
+void azn_emit(struct azstatus_native_receipt *receipt) {
+    CHECK(receipt->kind == AZN_PLAY && receipt->deck < 4 && receipt->unit);
+    atomic_fetch_add(&native_play_receipts, 1);
+}
+void azn_raw_state(unsigned deck, uint64_t generation, int retired) {
+    CHECK(deck < 4 && generation && (retired == 0 || retired == 1));
+    if (retired) atomic_fetch_add(&native_retirements, 1);
+}
+static void native_sync_seed(void) {
+    for (int build = 1; build <= 2; ++build) {
+        Fixture f __attribute__((cleanup(fixture_finish)));
+        fixture_init(&f);
+        azsdk_live_configure(1, build);
+        azsdk_live_status_start(build, 1);
+        uintptr_t unit = (uintptr_t) &f.unit;
+        int raw = -7;
+        CHECK(!azn_sync_seed(4, unit, &raw));
+        CHECK(!azn_sync_seed(0, 0, &raw));
+        CHECK(!azn_sync_seed(0, unit, NULL));
+        CHECK(!azn_sync_seed(0, unit, &raw) && raw == -7);
+        CHECK(azsdk_live_register(0, &f.unit));
+        CHECK(!azn_sync_seed(0, unit, &raw) && raw == -7);
+        emit_fixture_scalar(&f, 3, 2, 0);
+        CHECK(azn_sync_seed(0, unit, &raw) && raw == 2);
+        CHECK(!azn_sync_seed(0, unit + 8, &raw) && raw == 2);
+        emit_fixture_scalar(&f, 3, 1, 0);
+        CHECK(!azn_sync_seed(0, unit, &raw) && raw == 2);
+        emit_fixture_scalar(&f, 3, 0, 0);
+        CHECK(azn_sync_seed(0, unit, &raw) && raw == 0);
+        unsigned before = atomic_load(&native_retirements);
+        azsdk_live_retire(0);
+        CHECK(atomic_load(&native_retirements) == before + 1);
+        CHECK(!azn_sync_seed(0, unit, &raw) && raw == 0);
+        CHECK(azsdk_live_register(0, &f.unit));
+        CHECK(!azn_sync_seed(0, unit, &raw) && raw == 0);
+        emit_fixture_scalar(&f, 3, 2, 0);
+        CHECK(azn_sync_seed(0, unit, &raw) && raw == 2);
+        azsdk_live_retire(0);
+    }
+    CHECK(atomic_load(&native_play_receipts) >= 4);
+}
+#endif
 static void unchanged(int d) {
     struct azsdk_live_sample out, before;
     memset(&out, 0xa5, sizeof out);
@@ -503,6 +550,9 @@ int main(int argc, char **argv) {
     every_deck();
     sync_components_and_lifetime();
     concurrent();
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    native_sync_seed();
+#endif
     azsdk_live_configure(0, 2);
     puts("PASS live: GNU observer ABI, bounded payloads, per-stream validity, lifecycle, rollback, concurrency");
 }

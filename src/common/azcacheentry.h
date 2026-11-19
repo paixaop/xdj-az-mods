@@ -47,7 +47,9 @@
 #ifndef __ASSEMBLER__
 #include <stddef.h>
 #include <stdint.h>
-struct azce_vector { uint64_t words[2]; } __attribute__((aligned(16)));
+struct azce_vector {
+    uint64_t words[2];
+} __attribute__((aligned(16)));
 struct azce_call {
     uint64_t args[9];
     uint64_t result[2];

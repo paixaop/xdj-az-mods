@@ -22,7 +22,7 @@ if [[ -n ${WAVE_REPORT_EXTRA_FLAGS:-} ]]; then
 fi
 python3 - "$task_tmp" <<'PY'
 from pathlib import Path
-import re,sys
+import json,re,sys
 root=Path(sys.argv[1]); text=Path('src/azmod/waveform.c').read_text()
 prefix='static void wave_prov_report(void) {'
 assert text.count(prefix)==1
@@ -30,7 +30,7 @@ start=text.index(prefix); end=text.index('\n}',start)+2
 body=text[start:end]
 status=re.search(r'enum ov_lease_binding_status \{[^}]*\};',text,re.S)
 assert status,'lease binding status enum missing'
-(root/'real.inc').write_text(status.group(0)+'\n'+body+'\n')
+(root/'real.inc').write_text(status.group(0)+'\n#line {} {}\n'.format(text[:start].count('\n')+1,json.dumps(str(Path('src/azmod/waveform.c').resolve())))+body+'\n')
 needle='    fprintf(f, "overview:'
 assert body.count(needle)==1
 probe=r'''    for (int i=0;i<__atomic_load_n(&g_ovi_n,__ATOMIC_RELAXED);++i) {

@@ -54,7 +54,9 @@ static inline int sd_play_step(struct sd_play *p, int loaded, long long pos, lon
     }
     p->last_pos = pos;
     return p->moved && compare_timestamps(now_ms, p->last_move_ms + SD_PLAY_HOLD_MS,
-                                          1000, 1000, 1) <= AZ_TIME_EQUAL ? 1 : 0;
+                                          1000, 1000, 1) <= AZ_TIME_EQUAL
+               ? 1
+               : 0;
 }
 
 /* ---- deck events ------------------------------------------------------------------

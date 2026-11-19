@@ -72,20 +72,11 @@ static bool bytes(const struct az_sql_profile *p, uintptr_t rva, const void *exp
            memcmp(((const void *) (p->base_ + rva)), expected, n) == 0;
 }
 #endif
-static const struct az_sql_profile *profile_load() {
 #if defined(__linux__)
-    if (!native_platform()) return NULL;
-    void *handle = dlopen("libsqlcipher.so.0", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
-    if (!handle) return NULL;
-    struct az_sql_profile *p = calloc(1, sizeof *p);
-    if (!p) {
-        dlclose(handle);
-        return NULL;
-    }
+static bool profile_resolve_symbols(struct az_sql_profile *p, void *handle, void **symbols) {
     const char *names[] = {"sqlite3_file_control", "sqlite3_libversion_number", "sqlite3_libversion",
                            "sqlite3_open", "sqlite3_open_v2", "sqlite3_open16", "sqlite3_close", "sqlite3_close_v2"};
     const uintptr_t rvas[] = {0x244b0, 0x1330c, 0x13300, 0x64d50, 0x82488, 0x8248c, 0x5141c, 0x51424};
-    void *symbols[8] = {0};
     bool valid = true;
     for (unsigned i = 0; i < 8; ++i) {
         symbols[i] = dlsym(handle, names[i]);
@@ -97,17 +88,21 @@ static const struct az_sql_profile *profile_load() {
         dl_iterate_phdr(ranges, p);
     } else valid = false;
     for (unsigned i = 0; valid && i < 8; ++i) valid = function(p, symbols[i], rvas[i]);
+    return valid;
+}
+static bool profile_entry_bytes(const struct az_sql_profile *p) {
     const uint32_t open_prefix[] = {0xd102c3ff, 0xa9027bfd, 0x910083fd, 0xa90353f3};
     const uint32_t close_prefix[] = {0xa9bd7bfd, 0x910003fd, 0xa90153f3, 0xaa0003f3};
     const uint32_t null_test = 0xb4000ac0;
     const uint32_t null_return[] = {0x52800000, 0xd65f03c0};
-    valid = valid && bytes(p, 0x647b0, open_prefix, sizeof open_prefix) &&
-            bytes(p, 0x512c0, close_prefix, sizeof close_prefix) &&
-            bytes(p, 0x512bc, &null_test, sizeof null_test) &&
-            bytes(p, 0x51414, null_return, sizeof null_return) &&
-            0xf980 <= UINTPTR_MAX - p->base_ && az_sql_profile_contains(p, p->base_ + 0xf980, 481192, 5);
-        /* Public unkeyed OpenSSL dependency API, exactly as the existing physical
-         * profile. This hashes mapped code once at startup, never a DB or key. */
+    return bytes(p, 0x647b0, open_prefix, sizeof open_prefix) &&
+           bytes(p, 0x512c0, close_prefix, sizeof close_prefix) &&
+           bytes(p, 0x512bc, &null_test, sizeof null_test) &&
+           bytes(p, 0x51414, null_return, sizeof null_return) &&
+           0xf980 <= UINTPTR_MAX - p->base_ && az_sql_profile_contains(p, p->base_ + 0xf980, 481192, 5);
+}
+static bool profile_code_digest(const struct az_sql_profile *p, void *handle) {
+    /* Hash mapped code once using the public unkeyed OpenSSL API; never a DB or key. */
     __auto_type sha = ((const void *(*) ())(dlsym(handle, "EVP_sha256")));
     __auto_type digest = ((int (*)(const void *, size_t, unsigned char *, unsigned *, const void *, void *))(dlsym(handle, "EVP_Digest")));
     static const unsigned char expected[32] = {
@@ -115,15 +110,30 @@ static const struct az_sql_profile *profile_load() {
         0xa3, 0xdd, 0x5a, 0x22, 0x3e, 0x8e, 0x01, 0x27, 0x35, 0x74, 0x01, 0x7f, 0x7a, 0xfc, 0x39, 0x44};
     unsigned char hash[32] = {0};
     unsigned length = 0;
-    valid = valid && sha && digest &&
-            digest(((const void *) (p->base_ + 0xf980)), 481192, hash, &length, sha(), NULL) &&
-            length == sizeof hash && memcmp(hash, expected, sizeof hash) == 0;
-        /* Only checked, hashed public getter code is called. No connection API. */
-    if (valid) valid = ((int (*)())(symbols[1]))() == 3033000;
-    if (valid) {
-        const char *version = ((const char *(*) ())(symbols[2]))();
-        valid = az_sql_profile_contains(p, ((uintptr_t) (version)), 7, 4) && memcmp(version, "3.33.0", 7) == 0;
+    return sha && digest &&
+           digest(((const void *) (p->base_ + 0xf980)), 481192, hash, &length, sha(), NULL) &&
+           length == sizeof hash && memcmp(hash, expected, sizeof hash) == 0;
+}
+static bool profile_version_matches(const struct az_sql_profile *p, void **symbols) {
+    /* Invoke public getters only after the code has been checked and hashed. */
+    if (((int (*)()) symbols[1])() != 3033000) return false;
+    const char *version = ((const char *(*) ()) symbols[2])();
+    return az_sql_profile_contains(p, (uintptr_t) version, 7, 4) && memcmp(version, "3.33.0", 7) == 0;
+}
+#endif
+static const struct az_sql_profile *profile_load() {
+#if defined(__linux__)
+    if (!native_platform()) return NULL;
+    void *handle = dlopen("libsqlcipher.so.0", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+    if (!handle) return NULL;
+    struct az_sql_profile *p = calloc(1, sizeof *p);
+    if (!p) {
+        dlclose(handle);
+        return NULL;
     }
+    void *symbols[8] = {0};
+    bool valid = profile_resolve_symbols(p, handle, symbols) && profile_entry_bytes(p) &&
+                 profile_code_digest(p, handle) && profile_version_matches(p, symbols);
     if (!valid) {
         free(p);
         dlclose(handle);

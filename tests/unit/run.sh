@@ -396,6 +396,7 @@ fi
 COVERAGE=${COVERAGE:-}
 [ "$COVERAGE" != 0 ] || COVERAGE=
 if [ -n "$COVERAGE" ]; then
+    python3 "$T/test_coverage_functions.py"
     [ -z "$SAN" ] || { echo "COVERAGE=1 is its own pass: unset SAN"; exit 2; }
     "$CC" --version 2>/dev/null | grep -q clang || { echo "COVERAGE=1 needs clang (HOST_CC=$CC is not)"; exit 2; }
     covtool() { # covtool <name> : the LLVM tool's path, or nothing
@@ -905,6 +906,8 @@ FD_DIR=$d
 { extract guest/azmod/bus_interpose.c '^static int gpiodrv_slot\('
   extract guest/azmod/bus_interpose.c '^static void bus_fd_drop\('
   extract guest/azmod/bus_interpose.c '^static void bus_fd_forget\('
+  extract guest/azmod/bus_interpose.c '^static void bus_note_panel\('
+  extract guest/azmod/bus_interpose.c '^static void bus_note_device\('
   extract guest/azmod/bus_interpose.c '^static void bus_fd_note\('
 } | perl -pe 's{"/dev/}{FDT_DEV "/}g' > "$d/track-real.inc"
 extract guest/azmod/bus_interpose.c '^int open\(const char \*path' | perl -pe 's{"/dev/}{FDT_DEV "/}g' > "$d/open-real.inc"
@@ -1313,9 +1316,14 @@ suite "drum feed" "$d/real"
 d="$OUT/bpmstate"; mkdir -p "$d"
 { grep -E '^#define (BPMSTATE_(DECK|TRACK|PIN_MAX)|BPMCTRL_(OFF|USE|WEAK)) ' guest/azmod/stems_display.c
   grep -E '^static (unsigned long|int|pthread_mutex_t) g_bpmstate' guest/azmod/stems_display.c
+  extract guest/azmod/stems_display.c '^static int bpmstate_weak_hold\('
+  extract guest/azmod/stems_display.c '^static int bpmstate_capture_locked\('
   extract guest/azmod/stems_display.c '^static int bpmstate_capture\('
   extract guest/azmod/stems_display.c '^static int bpmstate_hold\('
   extract guest/azmod/stems_display.c '^static void bpmstate_release\('
+  extract guest/azmod/stems_display.c '^static void bpmstate_clear_sample\('
+  extract guest/azmod/stems_display.c '^static unsigned long bpmstate_acquire\('
+  extract guest/azmod/stems_display.c '^static int bpmstate_identity\('
   extract guest/azmod/stems_display.c '^static int bpmstate_sample\('
   extract guest/azmod/stems_display.c '^static int bpmstate_read\('; } > "$d/real.inc"
 grep -q 'bpmstate_hold(obj - BPMCTRL_OFF)' "$d/real.inc" && grep -q 'g_bpmstate_id\[d\]' "$d/real.inc" ||
@@ -1381,6 +1389,7 @@ d="$OUT/sdkobservation"; mkdir -p "$d"
 { region "$DT" '^#define LTI_STR ' '^static unsigned lti_wlock'
   extract "$DT" '^static void lti_snap_get\('
   extract "$DT" '^static int lti_id_zero.* \{'
+  extract guest/azstem/sdk_export.c '^static int azstem_observation_request\('
   extract guest/azstem/sdk_export.c '^int azstem_deck_observation_v1\('; } > "$d/real.inc"
 $CC "${CFLAGS[@]}" -Iguest/azmod -DOBS_INC="\"$d/real.inc\"" -o "$d/real" $T/sdkobservation_test.c
 suite "sdk native observation size and lifetime" "$d/real"
@@ -1412,13 +1421,11 @@ done
 # Public snapshot sizes preserve the earlier development prefix; loop receipt is separate
 # from LTI capture and cannot provide a track-load generation.
 d="$OUT/sdkdeckdata"; mkdir -p "$d"
-{ extract guest/azmod/sdk_deck.c '^static int sd_native_load_read\('
-  extract guest/azmod/sdk_deck.c '^static int sd_native_cue_read\('
-  extract guest/azmod/sdk_deck.c '^static uint32_t sd_live_fields\('
-  extract guest/azmod/sdk_deck.c '^static int sd_deck_snapshot_v1\('; } > "$d/real.inc"
+python3 "$T/sdk_deck_extract.py" guest/azmod/sdk_deck.c "$d/real.inc"
 $CC "${CFLAGS[@]}" -Iguest/azmod -DDECK_DATA_INC="\"$d/real.inc\"" -o "$d/real" $T/sdkdeckdata_test.c
 suite "sdk deck data independent streams and sizes" "$d/real"
-mutate "$d/real.inc" "$d/control.inc" 's/memcpy\(out, &v, bytes\);/memcpy(out, \&v, bytes + (sizeof v - bytes));/'
+sed '/^#line /d' "$d/real.inc" > "$d/control-source.inc"
+mutate "$d/control-source.inc" "$d/control.inc" 's/memcpy\(out, &v, bytes\);/memcpy(out, \&v, bytes + (sizeof v - bytes));/'
 $CC "${CFLAGS[@]}" -Iguest/azmod -DDECK_DATA_INC="\"$d/control.inc\"" -o "$d/control" $T/sdkdeckdata_test.c
 control "sdk deck data: older output buffer overwritten" "$d/control"
 # Native weak-listener ABI guards require Linux ELF mappings.
@@ -2054,12 +2061,15 @@ extract_coretick() { # $1 = community.c variant
     extract guest/azmod/sdk_ui.c '^int azcm_confirm\('
     extract guest/azmod/sdk_ui.c '^static void sdk_confirm_tick\('
     extract guest/azmod/sdk_ui.c '^static void sdk_ui_tick\('
+    for helper in cm_flush_dirty_settings cm_tick_maintenance cm_tick_logs cm_tick_callbacks; do
+        extract "$1" "^static void ${helper}\("
+    done
     extract "$1" '^static void community_tick\(void\) \{'
 }
 cp guest/azmod/community.c "$d/real.c"
 # control: the dialog serviced only after the early returns (a deck with no running mod then
 # never shows the core's questions)
-mutate "$d/real.c" "$d/ctl-late.c" 's/    sdk_confirm_tick\(\); \/\* the dialog: [^\n]*\n//; s/(    sdk_ui_tick\(\);  )/    sdk_confirm_tick();\n$1/'
+mutate "$d/real.c" "$d/ctl-late.c" 's/    sdk_confirm_tick\(\); \/\* the dialog: [^\n]*\n//; s/(    cm_tick_callbacks\(now\);)/    sdk_confirm_tick();\n$1/'
 for v in real ctl-late; do
     extract_coretick "$d/$v.c" > "$d/$v.inc"
     grep -q 'g_sd_dlg;' "$d/$v.inc" && grep -q 'static void community_tick' "$d/$v.inc" && grep -q 'int azcm_confirm' "$d/$v.inc" ||
@@ -2615,7 +2625,7 @@ mutate guest/azmod/screen_community.c "$d/src-ctl-anyname/screen_community.c" 's
 # control 8: the trust note drawn on every tab, not the Installed tab alone
 mutate guest/azmod/screen_community.c "$d/src-ctl-noteall/screen_community.c" 's/if \(g_cm_view == CMV_HOME && g_cm_tab == 0 && draw\)/if (g_cm_view == CMV_HOME \&\& draw)/'
 # control 9: the breadcrumb never names the tab a page was opened from
-mutate guest/azmod/screen_community.c "$d/src-ctl-notab/screen_community.c" 's/for \(int with_tab = 1; with_tab >= 0; with_tab--\)/for (int with_tab = 0; with_tab >= 0; with_tab--)/'
+mutate guest/azmod/screen_community.c "$d/src-ctl-notab/screen_community.c" 's/cm_crumb_format\(t, n, CM_TABNAME\[tab\], page, sub\);/cm_crumb_format(t, n, 0, page, sub);/'
 # control 7: field 20 (updated) never read: the Updated order has no dates
 mutate guest/azmod/screen_community.c "$d/src-ctl-noupd/screen_community.c" 's/cm_cpy\(m->upd, sizeof m->upd, n >= 20 && cmb_date_ok\(fl\[19\]\) \? fl\[19\] : ""\);/cm_cpy(m->upd, sizeof m->upd, "");/'
 # control 10: field 21 (downloads) never read: no counts, no Most downloaded
@@ -2625,11 +2635,11 @@ mutate guest/azmod/screen_community.c "$d/src-ctl-dlzero/screen_community.c" 's/
 # control 12: Browse opens on All mods, not Home
 mutate guest/azmod/screen_community.c "$d/src-ctl-nohome/screen_community.c" 's/static int g_cm_fcat = CMB_HOME,/static int g_cm_fcat = CMB_ALL,/'
 # control 13: See all keeps the order it had (Most downloaded opens All mods A-Z)
-mutate guest/azmod/screen_community.c "$d/src-ctl-seeall/screen_community.c" 's/g_cm_sort = cmb_shelf_sort\(c->idx\); //'
+mutate guest/azmod/screen_community.c "$d/src-ctl-seeall/screen_community.c" 's/g_cm_sort = cmb_shelf_sort\(c->idx\);/\/\* control: keep old order \*\//'
 # control 14: a shelf draws every mod it holds, past the grid's right edge
 mutate guest/azmod/screen_community.c "$d/src-ctl-rowall/screen_community.c" 's/nf = h->n < cols \? h->n : cols;/nf = h->n;/'
 # control 15: the knob on the home page does not scroll it
-mutate guest/azmod/screen_community.c "$d/src-ctl-homeknob/screen_community.c" 's/        \} else if \(d\) \{   \/\* a row per detent, gliding/        } else if (0) {   \/* a row per detent, gliding/'
+mutate guest/azmod/screen_community.c "$d/src-ctl-homeknob/screen_community.c" 's/else if \(in->d\) cm_input_home_scroll\(in\);/else if (0) cm_input_home_scroll(in);/'
 # control 17: the mod page's separator as a UTF-8 middle dot (two glyphs in the menu font)
 mutate guest/azmod/screen_community.c "$d/src-ctl-dotutf8/screen_community.c" 's/#define CM_DOT "  \\xb7  "/#define CM_DOT "  \\xc2\\xb7  "/'
 $CC -w -Iguest/azmod -Dmain=lanetest_main -Dazmod_ttf_menu=lanetest_ttf_menu -Dazmod_ttf_menu2=lanetest_ttf_menu2 \
@@ -2667,7 +2677,7 @@ mutate guest/azmod/screen_community.c "$d/src-ctl-reloadmid/screen_community.c" 
 # the checkbox opens the page: no control of its own, so a touch on it is the row's
 mutate guest/azmod/screen_community.c "$d/src-ctl-chkopens/screen_community.c"  's/        if \(box\) cm_chk_ctl\(lay, &n, CMC_CHK, i, y, h\);\n//'
 # the knob's press toggles: the knob's focus lands on a checkbox (the split's list, cm_split_knob)
-mutate guest/azmod/screen_community.c "$d/src-ctl-knobchk/screen_community.c"   's/        if \(ctl\[k\]\.x >= rx \|\| ctl\[k\]\.kind == CMC_CHK\) continue;/        if (ctl[k].x >= rx) continue;/'
+mutate guest/azmod/screen_community.c "$d/src-ctl-knobchk/screen_community.c"   's/if \(c->x >= controls->rx \|\| c->kind == CMC_CHK\) continue;/if (c->x >= controls->rx) continue;/'
 # a checkbox toggles while the last toggle is unanswered (the fetcher would drop it)
 mutate guest/azmod/screen_community.c "$d/src-ctl-noflight/screen_community.c" 's/if \(!cm_busy\(\) && !g_cm_flip\.at && cm_chk/if (!cm_busy() \&\& cm_chk/'
 # every opening refreshes (no 10-minute limit)
@@ -2675,7 +2685,7 @@ mutate guest/azmod/screen_community.c "$d/src-ctl-autoeach/screen_community.c" '
 # a failed refresh waits the full 10 minutes before the next opening tries again
 mutate guest/azmod/screen_community.c "$d/src-ctl-autonoretry/screen_community.c" 's/\(!retry && g_cm_auto_at/(g_cm_auto_at/'
 # the split's row opens the full page instead of selecting it
-mutate guest/azmod/screen_community.c "$d/src-ctl-splitopens/screen_community.c" 's/    case CMC_MOD:     if \(cm_isplit\(\) && !g_cm_row_opening\) \{ cm_split_select\(CMC_MOD << 16 \| c->idx\); break; \}[^\n]*\n/    case CMC_MOD:\n/'
+mutate guest/azmod/screen_community.c "$d/src-ctl-splitopens/screen_community.c" 's/    if \(cm_isplit\(\) && !g_cm_row_opening\) \{\n        cm_split_select\(CMC_MOD << 16 \| c->idx\);\n        return;\n    \}\n//'
 # the header's catalog count drawn before the band that covers it
 mutate guest/azmod/screen_community.c "$d/src-ctl-countunder/screen_community.c" 's/(        fill_rect\(fb, 0, top, fb->w, hh, C_HEADER_BG\);\n)(        if \(cnt\[0\]\) c_text\(fb, cntx, top, 0, hh, cnt, dpx, C_TEXT_DIM\);[^\n]*\n)/$2$1/'
 $CC -w -Iguest/azmod -Dmain=lanetest_main -Dazmod_ttf_menu=lanetest_ttf_menu -Dazmod_ttf_menu2=lanetest_ttf_menu2 \
@@ -2898,17 +2908,17 @@ suite "clock zone list" "$d/real"
 d="$OUT/cmtouch"; mkdir -p "$d"
 for v in real ctl-knobfocus ctl-noscroll ctl-nobar ctl-header ctl-noclamp ctl-slow ctl-staleglide ctl-lag ctl-drawleft ctl-railedge; do menu_variant "$d/src-$v" screen_community.c menu_full.c menu_composite.c; done
 # control 1: the home page is handled like the other pages again (knob focus, a press fires at once)
-mutate guest/azmod/screen_community.c "$d/src-ctl-knobfocus/screen_community.c" 's/    if \(g_cm_view == CMV_HOME\) \{\n        \/\* The home page works by touch/    if (0) {\n        \/* The home page works by touch/'
+mutate guest/azmod/screen_community.c "$d/src-ctl-knobfocus/screen_community.c" 's/else if \(g_cm_view == CMV_HOME\) cm_input_home\(&in\);/else if (0) cm_input_home(\&in);/'
 # control 2: a drag on the page moves nothing
 mutate guest/azmod/menu_full.c "$d/src-ctl-noscroll/menu_full.c" 's/        cmoved = cm_home_scroll_to\(fb, g_rdrag\.s0 - dy, phase\);/        cmoved = false;/'
 # control 3: no scroll bar
-mutate guest/azmod/screen_community.c "$d/src-ctl-nobar/screen_community.c" 's/        if \(draw\) draw_vsb\(fb, cm_isplit\(\) \? bx \+ bw \/ 2 - pad \/ 2 : bx \+ bw \+ pad, by, bh, content, bh, g_cm_scroll\);\n//'
+mutate guest/azmod/screen_community.c "$d/src-ctl-nobar/screen_community.c" 's/    if \(lay->draw\) draw_vsb\([^;]+;\n//'
 # control 4: a press on the header hits the page's control scrolled up under it
 mutate guest/azmod/screen_community.c "$d/src-ctl-header/screen_community.c" 's/    if \(ty < dock_y\(fb\) \+ menu_hdrh\(fb\) \|\| ty >= dock_y\(fb\) \+ dock_h\(fb\)\)\n        return -1;\n//'
 # control 5: the knob scrolls past the ends
-mutate guest/azmod/screen_community.c "$d/src-ctl-noclamp/screen_community.c" 's/\(float\) cm_scroll_clamp\(\(int\) \(from \+ 0\.5f\) \+ d \* c_rrowh\(fb\), g_cm_smax\)/(float) ((int) (from + 0.5f) + d * c_rrowh(fb))/; s/glide_step\(&g_cm_gl, cm_ms\(\), \(float\) g_cm_smax\);/glide_step(\&g_cm_gl, cm_ms(), 1e9f);/'
+mutate guest/azmod/screen_community.c "$d/src-ctl-noclamp/screen_community.c" 's/\(float\) cm_scroll_clamp\(\(int\) \(from \+ 0\.5f\) \+ in->d \* c_rrowh\(in->fb\), g_cm_smax\)/(float) ((int) (from + 0.5f) + in->d * c_rrowh(in->fb))/; s/glide_step\(&g_cm_gl, cm_ms\(\), \(float\) g_cm_smax\);/glide_step(\&g_cm_gl, cm_ms(), 1e9f);/'
 # control 6: every home control counts as navigation (a slow press on a view button switches it)
-mutate guest/azmod/screen_community.c "$d/src-ctl-slow/screen_community.c" 's/    return k == CMC_TAB \|\| k == CMC_TILE \|\| k == CMC_STILE \|\| k == CMC_SEEALL \|\| k == CMC_MOD \|\| k == CMC_INSTCAT \|\| k == CMC_BACK \|\|\n           k == CMC_SORTBTN \|\| k == CMC_SORT \|\| k == CMC_SORTOFF \|\| k == CMC_SETTINGS;/    return k >= 0;/'
+mutate guest/azmod/screen_community.c "$d/src-ctl-slow/screen_community.c" 's/if \(kinds\[i\] == kind\) return true;/if (kind >= 0) return true;/'
 # control 8: the glide forgets that it took over an offset set from outside, so it cancels every later drag
 mutate guest/azmod/screen_community.c "$d/src-ctl-staleglide/screen_community.c" 's/    g_cm_glpx = g_cm_scroll;\n}/}/'
 # control 11: the finger margin is tried before an exact hit again (the top of a rail tab picks the tab above)
@@ -3102,11 +3112,11 @@ if si_build "$PWD/guest/azmod/sdk_input.c" "$SI/real"; then suite "sdk input fil
 else echo "FAIL  sdk input filters: the suite did not build"; failures=$((failures + 1)); fi
 # controls: a passed touch is offered again mid-press; a slow filter is never switched off;
 # the raw stage hands out the frame itself instead of a copy
-mutate guest/azmod/sdk_input.c "$SI/ctl1.c" 's/                g_sdk_touch_decided = 1;\n//'
+mutate guest/azmod/sdk_input.c "$SI/ctl1.c" 's/^[ \t]*g_sdk_touch_decided = 1;\n//m'
 mutate guest/azmod/sdk_input.c "$SI/ctl2.c" 's/    __atomic_store_n\(off, 1, __ATOMIC_RELEASE\);\n//'
 mutate guest/azmod/sdk_input.c "$SI/ctl3.c" 's/ff->fn\(bus, copy, m, ff->user\);/ff->fn(bus, (unsigned char *) f, m, ff->user);/'
 # control 4: the owner of a touch is called whatever its state, and never timed (the old path)
-mutate guest/azmod/sdk_input.c "$SI/ctl4.c" 's/                if \(!__atomic_load_n\(&tf->off, __ATOMIC_ACQUIRE\) && !__atomic_load_n\(&tf->gone, __ATOMIC_ACQUIRE\) &&\n                    cm_enter\(tf->c\)\) \{\n                    g_cm_in_frame = 1;\n                    uint64_t t0 = sdk_ticks\(\);\n                    tf->fn\(&t, tf->user\);\n                    if \(compare_timestamps\(sdk_elapsed_ticks\(t0, sdk_ticks\(\)\), g_sdk_budget_ticks, 1, 1, 1\) == AZ_TIME_AFTER\)\n                        sdk_strike\(tf->c, &tf->strikes, &tf->off, "touch filter"\);\n                    g_cm_in_frame = 0;\n                    cm_leave\(tf->c\);\n                \}/                g_cm_in_frame = 1;\n                tf->fn(\&t, tf->user);\n                g_cm_in_frame = 0;/'
+mutate guest/azmod/sdk_input.c "$SI/ctl4.c" 's~static void sdk_touch_deliver\(const az_touch \*t\) \{.*?\n\}~static void sdk_touch_deliver(const az_touch *t) {\n    struct sdk_touch_filter *tf = \&g_sdk_tf[g_sdk_touch_owner];\n    g_cm_in_frame = 1;\n    tf->fn(t, tf->user);\n    g_cm_in_frame = 0;\n}~s'
 for k in 1 2 3 4; do si_build "$SI/ctl$k.c" "$SI/ctl$k" || failures=$((failures + 1)); done
 echo
 
@@ -3214,7 +3224,7 @@ else
     # Redirect order controls (hooktest section 5): the saved original stored after the redirect,
     # the 1.1.2 overlay_thread shape. Each must fail its order probe.
     mutate guest/azmod/inline_hooks.c "$HOOKCTL/inline_hooks-late-island.c" \
-        's/        __atomic_store_n\(orig, \(void \*\) tramp, __ATOMIC_RELAXED\);[^\n]*\n(        __atomic_store_n\(func, b, __ATOMIC_RELEASE\);[^\n]*\n)/$1        __atomic_store_n(orig, (void *) tramp, __ATOMIC_RELAXED);\n/'
+        's/    __atomic_store_n\(orig, \(void \*\) tramp, __ATOMIC_RELAXED\);[^\n]*\n(    __atomic_store_n\(func, b, __ATOMIC_RELEASE\);[^\n]*\n)/$1    __atomic_store_n(orig, (void *) tramp, __ATOMIC_RELAXED);\n/'
     mutate guest/azmod/inline_hooks.c "$HOOKCTL/inline_hooks-late-slot.c" \
         's/(    __atomic_store_n\(orig, \*slot, __ATOMIC_RELAXED\);\n)(    __atomic_store_n\(slot, hook, __ATOMIC_RELEASE\);\n)/    void *was = *slot;\n$2    __atomic_store_n(orig, was, __ATOMIC_RELAXED);\n/'
     mutate guest/azstem/azstem.c "$HOOKCTL/azstem-late-orig.c" \
@@ -4085,14 +4095,22 @@ suite "sdk: claim_vslot" "$d/real"
 
 d="$OUT/trackgen"; mkdir -p "$d"
 { extract guest/azstem/stem_playback.c '^static void deck_track_changed\('
+  extract guest/azstem/stem_playback.c '^static void stems_discover_base\('
+  extract guest/azstem/stem_playback.c '^static void stems_tick_empty\('
+  extract guest/azstem/stem_playback.c '^static int stems_same_file\('
+  extract guest/azstem/stem_playback.c '^static void stems_tick_existing\('
+  extract guest/azstem/stem_playback.c '^static int stems_confirm_change\('
+  extract guest/azstem/stem_playback.c '^static void stems_tick_changed\('
+  extract guest/azstem/stem_playback.c '^static void stems_tick_fallback\('
+  extract guest/azstem/stem_playback.c '^static void stems_tick_deck\('
   extract guest/azstem/stem_playback.c '^static void stems_tick\(' ; } > "$d/real.inc"
 grep -q 'deck_track_changed(deck); /\* generation + identity: ejected \*/' "$d/real.inc" || { echo "extraction of stems_tick failed"; exit 2; }
 # control 1: the eject path does not bump the generation (the old code)
 mutate "$d/real.inc" "$d/ctl-eject.inc" 's/\n\s*deck_track_changed\(deck\); \/\* generation \+ identity: ejected \*\///'
 # control 2: the bump after the curtrack publish (azmod would see the name before the generation)
-mutate "$d/real.inc" "$d/ctl-order.inc" 's/\n\s*deck_track_changed\(deck\);\n(\s*\n\s*\/\* Drop the old stems)/\n$1/; s/(publish_deck_file\(deck, "curtrack", tr\);\n\s*publish_src\(deck\);)/$1\n        deck_track_changed(deck);/'
+mutate "$d/real.inc" "$d/ctl-order.inc" 's/\n    deck_track_changed\(deck\);\n    if \(!have_base\)/\n    if (!have_base)/; s/(publish_deck_file\(deck, "curtrack", tr\);\n\s*publish_src\(deck\);)/$1\n        deck_track_changed(deck);/'
 # control 3: no stems base skips the deck before its identity (the old code)
-mutate "$d/real.inc" "$d/ctl-nobase.inc" 's/(int have_base = g_stems_base\[0\] != 0;)/$1\n        if (!have_base) continue;/'
+mutate "$d/real.inc" "$d/ctl-nobase.inc" 's/(int have_base = g_stems_base\[0\] != 0;)/$1\n        if (!have_base) return;/'
 # control 4: the track identified without a base never loads once a base turns up
 mutate "$d/real.inc" "$d/ctl-deferred.inc" 's/g_load_deferred\[deck\] = 1;/g_load_deferred[deck] = 0;/'
 for v in real ctl-eject ctl-order ctl-nobase ctl-deferred; do
@@ -5282,10 +5300,11 @@ fi
 if [ -n "$COVERAGE" ]; then
     echo "=== coverage: the gcc-built suites (coverage-gcc.sh, in the containers) ==="
     GCOV_ARGS=()
+    GCCOVDIR=${COVERAGE_GCC_DIR:-${COVDIR}-gcc}
     if ! command -v docker >/dev/null 2>&1; then
         skip "coverage of the gcc-built suites: no docker (the report covers the clang suites only)"
-    elif bash "$T/coverage-gcc.sh" "$ROOT/guest/out/unit-gcccov"; then
-        GCOV_ARGS=(--gcc-lcov "$ROOT/guest/out/unit-gcccov/report/coverage.info")
+    elif bash "$T/coverage-gcc.sh" "$GCCOVDIR"; then
+        GCOV_ARGS=(--gcc-lcov "$GCCOVDIR/report/coverage.info")
     else
         echo "FAIL  coverage of the gcc-built suites (a suite or a control above)"; failures=$((failures + 1))
     fi
@@ -5294,7 +5313,7 @@ if [ -n "$COVERAGE" ]; then
     rm -rf "$COVDIR"; mkdir -p "$COVDIR"
     if python3 "$T/coverage-report.py" --root "$ROOT" --out "$OUT" --prof "$OUT/cov/prof" --covdir "$COVDIR" \
             --profdata "$LLVM_PROFDATA" --cov "$LLVM_COV" --cc "$COVREAL" ${GCOV_ARGS[@]+"${GCOV_ARGS[@]}"}; then
-        [ ${#GCOV_ARGS[@]} = 0 ] || cp "$ROOT/guest/out/unit-gcccov/report/summary.txt" "$COVDIR/gcc-summary.txt"
+        [ ${#GCOV_ARGS[@]} = 0 ] || cp "$GCCOVDIR/report/summary.txt" "$COVDIR/gcc-summary.txt"
     else
         echo "FAIL  coverage report"; failures=$((failures + 1))
     fi

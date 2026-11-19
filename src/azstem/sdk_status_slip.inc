@@ -58,98 +58,134 @@ static void slip_retire(unsigned d) {
     }
     azn_capability(d, AZN_CAP_SLIP_HEAD, 0);
 }
-static void slip_sample(unsigned d, uintptr_t address, SlipProjection *s, SlipMotionCut motion) {
-    if (!address || !motion.load || motion.load != s->load || atomic_load_explicit(&(s->writers), memory_order_acquire)) return;
-    uint64_t stamp = atomic_load_explicit(&(s->stamp), memory_order_acquire), owner = atomic_load_explicit(&(s->owner), memory_order_acquire);
-    if (!owner || atomic_load_explicit(&(s->address), memory_order_acquire) != address) return;
+struct SlipSample {
+    uint64_t stamp, owner, sample, seed;
+    int availability;
+    unsigned window;
+    bool cut;
+};
+static bool slip_sample_enabled(uintptr_t address, const SlipProjection *s, SlipMotionCut motion) {
+    return address && motion.load && motion.load == s->load && !atomic_load_explicit(&(s->writers), memory_order_acquire);
+}
+static void slip_read_coordinate(unsigned d, uintptr_t address, const SlipProjection *s, struct SlipSample *value) {
     unsigned running = byte(address + 0x68), paused = byte(address + 0x6a);
-    int avail = running == 0 ? AZ_AVAIL_EMPTY : AZ_AVAIL_STALE;
-    uint64_t sample = 0;
+    value->availability = running == 0 ? AZ_AVAIL_EMPTY : AZ_AVAIL_STALE;
     if (running == 1 && !paused && s->rate && s->rate_load == s->load) {
         unsigned char track[12];
-        memcpy(track, ((const void *) (address + 0x38)), sizeof track);
-        sample = word(address + 0x48);
-        const int range = compare_timestamps(sample, UINT64_C(9007199254740992), s->rate, s->rate, 1);
+        memcpy(track, (const void *) (address + 0x38), sizeof track);
+        value->sample = word(address + 0x48);
+        const int range = compare_timestamps(value->sample, UINT64_C(9007199254740992), s->rate, s->rate, 1);
         if (range != AZ_TIME_INVALID && range <= AZ_TIME_EQUAL && azn_load_track_matches(d, s->epoch, s->load, track))
-            avail = AZ_AVAIL_READY;
+            value->availability = AZ_AVAIL_READY;
     }
+}
+static bool slip_sample_current(unsigned d, const SlipProjection *s, const struct SlipSample *value) {
     azsdk_load_sample live = {0};
-    if (!azsdk_load_read((int) (d), &live) || live.unit_generation != s->unit || live.invalidation_epoch != s->epoch ||
-        live.load_generation != s->load || atomic_load_explicit(&(s->stamp), memory_order_acquire) != stamp ||
-        atomic_load_explicit(&(s->writers), memory_order_acquire) || atomic_load_explicit(&(s->owner), memory_order_acquire) != owner) return;
-    const SlipMotionCut after = slip_motion_cut(&(state().decks[d].motion));
-    if (after.load != motion.load || after.generation != motion.generation || after.landing != motion.landing) return;
-    uint64_t seed = azn_seed_id(d);
-    bool cut = s->availability != avail || s->load != s->published_load || motion.generation != s->published_generation;
+    return azsdk_load_read((int) d, &live) && live.unit_generation == s->unit && live.invalidation_epoch == s->epoch &&
+           live.load_generation == s->load && atomic_load_explicit(&(s->stamp), memory_order_acquire) == value->stamp &&
+           !atomic_load_explicit(&(s->writers), memory_order_acquire) && atomic_load_explicit(&(s->owner), memory_order_acquire) == value->owner;
+}
+static bool slip_motion_current(unsigned d, SlipMotionCut motion) {
+    const SlipMotionCut after = slip_motion_cut(&state().decks[d].motion);
+    return after.load == motion.load && after.generation == motion.generation && after.landing == motion.landing;
+}
+static unsigned slip_elapsed_window(const SlipProjection *s) {
     const int64_t elapsed = atomic_load_explicit(&(s->elapsed_samples), memory_order_acquire);
-    unsigned window = 0;
     const int positive = compare_timestamps(elapsed, 0, s->rate, s->rate, 1);
     const int capacity = compare_timestamps(elapsed, UINT32_MAX, s->rate, s->rate, 1);
     if (positive != AZ_TIME_INVALID && capacity != AZ_TIME_INVALID && positive == AZ_TIME_AFTER && capacity <= AZ_TIME_EQUAL)
-        window = (unsigned) (elapsed);
-    const int unchanged = compare_timestamps(s->sample, sample, s->rate, s->rate, window);
-    if (!cut && s->seed == seed && (avail != AZ_AVAIL_READY || (window && s->published_rate == s->rate && unchanged != AZ_TIME_INVALID && unchanged == AZ_TIME_EQUAL))) return;
-    azstatus_native_receipt r = {0};
-    r.kind = AZN_SLIP_HEAD;
-    r.deck = d;
-    r.unit = s->unit;
-    r.epoch = s->epoch;
-    r.load_generation = s->load;
-    r.motion_generation = motion.generation;
-    r.attempt = owner;
-    r.valid = avail;
-    r.b = cut || s->seed != seed;
-    r.observed_window_samples = window;
-    r.observed_window_rate = window ? s->rate : 0;
-    if (avail == AZ_AVAIL_READY) r.points[0] = (__typeof__(r.points[0])) {AZN_COORD, s->rate, ((int64_t) (sample))};
-    if (azn_offer(&r)) {
-        s->availability = avail;
+        return (unsigned) elapsed;
+    return 0;
+}
+static bool slip_sample_unchanged(const SlipProjection *s, const struct SlipSample *value) {
+    const int unchanged = compare_timestamps(s->sample, value->sample, s->rate, s->rate, value->window);
+    return !value->cut && s->seed == value->seed && (value->availability != AZ_AVAIL_READY || (value->window && s->published_rate == s->rate && unchanged != AZ_TIME_INVALID && unchanged == AZ_TIME_EQUAL));
+}
+static void slip_publish(unsigned d, SlipProjection *s, SlipMotionCut motion, const struct SlipSample *value) {
+    azstatus_native_receipt receipt = {0};
+    receipt.kind = AZN_SLIP_HEAD;
+    receipt.deck = d;
+    receipt.unit = s->unit;
+    receipt.epoch = s->epoch;
+    receipt.load_generation = s->load;
+    receipt.motion_generation = motion.generation;
+    receipt.attempt = value->owner;
+    receipt.valid = value->availability;
+    receipt.b = value->cut || s->seed != value->seed;
+    receipt.observed_window_samples = value->window;
+    receipt.observed_window_rate = value->window ? s->rate : 0;
+    if (value->availability == AZ_AVAIL_READY) receipt.points[0] = (azn_point) {AZN_COORD, s->rate, (int64_t) value->sample};
+    if (azn_offer(&receipt)) {
+        s->availability = value->availability;
         s->published_load = s->load;
         s->published_generation = motion.generation;
         s->published_rate = s->rate;
-        s->sample = sample;
-        s->seed = seed;
+        s->sample = value->sample;
+        s->seed = value->seed;
+    }
+}
+static void slip_sample(unsigned d, uintptr_t address, SlipProjection *s, SlipMotionCut motion) {
+    if (!slip_sample_enabled(address, s, motion)) return;
+    struct SlipSample value = {0};
+    value.stamp = atomic_load_explicit(&(s->stamp), memory_order_acquire);
+    value.owner = atomic_load_explicit(&(s->owner), memory_order_acquire);
+    if (!value.owner || atomic_load_explicit(&(s->address), memory_order_acquire) != address) return;
+    slip_read_coordinate(d, address, s, &value);
+    if (!slip_sample_current(d, s, &value) || !slip_motion_current(d, motion)) return;
+    value.seed = azn_seed_id(d);
+    value.cut = s->availability != value.availability || s->load != s->published_load || motion.generation != s->published_generation;
+    value.window = slip_elapsed_window(s);
+    if (!slip_sample_unchanged(s, &value)) slip_publish(d, s, motion, &value);
+}
+static uintptr_t slip_owned_address(Slot *slot) {
+    if (!coherent(slot)) return 0;
+    uintptr_t functions = word(slot->unit + 0x188), child = word(slot->facade + 0xa8);
+    return pointer(functions) && word(functions + 0x30) == child && table(child, state().profile.slip) ? child : 0;
+}
+static void slip_replace_owner(unsigned d, SlipProjection *s, uintptr_t address) {
+    slip_retire(d);
+    s->availability = -1;
+    s->published_load = 0;
+    s->rate_load = 0;
+    s->rate = 0;
+    atomic_store_explicit(&(s->elapsed_samples), 0, memory_order_release);
+    if (address) {
+        uint64_t id = atomic_fetch_add_explicit(&(slip_owners), 1, memory_order_relaxed) + 1;
+        if (id && id <= AZSP_SERIAL_MAX) {
+            atomic_store_explicit(&(s->owner), AZSP_SLIP | id, memory_order_release);
+            atomic_store_explicit(&(s->address), address, memory_order_release);
+            azn_capability(d, AZN_CAP_SLIP_HEAD, 1);
+        }
+    }
+}
+static bool slip_frame_needs_sample(unsigned d, uintptr_t address, const SlipProjection *s, SlipMotionCut motion) {
+    return s->published_load != s->load || s->published_generation != motion.generation ||
+           s->availability != AZ_AVAIL_EMPTY || byte(address + 0x68) || s->seed != azn_seed_id(d);
+}
+static void slip_frame_load(unsigned d, Slot *slot, SlipProjection *s, uintptr_t address) {
+    azsdk_load_sample live = {0};
+    if (!address || !azsdk_load_read((int) d, &live)) {
+        s->load = 0;
+        return;
+    }
+    s->unit = live.unit_generation;
+    s->epoch = live.invalidation_epoch;
+    s->load = live.load_generation;
+    const SlipMotionCut motion = slip_motion_cut(&slot->motion);
+    if (slip_frame_needs_sample(d, address, s, motion)) {
+        __auto_type head = status_head(atomic_load_explicit(&(slot->core), memory_order_acquire));
+        s->rate = head.ready && azn_load_track_matches(d, s->epoch, s->load, head.source) ? head.rate : 0;
+        s->rate_load = s->rate ? s->load : 0;
+        slip_sample(d, address, s, motion);
     }
 }
 static void slip_frame(unsigned d, Slot *slot) {
     if (!atomic_load_explicit(&(slip_installed), memory_order_acquire) || !(azn_interest(d) & AZ_STATUS_TOPIC(AZ_STATUS_POSITION))) return;
-    uintptr_t address = 0;
-    if (coherent(slot)) {
-        uintptr_t functions = word(slot->unit + 0x188), child = word(slot->facade + 0xa8);
-        if (pointer(functions) && word(functions + 0x30) == child && table(child, state().profile.slip)) address = child;
-    }
-    __auto_type s = &(slip_projection[d]);
+    uintptr_t address = slip_owned_address(slot);
+    SlipProjection *s = &slip_projection[d];
     if (atomic_flag_test_and_set_explicit(&(s->busy), memory_order_acquire)) return;
-    if (atomic_load_explicit(&(s->address), memory_order_acquire) != address) {
-        slip_retire(d);
-        s->availability = -1;
-        s->published_load = 0;
-        s->rate_load = 0;
-        s->rate = 0;
-        atomic_store_explicit(&(s->elapsed_samples), 0, memory_order_release);
-        if (address) {
-            uint64_t id = atomic_fetch_add_explicit(&(slip_owners), 1, memory_order_relaxed) + 1;
-            if (id && id <= AZSP_SERIAL_MAX) {
-                atomic_store_explicit(&(s->owner), AZSP_SLIP | id, memory_order_release);
-                atomic_store_explicit(&(s->address), address, memory_order_release);
-                azn_capability(d, AZN_CAP_SLIP_HEAD, 1);
-            }
-        }
-    }
-    azsdk_load_sample live = {0};
-    if (address && azsdk_load_read((int) (d), &live)) {
-        s->unit = live.unit_generation;
-        s->epoch = live.invalidation_epoch;
-        s->load = live.load_generation;
-        const SlipMotionCut motion = slip_motion_cut(&(slot->motion));
-        if (s->published_load != s->load || s->published_generation != motion.generation ||
-            s->availability != AZ_AVAIL_EMPTY || byte(address + 0x68) || s->seed != azn_seed_id(d)) {
-            __auto_type head = status_head(atomic_load_explicit(&(slot->core), memory_order_acquire));
-            s->rate = head.ready && azn_load_track_matches(d, s->epoch, s->load, head.source) ? head.rate : 0;
-            s->rate_load = s->rate ? s->load : 0;
-            slip_sample(d, address, &((*s)), motion);
-        }
-    } else s->load = 0;
+    if (atomic_load_explicit(&(s->address), memory_order_acquire) != address) slip_replace_owner(d, s, address);
+    slip_frame_load(d, slot, s, address);
     atomic_flag_clear_explicit(&(s->busy), memory_order_release);
 }
 typedef struct SlipWriter SlipWriter;

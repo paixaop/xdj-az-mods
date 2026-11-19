@@ -39,18 +39,20 @@ struct azov_native_profile {
     uintptr_t setter, updater, render_return, updater_return, owner_release, content_vtable;
     uint64_t setter_hash, updater_hash;
 };
-static int azov_capture_valid(const struct azov_owned_entry *capture,
-                              const struct azov_native_profile *profile, uintptr_t lo,
-                              uintptr_t hi, uintptr_t here) {
+static int azov_capture_content(const struct azov_owned_entry *capture) {
+    return capture->held_content >= 0x10000 && capture->held_content <= UINT64_C(0x0000ffffffffffff) && !(capture->held_content & 7u);
+}
+static int azov_capture_stack(uintptr_t sp, uintptr_t lo, uintptr_t hi, uintptr_t here) {
+    return !(sp & 15u) && sp >= lo && sp <= hi && hi - sp >= 0xd8 && sp > here && sp - here <= 65536;
+}
+static int azov_capture_valid(const struct azov_owned_entry *capture, const struct azov_native_profile *profile,
+                              uintptr_t lo, uintptr_t hi, uintptr_t here) {
     uintptr_t sp = capture->native_stack;
-    if (!profile || capture->native_return != profile->render_return || !capture->widget ||
-        capture->held_content < 0x10000 || capture->held_content > UINT64_C(0x0000ffffffffffff) ||
-        (capture->held_content & 7u) || (sp & 15u) || sp < lo || sp > hi || hi - sp < 0xd8 ||
-        sp <= here || sp - here > 65536) return 0;
-    if (*(const uintptr_t *) (sp + 8) != profile->updater_return ||
-        *(const uintptr_t *) (sp + 0xd0) != capture->held_content ||
-        *(const uintptr_t *) capture->held_content != profile->content_vtable) return 0;
-    return 1;
+    if (!profile || capture->native_return != profile->render_return || !capture->widget) return 0;
+    if (!azov_capture_content(capture) || !azov_capture_stack(sp, lo, hi, here)) return 0;
+    return *(const uintptr_t *) (sp + 8) == profile->updater_return &&
+           *(const uintptr_t *) (sp + 0xd0) == capture->held_content &&
+           *(const uintptr_t *) capture->held_content == profile->content_vtable;
 }
 #ifndef AZOV_LEASE_UNIT
 static void *azov_client_image;
@@ -102,6 +104,13 @@ static int azov_enter_owned(const struct azov_owned_entry *capture, struct azov_
 }
 static void azov_leave_owned(struct azov_entry *entry) { (void) entry; }
 #if defined(__linux__) && defined(__aarch64__)
+static int azov_executable_segment(const struct dl_phdr_info *info, const ElfW(Phdr) * p) {
+    return p->p_type == PT_LOAD && (p->p_flags & (PF_R | PF_X)) == (PF_R | PF_X) &&
+           p->p_vaddr <= UINTPTR_MAX - info->dlpi_addr && p->p_memsz <= UINTPTR_MAX - info->dlpi_addr - p->p_vaddr;
+}
+static int azov_range_contains(uintptr_t lo, uintptr_t hi, uintptr_t address, size_t bytes) {
+    return address >= lo && address <= hi && hi - address >= bytes;
+}
 static int azov_main_range(struct dl_phdr_info *info, size_t size, void *argument) {
     (void) size;
     if (info->dlpi_name && *info->dlpi_name) return 0;
@@ -109,12 +118,10 @@ static int azov_main_range(struct dl_phdr_info *info, size_t size, void *argumen
     int setter = 0, updater = 0;
     for (unsigned i = 0; i < info->dlpi_phnum; ++i) {
         const ElfW(Phdr) *p = &info->dlpi_phdr[i];
-        if (p->p_type != PT_LOAD || (p->p_flags & (PF_R | PF_X)) != (PF_R | PF_X)) continue;
-        if (p->p_vaddr > UINTPTR_MAX - info->dlpi_addr ||
-            p->p_memsz > UINTPTR_MAX - info->dlpi_addr - p->p_vaddr) continue;
+        if (!azov_executable_segment(info, p)) continue;
         uintptr_t lo = info->dlpi_addr + p->p_vaddr, hi = lo + p->p_memsz;
-        setter |= profile->setter >= lo && profile->setter <= hi && hi - profile->setter >= 700;
-        updater |= profile->updater >= lo && profile->updater <= hi && hi - profile->updater >= 9532;
+        setter |= azov_range_contains(lo, hi, profile->setter, 700);
+        updater |= azov_range_contains(lo, hi, profile->updater, 9532);
     }
     return setter && updater ? 1 : 2;
 }
@@ -124,22 +131,25 @@ static uint64_t azov_hash(uintptr_t address, size_t count) {
     for (size_t i = 0; i < count; ++i) hash = (hash ^ p[i]) * UINT64_C(1099511628211);
     return hash;
 }
-static void azov_prepare_profile(int build_id, void (*release)(void *, void *)) {
-    const struct azov_native_profile *profile = &azov_profiles[build_id - 1];
-    if ((uintptr_t) release != profile->owner_release ||
-        dl_iterate_phdr(azov_main_range, (void *) profile) != 1 ||
-        azov_hash(profile->setter, 700) != profile->setter_hash ||
-        azov_hash(profile->updater, 9532) != profile->updater_hash) return;
+static int azov_profile_verified(const struct azov_native_profile *profile, void (*release)(void *, void *)) {
+    return (uintptr_t) release == profile->owner_release && dl_iterate_phdr(azov_main_range, (void *) profile) == 1 &&
+           azov_hash(profile->setter, 700) == profile->setter_hash && azov_hash(profile->updater, 9532) == profile->updater_hash;
+}
+static int azov_prepare_stack(void) {
     pthread_attr_t attr;
     void *stack;
     size_t size;
-    if (pthread_getattr_np(pthread_self(), &attr)) return;
+    if (pthread_getattr_np(pthread_self(), &attr)) return 0;
     int result = pthread_attr_getstack(&attr, &stack, &size);
     pthread_attr_destroy(&attr);
-    if (result || !stack || size < 0xd8 || (uintptr_t) stack > UINTPTR_MAX - size) return;
+    if (result || !stack || size < 0xd8 || (uintptr_t) stack > UINTPTR_MAX - size) return 0;
     azov_stack_lo = (uintptr_t) stack;
     azov_stack_hi = azov_stack_lo + size;
-    azov_profile = profile;
+    return 1;
+}
+static void azov_prepare_profile(int build_id, void (*release)(void *, void *)) {
+    const struct azov_native_profile *profile = &azov_profiles[build_id - 1];
+    if (azov_profile_verified(profile, release) && azov_prepare_stack()) azov_profile = profile;
 }
 #endif
 #endif
@@ -166,47 +176,38 @@ static struct azov_slot *azov_find(const uint64_t token[2]) {
     struct azov_slot *slot = &azov_slots[token[1] - 1];
     return slot->content && slot->generation == token[0] ? slot : NULL;
 }
-static int azov_begin(const struct azov_owned_entry *capture, struct azov_lease *out, size_t size) {
-    if (!azov_caller_ok(__builtin_return_address(0)) || !azov_enabled ||
-        !azov_profile_ready() || !capture || !out || size < sizeof *out ||
-        azov_generation == UINT64_MAX) return 0;
+static int azov_begin_request(const struct azov_owned_entry *capture, const struct azov_lease *out, size_t size) {
+    return azov_enabled && azov_profile_ready() && capture && out && size >= sizeof *out && azov_generation != UINT64_MAX;
+}
+static unsigned azov_free_slot(void) {
     unsigned index;
     for (index = 0; index < AZOV_SLOTS && azov_slots[index].content; ++index) {}
-    if (index == AZOV_SLOTS) return 0;
-    struct azov_entry entry = {0, NULL};
-    if (!azov_enter_owned(capture, &entry)) return 0;
-    uintptr_t content = entry.content;
-    int retained = 0;
-    if (content && !(content & 7u) &&
-        *(const uint32_t *) (content + 0x10) == AZOV_XOCR) {
-        _Atomic int *rc = (_Atomic int *) (content + 0x0c);
-        int count = atomic_load_explicit(rc, memory_order_acquire);
-        /* Leave one further retain for the original renderer; contention selects stock. */
-        for (unsigned attempt = 0; attempt < AZOV_RETAIN_ATTEMPTS && count > 0 &&
-                                   count < INT_MAX - 1;
-             ++attempt) {
+    return index;
+}
+static int azov_retain_count(_Atomic int *rc) {
+    int count = atomic_load_explicit(rc, memory_order_acquire);
+    /* Leave one further retain for the original renderer; contention selects stock. */
+    for (unsigned attempt = 0; attempt < AZOV_RETAIN_ATTEMPTS && count > 0 && count < INT_MAX - 1; ++attempt) {
 #ifdef AZOV_LEASE_UNIT
-            if (azov_test_fail_cas()) {
-                count = atomic_load_explicit(rc, memory_order_acquire);
-                continue;
-            }
+        if (azov_test_fail_cas()) {
+            count = atomic_load_explicit(rc, memory_order_acquire);
+            continue;
+        }
 #endif
-            if (atomic_compare_exchange_weak_explicit(rc, &count, count + 1,
-                                                      memory_order_acq_rel,
-                                                      memory_order_acquire)) {
-                retained = 1;
-                break;
-            }
-        }
+        if (atomic_compare_exchange_weak_explicit(rc, &count, count + 1, memory_order_acq_rel, memory_order_acquire)) return 1;
     }
-    /* The genuine entry owner remains alive through the retain and leave. */
-    azov_leave_owned(&entry);
-    if (!retained) return 0;
+    return 0;
+}
+static int azov_retain_content(uintptr_t content) {
+    if (!content || (content & 7u) || *(const uint32_t *) (content + 0x10) != AZOV_XOCR) return 0;
+    return azov_retain_count((_Atomic int *) (content + 0x0c));
+}
+static int azov_recursive_content(uintptr_t content) {
     for (unsigned i = 0; i < AZOV_SLOTS; ++i)
-        if (azov_slots[i].content == content) {
-            azov_drop(content); /* Same-object recursive rendering uses the outer copy. */
-            return 0;
-        }
+        if (azov_slots[i].content == content) return 1;
+    return 0;
+}
+static int azov_publish_lease(uintptr_t content, unsigned index, struct azov_lease *out) {
     int count = *(const int *) (content + 0x30);
     unsigned char *points = *(unsigned char **) (content + 0x28);
     if (!points || count <= 0 || count > 2048) {
@@ -221,6 +222,23 @@ static int azov_begin(const struct azov_owned_entry *capture, struct azov_lease 
     struct azov_lease result = {{slot->generation, index + 1u}, content, points, count, 0};
     memcpy(out, &result, sizeof result);
     return 1;
+}
+static int azov_begin(const struct azov_owned_entry *capture, struct azov_lease *out, size_t size) {
+    if (!azov_caller_ok(__builtin_return_address(0)) || !azov_begin_request(capture, out, size)) return 0;
+    unsigned index = azov_free_slot();
+    if (index == AZOV_SLOTS) return 0;
+    struct azov_entry entry = {0, NULL};
+    if (!azov_enter_owned(capture, &entry)) return 0;
+    uintptr_t content = entry.content;
+    int retained = azov_retain_content(content);
+    /* The genuine entry owner remains alive through the retain and leave. */
+    azov_leave_owned(&entry);
+    if (!retained) return 0;
+    if (azov_recursive_content(content)) {
+        azov_drop(content); /* Same-object recursive rendering uses the outer copy. */
+        return 0;
+    }
+    return azov_publish_lease(content, index, out);
 }
 static int azov_install(const uint64_t token[2], unsigned char *scaled) {
     if (!azov_caller_ok(__builtin_return_address(0)) || !scaled) return 0;
@@ -243,9 +261,12 @@ static int azov_finish(const uint64_t token[2]) {
     azov_drop(content);
     return 1;
 }
+static void azov_reconfigure(int build_id, void (*release)(void *, void *)) {
+    if (pthread_equal(pthread_self(), azov_thread) && (!release || !build_id)) azov_enabled = 0;
+}
 void azov_lease_configure(int build_id, void (*release)(void *, void *)) {
     if (atomic_load_explicit(&azov_configured, memory_order_acquire)) {
-        if (pthread_equal(pthread_self(), azov_thread) && (!release || !build_id)) azov_enabled = 0;
+        azov_reconfigure(build_id, release);
         return;
     }
     if ((build_id != 1 && build_id != 2) || !release) return;
@@ -267,19 +288,27 @@ void azov_lease_configure(int build_id, void (*release)(void *, void *)) {
 #endif
     atomic_store_explicit(&azov_configured, 1, memory_order_release);
 }
-int azstem_overview_lease_v1(uint32_t abi, struct azov_lease_api *out, size_t size) {
-    if (!atomic_load_explicit(&azov_configured, memory_order_acquire) ||
-        !pthread_equal(pthread_self(), azov_thread) ||
-        abi != AZOV_LEASE_ABI || !out || size < sizeof *out) return 0;
-#ifdef AZOV_LEASE_UNIT
-    if (!azov_test_trusted()) return 0;
-#else
+static int azov_api_request(uint32_t abi, const struct azov_lease_api *out, size_t size) {
+    return atomic_load_explicit(&azov_configured, memory_order_acquire) && pthread_equal(pthread_self(), azov_thread) &&
+           abi == AZOV_LEASE_ABI && out && size >= sizeof *out;
+}
+#ifndef AZOV_LEASE_UNIT
+static int azov_accept_client(const void *caller) {
     Dl_info info;
-    if (!dladdr(__builtin_return_address(0), &info) || !info.dli_fbase || !info.dli_fname) return 0;
+    if (!dladdr(caller, &info) || !info.dli_fbase || !info.dli_fname) return 0;
     const char *name = strrchr(info.dli_fname, '/');
     if (strcmp(name ? name + 1 : info.dli_fname, "azmod.so")) return 0;
     if (azov_client_image && azov_client_image != info.dli_fbase) return 0;
     azov_client_image = info.dli_fbase;
+    return 1;
+}
+#endif
+int azstem_overview_lease_v1(uint32_t abi, struct azov_lease_api *out, size_t size) {
+    if (!azov_api_request(abi, out, size)) return 0;
+#ifdef AZOV_LEASE_UNIT
+    if (!azov_test_trusted()) return 0;
+#else
+    if (!azov_accept_client(__builtin_return_address(0))) return 0;
 #endif
     const struct azov_lease_api api = {sizeof api, AZOV_LEASE_ABI,
                                        azov_profile_ready() ? 0u : AZOV_LEASE_PROFILE_UNAVAILABLE, 0,

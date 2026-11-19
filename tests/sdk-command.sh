@@ -39,8 +39,8 @@ text = source.read_text()
 controls = {
     'owner': ('e->records[i].owner == owner &&', '((void) owner, 1) &&'),
     'arguments': ('a->beats == b->beats &&', '1 &&'),
-    'id-replay': ('r.request_id <= e->highest_id[owner]', '0'),
-    'load': ('t->load_generation != r->expected_load_generation', '0'),
+    'id-replay': ('r->request_id <= e->highest_id[admission->owner]', '((void) e, 0)'),
+    'load': ('t->load_generation == r->expected_load_generation', '((void) r, 1)'),
     'revision': ('t->revision != r->expected_revision', '0'),
     'persistence': ('(t->persistent_commands & bit)', '0'),
     'deadline': ('if (now && (deadline_order == AZ_TIME_BEFORE || deadline_order == AZ_TIME_EQUAL))', 'if (0)'),

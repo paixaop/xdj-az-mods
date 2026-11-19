@@ -54,54 +54,51 @@ static uintptr_t djpu_fgpr_of(uintptr_t unit) {
     return *(const volatile uintptr_t *) f == (uintptr_t) FGPR_VTABLE ? f : 0;
 }
 
-static void djpuctor_hook(void *self, const void *id, void *ctx, int cap) {
-    unsigned n32 = ~0u;
-    if (self && id) {
-        unsigned n8 = *(const unsigned char *) id;
-        n32 = *(const unsigned *) ((const char *) id + 8);
-        if (n8 != n32)
-            n32 = ~0u;
-    }
-    g_orig_djpuctor(self, id, ctx, cap);
-    /* Published only once the ctor has returned: a half-built unit is never in a slot. Still
-     * before its first audio block, which needs the finished unit. */
-    if (n32 < (unsigned) NDECK) {
-        /* The deck's KeyControlFGPR is built inside this constructor and stored once, so it is
-         * read here, on the constructing thread, while EP147's call still holds the unit. */
-        atomic_store_explicit(&g_djpu_fgpr[n32], djpu_fgpr_of((uintptr_t) self),
-                              memory_order_release);
-        int s = STEM_SLOT[n32];
-        void *exp = NULL;
-        atomic_fetch_add_explicit(&g_ctor_calls[n32], 1, memory_order_relaxed);
-        int claimed = atomic_compare_exchange_strong_explicit(&g_deck_self[s], &exp, self,
-                                                              memory_order_release, memory_order_relaxed);
-        if (!claimed && exp != self)
-            atomic_fetch_or_explicit(&g_ap_rebind, 1u << n32, memory_order_relaxed);
-        /* This call owns the fully constructed unit. The listener retains only a unique
-         * generation, never the unit/server pointers; its callback copies one scalar. */
-        if (g_sdk_loop_on && (claimed || exp == self) &&
-            *(const uintptr_t *) self == atomic_load_explicit(&g_djpu_vt, memory_order_relaxed))
-            (void) azsdk_loop_register((int) n32, self);
+static unsigned djpuctor_deck(void *self, const void *id) {
+    if (!self || !id) return ~0u;
+    unsigned n8 = *(const unsigned char *) id;
+    unsigned n32 = *(const unsigned *) ((const char *) id + 8);
+    return n8 == n32 ? n32 : ~0u;
+}
+static int djpuctor_unit_owned(void *self, int claimed, void *exp) {
+    return (claimed || exp == self) && *(const uintptr_t *) self == atomic_load_explicit(&g_djpu_vt, memory_order_relaxed);
+}
+static void djpuctor_live(unsigned n32, void *self, int claimed, void *exp) {
 #ifdef AZ_STATUS_NATIVE_PRODUCER
-        if (!g_sdk_live_on && g_status_play_on && (claimed || exp == self) &&
-            *(const uintptr_t *) self == atomic_load_explicit(&g_djpu_vt, memory_order_relaxed))
-            (void) azsdk_live_register((int) n32, self);
+    if (!g_sdk_live_on && g_status_play_on && djpuctor_unit_owned(self, claimed, exp)) (void) azsdk_live_register((int) n32, self);
 #endif
-        if (g_sdk_live_on && (claimed || exp == self) &&
-            *(const uintptr_t *) self == atomic_load_explicit(&g_djpu_vt, memory_order_relaxed))
-            (void) azsdk_live_register((int) n32, self);
-        if (g_sdk_cue_on && (claimed || exp == self) &&
-            *(const uintptr_t *) self == atomic_load_explicit(&g_djpu_vt, memory_order_relaxed))
-            (void) azsdk_cue_register((int) n32, self);
-        /* The load tap validates the unit-owned facade here; retained pointer values are
-         * opaque callback identities and are retired before native unit teardown. */
-        if (g_sdk_load_on && (claimed || exp == self) &&
-            *(const uintptr_t *) self == atomic_load_explicit(&g_djpu_vt, memory_order_relaxed)) {
-            (void) azsdk_load_register((int) n32, self);
-            (void) azsdk_exit_register((int) n32, self);
-        }
-        atomic_fetch_or_explicit(&g_ap_ctor, 1u << n32, memory_order_relaxed);
+    if (g_sdk_live_on && djpuctor_unit_owned(self, claimed, exp)) (void) azsdk_live_register((int) n32, self);
+}
+static void djpuctor_observe(unsigned n32, void *self, int claimed, void *exp) {
+    /* This call owns the fully constructed unit. The listener retains only a
+     * unique generation; its callback copies one scalar. */
+    if (g_sdk_loop_on && djpuctor_unit_owned(self, claimed, exp)) (void) azsdk_loop_register((int) n32, self);
+    djpuctor_live(n32, self, claimed, exp);
+    if (g_sdk_cue_on && djpuctor_unit_owned(self, claimed, exp)) (void) azsdk_cue_register((int) n32, self);
+    /* The load tap validates the unit-owned facade here; retained pointer values
+     * are opaque callback identities retired before native unit teardown. */
+    if (g_sdk_load_on && djpuctor_unit_owned(self, claimed, exp)) {
+        (void) azsdk_load_register((int) n32, self);
+        (void) azsdk_exit_register((int) n32, self);
     }
+}
+static void djpuctor_publish(unsigned n32, void *self) {
+    /* The deck's KeyControlFGPR is built inside this constructor and stored once,
+     * so read it while EP147's call still holds the fully constructed unit. */
+    atomic_store_explicit(&g_djpu_fgpr[n32], djpu_fgpr_of((uintptr_t) self), memory_order_release);
+    int s = STEM_SLOT[n32];
+    void *exp = NULL;
+    atomic_fetch_add_explicit(&g_ctor_calls[n32], 1, memory_order_relaxed);
+    int claimed = atomic_compare_exchange_strong_explicit(&g_deck_self[s], &exp, self, memory_order_release, memory_order_relaxed);
+    if (!claimed && exp != self) atomic_fetch_or_explicit(&g_ap_rebind, 1u << n32, memory_order_relaxed);
+    djpuctor_observe(n32, self, claimed, exp);
+    atomic_fetch_or_explicit(&g_ap_ctor, 1u << n32, memory_order_relaxed);
+}
+static void djpuctor_hook(void *self, const void *id, void *ctx, int cap) {
+    unsigned n32 = djpuctor_deck(self, id);
+    g_orig_djpuctor(self, id, ctx, cap);
+    /* Publish only after construction and before the first audio block. */
+    if (n32 < (unsigned) NDECK) djpuctor_publish(n32, self);
 }
 
 /* ---- DjPlayerUnit destructor hook: the slot never outlives its unit ----
@@ -114,21 +111,24 @@ static void djpuctor_hook(void *self, const void *id, void *ctx, int cap) {
 typedef void (*djpudtor_fn)(void *self);
 static djpudtor_fn g_orig_djpudtor = NULL;
 static _Atomic unsigned g_djpu_dtor_calls;
+static void djpudtor_retire(int d) {
+    azsdk_exit_retire(d);
+    if (g_sdk_loop_on) azsdk_loop_retire(d);
+    if (g_sdk_cue_on) azsdk_cue_retire(d);
+    if (g_sdk_live_on) azsdk_live_retire(d);
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    if (!g_sdk_live_on && g_status_play_on) azsdk_live_retire(d);
+#endif
+    if (g_sdk_load_on) azsdk_load_retire(d);
+    atomic_store_explicit(&g_djpu_fgpr[d], 0, memory_order_release);
+}
 static void djpudtor_hook(void *self) {
     uintptr_t unit = (uintptr_t) self;
     unsigned retiring = 0;
     for (int d = 0; d < NDECK; d++)
         if (atomic_load_explicit(&g_deck_self[STEM_SLOT[d]], memory_order_acquire) == self) {
             retiring |= 1u << d;
-            azsdk_exit_retire(d);
-            if (g_sdk_loop_on) azsdk_loop_retire(d);
-            if (g_sdk_cue_on) azsdk_cue_retire(d);
-            if (g_sdk_live_on) azsdk_live_retire(d);
-#ifdef AZ_STATUS_NATIVE_PRODUCER
-            if (!g_sdk_live_on && g_status_play_on) azsdk_live_retire(d);
-#endif
-            if (g_sdk_load_on) azsdk_load_retire(d);
-            atomic_store_explicit(&g_djpu_fgpr[d], 0, memory_order_release);
+            djpudtor_retire(d);
         }
     for (int i = 0; i < MAX_DECKS; i++) {
         void *exp = self;
@@ -248,15 +248,59 @@ static void lti_copy_str(uintptr_t field, uint64_t *w) {
     }
     lti_snap_put(w, out, LTI_STR / 8);
 }
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+struct lti_status_capture {
+    uint64_t lifecycle, owner, empty_fence;
+    int observed_empty;
+};
+static int lti_status_admitted(int d, uintptr_t lti, int admit_status, const struct lti_status_capture *capture) {
+    return g_status_lti_on && admit_status && atomic_load_explicit(&g_lti_tok[d], memory_order_acquire) == lti &&
+           atomic_load_explicit(&g_ls_gen[d], memory_order_acquire) == capture->owner && azn_lifecycle_fence((unsigned) d) == capture->lifecycle;
+}
+static void lti_status_metadata(const struct lti_snap *sn, struct azstatus_native_receipt *r) {
+    uint64_t raw;
+    lti_snap_get(&raw, sn->id + 1, 1);
+    r->content_id = (uint32_t) raw; /* trackid::TrackID +0x08, same as azstem_deck_snapshot */
+    lti_snap_get(r->title, sn->title, sizeof r->title / 8);
+    lti_snap_get(r->artist, sn->artist, sizeof r->artist / 8);
+    r->title[sizeof r->title - 1] = 0;
+    r->artist[sizeof r->artist - 1] = 0;
+}
+static int lti_status_changed(const struct lti_snap *sn, const struct azstatus_native_receipt *r, uint64_t seed) {
+    return sn->emitted_owner != r->unit || sn->emitted_fence != r->epoch || sn->emitted_seed != seed || sn->emitted_id != r->content_id ||
+           sn->emitted_valid != r->valid || sn->emitted_empty != r->a || memcmp(sn->emitted_title, r->title, sizeof r->title) ||
+           memcmp(sn->emitted_artist, r->artist, sizeof r->artist);
+}
+static void lti_status_remember(struct lti_snap *sn, const struct azstatus_native_receipt *r, uint64_t seed) {
+    sn->emitted_owner = r->unit;
+    sn->emitted_fence = r->epoch;
+    sn->emitted_seed = seed;
+    sn->emitted_id = r->content_id;
+    sn->emitted_valid = r->valid;
+    sn->emitted_empty = r->a;
+    memcpy(sn->emitted_title, r->title, sizeof r->title);
+    memcpy(sn->emitted_artist, r->artist, sizeof r->artist);
+}
+static void lti_status_publish(unsigned d, struct lti_snap *sn, const struct lti_status_capture *capture, int ok, const struct timespec *observed) {
+    atomic_store_explicit(&sn->status_owner, capture->owner, memory_order_relaxed);
+    atomic_store_explicit(&sn->status_fence, capture->lifecycle, memory_order_relaxed);
+    azn_capability(d, AZN_CAP_LTI, 1);
+    if (capture->observed_empty) azn_empty_commit(d, capture->empty_fence);
+    struct azstatus_native_receipt r = {.kind = AZN_METADATA, .deck = d, .epoch = capture->lifecycle, .unit = capture->owner, .valid = ok, .a = capture->observed_empty, .observed_ns = (uint64_t) observed->tv_sec * UINT64_C(1000000000) + observed->tv_nsec};
+    if (ok && !capture->observed_empty) lti_status_metadata(sn, &r);
+    uint64_t seed = azn_seed_id(d);
+    if (lti_status_changed(sn, &r, seed) && azn_offer(&r)) lti_status_remember(sn, &r, seed);
+}
+#endif
 /* Copy LoadedTrackInfo `lti` of deck d into the snapshot, if it is still deck d's. Plain loads:
  * the caller is inside EP147's call that owns `lti` (its update, or the LoadState ctor). */
 static void lti_capture_status(int d, uintptr_t lti, int admit_status) {
     (void) admit_status;
 #ifdef AZ_STATUS_NATIVE_PRODUCER
-    uint64_t lifecycle = azn_lifecycle_fence((unsigned) d);
-    uint64_t owner = atomic_load_explicit(&g_ls_gen[d], memory_order_acquire);
-    uint64_t empty_fence = azn_empty_fence((unsigned) d);
-    int observed_empty = 0;
+    struct lti_status_capture capture = {0};
+    capture.lifecycle = azn_lifecycle_fence((unsigned) d);
+    capture.owner = atomic_load_explicit(&g_ls_gen[d], memory_order_acquire);
+    capture.empty_fence = azn_empty_fence((unsigned) d);
 #endif
     struct lti_snap *sn = &g_lti_snap[d];
     unsigned s = lti_wlock(sn);
@@ -271,7 +315,7 @@ static void lti_capture_status(int d, uintptr_t lti, int admit_status) {
             id[i] = *(const volatile unsigned char *) (lti + LTI_ID_OFF + (uintptr_t) i);
 #ifdef AZ_STATUS_NATIVE_PRODUCER
         static const unsigned char zero_id[16];
-        observed_empty = !memcmp(id, zero_id, sizeof id);
+        capture.observed_empty = !memcmp(id, zero_id, sizeof id);
 #endif
         lti_snap_put(sn->id, id, 2);
         lti_copy_str(lti + LTI_TITLE_OFF, sn->title);
@@ -285,41 +329,8 @@ static void lti_capture_status(int d, uintptr_t lti, int admit_status) {
     atomic_store_explicit(&sn->owner, lti, memory_order_relaxed);
     atomic_store_explicit(&sn->valid, ok, memory_order_relaxed);
 #ifdef AZ_STATUS_NATIVE_PRODUCER
-    if (g_status_lti_on && admit_status && atomic_load_explicit(&g_lti_tok[d], memory_order_acquire) == lti &&
-        atomic_load_explicit(&g_ls_gen[d], memory_order_acquire) == owner &&
-        azn_lifecycle_fence((unsigned) d) == lifecycle) {
-        atomic_store_explicit(&sn->status_owner, owner, memory_order_relaxed);
-        atomic_store_explicit(&sn->status_fence, lifecycle, memory_order_relaxed);
-        azn_capability((unsigned) d, AZN_CAP_LTI, 1);
-        if (observed_empty) azn_empty_commit((unsigned) d, empty_fence);
-        struct azstatus_native_receipt r = {.kind = AZN_METADATA, .deck = (unsigned) d, .epoch = lifecycle, .unit = owner, .valid = ok, .a = observed_empty, .observed_ns = (uint64_t) observed.tv_sec * UINT64_C(1000000000) + observed.tv_nsec};
-        if (ok && !observed_empty) {
-            uint64_t raw;
-            lti_snap_get(&raw, sn->id + 1, 1);
-            r.content_id = (uint32_t) raw; /* trackid::TrackID +0x08, same as azstem_deck_snapshot */
-            lti_snap_get(r.title, sn->title, sizeof r.title / 8);
-            lti_snap_get(r.artist, sn->artist, sizeof r.artist / 8);
-            r.title[sizeof r.title - 1] = 0;
-            r.artist[sizeof r.artist - 1] = 0;
-        }
-        uint64_t seed = azn_seed_id((unsigned) d);
-        if (sn->emitted_owner != owner || sn->emitted_fence != lifecycle || sn->emitted_seed != seed ||
-            sn->emitted_id != r.content_id || sn->emitted_valid != r.valid || sn->emitted_empty != r.a ||
-            memcmp(sn->emitted_title, r.title, sizeof r.title) || memcmp(sn->emitted_artist, r.artist, sizeof r.artist)) {
-            if (azn_offer(&r)) {
-                sn->emitted_owner = owner;
-                sn->emitted_fence = lifecycle;
-                sn->emitted_seed = seed;
-                sn->emitted_id = r.content_id;
-                sn->emitted_valid = r.valid;
-                sn->emitted_empty = r.a;
-                memcpy(sn->emitted_title, r.title, sizeof r.title);
-                memcpy(sn->emitted_artist, r.artist, sizeof r.artist);
-            }
-        }
-    } else {
-        atomic_store_explicit(&sn->status_owner, 0, memory_order_relaxed);
-    }
+    if (lti_status_admitted(d, lti, admit_status, &capture)) lti_status_publish((unsigned) d, sn, &capture, ok, &observed);
+    else atomic_store_explicit(&sn->status_owner, 0, memory_order_relaxed);
 #endif
     lti_wunlock(sn, s);
 }
@@ -349,6 +360,10 @@ static void lti_invalidate(int d) {
 }
 
 #ifdef AZ_STATUS_NATIVE_PRODUCER
+static int lti_seed_current(unsigned d, const struct lti_snap *sn, unsigned sequence, const struct azstatus_native_receipt *r) {
+    return r->unit && r->observed_ns && sequence == atomic_load_explicit(&sn->seq, memory_order_acquire) &&
+           r->unit == atomic_load_explicit(&g_ls_gen[d], memory_order_acquire) && r->epoch == azn_lifecycle_fence(d);
+}
 /* Recovery reads only our copied writer snapshot, never the firmware object. */
 int azn_metadata_seed(unsigned d, struct azstatus_native_receipt *out) {
     if (!out || out->version != 1 || out->size < sizeof *out || d >= NDECK) return 0;
@@ -373,34 +388,45 @@ int azn_metadata_seed(unsigned d, struct azstatus_native_receipt *out) {
     r.title[sizeof r.title - 1] = 0;
     r.artist[sizeof r.artist - 1] = 0;
     atomic_thread_fence(memory_order_acquire);
-    if (!r.unit || !r.observed_ns || sequence != atomic_load_explicit(&sn->seq, memory_order_acquire) ||
-        r.unit != atomic_load_explicit(&g_ls_gen[d], memory_order_acquire) || r.epoch != azn_lifecycle_fence(d)) return 0;
+    if (!lti_seed_current(d, sn, sequence, &r)) return 0;
     *out = r;
     return 1;
 }
 #endif
 typedef long (*lti_update_fn)(void *, void *, void *, void *, void *, void *, void *, void *);
 static lti_update_fn g_orig_lti_update = NULL;
-static long lti_update_hook(void *self, void *a1, void *a2, void *a3, void *a4, void *a5,
-                            void *a6, void *a7) {
 #ifdef AZ_STATUS_NATIVE_PRODUCER
-    unsigned observed_deck = NDECK;
-    uint64_t before_fence = 0, before_owner = 0;
+struct lti_update_capture {
+    unsigned deck;
+    uint64_t fence, owner;
+};
+static struct lti_update_capture lti_update_before(void *self) {
+    struct lti_update_capture capture = {.deck = NDECK};
     for (unsigned d = 0; d < NDECK; ++d) {
         if (self && atomic_load_explicit(&g_lti_tok[d], memory_order_acquire) == (uintptr_t) self) {
-            observed_deck = d;
-            before_fence = azn_lifecycle_fence(d);
-            before_owner = atomic_load_explicit(&g_ls_gen[d], memory_order_acquire);
+            capture.deck = d;
+            capture.fence = azn_lifecycle_fence(d);
+            capture.owner = atomic_load_explicit(&g_ls_gen[d], memory_order_acquire);
             break;
         }
     }
+    return capture;
+}
+static int lti_update_admitted(unsigned d, const struct lti_update_capture *capture) {
+    return capture->deck == d && capture->fence == azn_lifecycle_fence(d) && capture->owner == atomic_load_explicit(&g_ls_gen[d], memory_order_acquire);
+}
+#endif
+static long lti_update_hook(void *self, void *a1, void *a2, void *a3, void *a4, void *a5,
+                            void *a6, void *a7) {
+#ifdef AZ_STATUS_NATIVE_PRODUCER
+    const struct lti_update_capture capture = lti_update_before(self);
 #endif
     long r = g_orig_lti_update(self, a1, a2, a3, a4, a5, a6, a7);
     int hit = 0;
     for (int d = 0; d < NDECK; d++)
         if (self && atomic_load_explicit(&g_lti_tok[d], memory_order_acquire) == (uintptr_t) self) {
 #ifdef AZ_STATUS_NATIVE_PRODUCER
-            lti_capture_status(d, (uintptr_t) self, observed_deck == (unsigned) d && before_fence == azn_lifecycle_fence((unsigned) d) && before_owner == atomic_load_explicit(&g_ls_gen[d], memory_order_acquire));
+            lti_capture_status(d, (uintptr_t) self, lti_update_admitted((unsigned) d, &capture));
 #else
             lti_capture(d, (uintptr_t) self);
 #endif

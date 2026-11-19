@@ -29,7 +29,10 @@ void azsdk_live_configure(int on, int build) {
     assert(on == 1 && build == 2);
     configure_calls++;
 }
-void azsdk_cue_configure(int on, int build) { assert(on == 1 && build == 2); ++cue_configure_calls; }
+void azsdk_cue_configure(int on, int build) {
+    assert(on == 1 && build == 2);
+    ++cue_configure_calls;
+}
 static int flag_access(const char *path, int mode) {
     assert(mode == F_OK);
     if (!strcmp(path, "/home/root/settings/azmod.track-data.off")) return track_flag ? 0 : -1;

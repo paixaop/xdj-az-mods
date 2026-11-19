@@ -240,6 +240,14 @@ struct ImageSearch {
     Image *image;
     bool main;
 };
+static bool append_image_segment(Image *image, uintptr_t base, const ElfW(Phdr) * p) {
+    if (image->count == 32 || p->p_vaddr > UINTPTR_MAX - base || p->p_memsz > UINTPTR_MAX - base - p->p_vaddr) {
+        image->count = 0;
+        return false;
+    }
+    image->ranges[image->count++] = (Range) {base + p->p_vaddr, base + p->p_vaddr + p->p_memsz, p->p_flags};
+    return true;
+}
 static int find_image(struct dl_phdr_info *info, size_t unused, void *context) {
     (void) unused;
     __auto_type s = &(*((ImageSearch *) (context)));
@@ -248,13 +256,7 @@ static int find_image(struct dl_phdr_info *info, size_t unused, void *context) {
     for (unsigned i = 0; i < info->dlpi_phnum; ++i) {
         __auto_type p = &(info->dlpi_phdr[i]);
         if (p->p_type != PT_LOAD || !(p->p_flags & PF_R)) continue;
-        if (s->image->count == 32 || p->p_vaddr > UINTPTR_MAX - info->dlpi_addr ||
-            p->p_memsz > UINTPTR_MAX - info->dlpi_addr - p->p_vaddr) {
-            s->image->count = 0;
-            return 1;
-        }
-        s->image->ranges[s->image->count++] = (Range) {info->dlpi_addr + p->p_vaddr,
-                                                       info->dlpi_addr + p->p_vaddr + p->p_memsz, p->p_flags};
+        if (!append_image_segment(s->image, info->dlpi_addr, p)) return 1;
     }
     return 1;
 }
@@ -277,17 +279,22 @@ static bool image_string_equal(const Image *image, uintptr_t address, const char
         if (!actual) return true;
     }
 }
+static uintptr_t checked_type_name(uintptr_t table) {
+    __auto_type type = load(uintptr_t, table - 8);
+    if (!canonical(type) || !image_contains(&source_state().main_image, type, 16, kRead)) return 0;
+    __auto_type text = load(uintptr_t, type + 8);
+    if (!image_contains(&source_state().main_image, text, 1, kRead)) return 0;
+    if (*((const char *) (text)) == '*') ++text;
+    return text;
+}
 static uintptr_t checked_vtable(uintptr_t object, const char *name, unsigned slots) {
     if (!canonical(object)) return 0;
     __auto_type table = load(uintptr_t, object);
     if (!canonical(table) || table < 16 ||
         !image_contains(&source_state().main_image, table - 16, (slots + 2u) * 8u, kRead) ||
         load(uintptr_t, table - 16)) return 0;
-    __auto_type type = load(uintptr_t, table - 8);
-    if (!canonical(type) || !image_contains(&source_state().main_image, type, 16, kRead)) return 0;
-    __auto_type text = load(uintptr_t, type + 8);
-    if (!image_contains(&source_state().main_image, text, 1, kRead)) return 0;
-    if (*((const char *) (text)) == '*') ++text;
+    uintptr_t text = checked_type_name(table);
+    if (!text) return 0;
     return image_string_equal(&(source_state().main_image), text, name) ? table : 0;
 }
 static bool worker_scope(uintptr_t server, const Build *build) {
@@ -308,28 +315,37 @@ struct OwnedChain {
     uintptr_t mount_address, database_address, connection;
     uint16_t media;
 };
+static uintptr_t owned_updater(uintptr_t server, const Build *build) {
+    uintptr_t dispatcher = load(uintptr_t, server + build->dispatcher);
+    if (!canonical(dispatcher)) return 0;
+    uintptr_t handler = load(uintptr_t, dispatcher + 0x20);
+    if (!canonical(handler)) return 0;
+    uintptr_t updater = load(uintptr_t, handler + 0x30);
+    return checked_vtable(updater, "N13music_library18InformationUpdaterE", 1) ? updater : 0;
+}
+static bool owned_reference_live(const StrongOwner *owner, uintptr_t object) {
+    return (uintptr_t) owner->object == object && owner->control &&
+           __atomic_load_n(&owner->control->strong, __ATOMIC_RELAXED) > 0;
+}
+static bool owned_chain_tuple(uintptr_t updater, uintptr_t mount, uint16_t media, uintptr_t connection) {
+    return media && load(uint16_t, mount + 8) == media && canonical(connection) &&
+           canonical(load(uintptr_t, updater + 0x10)) && canonical(load(uintptr_t, mount + 0x38));
+}
 static bool owned_chain(uintptr_t server, const Build *build, OwnedChain *out) {
-    __auto_type dispatcher = load(uintptr_t, server + build->dispatcher);
-    if (!canonical(dispatcher)) return false;
-    __auto_type handler = load(uintptr_t, dispatcher + 0x20);
-    if (!canonical(handler)) return false;
-    __auto_type updater = load(uintptr_t, handler + 0x30);
-    if (!checked_vtable(updater, "N13music_library18InformationUpdaterE", 1)) return false;
+    uintptr_t updater = owned_updater(server, build);
+    if (!updater) return false;
     __auto_type mount = load(uintptr_t, updater + 8);
     if (!checked_vtable(mount, "N13music_library16SqliteMountPointE", 1)) return false;
     __auto_type database = load(uintptr_t, mount + 0x30);
     if (!checked_vtable(database, "N13music_library14SqliteDataBaseE", 1)) return false;
     __auto_type media = load(uint16_t, database + 8);
     __auto_type connection = load(uintptr_t, database + 0x38);
-    if (!media || load(uint16_t, mount + 8) != media || !canonical(connection) ||
-        !canonical(load(uintptr_t, updater + 0x10)) ||
-        !canonical(load(uintptr_t, mount + 0x38))) return false;
+    if (!owned_chain_tuple(updater, mount, media, connection)) return false;
     /* Borrow the REAL source references in the verified serialized native worker scope.
      * Never memcpy ownership words into a shared/weak object or fabricate an owner. */
     __auto_type m = &(*((const StrongOwner *) (updater + 8)));
     __auto_type d = &(*((const StrongOwner *) (mount + 0x30)));
-    if (((uintptr_t) (m->object)) != mount || ((m->control) ? __atomic_load_n(&m->control->strong, __ATOMIC_RELAXED) : 0) <= 0 ||
-        ((uintptr_t) (d->object)) != database || ((d->control) ? __atomic_load_n(&d->control->strong, __ATOMIC_RELAXED) : 0) <= 0) return false;
+    if (!owned_reference_live(m, mount) || !owned_reference_live(d, database)) return false;
     out->mount = m;
     out->database = d;
     out->mount_address = mount;
@@ -376,35 +392,61 @@ struct MetadataOps {
     ssize_t (*read)(int, void *, size_t);
     int (*close)(int);
 };
-static int open_metadata(const char *path, int flags) { return open(path, flags); }
+static int open_metadata(const char *path, int flags) { return open(path, flags | O_CLOEXEC); }
 static const MetadataOps metadata_ops = {fstat, open_metadata, read, close};
 /* Complete bounded fdinfo text only: reject duplicate/truncated/overflowed mount IDs. */
+static size_t skip_mount_space(const char *data, size_t at, size_t end) {
+    while (at < end && (data[at] == ' ' || data[at] == '\t')) ++at;
+    return at;
+}
+static bool parse_mount_value(const char *data, size_t start, size_t end, uint64_t *out) {
+    size_t at = skip_mount_space(data, start, end);
+    if (at == end) return false;
+    uint64_t value = 0;
+    for (; at < end && data[at] >= '0' && data[at] <= '9'; ++at) {
+        unsigned digit = (unsigned) (data[at] - '0');
+        if (value > (UINT64_MAX - digit) / 10) return false;
+        value = value * 10 + digit;
+    }
+    if (skip_mount_space(data, at, end) != end || !value) return false;
+    *out = value;
+    return true;
+}
+static size_t mount_line_end(const char *data, size_t start, size_t size) {
+    while (start < size && data[start] != '\n') ++start;
+    return start;
+}
 static bool parse_mount_id(const char *data, size_t size, uint64_t *out) {
     bool found = false;
     uint64_t value = 0;
     for (size_t start = 0; start < size;) {
-        size_t end = start;
-        while (end < size && data[end] != '\n') ++end;
+        size_t end = mount_line_end(data, start, size);
         if (end == size) return false;
         if (end - start >= 7 && !memcmp(data + start, "mnt_id:", 7)) {
             if (found) return false;
-            size_t at = start + 7;
-            while (at < end && (data[at] == ' ' || data[at] == '\t')) ++at;
-            if (at == end) return false;
-            value = 0;
-            for (; at < end && data[at] >= '0' && data[at] <= '9'; ++at) {
-                unsigned digit = ((unsigned) (data[at] - '0'));
-                if (value > (UINT64_MAX - digit) / 10) return false;
-                value = value * 10 + digit;
-            }
-            while (at < end && (data[at] == ' ' || data[at] == '\t')) ++at;
-            if (at != end || !value) return false;
+            if (!parse_mount_value(data, start + 7, end, &value)) return false;
             found = true;
         }
         start = end + 1;
     }
     if (found) (*out) = value;
     return found;
+}
+static bool read_mount_text(int fd, const MetadataOps *ops, char *text, size_t capacity, size_t *used) {
+
+    bool complete = false;
+    /* At most 8 reads and 4096 bytes. No unbounded EINTR/short-read retry. */
+    for (unsigned attempt = 0; attempt < 8 && *used < capacity; ++attempt) {
+        ssize_t n = ops->read(fd, text + *used, capacity - *used);
+        if (n < 0) break;
+        if (!n) {
+            complete = true;
+            break;
+        }
+        if (((size_t) (n)) > capacity - *used) break;
+        *used += ((size_t) (n));
+    }
+    return complete;
 }
 static bool descriptor_mount_id(int native_fd, const MetadataOps *ops, uint64_t *out) {
     char path[64], text[4096];
@@ -413,18 +455,7 @@ static bool descriptor_mount_id(int native_fd, const MetadataOps *ops, uint64_t 
     int fd = ops->open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
     if (fd < 0) return false;
     size_t used = 0;
-    bool complete = false;
-    /* At most 8 reads and 4096 bytes. No unbounded EINTR/short-read retry. */
-    for (unsigned attempt = 0; attempt < 8 && used < sizeof text; ++attempt) {
-        ssize_t n = ops->read(fd, text + used, sizeof text - used);
-        if (n < 0) break;
-        if (!n) {
-            complete = true;
-            break;
-        }
-        if (((size_t) (n)) > sizeof text - used) break;
-        used += ((size_t) (n));
-    }
+    bool complete = read_mount_text(fd, ops, text, sizeof text, &used);
     int closed = ops->close(fd); /* Only our fdinfo FD; NEVER the SQLite descriptor. */
     return !closed && complete && parse_mount_id(text, used, &((*out)));
 }
@@ -439,38 +470,42 @@ static bool supported_name(const SqlProfile *p, const char *name) {
     }
     return false;
 }
-static int capture_physical(uintptr_t connection, const SqlProfile *p, const MetadataOps *ops, struct azsdk_source_sample *out, int *descriptor) {
-    if (!p->ready || !p->file_control) return AZS_PHYSICAL_PROFILE;
-    NativeFile *file = NULL;
-    NativeVFS *vfs = NULL;
-    if (p->file_control(((struct sqlite3 *) (connection)), "main", 7, &file) || !file ||
-        p->file_control(((struct sqlite3 *) (connection)), "main", 27, &vfs) || !vfs)
-        return AZS_PHYSICAL_API;
-    /* File liveness comes from the owned native callback. VFS/table/name/code are bounded
-     * to the exact hashed DSO; wrappers and unrelated SQLite modules fail closed. */
-    if (!canonical(((uintptr_t) (file))) ||
-        !canonical(((uintptr_t) (vfs))) ||
-        !image_contains(&p->image, ((uintptr_t) (vfs)), sizeof *vfs, kRead) ||
-        vfs->version != 3 || vfs->os_size != 120 || vfs->max_path != 512 ||
-        !supported_name(p, vfs->name) ||
-        !module_function(p, ((uintptr_t) (vfs->open)), p->open_rva))
-        return AZS_PHYSICAL_VFS;
-    const NativeIO *io = file->methods;
-    __auto_type table = ((uintptr_t) (io));
-    if (!canonical(table) || !image_contains(&p->image, table, sizeof *io, kRead) || table < p->image.base)
-        return AZS_PHYSICAL_METHODS;
-    __auto_type relative = table - p->image.base;
-    unsigned slot = 3;
+static bool physical_vfs_matches(const SqlProfile *p, NativeFile *file, NativeVFS *vfs) {
+    return canonical((uintptr_t) file) && canonical((uintptr_t) vfs) &&
+           image_contains(&p->image, (uintptr_t) vfs, sizeof *vfs, kRead) &&
+           vfs->version == 3 && vfs->os_size == 120 && vfs->max_path == 512 &&
+           supported_name(p, vfs->name) && module_function(p, (uintptr_t) vfs->open, p->open_rva);
+}
+static unsigned physical_methods_slot(const SqlProfile *p, uintptr_t relative) {
     for (unsigned i = 0; i < 3; ++i)
-        if (relative == p->io_rvas[i]) {
-            slot = i;
-            break;
-        }
-    if (slot == 3 || io->version != (slot == 2 ? 1 : 3) ||
-        !module_function(p, ((uintptr_t) (io->read)), p->read_rva) ||
-        !module_function(p, ((uintptr_t) (io->size)), p->size_rva) ||
-        !module_function(p, ((uintptr_t) (io->control)), p->control_rva))
-        return AZS_PHYSICAL_METHODS;
+        if (relative == p->io_rvas[i]) return i;
+    return 3;
+}
+static bool physical_methods_match(const SqlProfile *p, const NativeIO *io) {
+    uintptr_t table = (uintptr_t) io;
+    if (!canonical(table) || !image_contains(&p->image, table, sizeof *io, kRead) || table < p->image.base) return false;
+    unsigned slot = physical_methods_slot(p, table - p->image.base);
+    return slot != 3 && io->version == (slot == 2 ? 1 : 3) &&
+           module_function(p, (uintptr_t) io->read, p->read_rva) &&
+           module_function(p, (uintptr_t) io->size, p->size_rva) &&
+           module_function(p, (uintptr_t) io->control, p->control_rva);
+}
+static bool physical_metadata_changed(const struct stat *before, const struct stat *after, int64_t size) {
+    return before->st_dev != after->st_dev || before->st_ino != after->st_ino ||
+           before->st_size != after->st_size || size != before->st_size;
+}
+static bool physical_descriptor_changed(NativeFile *file, const NativeIO *io, uintptr_t embedded, int native_fd) {
+    uintptr_t address = (uintptr_t) file;
+    return load(int32_t, address + 0x18) != native_fd || file->methods != io || load(uintptr_t, address + 8) != embedded;
+}
+static bool read_physical_metadata(int native_fd, NativeFile *file, const NativeIO *io, const MetadataOps *ops,
+                                   struct stat *before, struct stat *after, int64_t *size, uint64_t *mount) {
+    return !ops->stat(native_fd, before) && S_ISREG(before->st_mode) && before->st_size >= 0 &&
+           descriptor_mount_id(native_fd, ops, mount) && !io->size(file, size) && !ops->stat(native_fd, after);
+}
+static int capture_descriptor(NativeFile *file, NativeVFS *vfs, const MetadataOps *ops,
+                              struct azsdk_source_sample *out, int *descriptor) {
+    const NativeIO *io = file->methods;
     __auto_type address = ((uintptr_t) (file));
     __auto_type embedded = load(uintptr_t, address + 8);
     int native_fd = load(int32_t, address + 0x18);
@@ -479,13 +514,9 @@ static int capture_physical(uintptr_t connection, const SqlProfile *p, const Met
     struct stat before, after;
     int64_t size = -1;
     uint64_t mount = 0;
-    if (ops->stat(native_fd, &before) || !S_ISREG(before.st_mode) || before.st_size < 0 ||
-        !descriptor_mount_id(native_fd, &((*ops)), &(mount)) || io->size(file, &size) ||
-        ops->stat(native_fd, &after)) return AZS_PHYSICAL_METADATA;
-    if (before.st_dev != after.st_dev || before.st_ino != after.st_ino ||
-        before.st_size != after.st_size || size != before.st_size ||
-        load(int32_t, address + 0x18) != native_fd || file->methods != io ||
-        load(uintptr_t, address + 8) != embedded) return AZS_PHYSICAL_CHANGED;
+    if (!read_physical_metadata(native_fd, file, io, ops, &before, &after, &size, &mount)) return AZS_PHYSICAL_METADATA;
+    if (physical_metadata_changed(&before, &after, size) || physical_descriptor_changed(file, io, embedded, native_fd))
+        return AZS_PHYSICAL_CHANGED;
     out->device = ((uint64_t) (before.st_dev));
     out->inode = ((uint64_t) (before.st_ino));
     out->mount_id = mount;
@@ -494,6 +525,18 @@ static int capture_physical(uintptr_t connection, const SqlProfile *p, const Met
     out->flags |= AZS_PHYSICAL;
     if (descriptor) *descriptor = native_fd;
     return AZS_PHYSICAL_OK;
+}
+static int capture_physical(uintptr_t connection, const SqlProfile *p, const MetadataOps *ops, struct azsdk_source_sample *out, int *descriptor) {
+    if (!p->ready || !p->file_control) return AZS_PHYSICAL_PROFILE;
+    NativeFile *file = NULL;
+    NativeVFS *vfs = NULL;
+    if (p->file_control(((struct sqlite3 *) (connection)), "main", 7, &file) || !file ||
+        p->file_control(((struct sqlite3 *) (connection)), "main", 27, &vfs) || !vfs)
+        return AZS_PHYSICAL_API;
+    /* The callback owns file liveness; the exact DSO bounds its metadata. */
+    if (!physical_vfs_matches(p, file, vfs)) return AZS_PHYSICAL_VFS;
+    if (!physical_methods_match(p, file->methods)) return AZS_PHYSICAL_METHODS;
+    return capture_descriptor(file, vfs, ops, out, descriptor);
 }
 #endif
 static bool has_binding(uint64_t epoch) {
@@ -568,149 +611,181 @@ static void entry_drop(Entry *p) {
 }
 /* Build/SqlProfile arguments also allow synthetic GNU fixtures to exercise the complete
  * implementation without masquerading as a real firmware or relaxing production guards. */
+typedef struct SourceLookup {
+    Binding *binding;
+    Entry *entry, *empty;
+    uint64_t observed_generation, status_generation;
+    bool was_observed, status_was_observed;
+} SourceLookup;
+static Binding *source_binding(uintptr_t server) {
+    for (unsigned i = 0; i < kSlots; ++i)
+        if (sources.bindings[i].server == server) return &sources.bindings[i];
+    for (unsigned i = 0; i < kSlots; ++i)
+        if (!sources.bindings[i].server) return &sources.bindings[i];
+    return NULL;
+}
+static bool entry_matches_chain(const Entry *entry, const OwnedChain *chain, const StrongOwner *mount, const StrongOwner *database) {
+    return entry->mount_address == chain->mount_address && entry->database_address == chain->database_address &&
+           entry->connection == chain->connection && entry->sample.native_media_id == chain->media &&
+           same_owner(&entry->mount, mount) && same_owner(&entry->database, database);
+}
+static bool source_entry_current(const Entry *entry, const SourceLookup *lookup) {
+    return !lookup->entry && entry->connection_generation == lookup->observed_generation &&
+           entry->status_connection_generation == lookup->status_generation && owner_bound(entry);
+}
+static void find_source_entry(SourceLookup *lookup, const OwnedChain *chain, const StrongOwner *mount, const StrongOwner *database) {
+    for (unsigned i = 0; i < kSlots; ++i) {
+        Entry *entry = &sources.entries[i];
+        if (!entry->sample.owner_epoch) {
+            if (!lookup->empty) lookup->empty = entry;
+            continue;
+        }
+        if (!entry_matches_chain(entry, chain, mount, database)) continue;
+        if (entry->connection_generation) lookup->was_observed = true;
+        if (entry->status_connection_generation) lookup->status_was_observed = true;
+        if (source_entry_current(entry, lookup)) lookup->entry = entry;
+    }
+}
+static bool source_generation_unavailable(const SourceLookup *lookup) {
+    return (!lookup->observed_generation && lookup->was_observed) || (!lookup->status_generation && lookup->status_was_observed);
+}
+static bool source_registry_full(const SourceLookup *lookup) {
+    return !lookup->binding || (!lookup->entry && (!lookup->empty || sources.next_epoch == UINT64_MAX)) ||
+           sources.next_revision == UINT64_MAX;
+}
+static void source_candidate_init(Entry *candidate, const SourceLookup *lookup, const OwnedChain *chain,
+                                  const StrongOwner *mount, const StrongOwner *database) {
+    if (lookup->entry) return;
+    /* Genuine weak construction, with no persistent strong retention. */
+    az_native_weak_copy(&candidate->mount, mount);
+    az_native_weak_copy(&candidate->database, database);
+    candidate->mount_address = chain->mount_address;
+    candidate->database_address = chain->database_address;
+    candidate->connection = chain->connection;
+    candidate->connection_generation = lookup->observed_generation;
+    candidate->status_connection_generation = lookup->status_generation;
+}
+static struct azsdk_source_sample source_sample_init(const SourceLookup *lookup, uint16_t media) {
+    struct azsdk_source_sample sample = {0};
+    sample.struct_size = sizeof sample;
+    sample.flags = AZS_OWNER_OBSERVED | AZS_CURRENT | AZS_HISTORY_INCOMPLETE;
+    sample.owner_epoch = lookup->entry ? lookup->entry->sample.owner_epoch : sources.next_epoch + 1;
+    sample.revision = sources.next_revision + 1;
+    sample.observed_ns = now_ns();
+    sample.native_media_id = media;
+    sample.physical_status = AZS_PHYSICAL_DISABLED;
+    if (bit(sources.ambiguous_media, media)) sample.flags |= AZS_MEDIA_AMBIGUOUS;
+    return sample;
+}
+static bool source_chain_unchanged(const OwnedChain *current, const OwnedChain *prior,
+                                   const StrongOwner *mount, const StrongOwner *database) {
+    return current->mount_address == prior->mount_address && current->database_address == prior->database_address &&
+           current->connection == prior->connection && current->media == prior->media &&
+           current->mount->control == mount->control && current->database->control == database->control;
+}
+static bool source_capture_current(uintptr_t server, const Build *build, const OwnedChain *chain,
+                                   const StrongOwner *mount, const StrongOwner *database) {
+    OwnedChain current = {0};
+    return worker_scope(server, build) && owned_chain(server, build, &current) &&
+           source_chain_unchanged(&current, chain, mount, database) && atomic_load_explicit(&sources.enabled, memory_order_acquire);
+}
+static bool source_receipts_current(const OwnedChain *chain, const SourceLookup *lookup) {
+    return connection_generation(chain->connection) == lookup->observed_generation &&
+           az_connection_status_generation(&sources.connection_epochs, (const void *) chain->connection) == lookup->status_generation;
+}
+static void source_publish(SourceLookup *lookup, Entry *candidate, struct azsdk_source_sample *sample, uintptr_t server) {
+    uint16_t media = sample->native_media_id;
+    if (!lookup->entry) {
+        if (bit(sources.seen_media, media)) set_bit(sources.ambiguous_media, media);
+        set_bit(sources.seen_media, media);
+        candidate->sample = *sample;
+        lookup->entry = lookup->empty;
+        entry_drop(lookup->entry);
+        *lookup->entry = *candidate;
+        *candidate = (Entry) {0};
+        sources.next_epoch = sample->owner_epoch;
+    }
+    if (bit(sources.ambiguous_media, media)) sample->flags |= AZS_MEDIA_AMBIGUOUS;
+    lookup->entry->sample = *sample;
+    sources.next_revision = sample->revision;
+    lookup->binding->server = server;
+    lookup->binding->epoch = sample->owner_epoch;
+    retire_unused();
+}
+static int source_lookup_admit(SourceLookup *lookup, uintptr_t server, const OwnedChain *chain,
+                               const StrongOwner *mount, const StrongOwner *database) {
+    lookup->observed_generation = connection_generation(chain->connection);
+    lookup->status_generation = az_connection_status_generation(&sources.connection_epochs, (const void *) chain->connection);
+    lookup->binding = source_binding(server);
+    find_source_entry(lookup, chain, mount, database);
+    /* Temporary receipt refusal cannot downgrade or retire a known incarnation. */
+    if (source_generation_unavailable(lookup)) return AZS_STALE;
+    if (source_registry_full(lookup)) {
+        /* An unrecorded valid owner must never become a later unique media match. */
+        set_bit(sources.seen_media, chain->media);
+        set_bit(sources.ambiguous_media, chain->media);
+        retire_server(server);
+        return AZS_LIMIT;
+    }
+    return AZS_OK;
+}
+static int observe_pinned_source(uintptr_t server, const Build *build, const SqlProfile *sql,
+#if defined(__linux__)
+                                 const MetadataOps *ops,
+#endif
+                                 const OwnedChain *chain, const StrongOwner *mount, const StrongOwner *database,
+                                 void *out, size_t out_size) {
+    SourceLookup lookup = {0};
+    int status = source_lookup_admit(&lookup, server, chain, mount, database);
+    if (status != AZS_OK) return status;
+    Entry candidate __attribute__((cleanup(entry_drop))) = {0};
+    source_candidate_init(&candidate, &lookup, chain, mount, database);
+    struct azsdk_source_sample sample = source_sample_init(&lookup, chain->media);
+    if (atomic_load_explicit(&sources.capture_policy, memory_order_relaxed) & AZS_CAPTURE_PHYSICAL_ON_LIBRARY_WORKER) {
+#if defined(__linux__)
+        sample.physical_status = capture_physical(chain->connection, sql, ops, &sample, NULL);
+#else
+        (void) sql;
+        sample.physical_status = AZS_PHYSICAL_PROFILE;
+#endif
+    }
+    /* Native callbacks may change the actual holders. Recheck before any publication. */
+    if (!source_capture_current(server, build, chain, mount, database)) {
+        retire_server(server);
+        return AZS_STALE;
+    }
+    if (!source_receipts_current(chain, &lookup)) return AZS_STALE;
+    source_publish(&lookup, &candidate, &sample, server);
+    copy_output(out, out_size, &sample);
+    return AZS_OK;
+}
 static int observe(uintptr_t server, const Build *build, const SqlProfile *sql,
 #if defined(__linux__)
                    const MetadataOps *ops,
 #endif
                    void *out, size_t out_size) {
-    if (!worker_scope(server, &((*build)))) return AZS_GUARD;
+    if (!worker_scope(server, build)) return AZS_GUARD;
     OwnedChain chain = {0};
-    bool supported = owned_chain(server, &((*build)), &(chain));
-    /* Stable local pins survive capture reentrancy; the holders themselves are
-     * freshly resolved below, never retained across a native callback. Actual
-     * complete-receiver lifetime and serialization remain caller preconditions. */
+    bool supported = owned_chain(server, build, &chain);
+    /* Stable pins survive capture reentrancy; actual holders are resolved again below. */
     StrongOwner mount __attribute__((cleanup(az_native_owner_reset))) = {0};
     StrongOwner database __attribute__((cleanup(az_native_owner_reset))) = {0};
     if (supported) {
-        az_native_owner_copy(&mount, &(*chain.mount));
-        az_native_owner_copy(&database, &(*chain.database));
+        az_native_owner_copy(&mount, chain.mount);
+        az_native_owner_copy(&database, chain.database);
     }
-    AZ_MUTEX_GUARD(lock, source_state().registry_mutex, true);
+    AZ_MUTEX_GUARD(lock, sources.registry_mutex, true);
     if (!lock.held) return AZS_BUSY;
-    if (!atomic_load_explicit(&(source_state().enabled), memory_order_acquire)) return AZS_UNSUPPORTED;
+    if (!atomic_load_explicit(&sources.enabled, memory_order_acquire)) return AZS_UNSUPPORTED;
     if (!supported) {
         retire_server(server);
         return AZS_GUARD;
     }
-    __auto_type observed_generation = connection_generation(chain.connection);
-    __auto_type status_generation = az_connection_status_generation(&source_state().connection_epochs,
-                                                                    ((const void *) (chain.connection)));
-    Binding *binding = NULL;
-    {
-        for (unsigned range_index_5 = 0; range_index_5 < sizeof(source_state().bindings) / sizeof(source_state().bindings)[0]; ++range_index_5) {
-            __auto_type b = &(source_state().bindings[range_index_5]);
-            if (b->server == server) {
-                binding = b;
-                break;
-            }
-        }
-    }
-    if (!binding) {
-        for (unsigned range_index_6 = 0; range_index_6 < sizeof(source_state().bindings) / sizeof(source_state().bindings)[0]; ++range_index_6) {
-            __auto_type b = &(source_state().bindings[range_index_6]);
-            if (!b->server) {
-                binding = b;
-                break;
-            }
-        }
-    }
-    Entry *entry = NULL, *empty = NULL;
-    bool was_observed = false, status_was_observed = false;
-    {
-        for (unsigned range_index_7 = 0; range_index_7 < sizeof(source_state().entries) / sizeof(source_state().entries)[0]; ++range_index_7) {
-            __auto_type e = &(source_state().entries[range_index_7]);
-
-            if (!e->sample.owner_epoch) {
-                if (!empty) empty = e;
-                continue;
-            }
-            if (e->mount_address != chain.mount_address ||
-                e->database_address != chain.database_address || e->connection != chain.connection ||
-                e->sample.native_media_id != chain.media) continue;
-            if (!same_owner(&(e->mount), &(mount)) || !same_owner(&(e->database), &(database))) continue;
-            if (e->connection_generation) was_observed = true;
-            if (e->status_connection_generation) status_was_observed = true;
-            if (!entry && e->connection_generation == observed_generation &&
-                e->status_connection_generation == status_generation && owner_bound(e)) entry = e;
-        }
-    }
-    if ((!observed_generation && was_observed) || (!status_generation && status_was_observed)) {
-        /* Unavailability cannot downgrade a known incarnation or permanently
-         * retire its key. It may be unrelated active lifecycle work. */
-        return AZS_STALE;
-    }
-    if (!binding || (!entry && (!empty || source_state().next_epoch == UINT64_MAX)) || source_state().next_revision == UINT64_MAX) {
-        /* A valid but unrecorded owner must never become a later 'unique' media match. */
-        set_bit(source_state().seen_media, chain.media);
-        set_bit(source_state().ambiguous_media, chain.media);
-        retire_server(server);
-        return AZS_LIMIT;
-    }
-    Entry candidate __attribute__((cleanup(entry_drop))) = {0};
-    if (!entry) {
-        az_native_weak_copy(&candidate.mount, &(mount)); /* Genuine weak construction, no persistent strong retention. */
-        az_native_weak_copy(&candidate.database, &(database));
-        candidate.mount_address = chain.mount_address;
-        candidate.database_address = chain.database_address;
-        candidate.connection = chain.connection;
-        candidate.connection_generation = observed_generation;
-        candidate.status_connection_generation = status_generation;
-    }
-    struct azsdk_source_sample sample = {0};
-    sample.struct_size = sizeof sample;
-    sample.flags = AZS_OWNER_OBSERVED | AZS_CURRENT | AZS_HISTORY_INCOMPLETE;
-    sample.owner_epoch = entry ? entry->sample.owner_epoch : source_state().next_epoch + 1;
-    sample.revision = source_state().next_revision + 1;
-    sample.observed_ns = now_ns();
-    sample.native_media_id = chain.media;
-    sample.physical_status = AZS_PHYSICAL_DISABLED;
-    if (bit(source_state().ambiguous_media, chain.media)) sample.flags |= AZS_MEDIA_AMBIGUOUS;
-    if (atomic_load_explicit(&(source_state().capture_policy), memory_order_relaxed) & AZS_CAPTURE_PHYSICAL_ON_LIBRARY_WORKER) {
+    return observe_pinned_source(server, build, sql,
 #if defined(__linux__)
-        sample.physical_status = capture_physical(chain.connection, sql, ops, &(sample), NULL);
-#else
-        (void) (*sql);
-        sample.physical_status = AZS_PHYSICAL_PROFILE;
+                                 ops,
 #endif
-    }
-    /* Physical capture can execute native callbacks. Re-resolve the actual
-     * holders after it, compare against the stable pins, and preserve the
-     * original incarnation stamp instead of adopting the latest return stamp.
-     * Registry identity/binding/sample publication has not occurred yet. */
-    OwnedChain current = {0};
-    if (!worker_scope(server, &((*build))) || !owned_chain(server, &((*build)), &(current)) ||
-        current.mount_address != chain.mount_address || current.database_address != chain.database_address ||
-        current.connection != chain.connection || current.media != chain.media ||
-        (current.mount->control != mount.control) || (mount.control != current.mount->control) ||
-        (current.database->control != database.control) || (database.control != current.database->control) ||
-        !atomic_load_explicit(&(source_state().enabled), memory_order_acquire)) {
-        retire_server(server);
-        return AZS_STALE;
-    }
-    /* A receipt-only refusal is transient/unknown, not retirement evidence.
-     * Actual close/reopen can never make the old positive stamp current again;
-     * live() continues to reject it without discarding another source's key. */
-    if (connection_generation(chain.connection) != observed_generation ||
-        az_connection_status_generation(&source_state().connection_epochs, ((const void *) (chain.connection))) !=
-            status_generation) return AZS_STALE;
-    if (!entry) {
-        if (bit(source_state().seen_media, chain.media)) set_bit(source_state().ambiguous_media, chain.media);
-        set_bit(source_state().seen_media, chain.media);
-        candidate.sample = sample;
-        entry = empty;
-        entry_drop(entry);
-        *entry = candidate;
-        candidate = (Entry) {0};
-        source_state().next_epoch = sample.owner_epoch;
-    }
-    if (bit(source_state().ambiguous_media, chain.media)) sample.flags |= AZS_MEDIA_AMBIGUOUS;
-    entry->sample = sample;
-    source_state().next_revision = sample.revision;
-    binding->server = server;
-    binding->epoch = sample.owner_epoch;
-    retire_unused();
-    copy_output(out, out_size, &(sample));
-    return AZS_OK;
+                                 &chain, &mount, &database, out, out_size);
 }
 
 
@@ -759,35 +834,35 @@ const Entry *cache_source_entry(uint64_t epoch) {
     }
     return NULL;
 }
-static bool cache_source_is(const SourceBorrow *source, const CachePins *pins, bool for_status) {
-    bool bound = false;
-    {
-        for (unsigned range_index_9 = 0; range_index_9 < sizeof(source_state().bindings) / sizeof(source_state().bindings)[0]; ++range_index_9) {
-            __auto_type binding = &(source_state().bindings[range_index_9]);
-            if (binding->server == ((uintptr_t) (source->server)) &&
-                binding->epoch == source->source_epoch) {
-                bound = true;
-                break;
-            }
-        }
+static bool cache_source_bound(const SourceBorrow *source) {
+    for (unsigned i = 0; i < kSlots; ++i) {
+        const Binding *binding = &sources.bindings[i];
+        if (binding->server == (uintptr_t) source->server && binding->epoch == source->source_epoch) return true;
     }
-    const Entry *entry = cache_source_entry(source->source_epoch);
-    if (!bound || !entry || (for_status ? !status_live(entry) : (!entry->connection_generation || !live(entry))) ||
-        !pins->mount.object || !pins->database.object ||
-        entry->mount_address != ((uintptr_t) (pins->mount.object)) ||
-        entry->database_address != ((uintptr_t) (pins->database.object)) ||
-        !same_owner(&(entry->mount), &(pins->mount)) || !same_owner(&(entry->database), &(pins->database))) return false;
-    /* Matching control blocks do not freeze the DB's mutable source tuple.
-     * Read only the native prefixes of these actual callback-owned pins, after
-     * exact owner/alias validation, and compare the tuple used by observe().
-     * No connection is followed and no epoch is renewed by this check. */
-    __auto_type mount = ((uintptr_t) (pins->mount.object));
-    __auto_type database = ((uintptr_t) (pins->database.object));
+    return false;
+}
+static bool cache_source_pins_match(const Entry *entry, const CachePins *pins) {
+    return pins->mount.object && pins->database.object && entry->mount_address == (uintptr_t) pins->mount.object &&
+           entry->database_address == (uintptr_t) pins->database.object && same_owner(&entry->mount, &pins->mount) &&
+           same_owner(&entry->database, &pins->database);
+}
+static bool cache_source_tuple_matches(const Entry *entry, const CachePins *pins) {
+    /* Read the mutable tuple only after exact owner/alias validation. A control
+     * block match alone cannot freeze the native database fields. */
+    uintptr_t mount = (uintptr_t) pins->mount.object, database = (uintptr_t) pins->database.object;
     return entry->connection == load(uintptr_t, database + 0x38) &&
            entry->sample.native_media_id == load(uint16_t, database + 8) &&
            entry->sample.native_media_id == load(uint16_t, mount + 8) &&
            connection_generation(entry->connection) == entry->connection_generation;
 }
+static bool cache_source_is(const SourceBorrow *source, const CachePins *pins, bool for_status) {
+    bool bound = cache_source_bound(source);
+    const Entry *entry = cache_source_entry(source->source_epoch);
+    if (!bound || !entry || (for_status ? !status_live(entry) : (!entry->connection_generation || !live(entry))) ||
+        !cache_source_pins_match(entry, pins)) return false;
+    return cache_source_tuple_matches(entry, pins);
+}
+
 static bool cache_binding_retained(const CacheBinding *binding, uint64_t generation) {
     const Entry *entry = cache_source_entry(binding->source_epoch);
     return binding->birth_epoch && binding->generation == generation && entry &&
@@ -808,15 +883,19 @@ static bool cache_worker_is(const SourceBorrow *source, const Build *profile) {
            (int) (source->build) == atomic_load_explicit(&(s->bound_build), memory_order_acquire) && source->server &&
            worker_scope(((uintptr_t) (source->server)), &((*profile)));
 }
+static bool cache_build_enabled(const SourceBorrow *source) {
+    return atomic_load_explicit(&sources.enabled, memory_order_acquire) && source->build >= 1 && source->build <= 2 &&
+           (int) source->build == atomic_load_explicit(&sources.bound_build, memory_order_acquire);
+}
+static bool cache_source_borrow_valid(const SourceBorrow *source, const Build *profile, const StrongOwner *collector) {
+    if (!source->source_epoch || !source->mount || !source->database || !collector || !cache_worker_is(source, profile)) return false;
+    /* These are actual callback-owned borrows, never arbitrary holder addresses. */
+    return source->mount->object && source->database->object && collector->object;
+}
 static int cache_prepare_source(const SourceBorrow *source, const Build *profile, const StrongOwner *collector, CachePins *pins, uint64_t *generation) {
     __auto_type s = &(source_state());
-    if (!atomic_load_explicit(&(s->enabled), memory_order_acquire) || source->build < 1 || source->build > 2 ||
-        (int) (source->build) != atomic_load_explicit(&(s->bound_build), memory_order_acquire)) return AZS_UNSUPPORTED;
-    if (!source->source_epoch || !source->mount || !source->database || !collector ||
-        !cache_worker_is(source, &((*profile)))) return AZS_GUARD;
-    /* These pointers are explicitly owned borrows from the current callback;
-     * canonical-address/RTTI tests cannot make arbitrary shared_ptr memory safe. */
-    if (!source->mount->object || !source->database->object || !collector->object || !cache_stamp(generation)) return AZS_GUARD;
+    if (!cache_build_enabled(source)) return AZS_UNSUPPORTED;
+    if (!cache_source_borrow_valid(source, profile, collector) || !cache_stamp(generation)) return AZS_GUARD;
     az_native_owner_copy(&pins->mount, &(*source->mount));
     az_native_owner_copy(&pins->database, &(*source->database));
     az_native_owner_copy(&pins->collector, collector);
@@ -901,6 +980,62 @@ static void cache_poison_scopes(CacheBirthScope *except) {
     for (__auto_type scope = cache_birth_scope; scope; scope = scope->parent)
         if (scope != except) scope->poisoned = true;
 }
+static bool cache_creator_pin(const BirthBorrow *borrow, const CachePins *pins, StrongOwner *creator) {
+    if (!borrow->creator_database || !borrow->creator_database->object || !borrow->native_result ||
+        pins->collector.object != borrow->receiver_collector) return false;
+    az_native_owner_copy(creator, borrow->creator_database);
+    return creator->object == pins->database.object && creator->control == pins->database.control;
+}
+static bool cache_birth_holders_unchanged(const BirthBorrow *borrow, const CachePins *pins, const StrongOwner *creator) {
+    return cache_borrow_source_unchanged(&borrow->source, pins) && borrow->collector->object &&
+           borrow->collector->object == pins->collector.object && borrow->collector->control == pins->collector.control &&
+           borrow->creator_database->object == creator->object && borrow->creator_database->control == creator->control &&
+           borrow->native_result->object;
+}
+static bool cache_birth_return_valid(const BirthBorrow *borrow, const Build *profile, const CacheBirthScope *construction,
+                                     const CachePins *pins, const StrongOwner *creator) {
+    return construction->completed && !construction->poisoned && cache_stamp_is(construction->generation) &&
+           cache_worker_is(&borrow->source, profile) && cache_birth_holders_unchanged(borrow, pins, creator);
+}
+static int cache_birth_slot(const CachePins *pins, uint64_t generation, CacheBinding **out) {
+    SourceState *s = &sources;
+    for (unsigned i = 0; i < s->cache_limit; ++i) {
+        CacheBinding *binding = &s->cache_bindings[i];
+        if (binding->birth_epoch && same_owner(&binding->cache, &pins->cache)) return AZS_STALE;
+        if (!*out && !cache_binding_retained(binding, generation)) *out = binding;
+    }
+    return !*out || s->next_cache_birth == UINT64_MAX ? AZS_LIMIT : AZS_OK;
+}
+static int cache_birth_publish(const BirthBorrow *borrow, const CachePins *pins, const CacheBirthScope *construction, Observation *out) {
+    uint64_t generation = construction->generation;
+    SourceState *s = &sources;
+    AZ_MUTEX_GUARD(lock, s->registry_mutex, true);
+    if (!lock.held) return AZS_BUSY;
+    if (!cache_stamp_is(generation) || !cache_source_is(&borrow->source, pins, false)) return AZS_STALE;
+    CacheBinding *slot = NULL;
+    int status = cache_birth_slot(pins, generation, &slot);
+    if (status != AZS_OK) return status;
+    CacheBinding candidate __attribute__((cleanup(cache_binding_drop))) = {0};
+    az_native_weak_copy(&candidate.mount, &pins->mount);
+    az_native_weak_copy(&candidate.database, &pins->database);
+    az_native_weak_copy(&candidate.collector, &pins->collector);
+    az_native_weak_copy(&candidate.cache, &pins->cache);
+    candidate.source_epoch = borrow->source.source_epoch;
+    candidate.generation = generation;
+    candidate.birth_epoch = s->next_cache_birth + 1;
+    candidate.factory_kind = construction->factory_kind;
+    if (!cache_stamp_is(generation) || !cache_source_is(&borrow->source, pins, false)) return AZS_STALE;
+    cache_binding_drop(slot);
+    *slot = candidate;
+    candidate = (CacheBinding) {0};
+    (void) candidate; /* The cleanup guard no longer owns the transferred weak references. */
+    s->next_cache_birth = slot->birth_epoch;
+    if (out) {
+        azcb_observation_drop(out);
+        *out = cache_observation(slot);
+    }
+    return AZS_OK;
+}
 static int cache_birth_impl(const BirthBorrow *borrow, const Build *profile, Forward original, Observation *out) {
     if (!original.call) return AZS_INVALID;
     CachePins pins __attribute__((cleanup(cache_pins_drop))) = {0};
@@ -908,15 +1043,7 @@ static int cache_birth_impl(const BirthBorrow *borrow, const Build *profile, For
     uint64_t before = 0;
     int status = AZS_GUARD;
     status = cache_prepare_source(&(borrow->source), &((*profile)), borrow->collector, &(pins), &(before));
-    if (status == AZS_OK) {
-        if (!borrow->creator_database || !borrow->creator_database->object || !borrow->native_result ||
-            pins.collector.object != borrow->receiver_collector) status = AZS_GUARD;
-        else {
-            az_native_owner_copy(&creator, &(*borrow->creator_database));
-            if (creator.object != pins.database.object || (creator.control != pins.database.control) ||
-                (pins.database.control != creator.control)) status = AZS_GUARD;
-        }
-    }
+    if (status == AZS_OK && !cache_creator_pin(borrow, &pins, &creator)) status = AZS_GUARD;
 
     /* The original constructs the real native result at its original sret
      * destination. No reinterpretation as a plain pointer-return function. */
@@ -924,128 +1051,82 @@ static int cache_birth_impl(const BirthBorrow *borrow, const Build *profile, For
     birth_scope_init(&construction, status == AZS_OK, &((*borrow)));
     original.call(original.context);
     if (status != AZS_OK) return status;
-    {
+    /* Preserve the final-write stamp through factory cleanup and publication. */
+    if (!cache_birth_return_valid(borrow, profile, &construction, &pins, &creator)) return AZS_STALE;
+    az_native_owner_copy(&pins.cache, borrow->native_result);
+    if (pins.cache.object != construction.raw_result) return AZS_STALE;
+    return cache_birth_publish(borrow, &pins, &construction, out);
+}
 
-        __auto_type generation = construction.generation;
-        /* Preserve the actual final-write stamp through factory cleanup and
-         * native shared-owner publication. Never adopt the latest return stamp. */
-        if (!construction.completed || construction.poisoned || !cache_stamp_is(generation) ||
-            !cache_worker_is(&(borrow->source), &((*profile))) ||
-            !cache_borrow_source_unchanged(&(borrow->source), &(pins)) ||
-            !borrow->collector->object || borrow->collector->object != pins.collector.object ||
-            (borrow->collector->control != pins.collector.control) || (pins.collector.control != borrow->collector->control) ||
-            borrow->creator_database->object != creator.object ||
-            (borrow->creator_database->control != creator.control) || (creator.control != borrow->creator_database->control) ||
-            !borrow->native_result->object) return AZS_STALE;
-        az_native_owner_copy(&pins.cache, &(*borrow->native_result)); // actual successfully constructed native owner
-        if (pins.cache.object != construction.raw_result) return AZS_STALE;
-        __auto_type s = &(source_state());
-        AZ_MUTEX_GUARD(lock, s->registry_mutex, true);
-        if (!lock.held) return AZS_BUSY;
-        if (!cache_stamp_is(generation) || !cache_source_is(&(borrow->source), &(pins), false)) return AZS_STALE;
-        CacheBinding *slot = NULL;
-        for (unsigned i = 0; i < s->cache_limit; ++i) {
-            __auto_type binding = &(s->cache_bindings[i]);
-            if (binding->birth_epoch && same_owner(&(binding->cache), &(pins.cache))) return AZS_STALE;
-            if (!slot && !cache_binding_retained(binding, generation)) slot = binding;
-        }
-        if (!slot || s->next_cache_birth == UINT64_MAX) return AZS_LIMIT;
-        CacheBinding candidate __attribute__((cleanup(cache_binding_drop))) = {0};
-        az_native_weak_copy(&candidate.mount, &(pins.mount));
-        az_native_weak_copy(&candidate.database, &(pins.database));
-        az_native_weak_copy(&candidate.collector, &(pins.collector));
-        az_native_weak_copy(&candidate.cache, &(pins.cache));
-        candidate.source_epoch = borrow->source.source_epoch;
-        candidate.generation = generation;
-        candidate.birth_epoch = s->next_cache_birth + 1;
-        candidate.factory_kind = construction.factory_kind;
-        if (!cache_stamp_is(generation) || !cache_source_is(&(borrow->source), &(pins), false)) return AZS_STALE;
-        cache_binding_drop(slot);
-        *slot = candidate;
-        candidate = (CacheBinding) {0}; // reclaim stale weak controls only in this owned worker
-        s->next_cache_birth = slot->birth_epoch;
-        if (out) {
-            azcb_observation_drop(out);
-            *out = cache_observation(slot);
-        }
+static bool cache_binding_matches_pins(const CacheBinding *binding, const CachePins *pins, uint64_t generation, uint64_t epoch) {
+    return cache_binding_current(binding, generation) && binding->source_epoch == epoch &&
+           cache_owner_is(&binding->cache, &pins->cache) && cache_owner_is(&binding->collector, &pins->collector) &&
+           cache_owner_is(&binding->mount, &pins->mount) && cache_owner_is(&binding->database, &pins->database);
+}
+static bool cache_query_input_valid(const QueryBorrow *borrow, CopyRowScalar copy) {
+    return borrow->selected_cache && borrow->selected_cache->object && copy.copy && borrow->selected_cache->object == borrow->receiver_cache;
+}
+static int cache_query_select(const QueryBorrow *borrow, CachePins *pins, uint64_t generation, CopyRowScalar copy, Observation *candidate) {
+    if (!cache_query_input_valid(borrow, copy)) return AZS_GUARD;
+    az_native_owner_copy(&pins->cache, borrow->selected_cache);
+    AZ_MUTEX_GUARD(lock, sources.registry_mutex, true);
+    if (!lock.held) return AZS_BUSY;
+    if (!cache_stamp_is(generation) || !cache_source_is(&borrow->source, pins, false)) return AZS_STALE;
+    for (unsigned i = 0; i < kSlots; ++i) {
+        const CacheBinding *binding = &sources.cache_bindings[i];
+        if (!cache_binding_matches_pins(binding, pins, generation, borrow->source.source_epoch)) continue;
+        azcb_observation_drop(candidate);
+        *candidate = cache_observation(binding);
         return AZS_OK;
     }
+    return AZS_UNKNOWN;
+}
+static bool cache_query_binding_retained(const CachePins *pins, uint64_t generation, uint64_t birth_epoch) {
+    for (unsigned i = 0; i < kSlots; ++i) {
+        const CacheBinding *binding = &sources.cache_bindings[i];
+        if (binding->birth_epoch == birth_epoch && cache_binding_current(binding, generation) &&
+            cache_owner_is(&binding->cache, &pins->cache) && cache_owner_is(&binding->collector, &pins->collector)) return true;
+    }
+    return false;
+}
+static bool cache_query_capture_current(const QueryBorrow *borrow, const CachePins *pins, uint64_t generation,
+                                        const SelectionInvocation *selection) {
+    /* Check the mutation stamp before rereading holders after the copier callback. */
+    return azsel_ready(selection) && cache_stamp_is(generation) && cache_query_borrows_unchanged(borrow, pins) &&
+           cache_source_is(&borrow->source, pins, false);
+}
+static int cache_query_publish(const QueryBorrow *borrow, const CachePins *pins, uint64_t generation,
+                               const SelectionInvocation *selection, Observation *candidate, uint32_t value, Observation *out) {
+    AZ_MUTEX_GUARD(lock, sources.registry_mutex, true);
+    if (!lock.held) return AZS_BUSY;
+    if (!cache_query_capture_current(borrow, pins, generation, selection)) return AZS_STALE;
+    bool retained = cache_query_binding_retained(pins, generation, candidate->birth_epoch);
+    if (!azsel_ready(selection) || !retained || !cache_source_is(&borrow->source, pins, false)) return AZS_STALE;
+    candidate->row_value = value;
+    if (out) azcb_observation_copy(out, candidate);
+    return AZS_OK;
+}
+static int cache_query_capture(const QueryBorrow *borrow, const Build *profile, const CachePins *pins, uint64_t generation,
+                               const SelectionInvocation *selection, Observation *candidate, CopyRowScalar copy, Observation *out) {
+    if (!azsel_ready(selection) || !cache_stamp_is(generation) || !cache_worker_is(&borrow->source, profile) ||
+        !cache_query_borrows_unchanged(borrow, pins)) return AZS_STALE;
+    uint32_t value = 0;
+    if (!copy.copy(copy.context, &value)) return AZS_GUARD;
+    if (!azsel_ready(selection) || !cache_worker_is(&borrow->source, profile)) return AZS_GUARD;
+    return cache_query_publish(borrow, pins, generation, selection, candidate, value, out);
 }
 static int cache_query_impl(const QueryBorrow *borrow, const Build *profile, Forward original, CopyRowScalar copy, Observation *out) {
     if (!original.call) return AZS_INVALID;
     SelectionInvocation selection __attribute__((cleanup(azsel_invocation_drop)));
-    azsel_invocation_init(&selection, &source_state().cache_selection);
+    azsel_invocation_init(&selection, &sources.cache_selection);
     CachePins pins __attribute__((cleanup(cache_pins_drop))) = {0};
     Observation candidate __attribute__((cleanup(azcb_observation_drop))) = {0};
     uint64_t generation = 0;
-    int status = AZS_GUARD;
-    status = azsel_ready(&selection) ? cache_prepare_source(&(borrow->source), &((*profile)), borrow->collector, &(pins), &(generation)) : AZS_GUARD;
-    if (status == AZS_OK) {
-        if (!borrow->selected_cache || !borrow->selected_cache->object || !copy.copy ||
-            borrow->selected_cache->object != borrow->receiver_cache) status = AZS_GUARD;
-        else {
-            az_native_owner_copy(&pins.cache, &(*borrow->selected_cache));
-            __auto_type s = &(source_state());
-            AZ_MUTEX_GUARD(lock, s->registry_mutex, true);
-            if (!lock.held) status = AZS_BUSY;
-            else {
-                status = AZS_UNKNOWN;
-                if (!cache_stamp_is(generation) || !cache_source_is(&(borrow->source), &(pins), false)) status = AZS_STALE;
-                else {
-                    for (unsigned range_index_10 = 0; range_index_10 < sizeof(s->cache_bindings) / sizeof(s->cache_bindings)[0]; ++range_index_10) {
-                        __auto_type binding = &(s->cache_bindings[range_index_10]);
-
-                        if (cache_binding_current(binding, generation) &&
-                            binding->source_epoch == borrow->source.source_epoch &&
-                            cache_owner_is(&(binding->cache), &(pins.cache)) &&
-                            cache_owner_is(&(binding->collector), &(pins.collector)) &&
-                            cache_owner_is(&(binding->mount), &(pins.mount)) &&
-                            cache_owner_is(&(binding->database), &(pins.database))) {
-                            azcb_observation_drop(&candidate);
-                            candidate = cache_observation(binding);
-                            status = AZS_OK;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    original.call(original.context); // preserve destination, ownership and native exception
+    int status = azsel_ready(&selection) ? cache_prepare_source(&borrow->source, profile, borrow->collector, &pins, &generation) : AZS_GUARD;
+    if (status == AZS_OK) status = cache_query_select(borrow, &pins, generation, copy, &candidate);
+    original.call(original.context); /* Preserve the destination, ownership and native exception. */
     if (status != AZS_OK) return status;
-    {
-
-        if (!azsel_ready(&selection) || !cache_stamp_is(generation) || !cache_worker_is(&(borrow->source), &((*profile))) ||
-            !cache_query_borrows_unchanged(borrow, &(pins))) return AZS_STALE;
-        uint32_t value = 0;
-        if (!copy.copy(copy.context, &value)) return AZS_GUARD;
-        if (!azsel_ready(&selection) || !cache_worker_is(&(borrow->source), &((*profile)))) return AZS_GUARD;
-        __auto_type s = &(source_state());
-        AZ_MUTEX_GUARD(lock, s->registry_mutex, true);
-        if (!lock.held) return AZS_BUSY;
-        /* The scalar copier may reenter native work. Recheck every actual
-         * borrow and the pinned source tuple after it, before publication.
-         * Check the mutation stamp first, before any holder storage reread. */
-        if (!azsel_ready(&selection) || !cache_stamp_is(generation) || !cache_query_borrows_unchanged(borrow, &(pins)) ||
-            !cache_source_is(&(borrow->source), &(pins), false)) return AZS_STALE;
-        bool retained = false;
-        {
-            for (unsigned range_index_11 = 0; range_index_11 < sizeof(s->cache_bindings) / sizeof(s->cache_bindings)[0]; ++range_index_11) {
-                __auto_type binding = &(s->cache_bindings[range_index_11]);
-                if (binding->birth_epoch == candidate.birth_epoch &&
-                    cache_binding_current(binding, generation) &&
-                    cache_owner_is(&(binding->cache), &(pins.cache)) && cache_owner_is(&(binding->collector), &(pins.collector))) {
-                    retained = true;
-                    break;
-                }
-            }
-        }
-        if (!azsel_ready(&selection) || !retained || !cache_source_is(&(borrow->source), &(pins), false)) return AZS_STALE;
-        candidate.row_value = value;
-        if (out) azcb_observation_copy(out, &candidate);
-        return AZS_OK;
-    }
+    return cache_query_capture(borrow, profile, &pins, generation, &selection, &candidate, copy, out);
 }
 typedef struct CacheMutation CacheMutation;
 struct CacheMutation {
@@ -1106,14 +1187,27 @@ struct CacheLibraryScope {
 };
 static void library_scope_init(CacheLibraryScope *ctx, unsigned build, void *server, const Build *value);
 static void library_scope_drop(CacheLibraryScope *ctx);
+static bool library_message_supported(CacheLibraryScope *ctx, void *server) {
+    return ctx->depth <= kSlots && azcm_current(server, &ctx->message) &&
+           (ctx->message.kind == 0x2102 || ctx->message.kind == 0x2002 || ctx->message.kind == 0x3000);
+}
+static void library_source_bind(CacheLibraryScope *ctx, void *server) {
+    for (unsigned i = 0; i < kSlots; ++i) {
+        const Binding *binding = &sources.bindings[i];
+        if (binding->server != (uintptr_t) server) continue;
+        ctx->source.source_epoch = binding->epoch;
+        ctx->ready = cache_source_is(&ctx->source, &ctx->pins, false);
+        ctx->status_ready = cache_source_is(&ctx->source, &ctx->pins, true);
+        break;
+    }
+}
 static void library_scope_init(CacheLibraryScope *ctx, unsigned build, void *server, const Build *value) {
     (void) ctx;
     *ctx = (CacheLibraryScope) {.row_selection = 0, .ready = false, .status_ready = false, .row_valid = false, .parent = cache_library_scope, .source = make_source(server, build, &ctx->pins.mount, &ctx->pins.database), .profile = (*value)};
 
     ctx->depth = ctx->parent ? (ctx->parent->depth < kSlots ? ctx->parent->depth + 1 : kSlots + 1) : 1;
     cache_library_scope = ctx;
-    if (ctx->depth > kSlots || !azcm_current(server, &ctx->message) ||
-        (ctx->message.kind != 0x2102 && ctx->message.kind != 0x2002 && ctx->message.kind != 0x3000)) return;
+    if (!library_message_supported(ctx, server)) return;
     {
 
         if (!cache_worker_is(&(ctx->source), &(ctx->profile))) return;
@@ -1124,17 +1218,7 @@ static void library_scope_init(CacheLibraryScope *ctx, unsigned build, void *ser
         __auto_type s = &(source_state());
         AZ_MUTEX_GUARD(lock, s->registry_mutex, true);
         if (!lock.held) return;
-        {
-            for (unsigned range_index_12 = 0; range_index_12 < sizeof(s->bindings) / sizeof(s->bindings)[0]; ++range_index_12) {
-                __auto_type binding = &(s->bindings[range_index_12]);
-                if (binding->server == ((uintptr_t) (server))) {
-                    ctx->source.source_epoch = binding->epoch;
-                    ctx->ready = cache_source_is(&(ctx->source), &(ctx->pins), false);
-                    ctx->status_ready = cache_source_is(&(ctx->source), &(ctx->pins), true);
-                    break;
-                }
-            }
-        }
+        library_source_bind(ctx, server);
     }
 }
 static void library_scope_drop(CacheLibraryScope *ctx) {
@@ -1157,17 +1241,21 @@ struct CacheSelectionScope {
 };
 static void selection_scope_init(CacheSelectionScope *ctx, const struct azce_call *call);
 static void selection_scope_drop(CacheSelectionScope *ctx);
+static bool selection_call_matches(const CacheLibraryScope *library, const struct azce_call *call) {
+    return (library->message.kind == 0x2102 || library->message.kind == 0x2002) &&
+           (unsigned char) call->args[1] == library->message.selector && (uint32_t) call->args[2] == library->message.client &&
+           canonical(call->args[0]) && canonical(call->args[3]);
+}
+static bool selection_scope_admitted(const CacheSelectionScope *ctx, const struct azce_call *call) {
+    return ctx->library && ctx->library->ready && ctx->library->depth <= kSlots && selection_call_matches(ctx->library, call);
+}
 static void selection_scope_init(CacheSelectionScope *ctx, const struct azce_call *call) {
     (void) ctx;
     *ctx = (CacheSelectionScope) {.creator = NULL, .ready = false, .parent = cache_selection_scope, .library = cache_library_scope, .source = make_source(NULL, 0, &ctx->pins.mount, &ctx->pins.database)};
 
     cache_selection_scope = ctx;
     cache_poison_scopes(NULL); // a nested selection cannot preserve an older factory claim
-    if (!ctx->library || !ctx->library->ready || ctx->library->depth > kSlots ||
-        (ctx->library->message.kind != 0x2102 && ctx->library->message.kind != 0x2002) ||
-        ((unsigned char) (call->args[1])) != ctx->library->message.selector ||
-        ((uint32_t) (call->args[2])) != ctx->library->message.client ||
-        !canonical(call->args[0]) || !canonical(call->args[3])) return;
+    if (!selection_scope_admitted(ctx, call)) return;
     {
 
             /* These are the reviewed selection entry's live native receiver
@@ -1235,28 +1323,21 @@ static bool query_scope_mount(void *context, const void *candidate) {
         // This exact Mount already has a genuine, RTTI-checked source pin.
     return candidate == self->library->pins.mount.object;
 }
-static void query_scope_init(CacheQueryScope *ctx, const struct azce_call *call) {
-    (void) ctx;
-    *ctx = (CacheQueryScope) {.start = 0, .count = 0, .client = 0, .selector = 0, .ready = false, .native_owned = false, .adapter_active = false, .adapter_done = false, .poisoned = false, .published = false, .parent = cache_query_scope, .library = cache_library_scope, .source = make_source(NULL, 0, &ctx->pins.mount, &ctx->pins.database)};
-
-    azsel_invocation_init(&ctx->selection, &source_state().cache_selection);
-    ctx->depth = ctx->parent ? (ctx->parent->depth < kSlots ? ctx->parent->depth + 1 : kSlots + 1) : 1;
-    cache_query_scope = ctx;
-    for (__auto_type older = ctx->parent; older; older = older->parent)
-        if (older->adapter_active) older->poisoned = true;
-    if (ctx->library) ctx->library->row_valid = false;
-    if (!ctx->library || !ctx->library->ready || ctx->depth > kSlots || !azsel_ready(&ctx->selection) ||
-        ctx->library->message.kind != 0x3000 || ctx->library->message.fields[3] != 0 ||
-        ((unsigned char) (call->args[1])) != ctx->library->message.client ||
-        ((uint32_t) (call->args[2])) != ctx->library->message.selector ||
-        ((uint32_t) (call->args[3])) != ctx->library->message.fields[1] ||
-        ((uint32_t) (call->args[4])) != ctx->library->message.fields[2] ||
-        !canonical(call->args[0]) || !canonical(call->args[8])) return;
-    ctx->start = ((uint32_t) (call->args[3]));
-    ctx->count = ((uint32_t) (call->args[4]));
-    ctx->client = ctx->library->message.client;
-    ctx->selector = ctx->library->message.selector;
-    if (ctx->start > INT32_MAX || !ctx->count || ctx->count > 16) return;
+static bool query_call_matches(const CacheLibraryScope *library, const struct azce_call *call) {
+    return library->message.kind == 0x3000 && library->message.fields[3] == 0 &&
+           (unsigned char) call->args[1] == library->message.client && (uint32_t) call->args[2] == library->message.selector &&
+           (uint32_t) call->args[3] == library->message.fields[1] && (uint32_t) call->args[4] == library->message.fields[2] &&
+           canonical(call->args[0]) && canonical(call->args[8]);
+}
+static bool query_scope_admitted(const CacheQueryScope *ctx, const struct azce_call *call) {
+    return ctx->library && ctx->library->ready && ctx->depth <= kSlots && azsel_ready(&ctx->selection) &&
+           query_call_matches(ctx->library, call);
+}
+static void query_poison_older(CacheQueryScope *parent) {
+    for (; parent; parent = parent->parent)
+        if (parent->adapter_active) parent->poisoned = true;
+}
+static void query_scope_resolve(CacheQueryScope *ctx, const struct azce_call *call) {
     {
 
         ctx->native_owned = true; // actual reviewed QUERY entry's live receiver, on the owned library worker
@@ -1278,6 +1359,23 @@ static void query_scope_init(CacheQueryScope *ctx, const struct azce_call *call)
         AZ_MUTEX_GUARD(lock, s->registry_mutex, true);
         ctx->ready = lock.held && azsel_ready(&ctx->selection) && cache_source_is(&(ctx->source), &(ctx->pins), false);
     }
+}
+static void query_scope_init(CacheQueryScope *ctx, const struct azce_call *call) {
+    (void) ctx;
+    *ctx = (CacheQueryScope) {.start = 0, .count = 0, .client = 0, .selector = 0, .ready = false, .native_owned = false, .adapter_active = false, .adapter_done = false, .poisoned = false, .published = false, .parent = cache_query_scope, .library = cache_library_scope, .source = make_source(NULL, 0, &ctx->pins.mount, &ctx->pins.database)};
+
+    azsel_invocation_init(&ctx->selection, &source_state().cache_selection);
+    ctx->depth = ctx->parent ? (ctx->parent->depth < kSlots ? ctx->parent->depth + 1 : kSlots + 1) : 1;
+    cache_query_scope = ctx;
+    query_poison_older(ctx->parent);
+    if (ctx->library) ctx->library->row_valid = false;
+    if (!query_scope_admitted(ctx, call)) return;
+    ctx->start = ((uint32_t) (call->args[3]));
+    ctx->count = ((uint32_t) (call->args[4]));
+    ctx->client = ctx->library->message.client;
+    ctx->selector = ctx->library->message.selector;
+    if (ctx->start > INT32_MAX || !ctx->count || ctx->count > 16) return;
+    query_scope_resolve(ctx, call);
 }
 static void query_scope_drop(CacheQueryScope *ctx) {
     (void) ctx;
@@ -1312,13 +1410,24 @@ static void adapter_guard_drop(AdapterGuard *ctx) {
     if (!ctx->returned) ctx->scope->poisoned = true;
 }
 
+static bool query_adapter_scope_ready(const CacheQueryScope *scope) {
+    return scope && scope->ready && !scope->poisoned && !scope->adapter_active && !scope->adapter_done &&
+           scope->library == cache_library_scope && azsel_ready(&scope->selection);
+}
+static bool query_adapter_call_matches(const CacheQueryScope *scope, const struct azce_call *call) {
+    return canonical(call->args[0]) && canonical(call->args[3]) && canonical(call->args[8]) &&
+           (uint32_t) call->args[1] == scope->start && (uint32_t) call->args[2] == scope->count;
+}
+static void query_adapter_complete(CacheQueryScope *scope, const struct azce_call *call, int result, const Observation *row) {
+    unsigned family = call->kind == AZCE_KIND_GENERIC ? AZCB_PRIMARY_FACTORY : AZCB_STANDARD_FALLBACK_FACTORY;
+    if (result == AZS_OK && !scope->poisoned && azsel_ready(&scope->selection) && row->factory_kind == family) {
+        azcb_observation_copy(&scope->row, row);
+        scope->adapter_done = true;
+    } else scope->poisoned = true;
+}
 static void cache_forward_query_adapter(struct azce_call *call, Forward original) {
     __auto_type scope = cache_query_scope;
-    if (!scope || !scope->ready || scope->poisoned || scope->adapter_active || scope->adapter_done ||
-        scope->library != cache_library_scope || !azsel_ready(&scope->selection) ||
-        !canonical(call->args[0]) || !canonical(call->args[3]) || !canonical(call->args[8]) ||
-        ((uint32_t) (call->args[1])) != scope->start ||
-        ((uint32_t) (call->args[2])) != scope->count) {
+    if (!query_adapter_scope_ready(scope) || !query_adapter_call_matches(scope, call)) {
         if (scope) scope->poisoned = true;
         original.call(original.context);
         return;
@@ -1342,23 +1451,25 @@ static void cache_forward_query_adapter(struct azce_call *call, Forward original
     __auto_type result = cache_query_impl(&(borrow), &(scope->library->profile), original,
                                           (CopyRowScalar) {cache_copy_native_row, ((void *) (call->args[8]))}, &row);
     guard.returned = true;
-    const unsigned family = call->kind == AZCE_KIND_GENERIC ? AZCB_PRIMARY_FACTORY : AZCB_STANDARD_FALLBACK_FACTORY;
-    if (result == AZS_OK && !scope->poisoned && azsel_ready(&scope->selection) && row.factory_kind == family) {
-        azcb_observation_copy(&scope->row, &row);
-        scope->adapter_done = true;
-    } else scope->poisoned = true;
+    query_adapter_complete(scope, call, result, &row);
+}
+static bool cache_row_binding_matches(const CacheBinding *binding, const Evidence *row) {
+    return binding->birth_epoch == row->cache.birth_epoch && binding->source_epoch == row->cache.source_epoch &&
+           binding->generation == row->cache.layout_generation && cache_binding_current(binding, binding->generation) &&
+           binding->cache.control == row->cache.cache.control && binding->collector.control == row->cache.collector.control;
 }
 static bool cache_row_binding_current(const Evidence *row) {
     {
         for (unsigned range_index_13 = 0; range_index_13 < sizeof(source_state().cache_bindings) / sizeof(source_state().cache_bindings)[0]; ++range_index_13) {
             __auto_type binding = &(source_state().cache_bindings[range_index_13]);
-            if (binding->birth_epoch == row->cache.birth_epoch && binding->source_epoch == row->cache.source_epoch &&
-                binding->generation == row->cache.layout_generation && cache_binding_current(binding, binding->generation) &&
-                !(binding->cache.control != row->cache.cache.control) && !(row->cache.cache.control != binding->cache.control) &&
-                !(binding->collector.control != row->cache.collector.control) && !(row->cache.collector.control != binding->collector.control)) return true;
+            if (cache_row_binding_matches(binding, row)) return true;
         }
     }
     return false;
+}
+static bool query_return_ready(const CacheQueryScope *scope) {
+    return scope->ready && !scope->poisoned && scope->adapter_done && azsel_ready(&scope->selection) &&
+           scope->library == cache_library_scope && cache_stamp_is(scope->row.layout_generation);
 }
 static void cache_forward_query(struct azce_call *call, Forward original) {
     CacheQueryScope scope __attribute__((cleanup(query_scope_drop)));
@@ -1366,8 +1477,7 @@ static void cache_forward_query(struct azce_call *call, Forward original) {
     original.call(original.context);
     {
 
-        if (!scope.ready || scope.poisoned || !scope.adapter_done || !azsel_ready(&scope.selection) ||
-            scope.library != cache_library_scope || !cache_stamp_is(scope.row.layout_generation)) return;
+        if (!query_return_ready(&scope)) return;
         uint32_t value = 0;
         if (!azcrow_copy_owned_tag23(((const void *) (call->args[8])), &value) ||
             value != scope.row.row_value) return;
@@ -1411,7 +1521,6 @@ static void cache_forward_library_impl(unsigned build, void *server, const Build
     __auto_type packet_key = azcm_take_packet_key(server);
     if (joining.enabled) azjs_server(scope.status_ready ? packet_key : 0, scope.message.parameter,
                                      scope.status_ready ? scope.source.source_epoch : 0, 1);
-    packet_key = 0;
     original.call(original.context); // no SDK lock or observer catch across native work
 }
 static void cache_forward_library_route(unsigned build, void *server, const Build *profile, Forward original) {
@@ -1419,6 +1528,28 @@ static void cache_forward_library_route(unsigned build, void *server, const Buil
     // Always push a masking frame, including while a partial installation is
     // forwarding. An older reentrant source scope cannot authorize this call.
     cache_forward_library_impl(admitted ? build : 0, server, &((*profile)), original);
+}
+static bool cache_create_call_matches(const CacheSelectionScope *selected, const struct azce_call *call) {
+    return call->kind == AZCE_KIND_CREATE && selected && selected->ready && selected->library == cache_library_scope &&
+           cache_library_scope->ready && call->args[0] == (uintptr_t) selected->pins.collector.object &&
+           canonical(call->args[1]) && canonical(call->args[8]);
+}
+static void cache_forward_create(struct azce_call *call, Forward original) {
+    __auto_type selected = cache_selection_scope;
+    if (!cache_create_call_matches(selected, call)) {
+        original.call(original.context);
+        return;
+    }
+    BirthPins pins __attribute__((cleanup(azcp_pins_drop))) = {0};
+    azcp_pins_init(&pins, &selected->source, &selected->pins.collector, ((const void *) (call->args[0])), ((const void *) (call->args[1])));
+    __auto_type borrow = azcp_pins_borrow(&pins, ((const StrongOwner *) (call->args[8])));
+    if (!azcp_pins_ready(&pins) || borrow.receiver_creator != selected->creator) {
+        original.call(original.context);
+        return;
+    }
+    /* Only local owner holders survive the original. Its genuine X8 result is
+     * read by the existing birth helper after successful native construction. */
+    (void) cache_birth_impl(&(borrow), &(selected->library->profile), original, NULL);
 }
 static void cache_forward_entry_impl(struct azce_call *call, Forward original) {
     if (!call || !original.call) return;
@@ -1436,43 +1567,31 @@ static void cache_forward_entry_impl(struct azce_call *call, Forward original) {
         original.call(original.context);
         return;
     }
-    __auto_type selected = cache_selection_scope;
-    if (call->kind != AZCE_KIND_CREATE || !selected || !selected->ready ||
-        selected->library != cache_library_scope || !cache_library_scope->ready ||
-        call->args[0] != ((uintptr_t) (selected->pins.collector.object)) ||
-        !canonical(call->args[1]) || !canonical(call->args[8])) {
-        original.call(original.context);
-        return;
-    }
-    BirthPins pins __attribute__((cleanup(azcp_pins_drop))) = {0};
-    azcp_pins_init(&pins, &selected->source, &selected->pins.collector, ((const void *) (call->args[0])), ((const void *) (call->args[1])));
-    __auto_type borrow = azcp_pins_borrow(&pins, ((const StrongOwner *) (call->args[8])));
-    if (!azcp_pins_ready(&pins) || borrow.receiver_creator != selected->creator) {
-        original.call(original.context);
-        return;
-    }
-    /* Only local owner holders survive the original. Its genuine X8 result is
-     * read by the existing birth helper after successful native construction. */
-    (void) cache_birth_impl(&(borrow), &(selected->library->profile), original, NULL);
+    cache_forward_create(call, original);
 }
 
 
 
+static bool cache_evidence_scope_ready(const CacheLibraryScope *scope) {
+    return !cache_query_scope && scope && scope->ready && scope->row_valid && scope->message.kind == 0x3000 &&
+           cache_worker_is(&scope->source, &scope->profile);
+}
+static bool cache_evidence_current(CacheLibraryScope *scope, const SelectionInvocation *selection) {
+    return cache_source_is(&scope->source, &scope->pins, false) && cache_row_binding_current(&scope->row) &&
+           azsel_ready(selection) && cache_stamp_is(scope->row.cache.layout_generation);
+}
 bool azcq_current_owned(Evidence *out) {
     {
 
         __auto_type scope = cache_library_scope;
-        if (cache_query_scope || !scope || !scope->ready || !scope->row_valid || scope->message.kind != 0x3000 ||
-            !cache_worker_is(&(scope->source), &(scope->profile))) return false;
+        if (!cache_evidence_scope_ready(scope)) return false;
         SelectionInvocation selection __attribute__((cleanup(azsel_invocation_drop)));
         azsel_invocation_init(&selection, &source_state().cache_selection);
         if (!azsel_ready(&selection) || selection.revision != scope->row_selection ||
             !cache_stamp_is(scope->row.cache.layout_generation)) return false;
         __auto_type s = &(source_state());
         AZ_MUTEX_GUARD(lock, s->registry_mutex, true);
-        if (!lock.held || !cache_source_is(&(scope->source), &(scope->pins), false) ||
-            !cache_row_binding_current(&(scope->row)) || !azsel_ready(&selection) ||
-            !cache_stamp_is(scope->row.cache.layout_generation)) return false;
+        if (!lock.held || !cache_evidence_current(scope, &selection)) return false;
         azcq_evidence_copy(out, &scope->row);
         return true;
     }
@@ -1504,21 +1623,31 @@ static void factory_guard_drop(FactoryGuard *ctx) {
     if (!ctx->returned) ctx->frame->poisoned = true;
 }
 
+static bool cache_factory_scope_ready(const CacheBirthScope *frame) {
+    return frame && frame->eligible && !frame->poisoned && !frame->factory_active && !frame->completed;
+}
+static bool cache_factory_borrow_matches(const CacheBirthScope *frame, const FactoryBorrow *borrow) {
+    return borrow->receiver_creator == frame->creator && borrow->borrowed_pool == frame->pool && borrow->native_result &&
+           (borrow->kind == AZCB_PRIMARY_FACTORY || borrow->kind == AZCB_STANDARD_FALLBACK_FACTORY);
+}
+static bool cache_factory_admit(CacheBirthScope *frame, const FactoryBorrow *borrow) {
+    if (!cache_factory_scope_ready(frame) || !cache_factory_borrow_matches(frame, borrow)) return false;
+    /* The exact fallback factory supports Creator mode 0. Read only after the
+     * current owned Collector scope has established this Creator's liveness. */
+    if (borrow->kind == AZCB_STANDARD_FALLBACK_FACTORY &&
+        load(unsigned char, (uintptr_t) borrow->receiver_creator + 0x44) != 0) return false;
+    return cache_stamp(&frame->generation);
+}
+static bool cache_factory_completed(const CacheBirthScope *frame, const FactoryBorrow *borrow) {
+    if (frame->poisoned || !cache_stamp_is(frame->generation) || !*borrow->native_result) return false;
+    return borrow->kind != AZCB_STANDARD_FALLBACK_FACTORY ||
+           (frame->setup_seen && frame->setters == 16 && *borrow->native_result == frame->raw_result);
+}
 void azcb_observe_factory_owned(const FactoryBorrow *borrow, Forward original) {
     if (!original.call) return;
     __auto_type frame = cache_birth_scope;
     cache_poison_scopes(frame);
-    const bool ready = frame && frame->eligible && !frame->poisoned &&
-                       !frame->factory_active && !frame->completed && borrow->receiver_creator == frame->creator &&
-                       borrow->borrowed_pool == frame->pool && borrow->native_result &&
-                       (borrow->kind == AZCB_PRIMARY_FACTORY || borrow->kind == AZCB_STANDARD_FALLBACK_FACTORY) &&
-        /* The exact standard factory is supported only for Creator mode0.
-         * Read it before forwarding, only after the actual owned Collector
-         * scope matched this Creator. An arbitrary factory entry cannot
-         * confer permission to follow its receiver. */
-                       (borrow->kind != AZCB_STANDARD_FALLBACK_FACTORY ||
-                        load(unsigned char, ((uintptr_t) (borrow->receiver_creator)) + 0x44) == 0) &&
-                       cache_stamp(&(frame->generation));
+    const bool ready = cache_factory_admit(frame, borrow);
     if (!ready) {
         if (frame) frame->poisoned = true;
         original.call(original.context);
@@ -1530,9 +1659,7 @@ void azcb_observe_factory_owned(const FactoryBorrow *borrow, Forward original) {
     factory_guard_init(&guard, frame);
     original.call(original.context); // original raw pointer result and exception remain native
     guard.returned = true;
-    if (frame->poisoned || !cache_stamp_is(frame->generation) || !*borrow->native_result ||
-        (borrow->kind == AZCB_STANDARD_FALLBACK_FACTORY && (!frame->setup_seen || frame->setters != 16 ||
-                                                            *borrow->native_result != frame->raw_result))) {
+    if (!cache_factory_completed(frame, borrow)) {
         frame->poisoned = true;
         return;
     }
@@ -1558,42 +1685,52 @@ static void write_guard_drop(WriteGuard *ctx) {
     }
 }
 
+static bool cache_write_scope_ready(const CacheBirthScope *frame) {
+    return frame->eligible && !frame->poisoned && frame->factory_active &&
+           frame->factory_kind == AZCB_STANDARD_FALLBACK_FACTORY && !frame->write_active;
+}
+static bool cache_write_sequence_matches(const CacheBirthScope *frame, const WriteBorrow *borrow) {
+    if (borrow->kind == AZCB_SETUP_WRITE)
+        return !frame->setup_seen && borrow->argument == 16 && borrow->borrowed_pool == frame->pool;
+    return borrow->kind == AZCB_LAYOUT_WRITE && frame->setup_seen && frame->setters < 16 &&
+           borrow->argument == frame->setters && borrow->receiver_cache == frame->raw_result;
+}
+static bool cache_write_admit(const CacheBirthScope *frame, const WriteBorrow *borrow) {
+    return frame && cache_write_scope_ready(frame) && borrow->receiver_cache && borrow->native_status &&
+           cache_stamp_is(frame->generation) && cache_write_sequence_matches(frame, borrow);
+}
+static void cache_write_complete(CacheBirthScope *frame, const WriteBorrow *borrow, uint64_t before) {
+    uint64_t after = 0;
+    if (frame->poisoned || !cache_stamp(&after) || before == UINT64_MAX || after != before + 1 || *borrow->native_status != 0) {
+        frame->poisoned = true;
+        return;
+    }
+    frame->generation = after;
+    if (borrow->kind == AZCB_SETUP_WRITE) {
+        frame->setup_seen = true;
+        frame->raw_result = borrow->receiver_cache;
+    } else ++frame->setters;
+}
 void azcb_observe_construction_write_owned(const WriteBorrow *borrow, Forward original) {
     if (!original.call) return;
     __auto_type frame = cache_birth_scope;
     cache_poison_scopes(frame);
-    const bool setup = borrow->kind == AZCB_SETUP_WRITE;
-    const bool ready = frame && frame->eligible && !frame->poisoned && frame->factory_active &&
-                       frame->factory_kind == AZCB_STANDARD_FALLBACK_FACTORY && !frame->write_active &&
-                       borrow->receiver_cache && borrow->native_status && cache_stamp_is(frame->generation) &&
-                       ((setup && !frame->setup_seen && borrow->argument == 16 && borrow->borrowed_pool == frame->pool) ||
-                        (borrow->kind == AZCB_LAYOUT_WRITE && frame->setup_seen && frame->setters < 16 &&
-                         borrow->argument == frame->setters && borrow->receiver_cache == frame->raw_result));
+    const bool ready = cache_write_admit(frame, borrow);
     if (frame) {
         if (!ready) frame->poisoned = true;
         frame->write_active = true;
     }
     WriteGuard guard __attribute__((cleanup(write_guard_drop)));
     write_guard_init(&guard, frame);
-    __auto_type before = ready ? frame->generation : 0;
+    __auto_type before = ready && frame ? frame->generation : 0;
     {
         CacheMutation mutation __attribute__((cleanup(cache_mutation_drop)));
         cache_mutation_init(&mutation);
         original.call(original.context);
     }
     guard.returned = true;
-    if (!ready) return;
-    uint64_t after = 0;
-    if (frame->poisoned || !cache_stamp(&(after)) || before == UINT64_MAX || after != before + 1 ||
-        *borrow->native_status != 0) {
-        frame->poisoned = true;
-        return;
-    }
-    frame->generation = after;
-    if (setup) {
-        frame->setup_seen = true;
-        frame->raw_result = borrow->receiver_cache;
-    } else ++frame->setters;
+    if (!ready || !frame) return;
+    cache_write_complete(frame, borrow, before);
 }
 int azcb_observe_birth_owned(const BirthBorrow *borrow, Forward original, Observation *out) {
     Build unsupported = {0, 0};
@@ -1620,6 +1757,9 @@ void azcb_selection_forward(Forward original) {
 }
 
 
+static bool source_configuration_valid(int enable, int build_id, unsigned policy) {
+    return enable && build_id >= 1 && build_id <= 2 && !(policy & ~kKnownPolicy);
+}
 int azsdk_sources_configure(int enable, int build_id, unsigned policy) {
     {
 
@@ -1634,7 +1774,7 @@ int azsdk_sources_configure(int enable, int build_id, unsigned policy) {
         }
         retire_unused();
         atomic_store_explicit(&(source_state().capture_policy), 0, memory_order_relaxed);
-        if (!enable || build_id < 1 || build_id > 2 || (policy & ~kKnownPolicy)) return AZS_UNSUPPORTED;
+        if (!source_configuration_valid(enable, build_id, policy)) return AZS_UNSUPPORTED;
         int prior = atomic_load_explicit(&(source_state().bound_build), memory_order_relaxed);
         if (prior && prior != build_id) return AZS_UNSUPPORTED;
         pthread_once(&source_state().image_once, prepare_image);
@@ -1757,16 +1897,27 @@ unsigned azsdk_sources_sweep() {
 int azsdk_sources_physical_ready() {
     return atomic_load_explicit(&(source_state().enabled), memory_order_acquire) && atomic_load_explicit(&(source_state().physical_prepared), memory_order_acquire);
 }
+#if defined(__linux__)
+static bool descriptor_stat_matches(int descriptor, uint64_t device, uint64_t inode, struct stat *out) {
+    return !metadata_ops.stat(descriptor, out) && S_ISREG(out->st_mode) &&
+           (uint64_t) out->st_dev == device && (uint64_t) out->st_ino == inode;
+}
+static bool descriptor_stat_unchanged(int descriptor, const struct stat *before) {
+    struct stat after;
+    return !metadata_ops.stat(descriptor, &after) && before->st_dev == after.st_dev && before->st_ino == after.st_ino;
+}
+static bool source_physical_identity(const struct azsdk_source_sample *sample, uint64_t mount, uint64_t device, uint64_t inode) {
+    return sample->mount_id == mount && sample->device == device && sample->inode == inode;
+}
+#endif
 int azsdk_sources_descriptor_identity(int descriptor, uint64_t mount_id,
                                       uint64_t device, uint64_t inode) {
 #if defined(__linux__)
-    struct stat descriptor_before, descriptor_after;
+    struct stat before;
     uint64_t actual_mount = 0;
-    return descriptor >= 0 && mount_id && inode && !metadata_ops.stat(descriptor, &descriptor_before) &&
-           S_ISREG(descriptor_before.st_mode) && ((uint64_t) (descriptor_before.st_dev)) == device &&
-           ((uint64_t) (descriptor_before.st_ino)) == inode &&
-           descriptor_mount_id(descriptor, &(metadata_ops), &(actual_mount)) && actual_mount == mount_id &&
-           !metadata_ops.stat(descriptor, &descriptor_after) && descriptor_before.st_dev == descriptor_after.st_dev && descriptor_before.st_ino == descriptor_after.st_ino;
+    return descriptor >= 0 && mount_id && inode && descriptor_stat_matches(descriptor, device, inode, &before) &&
+           descriptor_mount_id(descriptor, &metadata_ops, &actual_mount) && actual_mount == mount_id &&
+           descriptor_stat_unchanged(descriptor, &before);
 #else
     (void) descriptor;
     (void) mount_id;
@@ -1782,7 +1933,7 @@ int azsdk_sources_reader_fd(void *connection, uint64_t mount_id,
     struct azsdk_source_sample actual = {0};
     int fd = -1;
     if (capture_physical(((uintptr_t) (connection)), &(source_state().sql_profile), &(metadata_ops), &(actual), &fd) == AZS_PHYSICAL_OK &&
-        actual.mount_id == mount_id && actual.device == device && actual.inode == inode) return fd;
+        source_physical_identity(&actual, mount_id, device, inode)) return fd;
 #else
     (void) connection;
     (void) mount_id;
@@ -1958,6 +2109,29 @@ static bool reply_capture_enabled() {
     return atomic_load_explicit(&(source_state().enabled), memory_order_acquire) &&
            azsdk_cache_capture_ready && azsdk_cache_capture_ready();
 }
+static bool reply_generated_code(unsigned build, ReplyCodeProfile *code) {
+    struct azsdk_cache_reply_code generated;
+    if (!azsdk_cache_reply_code_profile((int) build, &generated)) return false;
+    uintptr_t base = sources.main_image.base;
+    if (generated.begin_rva > UINTPTR_MAX - base || generated.return_rva > UINTPTR_MAX - base) return false;
+    code->build = build;
+    code->begin = base + generated.begin_rva;
+    code->return_pc = base + generated.return_rva;
+    code->length = generated.length;
+    memcpy(code->sha256, generated.sha256, sizeof code->sha256);
+    return true;
+}
+static bool reply_code_range_valid(const ReplyCodeProfile *code) {
+    return code->begin && !(code->begin & 3u) && !(code->return_pc & 3u) && code->length >= 4 && code->length <= 65536 &&
+           code->length <= UINTPTR_MAX - code->begin && code->return_pc >= code->begin + 4 && code->return_pc <= code->begin + code->length;
+}
+static bool reply_code_verified(const ReplyCodeProfile *code, unsigned build) {
+    if (code->build != build || !reply_code_range_valid(code) || code->sha256[64] ||
+        !image_contains(&sources.main_image, code->begin, code->length, kRead | kExecute)) return false;
+    char digest[65];
+    azsha256_hex((const void *) code->begin, code->length, digest);
+    return !memcmp(digest, code->sha256, sizeof digest);
+}
 static bool reply_code_profile(ReplyCodeProfile *out) {
     if (!reply_capture_enabled()) return false;
     const unsigned build = (unsigned) (atomic_load_explicit(&(source_state().bound_build), memory_order_acquire));
@@ -1966,24 +2140,9 @@ static bool reply_code_profile(ReplyCodeProfile *out) {
     if (reply_test_code.build) code = reply_test_code;
     else
 #endif
-    {
-        struct azsdk_cache_reply_code generated;
-        if (!azsdk_cache_reply_code_profile((int) (build), &generated)) return false;
-        __auto_type base = source_state().main_image.base;
-        if (generated.begin_rva > UINTPTR_MAX - base || generated.return_rva > UINTPTR_MAX - base) return false;
-        code.build = build;
-        code.begin = base + generated.begin_rva;
-        code.return_pc = base + generated.return_rva;
-        code.length = generated.length;
-        memcpy(code.sha256, generated.sha256, sizeof code.sha256);
-    }
-    if (code.build != build || !code.begin || (code.begin & 3u) || (code.return_pc & 3u) ||
-        code.length < 4 || code.length > 65536 || code.length > UINTPTR_MAX - code.begin ||
-        code.return_pc < code.begin + 4 || code.return_pc > code.begin + code.length ||
-        code.sha256[64] || !image_contains(&source_state().main_image, code.begin, code.length, kRead | kExecute)) return false;
-    char digest[65];
-    azsha256_hex(((const void *) (code.begin)), code.length, digest);
-    if (memcmp(digest, code.sha256, sizeof digest)) return false;
+        if (!reply_generated_code(build, &code))
+        return false;
+    if (!reply_code_verified(&code, build)) return false;
     (*out) = code;
     return true;
 }
@@ -2036,30 +2195,33 @@ static void ticket_join_drop(TicketJoin *ctx) {
     if (ctx->enabled) azjs_ticket(0, 0, 0);
 }
 
+static bool reply_call_valid(const struct azce_call *call) {
+    return !call->reserved && !call->caller_reserved;
+}
+static const ReplyWeakAbi *reply_ticket_receiver(const struct azce_call *call, Request *request, uintptr_t *return_pc) {
+    ReplyCodeProfile code = {0};
+    if (!call || !reply_call_valid(call) || !reply_code_profile(&code)) return NULL;
+    uintptr_t ticket = (uintptr_t) call->args[0];
+    if (!checked_vtable(ticket, "N13music_library21LoadInfoRequestTicketE", 14) || load(unsigned char, ticket + 0x80) != 2) return NULL;
+    uintptr_t packet = load(uintptr_t, ticket + 0x28);
+    if (!canonical(packet)) return NULL;
+    memcpy(request->request_id, (const void *) (ticket + 8), sizeof request->request_id);
+    request->sequence = load(uint32_t, packet + 8);
+    request->reply_kind = load(uint16_t, packet);
+    *return_pc = code.return_pc;
+    return (const ReplyWeakAbi *) (ticket + 0x88);
+}
 void azcr_forward_ticket_owned(struct azce_call *call, Forward original) {
     if (!original.call) return;
     ReplyWeakAbi empty __attribute__((cleanup(az_native_weak_reset))) = {0};
     const ReplyWeakAbi *receiver = &empty;
     Request request = {0};
     uintptr_t return_pc = 0;
-    ReplyCodeProfile code = {0};
-    __auto_type ticket = call ? (uintptr_t) (call->args[0]) : 0;
-    /* The reviewed native process entry is invoked with a live owning-queue
-     * Ticket. The metadata checks below constrain that borrow; they acquire no
-     * liveness. Every native field is copied BEFORE forwarding and is never
-     * reread after processing can destroy/mutate its packet or Ticket. */
-    if (call && !call->reserved && !call->caller_reserved && reply_code_profile(&(code)) &&
-        checked_vtable(ticket, "N13music_library21LoadInfoRequestTicketE", 14) &&
-        load(unsigned char, ticket + 0x80) == 2) {
-        __auto_type packet = load(uintptr_t, ticket + 0x28);
-        if (canonical(packet)) {
-            memcpy(request.request_id, ((const void *) (ticket + 8)), sizeof request.request_id);
-            request.sequence = load(uint32_t, packet + 8);
-            request.reply_kind = load(uint16_t, packet);
-            receiver = ((const ReplyWeakAbi *) (ticket + 0x88));
-            return_pc = code.return_pc;
-        }
-    }
+    uintptr_t ticket = call ? (uintptr_t) call->args[0] : 0;
+    /* Copy fields before forwarding, while the actual owning queue keeps the
+     * Ticket live. Native work may destroy or replace both Ticket and packet. */
+    const ReplyWeakAbi *borrowed = reply_ticket_receiver(call, &request, &return_pc);
+    if (borrowed) receiver = borrowed;
     TicketJoin joining __attribute__((cleanup(ticket_join_drop)));
     ticket_join_init(&joining, azjs_ticket != NULL);
     if (joining.enabled) {
@@ -2074,35 +2236,41 @@ void azcr_forward_ticket_owned(struct azce_call *call, Forward original) {
     if (joining.enabled && call && azjs_ticket_return) azjs_ticket_return(ticket, call->result[0]);
 }
 
-void azcr_forward_reception_owned(struct azce_call *call, Forward original) {
-    if (!original.call) return;
-    ReplyCallbackScope callback __attribute__((cleanup(reply_scope_drop)));
-    reply_scope_init(&callback); // foreign/reentrant callbacks mask older receipts
+static void reply_reception_capture(const struct azce_call *call, ReplyCallbackScope *callback) {
     ReplyCodeProfile code = {0};
     __auto_type receiver = call ? (uintptr_t) (call->args[0]) : 0;
-    if (call && !call->reserved && !call->caller_reserved && reply_code_profile(&(code)) &&
+    if (call && reply_call_valid(call) && reply_code_profile(&(code)) &&
         call->caller_link == code.return_pc) {
         Promotion native = {0};
         native.control = call->caller_x21;
         native.caller_link = call->caller_link;
-        if (azcr_receive_current_owned(&native, ((const void *) (receiver)), &callback.receipt.selected) &&
+        if (azcr_receive_current_owned(&native, ((const void *) (receiver)), &callback->receipt.selected) &&
             checked_vtable(receiver, "N17trackinfo_stocker22LoadInfoRequestHandler9ReceptionE", 3)) {
             /* Native slot13's checked code keeps its actual X21 strong lease
              * until after this callback returns. The helper's temporary lock
              * is already released. These two copied fields confer no Stocker
              * ownership and are not a player load ID/source association. */
-            callback.receipt.pack_id = load(uint32_t, receiver + 8);
-            callback.receipt.borrowed_stocker = load(uintptr_t, receiver + 0x10);
-            callback.invocation = azcr_current_invocation();
-            callback.ready = true;
+            callback->receipt.pack_id = load(uint32_t, receiver + 8);
+            callback->receipt.borrowed_stocker = load(uintptr_t, receiver + 0x10);
+            callback->invocation = azcr_current_invocation();
+            callback->ready = true;
         }
     }
+}
+static void reply_reception_join(const struct azce_call *call, const ReplyCallbackScope *callback) {
     if (azjs_reception && call && checked_vtable((uintptr_t) (call->args[0]), "N17trackinfo_stocker22LoadInfoRequestHandler9ReceptionE", 3)) {
         __auto_type receiver = (uintptr_t) (call->args[0]);
         /* Foreign/unpromoted replies revoke any older pending claim for that pack. */
-        azjs_reception(callback.ready ? receiver : 0, load(uint32_t, receiver + 8),
+        azjs_reception(callback->ready ? receiver : 0, load(uint32_t, receiver + 8),
                        ((const void *) (call->args[1])));
     }
+}
+void azcr_forward_reception_owned(struct azce_call *call, Forward original) {
+    if (!original.call) return;
+    ReplyCallbackScope callback __attribute__((cleanup(reply_scope_drop)));
+    reply_scope_init(&callback); // foreign/reentrant callbacks mask older receipts
+    reply_reception_capture(call, &callback);
+    reply_reception_join(call, &callback);
     original.call(original.context);
 }
 

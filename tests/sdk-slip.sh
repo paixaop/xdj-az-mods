@@ -10,6 +10,9 @@ case ${SAN:-plain} in
     tsan) set -- -fsanitize=thread ;;
     *) echo 'unknown SAN' >&2;exit 2 ;;
 esac
+${CC:-gcc} -std=gnu11 -O1 -g -Wall -Wextra -Werror -Wno-unused-function -fno-omit-frame-pointer ${CFLAGS:-} \
+    "$@" tests/unit/sdkslip_startup_test.c -o "$work/startup"
+"$work/startup"
 for name in sdk_native_slip sdk_slip_hooks sdk_slip_getters; do
     ${CC:-gcc} -std=gnu11 -O1 -g -Wall -Wextra -Werror -fexceptions -fasynchronous-unwind-tables -fno-omit-frame-pointer ${CFLAGS:-} \
         "$@" -c "src/azmod/$name.c" -o "$work/$name.o"

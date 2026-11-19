@@ -2,14 +2,14 @@
 /* Shared Anlz FileData inception. Its stock cache is used by cues, grids and
  * phrase getters alike. A later getter inherits the original physical read;
  * it cannot relabel cached bytes with the file now occupying the same path. */
+static bool file_inputs_api_valid(const struct azn_file_input_api *api) {
+    return api && api->version == 1 && api->size >= sizeof *api && api->physical_begin && api->opened && api->seal && api->hold && api->join;
+}
 static const struct azn_file_input_api *file_inputs_api() {
     __auto_type cb = atomic_load_explicit(&(file_callbacks), memory_order_acquire);
     if (!cb || cb->size < offsetof(struct azn_file_cue_callbacks, inputs) + sizeof cb->inputs || !cb->inputs) return NULL;
     __auto_type api = cb->inputs();
-    return api && api->version == 1 && api->size >= sizeof *api && api->physical_begin &&
-                   api->opened && api->seal && api->hold && api->join
-               ? api
-               : NULL;
+    return file_inputs_api_valid(api) ? api : NULL;
 }
 
 /* Retain only the GNU weak control count. The native cache/borrowed getter
@@ -49,6 +49,15 @@ static void file_input_release(FileInputOrigin *origin) {
     file_input_weak_release(&(origin->owner));
     (*origin) = (FileInputOrigin) {0};
 }
+static bool file_input_duplicate(uintptr_t object, uintptr_t control, unsigned *at) {
+    for (unsigned i = 0; i < 16; ++i) {
+        if (file_input_origins[i].owner.object == object && file_input_origins[i].owner.control == control) {
+            *at = i;
+            return true;
+        }
+    }
+    return false;
+}
 /* Takes the one held reference returned by seal on every path. */
 static void file_input_remember(const struct azn_file_input_api *api, uint64_t token, unsigned mask,
                                 uintptr_t object, uintptr_t control) {
@@ -63,18 +72,15 @@ static void file_input_remember(const struct azn_file_input_api *api, uint64_t t
         return;
     }
     unsigned at = file_input_next++ % 16;
-    bool duplicate = false;
-    for (unsigned i = 0; i < 16; ++i)
-        if (file_input_origins[i].owner.object == object && file_input_origins[i].owner.control == control) {
-            at = i;
-            duplicate = true;
-            break;
-        }
+    bool duplicate = file_input_duplicate(object, control, &at);
     FileInputOrigin retired = file_input_origins[at];
     file_input_origins[at] = duplicate ? (FileInputOrigin) {0} : next;
     atomic_flag_clear_explicit(&(file_input_busy), memory_order_release);
     file_input_release(&(retired));
     if (duplicate) file_input_release(&(next));
+}
+static bool file_input_origin_matches(const FileInputOrigin *origin, const struct azn_file_input_api *api, uintptr_t object, uintptr_t control) {
+    return origin->token && origin->api == api && origin->owner.object == object && origin->owner.control == control;
 }
 /* The returned token has one borrowed-use hold, independent of eviction. */
 static uint64_t file_input_find(const struct azn_file_input_api *api, uintptr_t object, uintptr_t control, unsigned *mask) {
@@ -83,7 +89,7 @@ static uint64_t file_input_find(const struct azn_file_input_api *api, uintptr_t 
     uint64_t token = 0;
     for (unsigned origin_index = 0; origin_index < sizeof(file_input_origins) / sizeof(file_input_origins)[0]; ++origin_index) {
         const FileInputOrigin *origin = &(file_input_origins[origin_index]);
-        if (origin->token && origin->api == api && origin->owner.object == object && origin->owner.control == control) {
+        if (file_input_origin_matches(origin, api, object, control)) {
             token = origin->token;
             (*mask) = origin->mask;
             api->hold(&token, 1, 1);
@@ -138,6 +144,12 @@ static void file_fresh_drop(FileFreshInput *self) {
 }
 
 static _Thread_local FileFreshInput *file_fresh_input = NULL;
+static bool file_input_path(uintptr_t data, size_t bytes) {
+    return data >= 0x10000 && data <= UINT64_C(0x0000ffffffffffff) && bytes && bytes < 1024;
+}
+static bool file_input_reopened(const FileFreshInput *input, uintptr_t handle, uintptr_t data, size_t bytes) {
+    return input->handle == handle && input->path_bytes == bytes && !memcmp(input->path, (const void *) data, bytes);
+}
 static void file_input_start(FileFreshInput *input, uintptr_t handle, uintptr_t path) {
     ++input->opens;
     if (!input->api || input->opens > 2 || !typed(path, file_bias + file_profile->path_table)) {
@@ -148,7 +160,7 @@ static void file_input_start(FileFreshInput *input, uintptr_t handle, uintptr_t 
      * opener dynamic_casts that exact type and reads this string. */
     const uintptr_t data = object_word(path + 0x10);
     const size_t bytes = object_word(path + 0x18);
-    if (data < 0x10000 || data > UINT64_C(0x0000ffffffffffff) || !bytes || bytes >= 1024) {
+    if (!file_input_path(data, bytes)) {
         input->bad = true;
         return;
     }
@@ -156,8 +168,7 @@ static void file_input_start(FileFreshInput *input, uintptr_t handle, uintptr_t 
      * before decoding. Keep the inception witness across both opens; every
      * resulting descriptor must still match that original physical edition. */
     if (input->opens > 1) {
-        if (input->handle != handle || input->path_bytes != bytes ||
-            memcmp(input->path, ((const void *) (data)), bytes)) input->bad = true;
+        if (!file_input_reopened(input, handle, data, bytes)) input->bad = true;
         return;
     }
     input->handle = handle;

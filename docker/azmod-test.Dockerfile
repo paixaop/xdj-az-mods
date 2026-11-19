@@ -17,7 +17,7 @@
 FROM azmod-build:18.04
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        libsqlite3-dev python3 git docker.io rsync \
+        libsqlite3-dev libxtst-dev python3 git docker.io rsync \
  && rm -rf /var/lib/apt/lists/* \
  && git config --system --add safe.directory '*'
 ARG CLANG_FORMAT_VERSION=21.1.8

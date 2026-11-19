@@ -9,10 +9,9 @@ Method
     -fcoverage-mapping) and wrote one raw profile per process. They are merged into one profile.
   - Most suites compile production functions EXTRACTED by text out of guest/ into files of their
     own (run.sh, extract), so the coverage mapping names those copies, not the guest file. Each
-    copy is aligned back to the guest source line by line: a run of consecutive lines equal
-    (ignoring indentation) to consecutive guest lines is attributed to them, and a line or two
-    changed in place (a suite's perl substitution) inside such a run stays attributed. Lines
-    that align with nothing (the harness's own code) are not guest code and are not counted.
+    copy is mapped only when the entire function definition matches production source,
+    ignoring indentation. Altered control copies and partial fragments never contribute
+    production hits. Ambiguous definitions remain unmeasured.
     Suites that #include a guest file whole are counted as that file directly.
   - The DENOMINATOR is the release build: guest/azmod/{azmod,menu,text,azconf}.c,
     guest/azstem/azstem.c and guest/azhandoff/az-handoff-guard.c compiled with -DAZMOD_RELEASE for
@@ -26,9 +25,11 @@ Method
     not contain (development-only code) are reported apart.
 
 Output (in --covdir): summary.txt (totals and per file), functions.tsv (per function), uncovered/
-(per file, the uncovered lines of every function the suites call at least once), coverage.json.
+(per file, the uncovered lines of every function the suites call at least once), coverage.json,
+and coverage.lcov (actual test-compiled mapped lines, with explicit zero-hit records).
 """
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -47,8 +48,12 @@ EXCLUDE = {"azstem/stb_vorbis.c"}
 SRC_EXT = (".c", ".h", ".def", ".inc")
 
 
-def norm(s):
-    return " ".join(s.split())
+def function_index(sources):
+    path = os.path.join(os.path.dirname(__file__), "coverage-functions.py")
+    spec = importlib.util.spec_from_file_location("coverage_functions", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.FunctionIndex(sources)
 
 
 def run(cmd, **kw):
@@ -72,7 +77,7 @@ class Guest:
     def __init__(self, root):
         self.root = os.path.join(root, "guest")
         self.lines = {}
-        self.index = defaultdict(list)
+        sources = {}
         for d in DIRS:
             for dp, _, fs in os.walk(os.path.join(self.root, d)):
                 for fn in fs:
@@ -80,11 +85,11 @@ class Guest:
                         continue
                     rel = os.path.relpath(os.path.join(dp, fn), self.root)
                     with open(os.path.join(dp, fn), encoding="utf-8", errors="replace") as f:
-                        ls = [norm(x) for x in f.read().split("\n")]
+                        text = f.read()
+                        ls = text.split("\n")
                     self.lines[rel] = ls
-                    for i, s in enumerate(ls):
-                        if len(s) > 3:
-                            self.index[s].append((rel, i))
+                    sources[rel] = text
+        self.index = function_index(sources)
 
     def rel(self, path):
         """guest-relative name of a path inside guest/, or None."""
@@ -98,43 +103,7 @@ class Guest:
 
     def align(self, text):
         """{copy line (1-based): (guest file, guest line 1-based)} for a copy's text."""
-        e = [norm(x) for x in text.split("\n")]
-        out = {}
-        i, n = 0, len(e)
-        while i < n:
-            best, blen = None, 0
-            cands = self.index.get(e[i], ()) if len(e[i]) > 3 else ()
-            if len(cands) <= 400:
-                for f, j in cands:
-                    g = self.lines[f]
-                    r = 0
-                    while i + r < n and j + r < len(g) and e[i + r] == g[j + r]:
-                        r += 1
-                    if r > blen:
-                        best, blen = (f, j), r
-            # one equal line is enough only when it is long enough to be unique
-            if best and (blen >= 3 or (blen >= 1 and len(e[i]) >= 24 and len(self.index[e[i]]) == 1)):
-                f, j = best
-                g = self.lines[f]
-                k = 0
-                while True:
-                    while i + k < n and j + k < len(g) and e[i + k] == g[j + k]:
-                        out[i + k + 1] = (f, j + k + 1)
-                        k += 1
-                    # a line or two changed in place, with the run continuing after them
-                    for gap in (1, 2):
-                        a, b = i + k + gap, j + k + gap
-                        if a + 1 < n and b + 1 < len(g) and e[a] == g[b] and e[a + 1] == g[b + 1] and len(e[a]) > 3:
-                            for m in range(gap):
-                                out[i + k + m + 1] = (f, j + k + m + 1)
-                            k += gap
-                            break
-                    else:
-                        break
-                i += max(k, 1)
-            else:
-                i += 1
-        return out
+        return self.index.align(text)
 
 
 def parse_lcov(text):
@@ -161,6 +130,25 @@ def parse_lcov(text):
         elif ln == "end_of_record":
             cur = None
     return files
+
+
+
+def write_mapped_lcov(path, hits):
+    """Export actual test-compiled lines, retaining explicit unexecuted records.
+
+    The unexecuted release-universe build supplies the legacy summary's denominator,
+    not measured test coverage. Whole-function mapping already rejects partial and
+    altered copies. Functions no test compiles remain absent (unmeasured).
+    """
+    files = defaultdict(dict)
+    for (name, line), count in hits.items():
+        files[name][line] = count
+    with open(path, "w") as out:
+        for name in sorted(files):
+            out.write("SF:guest/%s\n" % name)
+            for line, count in sorted(files[name].items()):
+                out.write("DA:%d,%d\n" % (line, count))
+            out.write("end_of_record\n")
 
 
 def build_universe(args, guest, work):
@@ -313,6 +301,8 @@ def main():
             if k not in br and n:
                 br[k] = [True] * n
 
+    write_mapped_lcov(os.path.join(covdir, "coverage.lcov"), hits)
+
     # the release build's lines, branches and functions
     work = os.path.join(covdir, "universe")
     os.makedirs(work, exist_ok=True)
@@ -437,7 +427,7 @@ def main():
                    "compiled": [cc, cl]}, out, indent=1)
     with open(os.path.join(covdir, "summary.txt")) as f:
         sys.stdout.write("".join(f.readlines()[:10]))
-    print("coverage: full report in %s (summary.txt, functions.tsv, uncovered/)" % covdir)
+    print("coverage: full report in %s (summary.txt, functions.tsv, coverage.lcov, uncovered/)" % covdir)
     if not objs:
         print("coverage: no release-build denominator (see above): totals cover nothing")
     return 0

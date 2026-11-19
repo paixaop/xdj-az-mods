@@ -96,9 +96,14 @@ static int ds_pad_decode(unsigned code) {
     default: return -1;
     }
 }
+static unsigned ds_pad_mode_code(const struct ds_pad_slot *slot) {
+    static const unsigned char alternate[] = {1, 3, 9, 5, 10, 11, 8, 12, 13, 14, 15, 16, 17, 18, 19, 20};
+    if (!slot->pc || slot->cert_mode == 3 || slot->cert_mode == 4)
+        return slot->hui < 8 ? slot->hui + 1u : 0;
+    return slot->alternate < sizeof alternate ? alternate[slot->alternate] : 0;
+}
 static void ds_pad_derive(unsigned d, int force) {
     struct ds_pad_slot *s = &ds_pad_slots[d];
-    static const unsigned char alternate[] = {1, 3, 9, 5, 10, 11, 8, 12, 13, 14, 15, 16, 17, 18, 19, 20};
     if (!atomic_load_explicit(&s->self, memory_order_acquire)) {
         ds_pad_publish(d, AZ_AVAIL_UNSUPPORTED, 0, force);
         return;
@@ -107,46 +112,50 @@ static void ds_pad_derive(unsigned d, int force) {
         ds_pad_publish(d, AZ_AVAIL_STALE, 0, force);
         return;
     }
-    unsigned code;
-    if (!s->pc || s->cert_mode == 3 || s->cert_mode == 4)
-        code = s->hui < 8 ? s->hui + 1u : 0;
-    else code = s->alternate < sizeof alternate ? alternate[s->alternate] : 0;
-    int value = ds_pad_decode(code);
+    int value = ds_pad_decode(ds_pad_mode_code(s));
     ds_pad_publish(d, value >= 0 ? AZ_AVAIL_READY : AZ_AVAIL_UNSUPPORTED, value, force);
 }
-static void ds_pad_observe(uintptr_t p, int born, int deck, int seed_only) {
-    if (!p || !atomic_load_explicit(&ds_pad_ready, memory_order_acquire)) return;
-    for (unsigned d = 0; d < 4; d++) {
-        struct ds_pad_slot *s = &ds_pad_slots[d];
-        if (born ? (int) d != deck : atomic_load(&s->self) != p) continue;
-        if (ds_pad_word(p - 16) != ds_pad_profile->ctrl) return;
-        if (!(seed_only ? ds_pad_try_lock(d) : ds_pad_lock(d))) return;
-        if (born) {
-            uint64_t serial = atomic_fetch_add(&ds_pad_birth, 1) + 1;
-            if (!serial || serial > AZSP_SERIAL_MAX) {
-                atomic_store(&s->writing, 0);
-                return;
-            }
-            atomic_store(&s->owner, AZSP_PAD | serial);
-            atomic_store(&s->self, p);
-        } else if (atomic_load(&s->self) != p) {
-            atomic_store(&s->writing, 0);
-            return;
-        }
-        uintptr_t sw = ds_pad_word(p + 8), cert = ds_pad_word(p + 0x38);
-        s->switcher = sw && ds_pad_word(sw) == ds_pad_profile->switcher ? sw : 0;
-        s->cert = cert && ds_pad_word(cert) == ds_pad_profile->cert ? cert : 0;
-        s->hui = ds_pad_u32(p + 0xac);
-        s->alternate = ds_pad_byte(p + 0xb0);
-        if (s->switcher) s->pc = ds_pad_byte(sw + 0x58);
-        if (s->cert) s->cert_mode = ds_pad_byte(cert + 0x22);
-        unsigned selected = atomic_load_explicit(&ds_pad_selected[d % 2], memory_order_acquire);
-        s->waiting = selected && selected != d + 1;
-        int recover = atomic_exchange(&s->poisoned, 0);
-        ds_pad_derive(d, born || recover);
-        atomic_store_explicit(&s->writing, 0, memory_order_release);
+static int ds_pad_observation_deck(uintptr_t object, int born, int deck) {
+    for (unsigned d = 0; d < 4; d++)
+        if (born ? (int) d == deck : atomic_load(&ds_pad_slots[d].self) == object) return (int) d;
+    return -1;
+}
+static int ds_pad_adopt(struct ds_pad_slot *slot, uintptr_t object, int born) {
+    if (!born) return atomic_load(&slot->self) == object;
+    uint64_t serial = atomic_fetch_add(&ds_pad_birth, 1) + 1;
+    if (!serial || serial > AZSP_SERIAL_MAX) return 0;
+    atomic_store(&slot->owner, AZSP_PAD | serial);
+    atomic_store(&slot->self, object);
+    return 1;
+}
+static void ds_pad_read(unsigned deck, uintptr_t object, int born) {
+    struct ds_pad_slot *slot = &ds_pad_slots[deck];
+    uintptr_t switcher = ds_pad_word(object + 8), cert = ds_pad_word(object + 0x38);
+    slot->switcher = switcher && ds_pad_word(switcher) == ds_pad_profile->switcher ? switcher : 0;
+    slot->cert = cert && ds_pad_word(cert) == ds_pad_profile->cert ? cert : 0;
+    slot->hui = ds_pad_u32(object + 0xac);
+    slot->alternate = ds_pad_byte(object + 0xb0);
+    if (slot->switcher) slot->pc = ds_pad_byte(switcher + 0x58);
+    if (slot->cert) slot->cert_mode = ds_pad_byte(cert + 0x22);
+    unsigned selected = atomic_load_explicit(&ds_pad_selected[deck % 2], memory_order_acquire);
+    slot->waiting = selected && selected != deck + 1;
+    int recover = atomic_exchange(&slot->poisoned, 0);
+    ds_pad_derive(deck, born || recover);
+}
+static void ds_pad_observe(uintptr_t object, int born, int deck, int seed_only) {
+    if (!object || !atomic_load_explicit(&ds_pad_ready, memory_order_acquire)) return;
+    int selected = ds_pad_observation_deck(object, born, deck);
+    if (selected < 0) return;
+    unsigned d = (unsigned) selected;
+    struct ds_pad_slot *slot = &ds_pad_slots[d];
+    if (ds_pad_word(object - 16) != ds_pad_profile->ctrl) return;
+    if (!(seed_only ? ds_pad_try_lock(d) : ds_pad_lock(d))) return;
+    if (!ds_pad_adopt(slot, object, born)) {
+        atomic_store(&slot->writing, 0);
         return;
     }
+    ds_pad_read(d, object, born);
+    atomic_store_explicit(&slot->writing, 0, memory_order_release);
 }
 static void ds_pad_sample(uintptr_t p, int born, int deck) {
     ds_pad_observe(p, born, deck, 0);
@@ -167,26 +176,33 @@ static void ds_pad_layer(unsigned side, unsigned selected) {
 static void ds_pad_selection_end(_Atomic unsigned **count) {
     atomic_fetch_sub_explicit(*count, 1, memory_order_release);
 }
-static uintptr_t ds_pad_select(uintptr_t self, uintptr_t topic, uintptr_t button, unsigned on) {
+static int ds_pad_selector_buttons(uintptr_t self, uintptr_t button, unsigned *side, unsigned *alternate) {
     const uint64_t primary = UINT64_C(0x0d174d4fd081f300), secondary = UINT64_C(0x3030e6ac95bc4d00);
+    uint64_t first = ds_pad_word(self + 0x20), second = ds_pad_word(self + 0x28);
+    if (first < primary || first > primary + 1 || second != secondary + (first - primary) ||
+        ds_pad_word(self + 0x40) == ds_pad_word(self + 0x48) || (button != first && button != second)) return 0;
+    *side = (unsigned) (first - primary);
+    *alternate = button == second;
+    return 1;
+}
+static int ds_pad_selection(uintptr_t self, uintptr_t button, unsigned on, unsigned *side, unsigned *alternate) {
     uintptr_t expected = g_ep147_build == EPB_V130 ? 0x2e069b0 : 0x31b9db0;
+    if (!(on & 255u) || !self || ds_pad_word(self) != expected) return 0;
+    if (!ds_pad_selector_buttons(self, button, side, alternate)) return 0;
+    uintptr_t light = ds_pad_word(self + (*alternate ? 0x38 : 0x30));
+    return light && ds_pad_byte(light + 0x1d);
+}
+static uintptr_t ds_pad_select(uintptr_t self, uintptr_t topic, uintptr_t button, unsigned on) {
     uintptr_t (*original)(uintptr_t, uintptr_t, uintptr_t, unsigned) = ds_pad_select_original;
-    if ((on & 255u) && self && ds_pad_word(self) == expected) {
-        uint64_t first = ds_pad_word(self + 0x20), second = ds_pad_word(self + 0x28);
-        if (first >= primary && first <= primary + 1 && second == secondary + (first - primary) &&
-            ds_pad_word(self + 0x40) != ds_pad_word(self + 0x48) && (button == first || button == second)) {
-            unsigned side = (unsigned) (first - primary), alternate = button == second;
-            uintptr_t light = ds_pad_word(self + (alternate ? 0x38 : 0x30));
-            if (light && ds_pad_byte(light + 0x1d)) {
-                /* The selector publishes the new identity before withdrawal
-                 * and calls the PadState setter during native dispatch. A
-                 * periodic seed seeing that identity must wait through both. */
-                _Atomic unsigned *count __attribute__((cleanup(ds_pad_selection_end))) = &ds_pad_selecting[side];
-                atomic_fetch_add_explicit(count, 1, memory_order_acq_rel);
-                ds_pad_layer(side, side + alternate * 2);
-                return original(self, topic, button, on);
-            }
-        }
+    unsigned side, alternate;
+    if (ds_pad_selection(self, button, on, &side, &alternate)) {
+        /* The selector publishes the new identity before withdrawal and calls
+         * the PadState setter during native dispatch. A periodic seed seeing
+         * that identity must wait through both. */
+        _Atomic unsigned *count __attribute__((cleanup(ds_pad_selection_end))) = &ds_pad_selecting[side];
+        atomic_fetch_add_explicit(count, 1, memory_order_acq_rel);
+        ds_pad_layer(side, side + alternate * 2);
+        return original(self, topic, button, on);
     }
     return original(self, topic, button, on);
 }
@@ -226,49 +242,69 @@ static uintptr_t ds_pad_async(uintptr_t closure) {
     ds_pad_sample(self, 0, -1);
     return result;
 }
-static uintptr_t ds_pad_alternate(uintptr_t self) {
-    /* This periodic native refresh has one ALT store and may return without
-     * writing. Its unchanged reads must not reserve the shared writer slot.
-     * Lazy dependency binding remains an input change; independent HUI, PC
-     * and certificate writers retain their own capture hooks. */
-    struct ds_pad_slot *slot = NULL;
-    unsigned matches = 0, deck = 0;
+struct ds_pad_alternate_call {
+    struct ds_pad_slot *slot;
+    unsigned matches, deck, overlap, alternate;
+    uint64_t owner, call;
+    uintptr_t switcher, cert;
+};
+static struct ds_pad_alternate_call ds_pad_alternate_enter(uintptr_t self) {
+    struct ds_pad_alternate_call state = {0};
     for (unsigned d = 0; d < 4; d++)
         if (atomic_load_explicit(&ds_pad_slots[d].self, memory_order_acquire) == self) {
-            slot = &ds_pad_slots[d];
-            deck = d;
-            matches++;
+            state.slot = &ds_pad_slots[d];
+            state.deck = d;
+            state.matches++;
         }
-    uint64_t owner = slot ? atomic_load(&slot->owner) : 0, call = 0;
-    unsigned overlap = 0;
-    if (slot) {
-        call = atomic_fetch_add(&slot->alternate_calls, 1) + 1;
-        overlap = atomic_fetch_add(&slot->alternate_active, 1);
-        if (!call || overlap == UINT_MAX) atomic_store(&slot->alternate_exhausted, 1);
+    if (state.slot) {
+        state.owner = atomic_load(&state.slot->owner);
+        state.call = atomic_fetch_add(&state.slot->alternate_calls, 1) + 1;
+        state.overlap = atomic_fetch_add(&state.slot->alternate_active, 1);
+        if (!state.call || state.overlap == UINT_MAX) atomic_store(&state.slot->alternate_exhausted, 1);
     }
-    uintptr_t switcher = ds_pad_word(self + 8), cert = ds_pad_word(self + 0x38);
-    unsigned alternate = ds_pad_byte(self + 0xb0);
+    state.switcher = ds_pad_word(self + 8);
+    state.cert = ds_pad_word(self + 0x38);
+    state.alternate = ds_pad_byte(self + 0xb0);
+    return state;
+}
+static int ds_pad_alternate_owned(const struct ds_pad_alternate_call *state, uintptr_t self) {
+    return state->matches == 1 && state->owner && atomic_load(&state->slot->owner) == state->owner &&
+           atomic_load(&state->slot->self) == self;
+}
+static int ds_pad_alternate_unchanged(const struct ds_pad_alternate_call *state, uintptr_t self, int owned) {
+    return owned && state->alternate == ds_pad_byte(self + 0xb0) &&
+           state->switcher == ds_pad_word(self + 8) && state->cert == ds_pad_word(self + 0x38);
+}
+static int ds_pad_alternate_collided(const struct ds_pad_alternate_call *state) {
+    return state->slot && (state->overlap || atomic_load(&state->slot->alternate_exhausted) ||
+                           atomic_load(&state->slot->alternate_calls) != state->call || atomic_load(&state->slot->alternate_active) != 1);
+}
+static uintptr_t ds_pad_alternate(uintptr_t self) {
+    /* An unchanged periodic refresh does not reserve the writer slot. Keep
+     * admission counters across slot reincarnation; overlapping or nested
+     * calls can hide A -> B -> A even when the final sampled bytes match. */
+    struct ds_pad_alternate_call state = ds_pad_alternate_enter(self);
     uintptr_t result = ((uintptr_t (*)(uintptr_t)) ds_pad_original[3])(self);
-    /* A nested or overlapping refresh may restore A -> B -> A. Its calls
-     * cannot take the unchanged fast path even when the outer bytes match.
-     * Keep counters across slot reincarnation so an old call cannot reset a
-     * replacement owner's admission state. Exhaustion permanently disables
-     * the optimization and retains explicit uncertainty. */
-    int owned = matches == 1 && owner && atomic_load(&slot->owner) == owner && atomic_load(&slot->self) == self;
-    int unchanged = owned && alternate == ds_pad_byte(self + 0xb0) && switcher == ds_pad_word(self + 8) && cert == ds_pad_word(self + 0x38);
-    unsigned collided = slot && (overlap || atomic_load(&slot->alternate_exhausted) ||
-        atomic_load(&slot->alternate_calls) != call || atomic_load(&slot->alternate_active) != 1);
-    /* Overlapping originals can finish both native writes before either
-     * capture. Their later SDK reservations may serialize: that alone cannot
-     * prove the intermediate mode. Retain an explicit gap for any overlap. */
-    if (owned && collided) ds_pad_loss(deck);
-    if (!unchanged || collided || atomic_load(&slot->owner) != owner || atomic_load(&slot->self) != self)
+    int owned = ds_pad_alternate_owned(&state, self);
+    int unchanged = ds_pad_alternate_unchanged(&state, self, owned);
+    int collided = ds_pad_alternate_collided(&state);
+    /* Serialized SDK captures cannot prove an overlapping native history. */
+    if (owned && collided) ds_pad_loss(state.deck);
+    if (!unchanged || collided || atomic_load(&state.slot->owner) != state.owner || atomic_load(&state.slot->self) != self)
         ds_pad_sample(self, 0, -1);
     else ds_pad_fresh(self);
-    if (slot) {
-        atomic_fetch_sub(&slot->alternate_active, 1);
-    }
+    if (state.slot) atomic_fetch_sub(&state.slot->alternate_active, 1);
     return result;
+}
+static void ds_pad_update_dependency(unsigned deck, uintptr_t owner, uintptr_t key, int cert) {
+    struct ds_pad_slot *slot = &ds_pad_slots[deck];
+    if ((cert ? slot->cert : slot->switcher) == key) {
+        unsigned value = ds_pad_byte(owner + (cert ? 0x152u : 0x130u));
+        if (cert) slot->cert_mode = value;
+        else slot->pc = value;
+        ds_pad_derive(deck, 0);
+    }
+    atomic_store_explicit(&slot->writing, 0, memory_order_release);
 }
 static void ds_pad_dependency(uintptr_t owner, int cert) {
     if (!atomic_load(&ds_pad_ready)) return;
@@ -280,14 +316,7 @@ static void ds_pad_dependency(uintptr_t owner, int cert) {
         if (atomic_load(&ds_pad_slots[d].self) &&
             atomic_load_explicit(cert ? &ds_pad_slots[d].cert : &ds_pad_slots[d].switcher, memory_order_acquire) == key &&
             ds_pad_lock(d)) {
-            struct ds_pad_slot *s = &ds_pad_slots[d];
-            if ((cert ? s->cert : s->switcher) == key) {
-                unsigned value = ds_pad_byte(owner + (cert ? 0x152u : 0x130u));
-                if (cert) s->cert_mode = value;
-                else s->pc = value;
-                ds_pad_derive(d, 0);
-            }
-            atomic_store_explicit(&s->writing, 0, memory_order_release);
+            ds_pad_update_dependency(d, owner, key, cert);
         }
 }
 static uintptr_t ds_pad_pc_direct(uintptr_t self, uintptr_t source) {
@@ -301,45 +330,61 @@ static uintptr_t ds_pad_pc_async(uintptr_t closure) {
     ds_pad_dependency(self, 0);
     return r;
 }
+struct ds_pad_certificate_call {
+    uint64_t calls[4];
+    unsigned entered, overlap;
+};
+static struct ds_pad_certificate_call ds_pad_certificate_enter(uintptr_t key) {
+    struct ds_pad_certificate_call state = {0};
+    for (unsigned d = 0; d < 4; d++) {
+        struct ds_pad_slot *slot = &ds_pad_slots[d];
+        if (!atomic_load(&slot->self) || atomic_load(&slot->cert) != key) continue;
+        state.entered |= 1u << d;
+        state.calls[d] = atomic_fetch_add(&slot->cert_calls, 1) + 1;
+        unsigned prior = atomic_fetch_add(&slot->cert_active, 1);
+        if (prior) state.overlap |= 1u << d;
+        if (!state.calls[d] || prior == UINT_MAX) atomic_store(&slot->cert_exhausted, 1);
+    }
+    return state;
+}
+static int ds_pad_certificate_collided(const struct ds_pad_certificate_call *state, unsigned deck, uintptr_t key) {
+    const struct ds_pad_slot *slot = &ds_pad_slots[deck];
+    return ((state->overlap & (1u << deck)) || atomic_load(&slot->cert_exhausted) ||
+            state->calls[deck] != atomic_load(&slot->cert_calls) || atomic_load(&slot->cert_active) != 1) &&
+           atomic_load(&slot->self) && atomic_load(&slot->cert) == key;
+}
+static unsigned ds_pad_certificate_uncertain(const struct ds_pad_certificate_call *state, uintptr_t key) {
+    unsigned uncertain = 0;
+    for (unsigned deck = 0; deck < 4; deck++) {
+        if (!(state->entered & (1u << deck))) continue;
+        if (ds_pad_certificate_collided(state, deck, key)) {
+            uncertain |= 1u << deck;
+            ds_pad_loss(deck);
+        }
+    }
+    return uncertain;
+}
+static void ds_pad_certificate_leave(const struct ds_pad_certificate_call *state) {
+    for (unsigned deck = 0; deck < 4; deck++)
+        if (state->entered & (1u << deck)) atomic_fetch_sub(&ds_pad_slots[deck].cert_active, 1);
+}
 static uintptr_t ds_pad_certificate(uintptr_t self, uintptr_t context, int constructing) {
     const int ready = self && atomic_load_explicit(&ds_pad_ready, memory_order_acquire);
     const uintptr_t key = self + 0x130u;
-    uint64_t calls[4] = {0};
-    unsigned entered = 0, overlap = 0;
-    if (ready) {
-        for (unsigned d = 0; d < 4; d++) {
-            struct ds_pad_slot *s = &ds_pad_slots[d];
-            if (!atomic_load(&s->self) || atomic_load(&s->cert) != key) continue;
-            entered |= 1u << d;
-            calls[d] = atomic_fetch_add(&s->cert_calls, 1) + 1;
-            unsigned prior = atomic_fetch_add(&s->cert_active, 1);
-            if (prior) overlap |= 1u << d;
-            if (!calls[d] || prior == UINT_MAX) atomic_store(&s->cert_exhausted, 1);
-        }
-    }
+    struct ds_pad_certificate_call state = {0};
+    if (ready) state = ds_pad_certificate_enter(key);
     unsigned before = ready && !constructing ? ds_pad_byte(self + 0x152u) : UINT_MAX;
     uintptr_t result = constructing
-        ? ((uintptr_t (*)(uintptr_t, uintptr_t)) ds_pad_original[7])(self, context)
-        : ((uintptr_t (*)(uintptr_t)) ds_pad_original[6])(self);
+                           ? ((uintptr_t (*)(uintptr_t, uintptr_t)) ds_pad_original[7])(self, context)
+                           : ((uintptr_t (*)(uintptr_t)) ds_pad_original[6])(self);
     if (!ready) return result;
     unsigned after = ds_pad_byte(self + 0x152u);
-    unsigned uncertain = 0;
-    for (unsigned d = 0; d < 4; d++) {
-        if (!(entered & (1u << d))) continue;
-        struct ds_pad_slot *s = &ds_pad_slots[d];
-        if (((overlap & (1u << d)) || atomic_load(&s->cert_exhausted) ||
-             calls[d] != atomic_load(&s->cert_calls) || atomic_load(&s->cert_active) != 1) &&
-            atomic_load(&s->self) && atomic_load(&s->cert) == key) {
-            uncertain |= 1u << d;
-            ds_pad_loss(d);
-        }
-    }
+    unsigned uncertain = ds_pad_certificate_uncertain(&state, key);
     /* Both profiles return before their mode store when the value is equal.
      * An isolated no-op carries no pad commit. Nested or competing calls can
      * hide an intermediate value, even if the sampled byte is restored. */
     if (before != after || uncertain) ds_pad_dependency(self, 1);
-    for (unsigned d = 0; d < 4; d++)
-        if (entered & (1u << d)) atomic_fetch_sub(&ds_pad_slots[d].cert_active, 1);
+    ds_pad_certificate_leave(&state);
     return result;
 }
 static uintptr_t ds_pad_cert_update(uintptr_t self) {
@@ -367,26 +412,38 @@ static void ds_pad_apply(const struct ds_gui_record *r, int gap) {
     ds_publish(r->deck, 0, DS_UNIT_INPUT, r->observed, &f, 1, NULL, NULL, gap ? AZ_STATUS_TOPIC(AZ_STATUS_SETTINGS) : 0,
                gap ? AZ_STATUS_CAPTURE_GAP : 0);
 }
+static int ds_pad_selector_valid(uintptr_t selector) {
+    const uint32_t signature[] = {0x72001c7f, 0x54000160, 0xa9be7bfd, 0x910003fd};
+    return selector >= g_ep_img_lo && selector + sizeof signature <= g_ep_img_hi &&
+           !memcmp((void *) selector, signature, sizeof signature);
+}
+static int ds_pad_entries_valid(const struct ds_pad_profile *profile) {
+    const uint32_t expected[] = {0xa9af7bfd, 0xa9b47bfd, 0xf9400c01, 0xa9b87bfd, 0xa9b37bfd, 0xa9b87bfd, 0xa9bc7bfd, 0xa9b47bfd};
+    for (unsigned i = 0; i < 8; i++)
+        if (profile->entry[i] < g_ep_img_lo || profile->entry[i] + 4 > g_ep_img_hi ||
+            memcmp((void *) profile->entry[i], &expected[i], 4)) return 0;
+    return 1;
+}
+static int ds_pad_targets_valid(const struct ds_pad_profile *profile, uintptr_t selector) {
+    uintptr_t dispose = 0;
+    if (!ds_pad_selector_valid(selector)) return 0;
+    return img_q(profile->ctrl + 16, &dispose) && dispose == profile->dispose && ds_pad_entries_valid(profile);
+}
+static int ds_pad_install_entries(const struct ds_pad_profile *profile, uintptr_t selector) {
+    void *hooks[] = {ds_pad_construct, ds_pad_direct, ds_pad_async, ds_pad_alternate, ds_pad_pc_direct, ds_pad_pc_async,
+                     ds_pad_cert_update, ds_pad_cert_construct};
+    for (unsigned i = 0; i < 8; i++)
+        if (azm_install_island_hook_at(profile->entry[i], hooks[i], &ds_pad_original[i], "status-pad") != 1) return 0;
+    return azm_install_island_hook_at(selector, ds_pad_select, &ds_pad_select_original, "status-pad-layer") == 1;
+}
 static void ds_pad_install(void) {
     if (g_ep147_build != EPB_V130 && g_ep147_build != EPB_V200) return;
     if (access("/home/root/settings/azmod.deck-status.off", F_OK) == 0) return;
-    const struct ds_pad_profile *p = &ds_pad_profiles[g_ep147_build == EPB_V130 ? 0 : 1];
-    const uint32_t expected[] = {0xa9af7bfd, 0xa9b47bfd, 0xf9400c01, 0xa9b87bfd, 0xa9b37bfd, 0xa9b87bfd, 0xa9bc7bfd, 0xa9b47bfd};
-    void *hooks[] = {ds_pad_construct, ds_pad_direct, ds_pad_async, ds_pad_alternate, ds_pad_pc_direct, ds_pad_pc_async,
-                     ds_pad_cert_update, ds_pad_cert_construct};
-    uintptr_t dispose = 0;
+    const struct ds_pad_profile *profile = &ds_pad_profiles[g_ep147_build == EPB_V130 ? 0 : 1];
     uintptr_t selector = g_ep147_build == EPB_V130 ? 0x2039d58 : 0x21a7650;
-    const uint32_t select_signature[] = {0x72001c7f, 0x54000160, 0xa9be7bfd, 0x910003fd};
-    if (selector < g_ep_img_lo || selector + sizeof select_signature > g_ep_img_hi ||
-        memcmp((void *) selector, select_signature, sizeof select_signature)) return;
-    if (!img_q(p->ctrl + 16, &dispose) || dispose != p->dispose) return;
-    for (unsigned i = 0; i < 8; i++)
-        if (p->entry[i] < g_ep_img_lo || p->entry[i] + 4 > g_ep_img_hi ||
-            memcmp((void *) p->entry[i], &expected[i], 4)) return;
-    ds_pad_profile = p;
-    if (azm_patch_vtable(p->ctrl + 16, ds_pad_dispose, &ds_pad_dispose_original) != 1) return;
-    for (unsigned i = 0; i < 8; i++)
-        if (azm_install_island_hook_at(p->entry[i], hooks[i], &ds_pad_original[i], "status-pad") != 1) return;
-    if (azm_install_island_hook_at(selector, ds_pad_select, &ds_pad_select_original, "status-pad-layer") != 1) return;
+    if (!ds_pad_targets_valid(profile, selector)) return;
+    ds_pad_profile = profile;
+    if (azm_patch_vtable(profile->ctrl + 16, ds_pad_dispose, &ds_pad_dispose_original) != 1) return;
+    if (!ds_pad_install_entries(profile, selector)) return;
     atomic_store_explicit(&ds_pad_ready, 1, memory_order_release);
 }

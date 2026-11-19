@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 
-EXTENSIONS = ["records", "automation", "time", "command", "exit", "cue-actor", "cue-store", "cue-lifecycle", "cue-persist", "cue-recall", "cue-stage", "cue-commands", "stored", "live", "sources", "native-commands", "load",
+EXTENSIONS = ["native-c", "records", "automation", "time", "command", "command-delivery", "exit", "cue-actor", "cue-store", "cue-lifecycle", "cue-persist", "cue-recall", "cue-stage", "cue-commands", "stored", "live", "sources", "native-commands", "load",
               "load-lifecycle", "vtable", "hook-install", "source-probe", "load-probe", "wave-overview", "wave-report"]
 
 
@@ -166,7 +166,13 @@ class SanitizerPreflightTests(unittest.TestCase):
                          "sdk-cache-entry-fp", "sdk-cue", "sdk-cue-public", "sdk-cue-export",
                          "sdk-cue-events", "sdk-deck-listeners", "sdk-data-lifecycle", "sdk-slip", "sdk-exit",
                          "sdk-status", "sdk-status-ui", "sdk-status-gui", "sdk-status-loader", "sdk-status-native", "sdk-status-maps",
-                         "sdk-status-map-source", "sdk-status-source", "sdk-status-store"):
+                         "sdk-status-map-source", "sdk-status-source", "sdk-status-store",
+                         "sdk-status-file-install", "sdk-status-map-install", "sdk-status-memory-ownership",
+                         "sdk-status-map-transactions", "sdk-analysis-install", "sdk-status-file-cues",
+                         "sdk-status-sync", "sdk-status-lti", "sdk-status-install", "sdk-status-memory-recall",
+                         "azstem-startup", "overview-native", "inline-entry", "sdk-ui-routing",
+                         "sdk-surface-placement", "community-bindings", "community-screen", "stem-folder",
+                         "sdk-cue-bridge", "sdk-panel", "stem-loader", "stem-fd", "sdk-playlist-message", "sdk-exit-contracts"):
                 (root / ("tests/" + name + ".sh")).write_text("#!/bin/sh\nexit 0\n")
             docker = root / "bin/docker"
             docker.write_text('''#!/usr/bin/env python3
@@ -267,7 +273,7 @@ sys.exit(result.returncode)
                         text += 'echo "SKIP: required fixture unavailable"\n'
                     elif scenario == "skip-77":
                         text += 'echo "required fixture unavailable"; exit 77\n'
-                script = name + ".sh" if name.startswith("wave-") else "sdk-" + name + ".sh"
+                script = name + ".sh" if name == "native-c" or name.startswith("wave-") else "sdk-" + name + ".sh"
                 (root / "tests" / script).write_text(text)
             calls = root / "calls.txt"
             environment = os.environ.copy()

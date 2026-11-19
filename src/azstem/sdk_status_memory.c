@@ -75,7 +75,7 @@ void *originals[5];
 _Atomic(bool) enabled = false;
 _Atomic(bool) connected = false;
 _Atomic(bool) pack_profile_ready = false;
-_Atomic(azn_pack_observer) pack_observer = NULL;
+_Atomic(azn_pack_observer) pack_observer;
 static bool observing() { return atomic_load_explicit(&(enabled), memory_order_acquire) && atomic_load_explicit(&(connected), memory_order_acquire); }
 enum {
     pool_count = 256,
@@ -147,12 +147,12 @@ struct Hold {
 static void hold_drop(struct Hold *held) {
     if (held->token) drop(held->token);
 }
-#define HOLD(name, id) struct Hold name __attribute__((cleanup(hold_drop))) = {hold(id) ? (id) : 0}
 /* Evaluate the requested incarnation exactly once before attempting a hold. */
 static struct Hold hold_acquire(uint64_t id) { return (struct Hold) {hold(id) ? id : 0}; }
-#undef HOLD
-#define HOLD(name, id) struct Hold name __attribute__((cleanup(hold_drop))) = hold_acquire(id)
+#define HOLD(name, id) struct Hold name __attribute__((cleanup(hold_drop))) = hold_acquire((id))
 static void publishing_unlock(atomic_flag **flag) { atomic_flag_clear_explicit(*flag, memory_order_release); }
+/* A declaration with a cleanup attribute cannot be parenthesized as an expression. */
+// NOLINTNEXTLINE(bugprone-macro-parentheses)
 #define PUBLISHING_GUARD(name, pin) atomic_flag *name __attribute__((cleanup(publishing_unlock))) = &(pin)->publishing
 static uint64_t make_pin(uintptr_t object, uint64_t epoch, uint64_t load, uint64_t unit) {
     uint64_t id = new_id(&(sequence), (UINT64_C(1) << 46) - 1);
@@ -231,59 +231,55 @@ static void memory_loss(unsigned deck, const Pin *bind) {
     r.memory_serial = atomic_load_explicit(&(bind->serial), memory_order_acquire);
     azn_emit(&r);
 }
-/* owned_holder/content_pin are supplied by a real setter/factory, or by the
- * cache of still-pinned objects. A raw pointer read from the pack is used
- * only for comparison, never to borrow or resurrect the target. */
-static bool fill(unsigned deck, Pin *binding, uint64_t holder_token, uint64_t content_token, bool explicit_empty, bool committed, struct azstatus_native_receipt *out) {
-    if (!current(deck, binding)) return false;
-    const uintptr_t holder = object_word(binding->object + 0xe8);
-    Pin *hp = pin_for(holder_token), *cp = pin_for(content_token);
+static bool memory_fill_owned(uintptr_t holder, const Pin *hp, const Pin *cp, bool explicit_empty) {
     if ((hp && hp->object != holder) || (cp && (!hp || object_word(holder + 0x28) != cp->object))) return false;
-    if (explicit_empty && (!hp || object_word(holder + 0x28) != 0)) return false;
-    if (atomic_flag_test_and_set_explicit(&(binding->publishing), memory_order_acquire)) return false;
-    PUBLISHING_GUARD(guard, binding);
-    if (!current(deck, binding) || object_word(binding->object + 0xe8) != holder ||
-        (cp && object_word(holder + 0x28) != cp->object) || (explicit_empty && object_word(holder + 0x28))) return false;
-    uintptr_t previous = atomic_load_explicit(&(binding->holder), memory_order_relaxed);
+    return !explicit_empty || (hp && object_word(holder + 0x28) == 0);
+}
+static bool memory_fill_current(unsigned deck, const Pin *binding, uintptr_t holder, const Pin *cp, bool explicit_empty) {
+    return current(deck, binding) && object_word(binding->object + 0xe8) == holder &&
+           (!cp || object_word(holder + 0x28) == cp->object) && (!explicit_empty || !object_word(holder + 0x28));
+}
+static uint64_t memory_fill_provider(unsigned deck, Pin *binding, uintptr_t holder, uintptr_t previous, bool *committed) {
     uint64_t provider = atomic_load_explicit(&(binding->provider), memory_order_relaxed);
-    if (!provider || previous != holder) {
-        uint64_t n = new_id(&(providers), AZSP_SERIAL_MAX);
-        if (!n) {
-            memory_loss(deck, binding);
-            return false;
-        }
-        provider = AZSP_MEMORY | n;
-        atomic_store_explicit(&(binding->holder), holder, memory_order_relaxed);
-        atomic_store_explicit(&(binding->provider), provider, memory_order_relaxed);
-        binding->confirmed_empty = false;
-        committed = true;
+    if (provider && previous == holder) return provider;
+    uint64_t n = new_id(&(providers), AZSP_SERIAL_MAX);
+    if (!n) {
+        memory_loss(deck, binding);
+        return 0;
     }
-    if (holder_token && hold(holder_token)) {
-        uint64_t old = atomic_exchange_explicit(&(binding->holder_pin), holder_token, memory_order_acq_rel);
+    provider = AZSP_MEMORY | n;
+    atomic_store_explicit(&(binding->holder), holder, memory_order_relaxed);
+    atomic_store_explicit(&(binding->provider), provider, memory_order_relaxed);
+    binding->confirmed_empty = false;
+    *committed = true;
+    return provider;
+}
+static void memory_replace_pin(_Atomic(uint64_t) *destination, uint64_t token, bool clear) {
+    if (token && hold(token)) {
+        uint64_t old = atomic_exchange_explicit(destination, token, memory_order_acq_rel);
         if (old) drop(old);
-    } else if (previous != holder) {
-        uint64_t old = atomic_exchange_explicit(&(binding->holder_pin), 0, memory_order_acq_rel);
-        if (old) drop(old);
-    }
-    if (content_token && hold(content_token)) {
-        uint64_t old = atomic_exchange_explicit(&(binding->latest_pin), content_token, memory_order_acq_rel);
-        if (old) drop(old);
-    } else if (explicit_empty || previous != holder) {
-        uint64_t old = atomic_exchange_explicit(&(binding->latest_pin), 0, memory_order_acq_rel);
+    } else if (clear) {
+        uint64_t old = atomic_exchange_explicit(destination, 0, memory_order_acq_rel);
         if (old) drop(old);
     }
-    uint64_t revision = atomic_load_explicit(&(binding->serial), memory_order_relaxed);
+}
+static void memory_fill_empty(Pin *binding, uintptr_t holder, const Pin *hp, uint64_t content_token, bool explicit_empty) {
     if (content_token || (hp && object_word(holder + 0x28))) binding->confirmed_empty = false;
     else if (explicit_empty) binding->confirmed_empty = true;
-    if (committed) {
-        if (revision == UINT64_MAX) {
-            memory_loss(deck, binding);
-            return false;
-        }
-        atomic_store_explicit(&(binding->serial), ++revision, memory_order_relaxed);
+}
+static bool memory_fill_revision(unsigned deck, Pin *binding, bool committed, uint64_t *revision) {
+    if (!committed) return true;
+    if (*revision == UINT64_MAX) {
+        memory_loss(deck, binding);
+        return false;
     }
-    (*out) = (struct azstatus_native_receipt) {0};
-    out->size = sizeof(*out);
+    atomic_store_explicit(&(binding->serial), ++*revision, memory_order_relaxed);
+    return true;
+}
+static void memory_fill_receipt(unsigned deck, const Pin *binding, const Pin *hp, uint64_t content_token,
+                                uint64_t provider, uint64_t revision, struct azstatus_native_receipt *out) {
+    *out = (struct azstatus_native_receipt) {0};
+    out->size = sizeof *out;
     out->version = 1;
     out->kind = AZN_MEMORY;
     out->deck = deck;
@@ -296,40 +292,79 @@ static bool fill(unsigned deck, Pin *binding, uint64_t holder_token, uint64_t co
         out->memory_pin = content_token;
         out->valid = AZ_AVAIL_READY;
     } else out->valid = hp && binding->confirmed_empty ? AZ_AVAIL_EMPTY : AZ_AVAIL_LOADING;
+}
+/* owned_holder/content_pin are supplied by a real setter/factory, or by the
+ * cache of still-pinned objects. A raw pointer read from the pack is used
+ * only for comparison, never to borrow or resurrect the target. */
+static bool fill(unsigned deck, Pin *binding, uint64_t holder_token, uint64_t content_token, bool explicit_empty, bool committed, struct azstatus_native_receipt *out) {
+    if (!current(deck, binding)) return false;
+    const uintptr_t holder = object_word(binding->object + 0xe8);
+    Pin *hp = pin_for(holder_token), *cp = pin_for(content_token);
+    if (!memory_fill_owned(holder, hp, cp, explicit_empty)) return false;
+    if (atomic_flag_test_and_set_explicit(&(binding->publishing), memory_order_acquire)) return false;
+    PUBLISHING_GUARD(guard, binding);
+    if (!memory_fill_current(deck, binding, holder, cp, explicit_empty)) return false;
+    uintptr_t previous = atomic_load_explicit(&(binding->holder), memory_order_relaxed);
+    uint64_t provider = memory_fill_provider(deck, binding, holder, previous, &committed);
+    if (!provider) return false;
+    memory_replace_pin(&binding->holder_pin, holder_token, previous != holder);
+    memory_replace_pin(&binding->latest_pin, content_token, explicit_empty || previous != holder);
+    uint64_t revision = atomic_load_explicit(&(binding->serial), memory_order_relaxed);
+    memory_fill_empty(binding, holder, hp, content_token, explicit_empty);
+    if (!memory_fill_revision(deck, binding, committed, &revision)) return false;
+    memory_fill_receipt(deck, binding, hp, content_token, provider, revision, out);
     return true;
 }
-static int seed(unsigned deck, struct azstatus_native_receipt *out) {
-    if (deck >= 4 || !out || out->size < sizeof *out || out->version != 1) return 0;
-    HOLD(pack, atomic_load_explicit(&(active[deck]), memory_order_acquire));
-    Pin *binding = pin_for(pack.token);
-    if (!binding || !current(deck, binding)) return 0;
-    __auto_type replacement = &(holder_writers[cache_slot(binding->object)]);
-    if (atomic_load_explicit(&(replacement->count), memory_order_acquire)) return 0;
-    uint64_t replace_cut = atomic_load_explicit(&(replacement->interference), memory_order_acquire);
-    uintptr_t holder = object_word(binding->object + 0xe8);
-    __auto_type write = &(writers[cache_slot(holder)]);
-    if (atomic_load_explicit(&(write->count), memory_order_acquire)) return 0;
-    uint64_t cut = atomic_load_explicit(&(write->interference), memory_order_acquire);
-    uint64_t h = holder ? known(cached_holder, holder) : 0;
-    if (!h && holder) {
-        HOLD(prior, atomic_load_explicit(&(binding->holder_pin), memory_order_acquire));
-        if (prior.token && pin_for(prior.token)->object == holder && hold(prior.token)) h = prior.token;
+struct MemorySeed {
+    Writing *replacement, *write;
+    uint64_t replace_cut, cut;
+    uintptr_t holder;
+};
+static bool memory_seed_capture(Pin *binding, struct MemorySeed *s) {
+    s->replacement = &holder_writers[cache_slot(binding->object)];
+    if (atomic_load_explicit(&(s->replacement->count), memory_order_acquire)) return false;
+    s->replace_cut = atomic_load_explicit(&(s->replacement->interference), memory_order_acquire);
+    s->holder = object_word(binding->object + 0xe8);
+    s->write = &writers[cache_slot(s->holder)];
+    if (atomic_load_explicit(&(s->write->count), memory_order_acquire)) return false;
+    s->cut = atomic_load_explicit(&(s->write->interference), memory_order_acquire);
+    return true;
+}
+static uint64_t memory_seed_pin(uintptr_t object, _Atomic(uint64_t) *cache, const _Atomic(uint64_t) *binding_pin) {
+    uint64_t token = object ? known(cache, object) : 0;
+    if (!token && object) {
+        HOLD(prior, atomic_load_explicit(binding_pin, memory_order_acquire));
+        if (prior.token && pin_for(prior.token)->object == object && hold(prior.token)) token = prior.token;
     }
-    uintptr_t content = h ? object_word(holder + 0x28) : 0;
-    uint64_t c = content ? known(cached_content, content) : 0;
-    if (!c && content) {
-        HOLD(prior, atomic_load_explicit(&(binding->latest_pin), memory_order_acquire));
-        if (prior.token && pin_for(prior.token)->object == content && hold(prior.token)) c = prior.token;
-    }
+    return token;
+}
+static bool memory_seed_unchanged(const struct MemorySeed *s) {
+    return !atomic_load_explicit(&(s->write->count), memory_order_acquire) &&
+           s->cut == atomic_load_explicit(&(s->write->interference), memory_order_acquire) &&
+           !atomic_load_explicit(&(s->replacement->count), memory_order_acquire) &&
+           s->replace_cut == atomic_load_explicit(&(s->replacement->interference), memory_order_acquire);
+}
+static bool memory_seed_fill(unsigned deck, Pin *binding, const struct MemorySeed *s, struct azstatus_native_receipt *out) {
+    uint64_t h = memory_seed_pin(s->holder, cached_holder, &binding->holder_pin);
+    uintptr_t content = h ? object_word(s->holder + 0x28) : 0;
+    uint64_t c = memory_seed_pin(content, cached_content, &binding->latest_pin);
     bool ok = fill(deck, binding, h, c, false, false, out);
-    if (ok && (atomic_load_explicit(&(write->count), memory_order_acquire) || cut != atomic_load_explicit(&(write->interference), memory_order_acquire) ||
-               atomic_load_explicit(&(replacement->count), memory_order_acquire) || replace_cut != atomic_load_explicit(&(replacement->interference), memory_order_acquire))) {
+    if (ok && !memory_seed_unchanged(s)) {
         if (out->memory_pin) drop(out->memory_pin);
         ok = false;
     }
     if (c) drop(c);
     if (h) drop(h);
     return ok;
+}
+static int seed(unsigned deck, struct azstatus_native_receipt *out) {
+    if (deck >= 4 || !out || out->size < sizeof *out || out->version != 1) return 0;
+    HOLD(pack, atomic_load_explicit(&(active[deck]), memory_order_acquire));
+    Pin *binding = pin_for(pack.token);
+    if (!binding || !current(deck, binding)) return 0;
+    struct MemorySeed s = {0};
+    if (!memory_seed_capture(binding, &s)) return 0;
+    return memory_seed_fill(deck, binding, &s, out);
 }
 static void send(struct azstatus_native_receipt *r) {
     if ((!(azn_interest(r->deck) & AZ_STATUS_TOPIC(AZ_STATUS_CUES)) || !azn_offer(r)) && r->memory_pin) drop(r->memory_pin);
@@ -369,53 +404,58 @@ static void writer_begin(struct Writer *w, uintptr_t holder, uintptr_t content) 
         atomic_fetch_add_explicit(&w->bucket->interference, 1, memory_order_acq_rel);
     }
 }
+static void writer_recover_decks(const struct Writer *w, bool last) {
+    for (unsigned d = 0; d < 4; ++d) {
+        HOLD(bind, atomic_load_explicit(&active[d], memory_order_acquire));
+        Pin *b = pin_for(bind.token);
+        if (!b || !current(d, b)) continue;
+        uintptr_t h = object_word(b->object + 0xe8);
+        if (h == w->holder) memory_loss(d, b);
+        if (last && cache_slot(h) == cache_slot(w->holder)) seed_active(d);
+    }
+}
 static void writer_drop(struct Writer *w) {
     writer_top = w->previous;
     if (!w->nested) {
         bool last = atomic_fetch_sub_explicit(&w->bucket->count, 1, memory_order_acq_rel) == 1;
-        if (writer_uncertain(w)) {
-            for (unsigned d = 0; d < 4; ++d) {
-                HOLD(bind, atomic_load_explicit(&active[d], memory_order_acquire));
-                Pin *b = pin_for(bind.token);
-                if (!b || !current(d, b)) continue;
-                uintptr_t h = object_word(b->object + 0xe8);
-                if (h == w->holder) memory_loss(d, b);
-                if (last && cache_slot(h) == cache_slot(w->holder)) seed_active(d);
-            }
-        }
+        if (writer_uncertain(w)) writer_recover_decks(w, last);
     }
     if (w->holder_token) drop(w->holder_token);
     if (w->content_token) drop(w->content_token);
 }
 #define WRITER(name, holder, content)                               \
     struct Writer name __attribute__((cleanup(writer_drop))) = {0}; \
-    writer_begin(&name, holder, content)
+    writer_begin(&(name), (holder), (content))
 #define ORIGINAL(type, index) ((type) __atomic_load_n(originals + (index), __ATOMIC_ACQUIRE))
+static bool writer_value_owned(const Writer *w) {
+    return w->holder_token && (!w->content || w->content_token) && object_word(w->holder + 0x28) == w->content;
+}
+static void writer_broadcast_deck(Writer *w, unsigned d) {
+    HOLD(bind, atomic_load_explicit(&(active[d]), memory_order_acquire));
+    Pin *b = pin_for(bind.token);
+    if (!b || !current(d, b) || object_word(b->object + 0xe8) != w->holder) return;
+    Writing *replacement = &holder_writers[cache_slot(b->object)];
+    if (atomic_load_explicit(&(replacement->count), memory_order_acquire)) {
+        atomic_fetch_add_explicit(&(replacement->interference), 1, memory_order_acq_rel);
+        memory_loss(d, b);
+        return;
+    }
+    if (writer_uncertain(w)) return; // last writer emits a scoped cut and an owned seed
+    if (!writer_value_owned(w)) {
+        memory_loss(d, b);
+        return;
+    }
+    struct azstatus_native_receipt r = {0};
+    if (fill(d, b, w->holder_token, w->content_token, !w->content, true, &r)) send(&r);
+    else memory_loss(d, b);
+}
 static void on_broadcast(void *self, void *listener) {
-    uintptr_t holder = ((uintptr_t) (self));
+    uintptr_t holder = (uintptr_t) self;
     Writer *w = writer_top;
     while (w && w->holder != holder) w = w->previous;
     if (w && !w->witnessed) {
         w->witnessed = true;
-        for (unsigned d = 0; d < 4; ++d) {
-            HOLD(bind, atomic_load_explicit(&(active[d]), memory_order_acquire));
-            Pin *b = pin_for(bind.token);
-            if (!b || !current(d, b) || object_word(b->object + 0xe8) != holder) continue;
-            __auto_type replacement = &(holder_writers[cache_slot(b->object)]);
-            if (atomic_load_explicit(&(replacement->count), memory_order_acquire)) {
-                atomic_fetch_add_explicit(&(replacement->interference), 1, memory_order_acq_rel);
-                memory_loss(d, b);
-                continue;
-            }
-            if (writer_uncertain(w)) continue; // last writer emits a scoped cut and an owned seed
-            if (!w->holder_token || (w->content && !w->content_token) || object_word(holder + 0x28) != w->content) {
-                memory_loss(d, b);
-                continue;
-            }
-            struct azstatus_native_receipt r = {0};
-            if (fill(d, b, w->holder_token, w->content_token, !w->content, true, &(r))) send(&(r));
-            else memory_loss(d, b);
-        }
+        for (unsigned d = 0; d < 4; ++d) writer_broadcast_deck(w, d);
     }
     ORIGINAL(void (*)(void *, void *), 2)(self, listener);
 }
@@ -439,16 +479,20 @@ struct HolderScope {
     uint64_t pin, cut;
     bool overlap;
 };
+static bool holder_scope_needs_seed(const HolderScope *scope, uintptr_t pack, bool lost) {
+    return pack == scope->pack || (lost && cache_slot(pack) == cache_slot(scope->pack));
+}
+static void holder_scope_recover_deck(const HolderScope *scope, unsigned d, bool last, bool lost) {
+    HOLD(bind, atomic_load_explicit(&(active[d]), memory_order_acquire));
+    Pin *b = pin_for(bind.token);
+    if (!b || !current(d, b)) return;
+    if (b->object == scope->pack && (lost || object_word(scope->pack + 0xe8) != scope->target)) memory_loss(d, b);
+    if (last && holder_scope_needs_seed(scope, b->object, lost)) seed_active(d);
+}
 static void holder_scope_drop(struct HolderScope *scope) {
     bool last = atomic_fetch_sub_explicit(&(scope->gate->count), 1, memory_order_acq_rel) == 1;
     bool lost = scope->overlap || scope->cut != atomic_load_explicit(&(scope->gate->interference), memory_order_acquire);
-    for (unsigned d = 0; d < 4; ++d) {
-        HOLD(bind, atomic_load_explicit(&(active[d]), memory_order_acquire));
-        Pin *b = pin_for(bind.token);
-        if (!b || !current(d, b)) continue;
-        if (b->object == scope->pack && (lost || object_word(scope->pack + 0xe8) != scope->target)) memory_loss(d, b);
-        if (last && (b->object == scope->pack || (lost && cache_slot(b->object) == cache_slot(scope->pack)))) seed_active(d);
-    }
+    for (unsigned d = 0; d < 4; ++d) holder_scope_recover_deck(scope, d, last, lost);
     if (scope->pin) drop(scope->pin);
 }
 static void set_holder(void *builder, const uintptr_t *where, const uintptr_t *input) {
@@ -467,6 +511,7 @@ static void set_holder(void *builder, const uintptr_t *where, const uintptr_t *i
     bool overlap = atomic_fetch_add_explicit(&(gate->count), 1, memory_order_acq_rel) != 0;
     if (overlap) atomic_fetch_add_explicit(&(gate->interference), 1, memory_order_acq_rel);
     struct HolderScope scope __attribute__((cleanup(holder_scope_drop))) = {gate, pack, target, h, cut, overlap};
+    (void) scope; /* cleanup attribute owns the scope exit */
     fn(builder, where, input);
 }
 static uintptr_t create_holder(void *manager, const void *id, const uintptr_t *input) {
@@ -490,6 +535,50 @@ static void holder_stage_drop(struct HolderStage *stage) {
 }
 extern void azn_cache_update_entry(void);
 extern void azn_invoke_cache_update(void *function, uintptr_t *result, const unsigned char *track, const uintptr_t *input, void *repository);
+static bool holder_stage_contains(const struct HolderStage *stage, uintptr_t holder) {
+    for (unsigned i = 0; i < stage->count; ++i)
+        if (stage->writers[i].holder == holder) return true;
+    return false;
+}
+static void holder_stage_deck(struct HolderStage *stage, unsigned d, const unsigned char *track, uintptr_t target) {
+    HOLD(bind, atomic_load_explicit(&(active[d]), memory_order_acquire));
+    Pin *p = pin_for(bind.token);
+    if (!p || !current(d, p) || memcmp((const void *) (p->object + 0x38), track, 12)) return;
+    uintptr_t holder = object_word(p->object + 0xe8);
+    uint64_t hp = known(cached_holder, holder);
+    if (!hp) return;
+    if (!holder_stage_contains(stage, holder)) {
+        writer_begin(&stage->writers[stage->count], holder, target);
+        ++stage->count;
+    }
+    drop(hp);
+}
+static bool holder_stage_captured(const struct HolderStage *stage, uintptr_t holder) {
+    for (unsigned i = 0; i < stage->count; ++i)
+        if (stage->writers[i].holder == holder && stage->writers[i].witnessed) return true;
+    return false;
+}
+static void holder_stage_publish_deck(unsigned d, uintptr_t holder, uintptr_t target, uint64_t h, uint64_t c) {
+    HOLD(bind, atomic_load_explicit(&(active[d]), memory_order_acquire));
+    Pin *p = pin_for(bind.token);
+    if (!p || !current(d, p) || object_word(p->object + 0xe8) != holder) return;
+    struct azstatus_native_receipt r = {0};
+    if (fill(d, p, h, c, !target, false, &r)) {
+        if (atomic_load_explicit(&(p->serial), memory_order_acquire) > 1) r.lost_topics = AZ_STATUS_TOPIC(AZ_STATUS_CUES);
+        send(&r);
+    }
+}
+static bool holder_stage_can_publish(const struct HolderStage *stage, uintptr_t result, uintptr_t target, uint64_t h) {
+    return !holder_stage_captured(stage, result) && h && (!target || stage->token) && object_word(result + 0x28) == target;
+}
+static void holder_stage_finish(const struct HolderStage *stage, uintptr_t result, uintptr_t target) {
+    if (!typed(result, profile.holder)) return;
+    uint64_t h = remember(cached_holder, result, profile.holder);
+    if (holder_stage_can_publish(stage, result, target, h)) {
+        for (unsigned d = 0; d < 4; ++d) holder_stage_publish_deck(d, result, target, h, stage->token);
+    }
+    if (h) drop(h);
+}
 __attribute__((visibility("hidden"))) uintptr_t *azn_cache_update(uintptr_t *result, const unsigned char *track, const uintptr_t *input, void *repository) {
     void *fn = __atomic_load_n(originals + 4, __ATOMIC_ACQUIRE);
     if (!observing() || !track || !input) {
@@ -499,42 +588,9 @@ __attribute__((visibility("hidden"))) uintptr_t *azn_cache_update(uintptr_t *res
     const uintptr_t target = *input;
     uint64_t c = target ? remember(cached_content, target, profile.content) : 0;
     struct HolderStage stage __attribute__((cleanup(holder_stage_drop))) = {.token = c};
-    for (unsigned d = 0; d < 4; ++d) {
-        HOLD(bind, atomic_load_explicit(&(active[d]), memory_order_acquire));
-        Pin *p = pin_for(bind.token);
-        if (!p || !current(d, p) || memcmp(((const void *) (p->object + 0x38)), track, 12)) continue;
-        uintptr_t holder = object_word(p->object + 0xe8);
-        uint64_t hp = known(cached_holder, holder);
-        if (!hp) continue;
-        bool present = false;
-        for (unsigned i = 0; i < stage.count; ++i)
-            if (stage.writers[i].holder == holder) present = true;
-        if (!present) {
-            writer_begin(&stage.writers[stage.count], holder, target);
-            ++stage.count;
-        }
-        drop(hp);
-    }
+    for (unsigned d = 0; d < 4; ++d) holder_stage_deck(&stage, d, track, target);
     azn_invoke_cache_update(fn, result, track, input, repository);
-    if (typed((*result), profile.holder)) {
-        uint64_t h = remember(cached_holder, (*result), profile.holder);
-        bool captured = false;
-        for (unsigned i = 0; i < stage.count; ++i)
-            if (stage.writers[i].holder == (*result) && stage.writers[i].witnessed) captured = true;
-        if (!captured && h && (!target || c) && object_word((*result) + 0x28) == target) {
-            for (unsigned d = 0; d < 4; ++d) {
-                HOLD(bind, atomic_load_explicit(&(active[d]), memory_order_acquire));
-                Pin *p = pin_for(bind.token);
-                if (!p || !current(d, p) || object_word(p->object + 0xe8) != (*result)) continue;
-                struct azstatus_native_receipt r = {0};
-                if (fill(d, p, h, c, !target, false, &(r))) {
-                    if (atomic_load_explicit(&(p->serial), memory_order_acquire) > 1) r.lost_topics = AZ_STATUS_TOPIC(AZ_STATUS_CUES);
-                    send(&(r));
-                }
-            }
-        }
-        if (h) drop(h);
-    }
+    holder_stage_finish(&stage, *result, target);
     return result;
 }
 /* Decode on the single core consumer while the immutable Content is pinned.
@@ -552,6 +608,83 @@ static bool coordinate(uint64_t samples, uint64_t us, uint32_t rate, double *sec
     (*seconds) = (double) (samples) / rate;
     return true;
 }
+static bool memory_rows_bounds(uintptr_t start, uintptr_t end) {
+    return end >= start && !((end - start) % 0x80) && (end - start) / 0x80 <= AZ_NATIVE_CUE_LIMIT && (start == end || ptr(start));
+}
+static bool memory_point_cache(const struct azcue_native_timestamps *t) {
+    const uint64_t absent = UINT64_C(0x7fffffffffffffff);
+    if (t->out_sample == absent) return true;
+    const int empty_cache = compare_timestamps(t->out_sample, 0, t->sample_rate, t->sample_rate, 1);
+    return empty_cache != AZ_TIME_INVALID && empty_cache == AZ_TIME_EQUAL;
+}
+static bool memory_row_times(struct az_cue_entry *entry, const struct azcue_native_timestamps *t, bool *loop) {
+    if (!coordinate(t->in_sample, t->in_us, t->sample_rate, &entry->start_s)) return false;
+    // Both stock profiles retain zero in the OUT sample cache of ordinary
+    // memory points while the OUT microseconds carry the absent marker.
+    *loop = t->out_us != UINT64_C(0x7fffffffffffffff);
+    if (!*loop) return memory_point_cache(t);
+    const int interval = compare_timestamps(t->out_sample, t->in_sample, t->sample_rate, t->sample_rate, 1);
+    return interval != AZ_TIME_INVALID && interval == AZ_TIME_AFTER && coordinate(t->out_sample, t->out_us, t->sample_rate, &entry->end_s);
+}
+static void memory_row_clocks(struct azn_memory_rows *out, unsigned i, const struct azcue_native_timestamps *t, bool loop, bool clocks, bool storage_keys) {
+    if (clocks) {
+        out->points[i][0] = (__typeof__(out->points[i][0])) {AZN_COORD, t->sample_rate, (int64_t) t->in_sample};
+        out->points[i][1] = (__typeof__(out->points[i][1])) {loop ? AZN_COORD : AZN_ABSENT, t->sample_rate, loop ? (int64_t) t->out_sample : 0};
+    }
+    if (storage_keys) {
+        out->stored_ms[i][0] = t->in_us / 1000;
+        out->stored_ms[i][1] = loop ? t->out_us / 1000 : 0;
+    }
+}
+static void memory_row_metadata(struct az_cue_entry *entry, uintptr_t row, unsigned i, bool loop) {
+    entry->size = sizeof *entry;
+    entry->version = AZ_DATA_VERSION;
+    entry->entry_id = i + 1;
+    entry->classification = AZ_CUE_MEMORY;
+    entry->type = loop ? AZ_CUE_LOOP : AZ_CUE_POINT;
+    entry->valid = AZ_CUE_START | AZ_CUE_COLOR | (loop ? AZ_CUE_END : 0);
+    entry->saved = entry->modified = -1;
+    entry->rgb = SCALAR(uint32_t, row + 0x78) & 0xffffff;
+    unsigned automatic = SCALAR(unsigned char, row + 0x28);
+    entry->auto_active = -1;
+    if (automatic <= 1) {
+        entry->auto_active = automatic;
+        entry->valid |= AZ_CUE_AUTO_ACTIVE;
+    }
+    unsigned palette = SCALAR(unsigned char, row + 0x7c);
+    if (palette <= 8) {
+        entry->valid |= AZ_CUE_COLOR_ID;
+        entry->color_id = palette;
+    }
+    uintptr_t comment = object_word(row + 0x70);
+    if (comment) {
+        azcue_copy_utf8_prefix(entry->comment, (const char *) comment);
+        entry->valid |= AZ_CUE_COMMENT;
+    }
+}
+static bool memory_read_row(struct azn_memory_rows *out, uintptr_t row, unsigned i, bool clocks, bool storage_keys) {
+    struct az_cue_entry *entry = &out->rows[i];
+    *entry = (struct az_cue_entry) {0};
+    if (SCALAR(unsigned char, row) != 0) return false;
+    struct azcue_native_timestamps t = azcue_read_timestamps((const void *) row);
+    bool loop;
+    if (!memory_row_times(entry, &t, &loop)) return false;
+    memory_row_clocks(out, i, &t, loop, clocks, storage_keys);
+    memory_row_metadata(entry, row, i, loop);
+    return true;
+}
+static void memory_read_content(uintptr_t object, struct azn_memory_rows *out, bool clocks, bool storage_keys) {
+    uintptr_t start = object_word(object + 0x28), end = object_word(object + 0x30);
+    out->count = 0;
+    out->availability = AZ_AVAIL_STALE;
+    if (!memory_rows_bounds(start, end)) return;
+    unsigned count = (unsigned) ((end - start) / 0x80);
+    for (unsigned i = 0; i < count; ++i)
+        if (!memory_read_row(out, start + i * 0x80, i, clocks, storage_keys)) return;
+    out->count = count;
+    out->availability = count ? AZ_AVAIL_READY : AZ_AVAIL_EMPTY;
+    if (clocks) out->clock_version = storage_keys ? 2 : 1;
+}
 static int read_rows(uint64_t token, struct azn_memory_rows *out) {
     if (!out || out->size < offsetof(struct azn_memory_rows, clock_version) || out->version != 1) return 0;
     const bool clocks = out->size >= offsetof(struct azn_memory_rows, stored_ms);
@@ -560,68 +693,7 @@ static int read_rows(uint64_t token, struct azn_memory_rows *out) {
     HOLD(content, token);
     Pin *p = pin_for(content.token);
     if (!p || !typed(p->object, profile.content)) return 0;
-    uintptr_t start = object_word(p->object + 0x28), end = object_word(p->object + 0x30);
-    out->count = 0;
-    out->availability = AZ_AVAIL_STALE;
-    if (end < start || (end - start) % 0x80 || (end - start) / 0x80 > AZ_NATIVE_CUE_LIMIT || (start != end && !ptr(start))) return 1;
-    unsigned count = (unsigned) ((end - start) / 0x80);
-    for (unsigned i = 0; i < count; ++i) {
-        uintptr_t row = start + i * 0x80;
-        __auto_type entry = &(out->rows[i]);
-        (*entry) = (struct az_cue_entry) {0};
-        if (SCALAR(unsigned char, row) != 0) return 1;
-        __auto_type t = azcue_read_timestamps(((const void *) (row)));
-        if (!coordinate(t.in_sample, t.in_us, t.sample_rate, &(entry->start_s))) return 1;
-        const uint64_t absent = UINT64_C(0x7fffffffffffffff);
-        // Both stock profiles retain zero in the OUT sample cache of ordinary
-        // memory points while the OUT microseconds carry the absent marker.
-        bool loop = t.out_us != absent;
-        if (!loop && t.out_sample != absent) {
-            const int empty_cache = compare_timestamps(t.out_sample, 0, t.sample_rate, t.sample_rate, 1);
-            if (empty_cache == AZ_TIME_INVALID || empty_cache != AZ_TIME_EQUAL) return 1;
-        }
-        if (loop) {
-            const int interval = compare_timestamps(t.out_sample, t.in_sample, t.sample_rate, t.sample_rate, 1);
-            if (interval == AZ_TIME_INVALID || interval != AZ_TIME_AFTER ||
-                !coordinate(t.out_sample, t.out_us, t.sample_rate, &(entry->end_s))) return 1;
-        }
-        if (clocks) {
-            out->points[i][0] = (__typeof__(out->points[i][0])) {AZN_COORD, t.sample_rate, ((int64_t) (t.in_sample))};
-            out->points[i][1] = (__typeof__(out->points[i][1])) {loop ? AZN_COORD : AZN_ABSENT, t.sample_rate,
-                                                                 loop ? ((int64_t) (t.out_sample)) : 0};
-        }
-        if (storage_keys) {
-            out->stored_ms[i][0] = t.in_us / 1000;
-            out->stored_ms[i][1] = loop ? t.out_us / 1000 : 0;
-        }
-        entry->size = sizeof(*entry);
-        entry->version = AZ_DATA_VERSION;
-        entry->entry_id = i + 1;
-        entry->classification = AZ_CUE_MEMORY;
-        entry->type = loop ? AZ_CUE_LOOP : AZ_CUE_POINT;
-        entry->valid = AZ_CUE_START | AZ_CUE_COLOR | (loop ? AZ_CUE_END : 0);
-        entry->saved = entry->modified = -1;
-        entry->rgb = SCALAR(uint32_t, row + 0x78) & 0xffffff;
-        unsigned automatic = SCALAR(unsigned char, row + 0x28);
-        entry->auto_active = -1;
-        if (automatic <= 1) {
-            entry->auto_active = automatic;
-            entry->valid |= AZ_CUE_AUTO_ACTIVE;
-        }
-        unsigned palette = SCALAR(unsigned char, row + 0x7c);
-        if (palette <= 8) {
-            entry->valid |= AZ_CUE_COLOR_ID;
-            entry->color_id = palette;
-        }
-        uintptr_t comment = object_word(row + 0x70);
-        if (comment) {
-            azcue_copy_utf8_prefix(entry->comment, ((const char *) (comment)));
-            entry->valid |= AZ_CUE_COMMENT;
-        }
-    }
-    out->count = count;
-    out->availability = count ? AZ_AVAIL_READY : AZ_AVAIL_EMPTY;
-    if (clocks) out->clock_version = storage_keys ? 2 : 1;
+    memory_read_content(p->object, out, clocks, storage_keys);
     return 1;
 }
 static uint64_t now_epoch(unsigned deck) {
@@ -638,34 +710,48 @@ static int main_image(struct dl_phdr_info *info, size_t bytes __attribute__((unu
 #endif
 
 
+static bool memory_copy_frame(const RecallFrame *frame, unsigned deck, uintptr_t context) {
+    return frame && deck < 4 && context && frame->owned && frame->candidates &&
+           typed(frame->facade, recall_bias + recall_profile->facade_table) && object_word(frame->facade + 0x60) == context;
+}
+static bool memory_copy_edition(const MemoryEdition *edition, uint64_t fence, uint64_t load, uintptr_t destination, uint32_t revision) {
+    return edition->entry && edition->epoch == fence && edition->load == load && SCALAR(uint32_t, destination + 8) == revision + 1u;
+}
+static bool memory_working_copy(const RecallFrame *frame, uintptr_t context, uintptr_t destination, uintptr_t source, uintptr_t retained) {
+    /* The stock CueLoadFacade first copies the task property to kind zero.
+     * Its loader increments the retained revision once more on committing the
+     * kind. Only that same retained property can establish the working copy. */
+    return destination == context + 0x160 && frame->retained && frame->retained == source && source == retained &&
+           SCALAR(uint32_t, source + 8) == frame->retained_revision + 1u;
+}
+static bool memory_edition_matches(const MemoryEdition *now, const MemoryEdition *edition, uint64_t fence, uint64_t load, uint64_t pack, uint64_t content) {
+    return now->unit == edition->unit && now->epoch == fence && now->load == load && now->provider == edition->provider &&
+           now->serial == edition->serial && now->pack_token == pack && now->content_token == content;
+}
+static struct azn_hot_link memory_copy_link(unsigned deck, uint64_t fence, uint64_t load, const MemoryEdition *edition, uint64_t *file_row) {
+    HOLD(a, edition->pack_token);
+    HOLD(c, edition->content_token);
+    if (!a.token || !c.token) return (struct azn_hot_link) {0};
+    MemoryEdition now = selected_edition(deck, pin_for(a.token)->object, pin_for(c.token)->object, edition->entry);
+    if (!memory_edition_matches(&now, edition, fence, load, a.token, c.token)) return (struct azn_hot_link) {0};
+    if (file_row) *file_row = imported_memory_row(pin_for(c.token)->object, edition->entry);
+    return (struct azn_hot_link) {edition->provider, edition->serial, edition->entry, AZN_MEMORY_LINK_READY};
+}
 struct azn_hot_link azn_memory_copied(unsigned deck, uint64_t fence, uint64_t load, uintptr_t context,
                                       uintptr_t destination, uintptr_t source, uint32_t previous_revision, uint64_t *file_row) {
     if (file_row) *file_row = 0;
-    __auto_type frame = recall_frame;
-    if (!frame || deck >= 4 || !context || !frame->owned || !frame->candidates ||
-        !typed(frame->facade, recall_bias + recall_profile->facade_table) || object_word(frame->facade + 0x60) != context) return (struct azn_hot_link) {0};
-    __auto_type edition = &(frame->candidates->deck[deck]);
-    if (!edition->entry || edition->epoch != fence || edition->load != load ||
-        SCALAR(uint32_t, destination + 8) != previous_revision + 1u) return (struct azn_hot_link) {0};
+    RecallFrame *frame = recall_frame;
+    if (!memory_copy_frame(frame, deck, context)) return (struct azn_hot_link) {0};
+    const MemoryEdition *edition = &frame->candidates->deck[deck];
+    if (!memory_copy_edition(edition, fence, load, destination, previous_revision)) return (struct azn_hot_link) {0};
     const uintptr_t retained = object_word(context + 0x18);
     if (destination == retained) {
         frame->retained = source == frame->owned ? retained : 0;
         frame->retained_revision = previous_revision + 1u;
         return (struct azn_hot_link) {0};
     }
-    /* The stock CueLoadFacade first copies the task property to kind zero.
-     * Its loader increments the retained revision once more on committing the
-     * kind. Only that same retained property can establish the working copy. */
-    if (destination != context + 0x160 || !frame->retained || frame->retained != source || source != retained ||
-        SCALAR(uint32_t, source + 8) != frame->retained_revision + 1u) return (struct azn_hot_link) {0};
-    HOLD(a, edition->pack_token);
-    HOLD(c, edition->content_token);
-    if (!a.token || !c.token) return (struct azn_hot_link) {0};
-    __auto_type now = selected_edition(deck, pin_for(a.token)->object, pin_for(c.token)->object, edition->entry);
-    if (now.unit != edition->unit || now.epoch != fence || now.load != load || now.provider != edition->provider ||
-        now.serial != edition->serial || now.pack_token != a.token || now.content_token != c.token) return (struct azn_hot_link) {0};
-    if (file_row) *file_row = imported_memory_row(pin_for(c.token)->object, edition->entry);
-    return (struct azn_hot_link) {edition->provider, edition->serial, edition->entry, AZN_MEMORY_LINK_READY};
+    if (!memory_working_copy(frame, context, destination, source, retained)) return (struct azn_hot_link) {0};
+    return memory_copy_link(deck, fence, load, edition, file_row);
 }
 
 uint64_t azn_owned_pin(uintptr_t owned) { return ptr(owned) ? make_pin(owned, 0, 0, 0) : 0; }
@@ -677,11 +763,13 @@ int azn_pin_hold(uint64_t token, uintptr_t *object) {
 void azn_pin_drop(uint64_t token) {
     if (token) drop(token);
 }
+static bool memory_pack_view_matches(const Pin *pin, const struct azn_pack_view *view) {
+    return pin && pin->object == view->object && pin->epoch == view->fence && pin->load == view->load && pin->unit == view->unit;
+}
 int azn_pack_current(unsigned deck, const struct azn_pack_view *view) {
     if (deck >= 4 || !view || !view->token || atomic_load_explicit(&(active[deck]), memory_order_acquire) != view->token) return 0;
     Pin *pin = pin_for(view->token);
-    return pin && pin->object == view->object && pin->epoch == view->fence && pin->load == view->load && pin->unit == view->unit &&
-           current(deck, pin) && atomic_load_explicit(&(active[deck]), memory_order_acquire) == view->token;
+    return memory_pack_view_matches(pin, view) && current(deck, pin) && atomic_load_explicit(&(active[deck]), memory_order_acquire) == view->token;
 }
 int azn_pack_acquire(unsigned deck, struct azn_pack_view *out) {
     if (deck >= 4 || !out) return 0;
@@ -722,28 +810,55 @@ int azn_pack_observe(azn_pack_observer observer) {
     }
     return 1;
 }
-int azn_memory_configure(int build, azexit_install_fn install) {
 #if defined(__linux__) && defined(__aarch64__)
-    if (build < 1 || build > 2 || !install || atomic_load_explicit(&(enabled), memory_order_acquire)) return 0;
-    uintptr_t bias = 0;
-    dl_iterate_phdr(main_image, &bias);
+static int installed_memory_build;
+static uintptr_t installed_memory_bias;
+static bool memory_install_identity(int build, uintptr_t bias) {
+    return !installed_memory_build || (installed_memory_build == build && installed_memory_bias == bias);
+}
+static bool memory_configure_profile(int build, uintptr_t bias) {
+    if (!memory_install_identity(build, bias)) return false;
     profile = mem_profiles[build - 1];
     profile.pack += bias;
     profile.holder += bias;
     profile.content += bias;
     atomic_store_explicit(&(pack_profile_ready), true, memory_order_release);
-    void *hooks[] = {((void *) (set_holder)), ((void *) (set_content)),
-                     ((void *) (on_broadcast)), ((void *) (create_holder)), (void *) azn_cache_update_entry};
     for (unsigned i = 0; i < 5; ++i) {
         profile.entry[i].address += bias;
-        if (memcmp(((const void *) (profile.entry[i].address)), profile.entry[i].prologue, 16)) return 0;
+        if (!originals[i] && memcmp((const void *) profile.entry[i].address, profile.entry[i].prologue, 16)) return false;
     }
+    installed_memory_build = build;
+    installed_memory_bias = bias;
+    return true;
+}
+static bool memory_install_hooks(azexit_install_fn install) {
+    void *hooks[] = {(void *) set_holder, (void *) set_content, (void *) on_broadcast, (void *) create_holder, (void *) azn_cache_update_entry};
     for (unsigned i = 0; i < 5; ++i)
-        if (!install(profile.entry[i].address, hooks[i], &originals[i]) || !originals[i]) return 0;
+        if (!originals[i] && (!install(profile.entry[i].address, hooks[i], &originals[i]) || !originals[i])) return false;
+    return true;
+}
+#endif
+static void memory_enable_capabilities(void) {
+    for (unsigned d = 0; d < 4; ++d) azn_capability(d, AZN_CAP_MEMORY | (recall_ready ? AZN_CAP_MEMORY_LINK : 0), 1);
+}
+static void memory_publish_capabilities(void) {
+    if (atomic_load_explicit(&(connected), memory_order_acquire)) memory_enable_capabilities();
+}
+int azn_memory_configure(int build, azexit_install_fn install) {
+#if defined(__linux__) && defined(__aarch64__)
+    if (build < 1 || build > 2 || !install) return 0;
+    uintptr_t bias = 0;
+    dl_iterate_phdr(main_image, &bias);
+    if (!memory_install_identity(build, bias)) return 0;
+    if (atomic_load_explicit(&(enabled), memory_order_acquire)) {
+        install_recall(build, bias, install);
+        memory_publish_capabilities();
+        return 0;
+    }
+    if (!memory_configure_profile(build, bias) || !memory_install_hooks(install)) return 0;
     atomic_store_explicit(&(enabled), true, memory_order_release);
     install_recall(build, bias, install);
-    if (atomic_load_explicit(&(connected), memory_order_acquire))
-        for (unsigned d = 0; d < 4; ++d) azn_capability(d, AZN_CAP_MEMORY | (recall_ready ? AZN_CAP_MEMORY_LINK : 0), 1);
+    memory_publish_capabilities();
     return 1;
 #else
     (void) build;
@@ -751,36 +866,40 @@ int azn_memory_configure(int build, azexit_install_fn install) {
     return 0;
 #endif
 }
-void azn_memory_bind(unsigned deck, uint64_t unit, uint64_t epoch, uint64_t load,
-                     uintptr_t pack, const unsigned char track[12]) {
-    if (deck >= 4 || !epoch || !unit || !load || !atomic_load_explicit(&(pack_profile_ready), memory_order_acquire) ||
-        (!observing() && !atomic_load_explicit(&(pack_observer), memory_order_acquire)) ||
-        now_epoch(deck) != epoch || !typed(pack, profile.pack) || !SCALAR(uint32_t, pack + 0x30) ||
-        SCALAR(unsigned char, pack + 0x78) != 1 || memcmp(((const void *) (pack + 0x38)), track, 12) ||
-        memcmp(((const void *) (pack + 0x80)), track, 12)) return;
+static bool memory_bind_enabled(unsigned deck, uint64_t unit, uint64_t epoch, uint64_t load) {
+    return deck < 4 && epoch && unit && load && atomic_load_explicit(&(pack_profile_ready), memory_order_acquire) &&
+           (observing() || atomic_load_explicit(&(pack_observer), memory_order_acquire)) && now_epoch(deck) == epoch;
+}
+static bool memory_pack_matches(uintptr_t pack, const unsigned char track[12]) {
+    return typed(pack, profile.pack) && SCALAR(uint32_t, pack + 0x30) && SCALAR(unsigned char, pack + 0x78) == 1 &&
+           !memcmp((const void *) (pack + 0x38), track, 12) && !memcmp((const void *) (pack + 0x80), track, 12);
+}
+static bool memory_install_binding(unsigned deck, uint64_t epoch, uint64_t token, uint64_t *previous) {
+    for (unsigned n = 0; n < 8 && now_epoch(deck) == epoch; ++n) {
+        HOLD(old, *previous);
+        if (old.token && pin_for(old.token)->epoch >= epoch) return false;
+        if (atomic_compare_exchange_strong_explicit(&(active[deck]), previous, token, memory_order_acq_rel, memory_order_acquire)) return true;
+    }
+    return false;
+}
+static bool memory_binding_epoch_current(unsigned deck, uint64_t epoch, uint64_t token) {
+    if (now_epoch(deck) == epoch) return true;
+    uint64_t expected = token;
+    if (atomic_compare_exchange_strong_explicit(&(active[deck]), &expected, 0, memory_order_acq_rel, memory_order_acquire)) drop(token);
+    return false;
+}
+void azn_memory_bind(unsigned deck, uint64_t unit, uint64_t epoch, uint64_t load, uintptr_t pack, const unsigned char track[12]) {
+    if (!memory_bind_enabled(deck, unit, epoch, load) || !memory_pack_matches(pack, track)) return;
     uint64_t token = make_pin(pack, epoch, load, unit);
     if (!token) return;
     uint64_t previous = atomic_load_explicit(&(active[deck]), memory_order_acquire);
-    bool installed = false;
-    for (unsigned n = 0; n < 8 && now_epoch(deck) == epoch; ++n) {
-        HOLD(old, previous);
-        if (old.token && pin_for(old.token)->epoch >= epoch) break;
-        if (atomic_compare_exchange_strong_explicit(&(active[deck]), &(previous), token, memory_order_acq_rel, memory_order_acquire)) {
-            installed = true;
-            break;
-        }
-    }
-    if (!installed) {
+    if (!memory_install_binding(deck, epoch, token, &previous)) {
         drop(token);
         return;
     }
     if (previous) drop(previous);
-    if (now_epoch(deck) != epoch) {
-        uint64_t expected = token;
-        if (atomic_compare_exchange_strong_explicit(&(active[deck]), &(expected), 0, memory_order_acq_rel, memory_order_acquire)) drop(token);
-        return;
-    }
-    __auto_type observer = atomic_load_explicit(&(pack_observer), memory_order_acquire);
+    if (!memory_binding_epoch_current(deck, epoch, token)) return;
+    azn_pack_observer observer = atomic_load_explicit(&(pack_observer), memory_order_acquire);
     if (observer) observer(deck, unit, epoch, load);
     if (observing()) seed_active(deck);
 }
@@ -820,8 +939,7 @@ const struct azn_file_cue_api *azn_file_service(void) {
 }
 static void memory_connect(void) {
     atomic_store_explicit(&(connected), true, memory_order_release);
-    if (atomic_load_explicit(&(enabled), memory_order_acquire))
-        for (unsigned d = 0; d < 4; ++d) azn_capability(d, AZN_CAP_MEMORY | (recall_ready ? AZN_CAP_MEMORY_LINK : 0), 1);
+    if (atomic_load_explicit(&(enabled), memory_order_acquire)) memory_enable_capabilities();
 }
 const struct azn_memory_api *azn_memory_service(void) {
     static const struct azn_memory_api api = {sizeof api, 1, read_rows, drop, seed, memory_connect};

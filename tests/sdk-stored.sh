@@ -30,9 +30,9 @@ source=Path('src/azmod'); root=Path(sys.argv[1])
 variants=[
     ('short-cue', 'sdk_analysis.h', 'en < 0x28u', 'en < (co2 ? 0x2cu : 0x28u)'),
     ('cue-header', 'sdk_analysis.h', 'hc_be32(e + 4) != (co2 ? 0x10u : 0x1cu)', '0'),
-    ('active-status', 'sdk_analysis.h', 'c.auto_active = status == 4;', 'c.auto_active = 0;'),
+    ('active-status', 'sdk_analysis.h', 'c->auto_active = status == 4;', 'c->auto_active = 0;'),
     ('active-identity', 'sdk_analysis.h', 'if (matches == 1 && active >= 0)', 'if (matches > 0 && active >= 0)'),
-    ('memory-color', 'sdk_analysis.h', 'if (kind && en - 0x2c - nc >= 4)', 'if (en - 0x2c - nc >= 4)'),
+    ('memory-color', 'sdk_analysis.h', 'if (kind && en - 0x2c - nc >= 4)', 'if (((void) kind, en - 0x2c - nc >= 4))'),
     ('preview-clock', 'sdk_waveform.h', 'duration_s / index->sample_count', '1.0 / 150.0'),
     ('preview-stride', 'sdk_waveform.h', '{SDKW_PWV4, 6, 0}', '{SDKW_PWV4, 3, 0}'),
     ('preview-header', 'sdk_waveform.h', 'encoding == SDKW_ENCODING_PWV6 || sww_is_mono_preview(encoding) ? 20u : 24u', 'encoding == SDKW_ENCODING_PWV6 || sww_is_mono_preview(encoding) ? 24u : 24u'),
@@ -42,7 +42,7 @@ variants=[
     ('phrase-unknown', 'sdk_analysis.h', 'if (version > 1)', 'if (version > 1000)'),
     ('preview-request', 'sdk_data_engine.h', 'wave->encoding > AZ_WAVE_PWV7_LAYERED_RAW', 'wave->encoding > AZ_WAVE_PWV7_BANDS'),
     ('mono-count', 'sdk_waveform.h', 'if (count != tag->size - tag->header_size)', 'if (0)'),
-    ('mono-word', 'sdk_waveform.h', 'if (sww_be32(p + 16) != format.header_word)', 'if (0)'),
+    ('mono-word', 'sdk_waveform.h', 'if (sww_be32(p + 16) != format.header_word)', 'if (((void) format, 0))'),
     ('mono-clock', 'sdk_waveform.h', 'encoding == SDKW_ENCODING_PWV4 || encoding == SDKW_ENCODING_PWV6 ||\n           encoding == SDKW_ENCODING_PWV2 || encoding == SDKW_ENCODING_PWAV;', 'encoding == SDKW_ENCODING_PWV4 || encoding == SDKW_ENCODING_PWV6;'),
 ]
 for name,filename,old,new in variants:

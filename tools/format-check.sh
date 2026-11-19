@@ -36,6 +36,9 @@ EXCLUDE=(
     '^guest/azmod/ep147addr\.h$'        # per-firmware address table
     '^guest/azstem/ep147addr\.h$'       # per-firmware address table
     '^guest/azstem/sdk_exit_profiles\.h$' # tools/sdk-exit-profile.py
+    '^guest/azmod/sdk_cache_targets\.h$' # tools/ep147-addrgen.py
+    '^guest/azmod/sdk_slip_targets\.h$'  # tools/ep147-addrgen.py
+    '^guest/azstem/sdk_cue_profiles\.h$' # tools/sdk-cue-profile.py
     '^guest/azmod/ep147png\.h$'         # tools/ep147-pngtable.py
     # GENERATED art: image bytes as C arrays, each header written by its own art tool
     '^guest/azmod/eyeicon\.h$'          # the Hide Title eye icon

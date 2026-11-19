@@ -387,26 +387,24 @@ __attribute__((noreturn)) static void install_hook_fatal(uintptr_t func, const c
             (unsigned long) func, reason);
     _exit(126);
 }
-static void *install_hook_at(uintptr_t FUNC, void *hookfn, void **orig) {
+static int install_hook_request_valid(uintptr_t FUNC, void *hookfn, void **orig) {
     if (atomic_load_explicit(&g_hooks_late, memory_order_acquire)) {
         logln("install: @0x%lx after the constructor -- REFUSED (16-byte patch)", (unsigned long) FUNC);
-        return NULL;
+        return 0;
     }
     if (FUNC == 0 || (FUNC & 3) || !hookfn || !orig) {
         logln("install: invalid addr/hook/original (0x%lx) -- declined", (unsigned long) FUNC);
-        return NULL;
+        return 0;
     }
-    uint32_t *func = (uint32_t *) FUNC;
-    uint32_t original_entry[4];
-    memcpy(original_entry, func, sizeof original_entry);
-    void *previous_orig = __atomic_load_n(orig, __ATOMIC_RELAXED);
-
+    return 1;
+}
+static int install_hook_prologue_valid(uintptr_t FUNC, const uint32_t original_entry[4]) {
     for (int i = 0; i < 4; i++) {
         if (pcrel_kind(original_entry[i]) == 1) {
             logln("install: @0x%lx prologue insn %d (%08x) PC-relative & non-relocatable"
                   " -- DECLINED (fail-safe)",
                   (unsigned long) FUNC, i, original_entry[i]);
-            return NULL;
+            return 0;
         }
         /* a function that returns (or branches away) inside the 16 bytes the jump
          * covers is shorter than the jump: it would overwrite the next function */
@@ -414,10 +412,13 @@ static void *install_hook_at(uintptr_t FUNC, void *hookfn, void **orig) {
             logln("install: @0x%lx insn %d (%08x) ends the function inside the 16-byte patch"
                   " -- DECLINED (fail-safe)",
                   (unsigned long) FUNC, i, original_entry[i]);
-            return NULL;
+            return 0;
         }
     }
 
+    return 1;
+}
+static uint32_t *install_hook_trampoline(uintptr_t FUNC, const uint32_t original_entry[4]) {
     /* An ADRP is re-encoded when the trampoline is in range, otherwise its page
      * address is materialized with MOVZ + 3x MOVK. Either way the copied prologue
      * computes the same register values as the original. */
@@ -449,6 +450,21 @@ static void *install_hook_at(uintptr_t FUNC, void *hookfn, void **orig) {
         munmap(tramp, 4096);
         return NULL;
     }
+
+    return tramp;
+}
+
+static void *install_hook_at(uintptr_t FUNC, void *hookfn, void **orig) {
+    if (!install_hook_request_valid(FUNC, hookfn, orig)) return NULL;
+    uint32_t *func = (uint32_t *) FUNC;
+    uint32_t original_entry[4];
+    memcpy(original_entry, func, sizeof original_entry);
+    void *previous_orig = __atomic_load_n(orig, __ATOMIC_RELAXED);
+
+    if (!install_hook_prologue_valid(FUNC, original_entry)) return NULL;
+
+    uint32_t *tramp = install_hook_trampoline(FUNC, original_entry);
+    if (!tramp) return NULL;
 
     /* patch FUNC entry -> hook: writable for the store only, then exactly the
      * protection the page had (read from /proc/self/maps, never assumed) */
@@ -1066,8 +1082,7 @@ static void *flusher(void *arg) {
     return NULL;
 }
 
-__attribute__((constructor)) static void azstem_init(void) {
-    int sdk_loop_build = EPB_UNKNOWN;
+static int azstem_process_matches(void) {
     char comm[32] = {0};
     FILE *f = fopen("/proc/self/comm", "re");
     if (f) {
@@ -1078,30 +1093,30 @@ __attribute__((constructor)) static void azstem_init(void) {
         if (nl)
             *nl = 0;
     }
-    if (strcmp(comm, "EP147") != 0)
-        return;
-    { /* Exact md5 identity of EP147, same as azmod: an unknown build stays inert. */
-        char md5[33];
-        long sz = 0;
-        int b = ep147_identify("/proc/self/exe", md5, &sz);
-        int ok = ep147_addr_init(b);
-        FILE *bf = azlog_fopen_capped("/tmp/azstem-build.log", 16L * 1024);
-        if (bf) {
-            fprintf(bf, "[%ld] EP147 %s md5=%s size=%ld -> %s\n", (long) time(NULL),
-                    ep147_build_name(b), md5, sz,
-                    ok ? "stems ON" : "INERT (unknown EP147 build or incomplete address table)");
-            fclose(bf);
-        }
-        if (!ok)
-            return;
-        sdk_loop_build = b;
-        atomic_store_explicit(&g_djpu_vt, (uintptr_t) DJPU_VTABLE, memory_order_relaxed);
-        *(void **) &g_meow_destroy_fn = (void *) MEOW_DESTROY; /* drumroll.c: the grid's release */
-        azov_lease_configure(b, g_meow_destroy_fn);
-        const uintptr_t probes[NPROBE] = {EP_7670a8, EP_785228, EP_784e90, EP_782dc0,
-                                          EP_77e260, EP_783010, EP_da07d8, EP_d58ee0};
-        memcpy(g_probe_addr, probes, sizeof probes);
+    return strcmp(comm, "EP147") == 0;
+}
+static int azstem_identify_build(void) {
+    char md5[33];
+    long sz = 0;
+    int b = ep147_identify("/proc/self/exe", md5, &sz);
+    int ok = ep147_addr_init(b);
+    FILE *bf = azlog_fopen_capped("/tmp/azstem-build.log", 16L * 1024);
+    if (bf) {
+        fprintf(bf, "[%ld] EP147 %s md5=%s size=%ld -> %s\n", (long) time(NULL),
+                ep147_build_name(b), md5, sz,
+                ok ? "stems ON" : "INERT (unknown EP147 build or incomplete address table)");
+        fclose(bf);
     }
+    if (!ok) return EPB_UNKNOWN;
+    atomic_store_explicit(&g_djpu_vt, (uintptr_t) DJPU_VTABLE, memory_order_relaxed);
+    *(void **) &g_meow_destroy_fn = (void *) MEOW_DESTROY; /* drumroll.c: the grid's release */
+    azov_lease_configure(b, g_meow_destroy_fn);
+    const uintptr_t probes[NPROBE] = {EP_7670a8, EP_785228, EP_784e90, EP_782dc0,
+                                      EP_77e260, EP_783010, EP_da07d8, EP_d58ee0};
+    memcpy(g_probe_addr, probes, sizeof probes);
+    return b;
+}
+static void azstem_initial_state(void) {
     /* No deck is loaded yet, so publish that first. A few tiny writes, no
      * filesystem walk (see the USB-scan note below). */
     clear_published_deck_state();
@@ -1116,298 +1131,180 @@ __attribute__((constructor)) static void azstem_init(void) {
     }
     for (int i = 0; i < GP_L; i++)
         g_hann[i] = 0.5f * (1.0f - cosf(6.2831853f * (float) i / (float) GP_L));
-    g_func_addr = read_target_addr();
-    /* Deck identity: the DjPlayerUnit ctor hook goes in first, before EP147
-     * constructs its four players early in main(). */
-    {
-        FILE *cf = addr_override_open(DJPUCTOR_PATH);
-        unsigned long long v = DJPUCTOR_DEFAULT;
-        if (cf) {
-            unsigned long long x = 0;
-            if (fscanf(cf, "%llx", &x) == 1 && x)
-                v = x;
-            fclose(cf);
+}
+static unsigned long long azstem_hook_address(const char *path, unsigned long long fallback) {
+    (void) path; /* Release builds compile address overrides out. */
+    FILE *file = addr_override_open(path);
+    if (!file) return fallback;
+    unsigned long long value = 0;
+    if (fscanf(file, "%llx", &value) == 1 && value) fallback = value;
+    fclose(file);
+    return fallback;
+}
+static void azstem_configure_loop(void *td, int sdk_loop_build) {
+    if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT && access("/home/root/settings/azmod.track-data.off", F_OK) != 0 &&
+        access("/home/root/settings/azmod.native-loop.off", F_OK) != 0) {
+        azsdk_loop_configure(1, sdk_loop_build);
+        g_sdk_loop_on = 1;
+    }
+}
+static void azstem_configure_live(void *td, int sdk_loop_build) {
+    if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT && access("/home/root/settings/azmod.track-data.off", F_OK) != 0 &&
+        access("/home/root/settings/azmod.native-live.off", F_OK) != 0) {
+        azsdk_live_configure(1, sdk_loop_build);
+        azsdk_cue_configure(1, sdk_loop_build);
+        g_sdk_live_on = 1;
+        g_sdk_cue_on = 1;
+    }
+}
+static unsigned azstem_command_flags(int sdk_cues_enabled, int sdk_loop_build) {
+    unsigned sdk_commands = 0;
+    if (access("/home/root/settings/azmod.native-exit.off", F_OK) != 0) sdk_commands |= AZEXIT_ENABLE_EXIT;
+    if (access("/home/root/settings/azmod.native-reloop.off", F_OK) != 0) sdk_commands |= AZEXIT_ENABLE_RELOOP;
+    if (access("/home/root/settings/azmod.native-loop-commands.off", F_OK) != 0) sdk_commands |= AZEXIT_ENABLE_LOOP;
+    if (sdk_cues_enabled) {
+        sdk_commands |= AZEXIT_ENABLE_CUE;
+        if (!g_sdk_cue_on) {
+            azsdk_cue_configure(1, sdk_loop_build);
+            g_sdk_cue_on = 1;
         }
-        g_djpuctor_addr = (uintptr_t) v;
-        void *tc =
-            install_hook_at(g_djpuctor_addr, (void *) djpuctor_hook, (void **) &g_orig_djpuctor);
-        if (tc) {
-            logln("djpuctor: hooked @0x%llx", v);
-            /* and its destructor, so a slot never outlives its unit */
-            void *td = install_hook_at(DJPUDTOR_DEFAULT, (void *) djpudtor_hook,
-                                       (void **) &g_orig_djpudtor);
-            logln("djpudtor: %s @0x%lx", td ? "hooked" : "install FAILED",
-                  (unsigned long) DJPUDTOR_DEFAULT);
-            unsigned passive_status = access("/home/root/settings/azmod.deck-status.off", F_OK) == 0
-                                          ? 0
-                                          : AZEXIT_PASSIVE_STATUS;
-            int sdk_cues_enabled = access("/home/root/settings/azmod.native-cue-commands.off", F_OK) != 0;
-            int sdk_commands_enabled = access("/home/root/settings/azmod.track-data.off", F_OK) != 0 &&
-                                       access("/home/root/settings/azmod.native-load.off", F_OK) != 0;
-            if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT &&
-                access("/home/root/settings/azmod.track-data.off", F_OK) != 0 &&
-                access("/home/root/settings/azmod.native-loop.off", F_OK) != 0) {
-                azsdk_loop_configure(1, sdk_loop_build);
-                g_sdk_loop_on = 1;
-            }
-            if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT &&
-                access("/home/root/settings/azmod.track-data.off", F_OK) != 0 &&
-                access("/home/root/settings/azmod.native-live.off", F_OK) != 0) {
-                azsdk_live_configure(1, sdk_loop_build);
-                azsdk_cue_configure(1, sdk_loop_build);
-                g_sdk_live_on = 1;
-                g_sdk_cue_on = 1;
-            }
-            if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT && sdk_commands_enabled) {
-                azsdk_load_configure(1, sdk_loop_build, sdk_patch_slot);
-                atomic_store_explicit(&g_sdk_load_on, 1, memory_order_release);
-                unsigned sdk_commands = 0;
-                if (access("/home/root/settings/azmod.native-exit.off", F_OK) != 0)
-                    sdk_commands |= AZEXIT_ENABLE_EXIT;
-                if (access("/home/root/settings/azmod.native-reloop.off", F_OK) != 0)
-                    sdk_commands |= AZEXIT_ENABLE_RELOOP;
-                if (access("/home/root/settings/azmod.native-loop-commands.off", F_OK) != 0)
-                    sdk_commands |= AZEXIT_ENABLE_LOOP;
-                if (sdk_cues_enabled) {
-                    sdk_commands |= AZEXIT_ENABLE_CUE;
-                    if (!g_sdk_cue_on) {
-                        azsdk_cue_configure(1, sdk_loop_build);
-                        g_sdk_cue_on = 1;
-                    }
-                }
-                if (sdk_commands) (void) azsdk_exit_configure((int) (sdk_commands | passive_status), sdk_loop_build, install_hook_at);
-            }
-            if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT && passive_status) {
+    }
+    return sdk_commands;
+}
+static void azstem_configure_commands(void *td, int sdk_loop_build, int sdk_commands_enabled, int sdk_cues_enabled, unsigned passive_status) {
+    if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT && sdk_commands_enabled) {
+        azsdk_load_configure(1, sdk_loop_build, sdk_patch_slot);
+        atomic_store_explicit(&g_sdk_load_on, 1, memory_order_release);
+        unsigned sdk_commands = azstem_command_flags(sdk_cues_enabled, sdk_loop_build);
+        if (sdk_commands) (void) azsdk_exit_configure((int) (sdk_commands | passive_status), sdk_loop_build, install_hook_at);
+    }
+}
+static void azstem_configure_status(void *td, int sdk_loop_build, unsigned passive_status) {
+    if (td && g_djpuctor_addr == DJPUCTOR_DEFAULT && passive_status) {
 #ifdef AZ_STATUS_NATIVE_PRODUCER
-                azsdk_live_status_start(sdk_loop_build, g_sdk_live_on);
-                g_status_play_on = 1;
+        azsdk_live_status_start(sdk_loop_build, g_sdk_live_on);
+        g_status_play_on = 1;
 #endif
-                /* Passive status shares owner hooks, but remains available when
-                 * legacy snapshot/command services are explicitly disabled. */
-                if (!atomic_load_explicit(&g_sdk_load_on, memory_order_acquire)) {
-                    azsdk_load_configure(1, sdk_loop_build, sdk_patch_slot);
-                    atomic_store_explicit(&g_sdk_load_on, 1, memory_order_release);
-                }
-                (void) azsdk_exit_configure(AZEXIT_PASSIVE_STATUS, sdk_loop_build, install_hook_at);
+        /* Passive status remains available when legacy services are disabled. */
+        if (!atomic_load_explicit(&g_sdk_load_on, memory_order_acquire)) {
+            azsdk_load_configure(1, sdk_loop_build, sdk_patch_slot);
+            atomic_store_explicit(&g_sdk_load_on, 1, memory_order_release);
+        }
+        (void) azsdk_exit_configure(AZEXIT_PASSIVE_STATUS, sdk_loop_build, install_hook_at);
 #ifdef AZ_STATUS_MEMORY_PRODUCER
-                (void) azn_memory_configure(sdk_loop_build, install_hook_at);
+        (void) azn_memory_configure(sdk_loop_build, install_hook_at);
 #ifdef AZ_STATUS_MAPS_PRODUCER
-                (void) azn_maps_configure(sdk_loop_build);
+        (void) azn_maps_configure(sdk_loop_build);
 #endif
 #endif
-            }
-        } else
-            logln("djpuctor: install FAILED @0x%llx (identity falls back to ap_deck_of)", v);
     }
-    /* gui::LoadState ctor -> per-deck LoadedTrackInfo. One hook, two switches:
-     *   g_lti_on:    the native track identity is authoritative (production,
-     *                  on unless azstem.nonativeid exists).
-     *   g_lti_probe: log LTI beside the path scan's answer (diagnostic).
-     * The native route must not turn the diagnostic on: that would keep
-     * probe_strings running (~70ms/tick). With both off the hook is not
-     * installed. */
+}
+static void azstem_deck_hooks(unsigned long long v, int sdk_loop_build) {
+    g_djpuctor_addr = (uintptr_t) v;
+    void *tc = install_hook_at(g_djpuctor_addr, (void *) djpuctor_hook, (void **) &g_orig_djpuctor);
+    if (!tc) {
+        logln("djpuctor: install FAILED @0x%llx (identity falls back to ap_deck_of)", v);
+        return;
+    }
+    logln("djpuctor: hooked @0x%llx", v);
+    void *td = install_hook_at(DJPUDTOR_DEFAULT, (void *) djpudtor_hook, (void **) &g_orig_djpudtor);
+    logln("djpudtor: %s @0x%lx", td ? "hooked" : "install FAILED", (unsigned long) DJPUDTOR_DEFAULT);
+    unsigned passive_status = access("/home/root/settings/azmod.deck-status.off", F_OK) == 0 ? 0 : AZEXIT_PASSIVE_STATUS;
+    int sdk_cues_enabled = access("/home/root/settings/azmod.native-cue-commands.off", F_OK) != 0;
+    int sdk_commands_enabled = access("/home/root/settings/azmod.track-data.off", F_OK) != 0 &&
+                               access("/home/root/settings/azmod.native-load.off", F_OK) != 0;
+    azstem_configure_loop(td, sdk_loop_build);
+    azstem_configure_live(td, sdk_loop_build);
+    azstem_configure_commands(td, sdk_loop_build, sdk_commands_enabled, sdk_cues_enabled, passive_status);
+    azstem_configure_status(td, sdk_loop_build, passive_status);
+}
+static void azstem_lti_hooks(unsigned long long v) {
+    /* Publish LoadState only after its destructor and update hooks succeed. */
+    void *td = install_hook_at(LSDTOR_DEFAULT, (void *) lsdtor_hook, (void **) &g_orig_lsdtor);
+    void *tu = td ? install_hook_at(LTI_UPDATE_DEFAULT, (void *) lti_update_hook, (void **) &g_orig_lti_update) : NULL;
+    void *t = tu ? install_hook_at(g_lsctor_addr, (void *) lsctor_hook, (void **) &g_orig_lsctor) : NULL;
+    logln("lsdtor %s @0x%lx, ltiupdate %s @0x%lx", td ? "hooked" : "FAILED", (unsigned long) LSDTOR_DEFAULT,
+          tu ? "hooked" : "FAILED", (unsigned long) LTI_UPDATE_DEFAULT);
+    if (t) logln("lsctor: hooked @0x%llx (pid %d)", v, (int) getpid());
+    else {
+        g_lti_probe = 0;
+        g_lti_on = 0;
+        logln("lsctor: install FAILED @0x%llx -- native route AND probe OFF", v);
+    }
+}
+static void azstem_configure_lti(void) {
+    /* Native identity and the diagnostic probe are independent switches. */
     g_lti_probe = dev_flag(LTIPROBE_PATH);
-    g_lti_on = !dev_flag("/home/root/settings/azstem.nonativeid"); /* default on */
-    if (g_lti_on || g_lti_probe) { /* the hook, needed by either */
-        FILE *lf = addr_override_open(LSCTOR_PATH);
-        unsigned long long v = LSCTOR_DEFAULT;
-        if (lf) {
-            unsigned long long x = 0;
-            if (fscanf(lf, "%llx", &x) == 1 && x)
-                v = x;
-            fclose(lf);
-        }
-        g_lsctor_addr = (uintptr_t) v;
+    g_lti_on = !dev_flag("/home/root/settings/azstem.nonativeid");
+    if (!g_lti_on && !g_lti_probe) return;
+    unsigned long long v = azstem_hook_address(LSCTOR_PATH, LSCTOR_DEFAULT);
+    g_lsctor_addr = (uintptr_t) v;
 #ifdef AZ_STATUS_NATIVE_PRODUCER
-        g_status_lti_on = g_lsctor_addr == LSCTOR_DEFAULT &&
-                          access("/home/root/settings/azmod.deck-status.off", F_OK) != 0;
+    g_status_lti_on = g_lsctor_addr == LSCTOR_DEFAULT && access("/home/root/settings/azmod.deck-status.off", F_OK) != 0;
 #endif
-        /* The destructor and LoadedTrackInfo-update hooks first: a LoadState is published only
-         * by lsctor_hook, so with all three in place nothing is ever published that the other
-         * two cannot see. Without the destructor hook the bracket readers rely on is missing,
-         * and without the update hook the track copy is never filled: either one missing means
-         * no native identity (unknown), never a guess. */
-        void *td = install_hook_at(LSDTOR_DEFAULT, (void *) lsdtor_hook, (void **) &g_orig_lsdtor);
-        void *tu = td ? install_hook_at(LTI_UPDATE_DEFAULT, (void *) lti_update_hook,
-                                        (void **) &g_orig_lti_update)
-                      : NULL;
-        void *t = tu ? install_hook_at(g_lsctor_addr, (void *) lsctor_hook, (void **) &g_orig_lsctor)
-                     : NULL;
-        logln("lsdtor %s @0x%lx, ltiupdate %s @0x%lx", td ? "hooked" : "FAILED",
-              (unsigned long) LSDTOR_DEFAULT, tu ? "hooked" : "FAILED",
-              (unsigned long) LTI_UPDATE_DEFAULT);
-        if (t) {
-            logln("lsctor: hooked @0x%llx (pid %d)", v, (int) getpid());
-        } else {
-            g_lti_probe = 0;
-            g_lti_on = 0; /* no hook = no identity: unknown, not a guess */
-            logln("lsctor: install FAILED @0x%llx -- native route AND probe OFF", v);
-        }
+    azstem_lti_hooks(v);
+}
+static void azstem_vtable_override(void) {
+    FILE *vf = addr_override_open(DJPUVT_PATH); /* dev-only override may disable the check */
+    unsigned long long x = 0;
+    if (vf) {
+        if (fscanf(vf, "%llx", &x) == 1) atomic_store_explicit(&g_djpu_vt, (uintptr_t) x, memory_order_relaxed);
+        fclose(vf);
+        logln("djpuvt: override 0x%llx", x);
     }
-    {
-        FILE *vf = addr_override_open(DJPUVT_PATH); /* dev only: it can switch the vtable check off */
-        unsigned long long x = 0;
-        if (vf) {
-            if (fscanf(vf, "%llx", &x) == 1)
-                atomic_store_explicit(&g_djpu_vt, (uintptr_t) x, memory_order_relaxed);
-            fclose(vf);
-            logln("djpuvt: override 0x%llx", x);
-        }
-    }
-    /* Never scan the USB here: this runs before EP147's main, and a walk of a
-     * large library (or one with no stems tree) blocks startup to a black
-     * screen. The flusher does stems discovery in the background. */
+}
+static void azstem_install_named(const char *name, uintptr_t address, void *hook, void **original) {
+    if (install_hook_at(address, hook, original)) logln("%s: hooked @0x%lx", name, (unsigned long) address);
+    else logln("%s: install FAILED @0x%lx", name, (unsigned long) address);
+}
+static void azstem_audio_hooks(void) {
+    g_pbread_addr = (uintptr_t) azstem_hook_address(PBREAD_PATH, PBREAD_DEFAULT);
+    azstem_install_named("pbread", g_pbread_addr, (void *) pbread_hook, (void **) &g_orig_pbread);
+    g_fread_addr = (uintptr_t) azstem_hook_address(FRADDR_PATH, FREAD_DEFAULT);
+    azstem_install_named("fread", g_fread_addr, (void *) fread_hook, (void **) &g_orig_fread);
+    g_operate_addr = (uintptr_t) azstem_hook_address(OPADDR_PATH, OPERATE_DEFAULT);
+    azstem_install_named("operate", g_operate_addr, (void *) operate_hook, (void **) &g_orig_operate);
+    g_kf_addr = (uintptr_t) azstem_hook_address(KFADDR_PATH, KEYFAC_DEFAULT);
+    azstem_install_named("keyfac", g_kf_addr, (void *) kf_hook, (void **) &g_orig_kf);
+    g_fgpr_setsrc_addr = (uintptr_t) azstem_hook_address(FGPRADDR_PATH, FGPR_SETSRC_DEFAULT);
+    azstem_install_named("fgpr_setsrc", g_fgpr_setsrc_addr, (void *) fgpr_setsrc_hook, (void **) &g_orig_fgpr_setsrc);
+    g_fgpr_read_addr = (uintptr_t) azstem_hook_address(FGPRREADADDR_PATH, FGPRREAD_DEFAULT);
+    azstem_install_named("fgpr_read", g_fgpr_read_addr, (void *) fgpr_read_hook, (void **) &g_orig_fgpr_read);
+    /* These diagnostic hooks are installed even when their runtime flags are off. */
+    g_ringfill_addr = (uintptr_t) azstem_hook_address(RINGFILLADDR_PATH, RINGFILL_DEFAULT);
+    azstem_install_named("ringfill", g_ringfill_addr, (void *) ringfill_hook, (void **) &g_orig_ringfill);
+    g_fgpr_op_addr = FGPROP_DEFAULT;
+    azstem_install_named("fgpr_op", g_fgpr_op_addr, (void *) fgpr_op_hook, (void **) &g_orig_fgpr_op);
+}
+static void azstem_start_pollers(void) {
+    pthread_t t;
+    if (az_thread_create(&t, NULL, flusher, NULL) == 0) pthread_detach(t);
+    /* Failure leaves toggle reads on the flusher. */
+    pthread_t mt;
+    if (az_thread_create(&mt, NULL, maskpoll_thread, NULL) == 0) {
+        pthread_detach(mt);
+        g_maskpoll_up = 1;
+        logln("maskpoll: started (stem toggle read off the flusher, 20Hz)");
+    } else logln("maskpoll: pthread_create FAILED -- toggle stays on the flusher");
+}
+__attribute__((constructor)) static void azstem_init(void) {
+    if (!azstem_process_matches()) return;
+    int sdk_loop_build = azstem_identify_build();
+    if (sdk_loop_build == EPB_UNKNOWN) return;
+    azstem_initial_state();
+    g_func_addr = read_target_addr();
+    azstem_deck_hooks(azstem_hook_address(DJPUCTOR_PATH, DJPUCTOR_DEFAULT), sdk_loop_build);
+    azstem_configure_lti();
+    azstem_vtable_override();
+    /* USB discovery stays on the flusher: never block EP147 startup on a library walk. */
     int rc = install_hook();
     atomic_store_explicit(&g_installed, rc, memory_order_release);
 #ifdef AZ_STATUS_NATIVE_PRODUCER
     if (rc == 1 && access("/home/root/settings/azmod.deck-status.off", F_OK) != 0) azn_stems_start(status_stem_probe);
 #endif
-    /* PageBuffer::read: stem injection and the observation ring (pbread_hook). */
-    {
-        FILE *pf = addr_override_open(PBREAD_PATH);
-        unsigned long long v = PBREAD_DEFAULT;
-        if (pf) {
-            unsigned long long x = 0;
-            if (fscanf(pf, "%llx", &x) == 1 && x)
-                v = x;
-            fclose(pf);
-        }
-        g_pbread_addr = (uintptr_t) v;
-        void *t2 = install_hook_at(g_pbread_addr, (void *) pbread_hook, (void **) &g_orig_pbread);
-        if (t2) {
-            logln("pbread: hooked @0x%llx", v);
-        } else
-            logln("pbread: install FAILED @0x%llx", v);
-    }
-    {
-        FILE *ff = addr_override_open(FRADDR_PATH);
-        unsigned long long v = FREAD_DEFAULT;
-        if (ff) {
-            unsigned long long x = 0;
-            if (fscanf(ff, "%llx", &x) == 1 && x)
-                v = x;
-            fclose(ff);
-        }
-        g_fread_addr = (uintptr_t) v;
-        void *t3 = install_hook_at(g_fread_addr, (void *) fread_hook, (void **) &g_orig_fread);
-        if (t3) {
-            logln("fread: hooked @0x%llx", v);
-        } else
-            logln("fread: install FAILED @0x%llx", v);
-    }
-    {
-        FILE *of = addr_override_open(OPADDR_PATH);
-        unsigned long long v = OPERATE_DEFAULT;
-        if (of) {
-            unsigned long long x = 0;
-            if (fscanf(of, "%llx", &x) == 1 && x)
-                v = x;
-            fclose(of);
-        }
-        g_operate_addr = (uintptr_t) v;
-        void *t4 =
-            install_hook_at(g_operate_addr, (void *) operate_hook, (void **) &g_orig_operate);
-        if (t4) {
-            logln("operate: hooked @0x%llx", v);
-        } else
-            logln("operate: install FAILED @0x%llx", v);
-    }
-    {
-        FILE *kff = addr_override_open(KFADDR_PATH);
-        unsigned long long v = KEYFAC_DEFAULT;
-        if (kff) {
-            unsigned long long x = 0;
-            if (fscanf(kff, "%llx", &x) == 1 && x)
-                v = x;
-            fclose(kff);
-        }
-        g_kf_addr = (uintptr_t) v;
-        void *t5 = install_hook_at(g_kf_addr, (void *) kf_hook, (void **) &g_orig_kf);
-        if (t5) {
-            logln("keyfac: hooked @0x%llx", v);
-        } else
-            logln("keyfac: install FAILED @0x%llx", v);
-    }
-    {
-        FILE *gf = addr_override_open(FGPRADDR_PATH);
-        unsigned long long v = FGPR_SETSRC_DEFAULT;
-        if (gf) {
-            unsigned long long x = 0;
-            if (fscanf(gf, "%llx", &x) == 1 && x)
-                v = x;
-            fclose(gf);
-        }
-        g_fgpr_setsrc_addr = (uintptr_t) v;
-        void *t6 = install_hook_at(g_fgpr_setsrc_addr, (void *) fgpr_setsrc_hook,
-                                   (void **) &g_orig_fgpr_setsrc);
-        if (t6) {
-            logln("fgpr_setsrc: hooked @0x%llx", v);
-        } else
-            logln("fgpr_setsrc: install FAILED @0x%llx", v);
-    }
-    {
-        FILE *gr = addr_override_open(FGPRREADADDR_PATH);
-        unsigned long long v = FGPRREAD_DEFAULT;
-        if (gr) {
-            unsigned long long x = 0;
-            if (fscanf(gr, "%llx", &x) == 1 && x)
-                v = x;
-            fclose(gr);
-        }
-        g_fgpr_read_addr = (uintptr_t) v;
-        void *t7 =
-            install_hook_at(g_fgpr_read_addr, (void *) fgpr_read_hook, (void **) &g_orig_fgpr_read);
-        if (t7) {
-            logln("fgpr_read: hooked @0x%llx", v);
-        } else
-            logln("fgpr_read: install FAILED @0x%llx", v);
-    }
-    /* ringfill (diagnostic ring probe) and fgpr_op (FGPR deck tag). Installed
-     * unconditionally: their flags are re-read every tick, so gating the install
-     * on a startup flag would leave a later flag with no hook behind it. Both are
-     * pass-through and off the RT path (EP147's buffering thread and the FGPR
-     * pre-render thread). */
-    {
-        FILE *rf = addr_override_open(RINGFILLADDR_PATH);
-        unsigned long long v = RINGFILL_DEFAULT;
-        if (rf) {
-            unsigned long long x = 0;
-            if (fscanf(rf, "%llx", &x) == 1 && x)
-                v = x;
-            fclose(rf);
-        }
-        g_ringfill_addr = (uintptr_t) v;
-        void *t8 =
-            install_hook_at(g_ringfill_addr, (void *) ringfill_hook, (void **) &g_orig_ringfill);
-        if (t8) {
-            logln("ringfill: hooked @0x%llx", v);
-        } else
-            logln("ringfill: install FAILED @0x%llx", v);
-        /* the async pre-render hook (FGPR deck tag) */
-        g_fgpr_op_addr = FGPROP_DEFAULT;
-        void *t10 =
-            install_hook_at(g_fgpr_op_addr, (void *) fgpr_op_hook, (void **) &g_orig_fgpr_op);
-        if (t10) {
-            logln("fgpr_op: hooked @0x%lx", (unsigned long) g_fgpr_op_addr);
-        } else
-            logln("fgpr_op: install FAILED @0x%lx", (unsigned long) g_fgpr_op_addr);
-    }
-    /* every hook is in: EP147's main runs once this constructor returns */
+    azstem_audio_hooks();
     atomic_store_explicit(&g_hooks_late, 1, memory_order_release);
-    pthread_t t;
-    if (az_thread_create(&t, NULL, flusher, NULL) == 0)
-        pthread_detach(t);
-    /* Toggle poller + flusher watchdog. If it fails to start, g_maskpoll_up stays
-     * 0 and the flusher reads the toggle itself. */
-    {
-        pthread_t mt;
-        if (az_thread_create(&mt, NULL, maskpoll_thread, NULL) == 0) {
-            pthread_detach(mt);
-            g_maskpoll_up = 1;
-            logln("maskpoll: started (stem toggle read off the flusher, 20Hz)");
-        } else
-            logln("maskpoll: pthread_create FAILED -- toggle stays on the flusher");
-    }
+    azstem_start_pollers();
 }
 
 #ifdef AZ_STATUS_MEMORY_PRODUCER

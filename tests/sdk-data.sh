@@ -13,7 +13,7 @@ tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 *) echo 'SAN must be plain, asan or tsan' >&2; exit 2 ;;
 esac
 cp src/azmod/{sdk_data_engine.h,sdk_analysis.h,azmod-mod.h,hc_anlz.h} "$task_tmp/"
-${HOST_CC:-cc} "${flags[@]}" -I"$task_tmp" -Isrc/azmod tests/unit/sdkdata_test.c -lm -o "$task_tmp/real"
+${HOST_CC:-cc} "${flags[@]}" -Isrc/azmod tests/unit/sdkdata_test.c -lm -o "$task_tmp/real"
 ${HOST_CC:-cc} "${flags[@]}" -Isrc/azmod tests/unit/sdkwaveform_test.c -o "$task_tmp/waveform"
 "$task_tmp/waveform"
 "$task_tmp/real"
@@ -63,12 +63,12 @@ else
 fi
 # Compile the actual public deck snapshot service, keeping its independent stream clocks
 # and earlier development output prefix under the same sanitizer mode.
-awk '/^static int sd_native_load_read\(/,/^}/; /^static int sd_native_cue_read\(/,/^}/; /^static uint32_t sd_live_fields\(/,/^}/; /^static int sd_deck_snapshot_v1\(/,/^}/' src/azmod/sdk_deck.c > "$task_tmp/deck.inc"
+python3 tests/unit/sdk_deck_extract.py src/azmod/sdk_deck.c "$task_tmp/deck.inc"
 ${HOST_CC:-cc} "${flags[@]}" -Isrc/azmod -DDECK_DATA_INC="\"$task_tmp/deck.inc\"" tests/unit/sdkdeckdata_test.c -o "$task_tmp/deck"
 "$task_tmp/deck"
 python3 - "$task_tmp/deck.inc" "$task_tmp/deck-control.inc" <<'PY'
-import sys
-s = open(sys.argv[1]).read()
+import re, sys
+s = re.sub(r'^#line[^\n]*\n', '', open(sys.argv[1]).read(), flags=re.M)
 old = 'memcpy(out, &v, bytes);'
 assert s.count(old) == 1
 open(sys.argv[2], 'w').write(s.replace(old, 'memcpy(out, &v, bytes + (sizeof v - bytes));'))

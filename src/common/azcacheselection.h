@@ -174,53 +174,72 @@ struct azsel_resolution {
     struct azsel_pins pins;
 };
 static inline void azsel_resolution_drop(struct azsel_resolution *r) { azsel_pins_drop(&r->pins); }
+static inline bool azsel_root_addresses(const void *root, uintptr_t *mount, uintptr_t *collector, uintptr_t *outer) {
+    return azsel_add((uintptr_t) root, 0x28, mount) && azsel_add((uintptr_t) root, 0x40, collector) && azsel_add((uintptr_t) root, 0x50, outer);
+}
+static inline bool azsel_pin_source(const struct azsel_invocation *i, const struct azsel_borrow *b,
+                                    struct azsel_pins *p, uintptr_t *outer, int *status) {
+    uintptr_t mount = 0, collector = 0, database = 0;
+    *status = AZSEL_GUARD;
+    if (!azsel_root_addresses(b->root, &mount, &collector, outer)) return false;
+    az_native_owner_copy(&p->mount, (const struct az_native_owner *) mount);
+    az_native_owner_copy(&p->collector, (const struct az_native_owner *) collector);
+    *status = AZSEL_UNAVAILABLE;
+    if (!p->mount.object || !p->collector.object || !azsel_ready(i)) return false;
+    struct azsel_proof proof = {b, p->mount.object, false};
+    *status = AZSEL_GUARD;
+    azsel_mount_proof(&proof);
+    if (!proof.result) return false;
+    *status = AZSEL_CHANGED;
+    if (!azsel_allowed(i, b)) return false;
+    *status = AZSEL_GUARD;
+    if (!azsel_add((uintptr_t) p->mount.object, 0x30, &database)) return false;
+    az_native_owner_copy(&p->database, (const struct az_native_owner *) database);
+    return true;
+}
+static inline bool azsel_vector_entry(uintptr_t address, uintptr_t stride, uintptr_t slot, uintptr_t *entry, int *status) {
+    struct azsel_vector vector = azsel_view(address);
+    uintptr_t count = 0;
+    *status = AZSEL_UNAVAILABLE;
+    if (!azsel_count(&vector, stride, &count) || slot >= count) return false;
+    *status = AZSEL_GUARD;
+    return slot <= (UINTPTR_MAX - vector.begin) / stride && azsel_add(vector.begin, slot * stride, entry);
+}
+static inline bool azsel_cache_address(uintptr_t outer, struct azsel_position pos, uintptr_t *cache, int *status) {
+    uintptr_t inner = 0;
+    if (!azsel_vector_entry(outer, 24, pos.outer, &inner, status)) return false;
+    return azsel_vector_entry(inner, 16, pos.selector - 1, cache, status);
+}
 /* Zero-initialize output; returned pins stay within the already-owned callback. */
+static inline void azsel_publish_resolution(const struct azsel_invocation *i, const struct azsel_borrow *b,
+                                            struct azsel_position pos, struct azsel_pins *pins, struct azsel_resolution *r) {
+    *r = (struct azsel_resolution) {AZSEL_OK, i->state, i->entered ? i->id : 0, i->revision, b->root, pos, *pins};
+    *pins = (struct azsel_pins) {0};
+}
 static inline void azsel_resolve_owned(const struct azsel_invocation *i, const struct azsel_borrow *b, struct azsel_position pos, struct azsel_resolution *r) {
     azsel_resolution_drop(r);
     *r = (struct azsel_resolution) {.status = AZSEL_GUARD};
     if (!azsel_allowed(i, b)) return;
     r->status = AZSEL_UNAVAILABLE;
     if (pos.selector < 1 || pos.selector > 9) return;
-    uintptr_t ma = 0, ca = 0, oa = 0;
-    r->status = AZSEL_GUARD;
-    if (!azsel_add((uintptr_t) b->root, 0x28, &ma) || !azsel_add((uintptr_t) b->root, 0x40, &ca) || !azsel_add((uintptr_t) b->root, 0x50, &oa)) return;
     struct azsel_pins p __attribute__((cleanup(azsel_pins_drop))) = {0};
-    az_native_owner_copy(&p.mount, (const struct az_native_owner *) ma);
-    az_native_owner_copy(&p.collector, (const struct az_native_owner *) ca);
-    r->status = AZSEL_UNAVAILABLE;
-    if (!p.mount.object || !p.collector.object || !azsel_ready(i)) return;
-    struct azsel_proof proof = {b, p.mount.object, false};
-    r->status = AZSEL_GUARD;
-    azsel_mount_proof(&proof);
-    if (!proof.result) return;
-    r->status = AZSEL_CHANGED;
-    if (!azsel_allowed(i, b)) return;
-    uintptr_t da = 0;
-    r->status = AZSEL_GUARD;
-    if (!azsel_add((uintptr_t) p.mount.object, 0x30, &da)) return;
-    az_native_owner_copy(&p.database, (const struct az_native_owner *) da);
-    struct azsel_vector outer = azsel_view(oa);
-    uintptr_t n = 0;
-    r->status = AZSEL_UNAVAILABLE;
-    if (!azsel_count(&outer, 24, &n) || pos.outer >= n) return;
-    uintptr_t ia = 0;
-    r->status = AZSEL_GUARD;
-    if (pos.outer > (UINTPTR_MAX - outer.begin) / 24 || !azsel_add(outer.begin, (uintptr_t) pos.outer * 24, &ia)) return;
-    struct azsel_vector inner = azsel_view(ia);
-    uintptr_t slot = pos.selector - 1;
-    r->status = AZSEL_UNAVAILABLE;
-    if (!azsel_count(&inner, 16, &n) || slot >= n) return;
-    uintptr_t cache = 0;
-    r->status = AZSEL_GUARD;
-    if (slot > (UINTPTR_MAX - inner.begin) / 16 || !azsel_add(inner.begin, slot * 16, &cache)) return;
+    uintptr_t outer = 0, cache = 0;
+    if (!azsel_pin_source(i, b, &p, &outer, &r->status)) return;
+    if (!azsel_cache_address(outer, pos, &cache, &r->status)) return;
     az_native_owner_copy(&p.cache, (const struct az_native_owner *) cache);
     r->status = AZSEL_CHANGED;
     if (!p.database.object || !p.cache.object || !azsel_allowed(i, b)) return;
-    *r = (struct azsel_resolution) {AZSEL_OK, i->state, i->entered ? i->id : 0, i->revision, b->root, pos, p};
-    p = (struct azsel_pins) {0};
+    azsel_publish_resolution(i, b, pos, &p, r);
+}
+static inline bool azsel_same_invocation(const struct azsel_invocation *i, const struct azsel_borrow *b, const struct azsel_resolution *selected) {
+    return selected->status == AZSEL_OK && selected->state == i->state && selected->invocation == (i->entered ? i->id : 0) &&
+           selected->revision == i->revision && selected->root == b->root;
+}
+static inline bool azsel_same_position(struct azsel_position a, struct azsel_position b) {
+    return a.outer == b.outer && a.selector == b.selector;
 }
 static inline bool azsel_validate_fresh(const struct azsel_invocation *i, const struct azsel_borrow *b, struct azsel_position p, const struct azsel_resolution *selected) {
-    if (selected->status != AZSEL_OK || selected->state != i->state || selected->invocation != (i->entered ? i->id : 0) || selected->revision != i->revision || selected->root != b->root || selected->position.outer != p.outer || selected->position.selector != p.selector || !azsel_allowed(i, b)) return false;
+    if (!azsel_same_invocation(i, b, selected) || !azsel_same_position(p, selected->position) || !azsel_allowed(i, b)) return false;
     struct azsel_resolution fresh __attribute__((cleanup(azsel_resolution_drop))) = {0};
     azsel_resolve_owned(i, b, p, &fresh);
     return fresh.status == AZSEL_OK && azsel_same(&selected->pins.mount, &fresh.pins.mount) && azsel_same(&selected->pins.database, &fresh.pins.database) && azsel_same(&selected->pins.collector, &fresh.pins.collector) && azsel_same(&selected->pins.cache, &fresh.pins.cache) && azsel_allowed(i, b);

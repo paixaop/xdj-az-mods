@@ -136,6 +136,46 @@ static int refuse_binding(const struct azexit_binding *binding) {
     (void) binding;
     return AZ_UNSUPPORTED;
 }
+static void native_adapter_contracts(const struct azexit_service *good) {
+    struct azexit_service peer = *good;
+    struct azexit_delivery_v2 delivery = *peer.delivery;
+    peer.delivery = &delivery;
+    assert(!sdk_exit_delivery(NULL));
+    peer.version = 2;
+    assert(!sdk_exit_delivery(&peer));
+    peer.version = 1;
+    assert(sdk_exit_delivery(&peer) == &delivery);
+    delivery.ready = NULL;
+    assert(!sdk_exit_delivery(&peer));
+    delivery = *good->delivery;
+    delivery.consume = NULL;
+    assert(!sdk_exit_delivery(&peer));
+    delivery = *good->delivery;
+    assert(sdk_exit_delivery(&peer) == &delivery);
+
+    az_command_request request = {.operation = AZ_CMD_LOOP_LENGTH, .flags = AZ_COMMAND_NATIVE_LOAD, .beats = 1.5};
+    assert(sdk_exit_arguments(NULL, &request, NULL) == AZ_OK);
+    request.operation = 0;
+    assert(sdk_exit_arguments(NULL, &request, NULL) == AZ_UNSUPPORTED);
+    request.operation = AZ_CMD_CUE_LOOP_SET + 1;
+    assert(sdk_exit_arguments(NULL, &request, NULL) == AZ_UNSUPPORTED);
+    request.operation = AZ_CMD_LOOP_LENGTH;
+    request.flags = 0;
+    assert(sdk_exit_arguments(NULL, &request, NULL) == AZ_UNSUPPORTED);
+    request.flags = AZ_COMMAND_NATIVE_LOAD | AZ_COMMAND_PERSIST;
+    assert(sdk_exit_arguments(NULL, &request, NULL) == AZ_INVALID);
+    request.flags = AZ_COMMAND_NATIVE_LOAD;
+    request.quantization = AZ_QUANTIZE_NATIVE + 1;
+    assert(sdk_exit_arguments(NULL, &request, NULL) == AZ_INVALID);
+    request.quantization = AZ_QUANTIZE_NATIVE;
+    request.expected_revision = 1;
+    assert(sdk_exit_arguments(NULL, &request, NULL) == AZ_INVALID);
+    request.expected_revision = 0;
+    request.beats = 0x1.0000000000001p0;
+    assert(sdk_exit_arguments(NULL, &request, NULL) == AZ_INVALID);
+    request.operation = AZ_CMD_CUE_LOOP_SET;
+    assert(sdk_exit_arguments(NULL, &request, NULL) == AZ_OK); /* native cue adapter owns value validation */
+}
 static void mixed_versions(const struct azexit_service *good) {
     struct azexit_service peer = *good;
     struct azexit_delivery_v2 tail = *peer.delivery;
@@ -185,6 +225,7 @@ int main(void) {
            AZ_LIB_HAS(library, command_acknowledge) && library->command_submit == g_cm_core.command_submit);
     const struct azexit_service *peer = fixture_service();
     assert(!peer->mask());
+    native_adapter_contracts(peer);
     mixed_versions(peer);
     fixture_arbitration();
     assert(sdk_command_start(peer) == AZ_OK);

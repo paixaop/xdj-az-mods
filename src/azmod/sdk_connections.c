@@ -7,7 +7,7 @@
 #include "../common/azsources.h"
 
 static int sdk_connections_install_at(uintptr_t entry, void *replacement, void **original,
-                                       void *context) {
+                                      void *context) {
     (void) context;
     return azm_install_island_hook_at(entry, replacement, original, "sdk-connection");
 }

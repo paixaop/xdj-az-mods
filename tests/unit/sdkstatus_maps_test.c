@@ -266,4 +266,5 @@ int main(int argc, char **argv) {
     drain(api);
     for (size_t i = 0; i < refs_count; ++i) assert(!refs[i].count);
     puts("PASS typed map owners, load binding, clock/offset, immutable sections, revisions, reader/writer collision, retirement and address reuse");
+    return 0;
 }

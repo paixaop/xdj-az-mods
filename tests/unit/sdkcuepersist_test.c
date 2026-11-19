@@ -28,7 +28,7 @@ char observed_comment[128];
 uint32_t observed_color;
 unsigned char observed_auto;
 void setword(void *base, unsigned offset, uintptr_t word) { memcpy(((unsigned char *) (base)) + offset, &word, sizeof word); }
-uintptr_t getword(void *base, unsigned offset) {
+uintptr_t getword(const void *base, unsigned offset) {
     uintptr_t word;
     memcpy(&word, ((unsigned char *) (base)) + offset, sizeof word);
     return word;
@@ -105,6 +105,19 @@ bool content_publish(void *set, const void *ref, void *listener) {
 void reply(int result);
 bool receipt_in_helper = false, hot_fresh = false, invalidate_reply = false, empty_reply_roots = false, rebuild_reply = false;
 int expected_publication = 1;
+static bool create_native_cue;
+static int native_create(const void *cue, const void *set_ref) {
+    void *set = (void *) getword(set_ref, 0);
+    uintptr_t content = getword(set, 0x28), vector[3] = {0}, built = 0;
+    uintptr_t begin = getword((void *) content, 0x28), end = getword((void *) content, 0x30);
+    for (uintptr_t row = begin; row != end; row += 0x80) vector_append(vector, (void *) row);
+    vector_append(vector, cue);
+    from_vector(&built, vector);
+    vector_destroy(vector);
+    assert(content_publish(set, &built, NULL));
+    release_ref(&built);
+    return 0;
+}
 int native_memory(void *unused_0, const void *unused_1, const void *unused_2, const void *unused_3, const void *unused_4, unsigned unused_5) {
     (void) unused_0;
     (void) unused_1;
@@ -113,6 +126,7 @@ int native_memory(void *unused_0, const void *unused_1, const void *unused_2, co
     (void) unused_4;
     (void) unused_5;
     ++helper_calls;
+    if (create_native_cue) return native_create(unused_3, unused_4);
     if (receipt_in_helper) {
         unsigned before = ready_calls;
         reply(0);
@@ -129,6 +143,7 @@ int native_hot(void *unused_0, const void *unused_1, const void *unused_2, const
     (void) unused_4;
     (void) unused_5;
     ++helper_calls;
+    if (create_native_cue) return native_create(unused_3, unused_4);
     return hot_fresh ? 0 : 1;
 }
 static void mix(uint64_t *hash, const void *p, size_t n) {
@@ -866,6 +881,40 @@ int main() {
     run_helper(1);
     assert(helper_calls == before_calls);
     finish(&(r), AZ_COMMAND_UNCERTAIN, 0);
+    // The exact first native publication is admitted when its newly bound roots
+    // are still empty; the helper's own receipt must retain that published content.
+    r = request(AZ_CMD_CUE_POINT_SET, token++);
+    r.entry_id = 1;
+    r.classification = AZ_CUE_HOT;
+    r.flags |= AZ_COMMAND_NATIVE_CUE_IDS;
+    strcpy(r.comment, "first Hot cue");
+    r.rgb = 0x123456;
+    absent = witness();
+    absent.memory_set = absent.hot_set = absent.memory_content = absent.hot_content = 0;
+    absent.fingerprint = full_hash(&absent);
+    current_operation = r.operation;
+    assert(azsdk_cue_persist_submit(&r, maintainer.bytes, maintainer.bytes, 1, property.bytes, 7, &absent) == AZ_PENDING);
+    for (unsigned hot = 0; hot < 2; ++hot) {
+        uintptr_t empty_vector[3] = {0}, empty_content = 0;
+        from_vector(&empty_content, empty_vector);
+        content_publish(hot ? hot_set.bytes : memory_set.bytes, &empty_content, NULL);
+        release_ref(&empty_content);
+    }
+    create_native_cue = true;
+    helper_pending = true;
+    before_calls = helper_calls;
+    run_helper(0);
+    create_native_cue = false;
+    assert(helper_calls == before_calls + 1);
+    uintptr_t first_content = getword(hot_set.bytes, 0x28);
+    uintptr_t first_row = getword((void *) first_content, 0x28);
+    assert(getword((void *) first_content, 0x30) - first_row == 0x80);
+    assert(*(unsigned char *) first_row == 1);
+    assert(!strcmp((char *) getword((void *) first_row, 0x70), r.comment));
+    assert((uint32_t) getword((void *) first_row, 0x78) == (0xff000000u | r.rgb));
+    publication_checks = true;
+    finish(&r, AZ_COMMAND_APPLIED, 0);
+    publication_checks = false;
     if (helper_cue_owned) destroy_row(helper_cue.bytes);
     for (size_t i = 0; i < owned_count; ++i) {
         unsigned char *content = owned_contents[i];

@@ -37,7 +37,7 @@ fi
 IMG=${AZ_TEST_IMAGE:-azmod-test:18.04}
 has() { docker run --rm --platform=linux/arm64 "$IMG" sh -c "$1" >/dev/null 2>&1; }
 if ! docker image inspect "$IMG" >/dev/null 2>&1 ||
-   ! has 'command -v gcc >/dev/null' ||
+   ! has 'command -v gcc >/dev/null && test -f /usr/include/X11/extensions/XTest.h' ||
    ! has 'clang-format --version | grep -q "clang-format version 21\.1\.8$"' ||
    ! has 'clang-10 --version && ls /usr/lib/llvm-10/lib/clang/10.0.0/lib/linux/libclang_rt.fuzzer-aarch64.a' ||
    ! has 'clang-tidy-10 --version | grep -q "LLVM version 10\.0\.0" && cppcheck --version | grep -q "^Cppcheck 1\.82$"'; then
@@ -85,9 +85,9 @@ exec docker run --rm --platform=linux/arm64 --security-opt seccomp=unconfined \
                 done
             fi
             case "$p" in
-                plain) status_suites=(sdk-status sdk-status-ui sdk-status-gui sdk-status-loader sdk-status-native sdk-status-maps sdk-status-map-source sdk-status-source sdk-status-store);;
-                asan) status_suites=(sdk-status-ui sdk-status-native sdk-status-maps sdk-status-map-source sdk-status-source sdk-status-store);;
-                tsan) status_suites=(sdk-status-source sdk-status-store);;
+                plain) status_suites=(sdk-status-file-install sdk-status-map-install sdk-status-memory-ownership sdk-status-map-transactions sdk-analysis-install sdk-status-file-cues sdk-status-sync sdk-status-lti sdk-status-install sdk-status-memory-recall sdk-status sdk-status-ui sdk-status-gui sdk-status-loader sdk-status-native sdk-status-maps sdk-status-map-source sdk-status-source sdk-status-store);;
+                asan) status_suites=(sdk-status-file-install sdk-status-map-install sdk-status-memory-ownership sdk-status-map-transactions sdk-analysis-install sdk-status-file-cues sdk-status-sync sdk-status-lti sdk-status-install sdk-status-memory-recall sdk-status-ui sdk-status-native sdk-status-maps sdk-status-map-source sdk-status-source sdk-status-store);;
+                tsan) status_suites=(sdk-status-file-install sdk-status-map-install sdk-status-memory-ownership sdk-status-map-transactions sdk-analysis-install sdk-status-file-cues sdk-status-sync sdk-status-lti sdk-status-install sdk-status-memory-recall sdk-status-source sdk-status-store);;
             esac
             for status_suite in "${status_suites[@]}"; do
                 status_t0=$SECONDS
@@ -95,7 +95,7 @@ exec docker run --rm --platform=linux/arm64 --security-opt seccomp=unconfined \
                 status_rc=$?; [ "$status_rc" -eq 0 ] || rc=1
                 sum+=("$status_suite $p ($((SECONDS - status_t0)) s, exit $status_rc)")
             done
-            for cue_suite in sdk-cue sdk-cue-public sdk-cue-export sdk-cue-events sdk-deck-listeners sdk-data-lifecycle sdk-slip sdk-exit sdk-panel; do
+            for cue_suite in sdk-exit-contracts stem-loader stem-fd sdk-playlist-message azstem-startup overview-native inline-entry sdk-ui-routing sdk-surface-placement community-bindings community-screen stem-folder sdk-cue-bridge sdk-cue sdk-cue-public sdk-cue-export sdk-cue-events sdk-deck-listeners sdk-data-lifecycle sdk-slip sdk-exit sdk-panel; do
                 cue_t0=$SECONDS
                 SAN=$s bash "tests/$cue_suite.sh"
                 cue_status=$?; [ "$cue_status" -eq 0 ] || rc=1

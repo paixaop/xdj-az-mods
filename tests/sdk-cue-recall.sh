@@ -5,6 +5,7 @@ cd "$(dirname "$0")/.."
 task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/az-sdk-cue-recall.XXXXXX")
 trap 'rm -rf "$task_tmp"' EXIT
 flags=(-O1 -g -Wall -Wextra -Werror -pthread -Isrc/common -Isrc/azmod -DAZSDK_CUE_RECALL_TESTING)
+if [[ ${CUE_DIAGNOSTIC:-0} == 1 ]]; then flags+=(-DAZSDK_CUE_DIAGNOSTIC); fi
 case ${SAN:-plain} in
 plain|'') ;;
 asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer) ;;

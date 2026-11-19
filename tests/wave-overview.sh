@@ -23,7 +23,7 @@ if [[ -n ${WAVE_OVERVIEW_EXTRA_FLAGS:-} ]]; then
 fi
 python3 - "$task_tmp" <<'PY'
 from pathlib import Path
-import re,sys
+import json,re,sys
 target=Path(sys.argv[1]); text=Path('src/azmod/waveform.c').read_text()
 names=['OV_STRIDE','OV_MAX','OV_COL_A','OV_COL_B','OV_HGT_A','OV_HGT_B','OVINST_MAX','OV_IN_TILE']
 constants=[]
@@ -41,17 +41,24 @@ constants.append(status.group(0))
 prefix='static unsigned char *ov_scaled_for('
 assert text.count(prefix)==1,prefix
 start=text.index(prefix);end=text.index('\n}',start)+2
+def mapped(start,end):
+    return '#line {} {}\n'.format(text[:start].count('\n')+1, json.dumps(str(Path('src/azmod/waveform.c').resolve())))+text[start:end]+'\n'
 functions=[text[start:end]]
+positive=[mapped(start,end)]
 start=text.index('static struct azov_lease_api g_ovlease;')
 body=re.search(r'^static void ov_hook_owned\([^;]*?\) \{',text,re.M|re.S)
 assert body,'overview dispatcher body missing'
 end=text.index('\n}',body.end())+2
+positive.append(mapped(start,end))
 functions.append(text[start:end])
 functions.append('static void ov_hook(long self) { ov_hook_owned(self,0,0,0); }')
+positive.append('#line 1 \"waveoverview-wrapper.inc\"\n'+functions[-1])
 start=text.index('#if defined(__aarch64__)\n__asm__(".text\\n.align 2\\n.globl azm_ov_entry')
 end=text.index('#endif',start)+len('#endif')
 functions.append('#if defined(__linux__)\n'+text[start:end]+'\n#endif')
+positive.append('#if defined(__linux__)\n'+mapped(start,end)+'\n#endif')
 (target/'functions.inc').write_text('\n'.join(functions)+'\n')
+(target/'functions-real.inc').write_text('\n'.join(positive)+'\n')
 PY
 compile() {
     local task_constants=$1 task_target=$2 task_functions=${3:-$task_tmp/functions.inc} task_broker=${4:-src/azstem/overview_lease.c}
@@ -86,7 +93,7 @@ old='rc, &count, count + 1,'
 assert text.count(old)==1
 (root/'unpinned.c').write_text(text.replace(old,'rc, &count, count,'))
 PY
-compile "$task_tmp/constants.inc" "$task_tmp/real"
+compile "$task_tmp/constants.inc" "$task_tmp/real" "$task_tmp/functions-real.inc"
 compile "$task_tmp/old-index.inc" "$task_tmp/control"
 compile "$task_tmp/constants.inc" "$task_tmp/normal-only" "$task_tmp/normal-only.inc"
 compile "$task_tmp/constants.inc" "$task_tmp/unpinned" "$task_tmp/functions.inc" "$task_tmp/unpinned.c"

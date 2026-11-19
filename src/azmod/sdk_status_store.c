@@ -76,10 +76,7 @@ struct ss_binding {
     uint64_t proof_connection, proof_version;
 };
 static struct ds_proof_context ss_proof_context(const struct ss_binding *b, unsigned kind, unsigned cause) {
-    struct ds_proof_context p = {.kind = kind, .cause = cause, .binding_cut = b->cut,
-        .binding_serial = b->serial, .connection = b->proof_connection,
-        .db_before = b->proof_version, .db_after = b->proof_version,
-        .device = b->image.src.device, .inode = b->image.src.inode, .mount_id = b->image.src.mount_id};
+    struct ds_proof_context p = {.kind = kind, .cause = cause, .binding_cut = b->cut, .binding_serial = b->serial, .connection = b->proof_connection, .db_before = b->proof_version, .db_after = b->proof_version, .device = b->image.src.device, .inode = b->image.src.inode, .mount_id = b->image.src.mount_id};
     memcpy(p.providers, b->provider, sizeof p.providers);
     memcpy(p.revisions, b->revision, sizeof p.revisions);
     for (unsigned f = 0; f < 2; f++) {
@@ -173,6 +170,14 @@ static void ss_close_database(void *db, int fd) {
 }
 /* OneLibrary content.fileType codes. Read this optional column separately so
  * an older export schema cannot take the other metadata fields offline. */
+static void ss_format_result(void *stmt, az_track_metadata *m, const char *const *names, size_t count) {
+    long long type = g_sdk_sq.col_int64(stmt, 0);
+    if (type >= 0 && (uint64_t) type < count && names[type] && g_sdk_sq.step(stmt) == 101) {
+        snprintf(m->format, sizeof m->format, "%s", names[type]);
+        m->valid |= AZ_META_FORMAT;
+    }
+}
+
 static void ss_read_format(void *db, uint32_t track_id, az_track_metadata *m) {
     static const char *const names[] = {
         [1] = "MP3", [3] = "MP4", [4] = "AAC", [5] = "FLAC", [6] = "ALAC", [11] = "WAV", [12] = "AIFF"};
@@ -180,14 +185,27 @@ static void ss_read_format(void *db, uint32_t track_id, az_track_metadata *m) {
     const char *sql = "SELECT fileType FROM content WHERE content_id=?1 AND typeof(fileType)='integer'";
     if (!g_sdk_sq.prepare(db, sql, -1, &stmt, NULL) && stmt && !g_sdk_sq.bind_int64(stmt, 1, track_id) &&
         g_sdk_sq.step(stmt) == 100) {
-        long long type = g_sdk_sq.col_int64(stmt, 0);
-        if (type >= 0 && (uint64_t) type < sizeof names / sizeof names[0] && names[type] && g_sdk_sq.step(stmt) == 101) {
-            snprintf(m->format, sizeof m->format, "%s", names[type]);
-            m->valid |= AZ_META_FORMAT;
-        }
+        ss_format_result(stmt, m, names, sizeof names / sizeof names[0]);
     }
     if (stmt) g_sdk_sq.finalize(stmt);
 }
+static void ss_file_stat(const struct st_source *src, struct ss_file *file) {
+    struct stat sb;
+    if (stat(file->path, &sb)) {
+        if (errno != ENOENT && errno != ENOTDIR) file->rc = AZ_FAILED;
+        return;
+    }
+    file->device = (uint64_t) sb.st_dev;
+    file->inode = (uint64_t) sb.st_ino;
+    file->signature = st_stat_sig(&sb);
+    /* Never open the live SQLite database as an analysis file, even through a
+     * hard link. Closing another descriptor for that inode can discard POSIX locks. */
+    file->rc = S_ISREG(sb.st_mode) && file->signature &&
+                       (file->device != src->device || file->inode != src->inode)
+                   ? AZ_OK
+                   : AZ_FAILED;
+}
+
 static void ss_file_probe(const struct st_source *src, const struct st_resolution *row,
                           int ext, struct ss_file *file) {
     file->rc = AZ_UNSUPPORTED;
@@ -206,20 +224,7 @@ static void ss_file_probe(const struct st_source *src, const struct st_resolutio
         file->rc = AZ_FAILED;
         return;
     }
-    struct stat sb;
-    if (stat(file->path, &sb)) {
-        if (errno != ENOENT && errno != ENOTDIR) file->rc = AZ_FAILED;
-        return;
-    }
-    file->device = (uint64_t) sb.st_dev;
-    file->inode = (uint64_t) sb.st_ino;
-    file->signature = st_stat_sig(&sb);
-    /* Never open the live SQLite database as an analysis file, even through a
-     * hard link. Closing another descriptor for that inode can discard POSIX locks. */
-    file->rc = S_ISREG(sb.st_mode) && file->signature &&
-                       (file->device != src->device || file->inode != src->inode)
-                   ? AZ_OK
-                   : AZ_FAILED;
+    ss_file_stat(src, file);
 }
 struct ss_monitor {
     uint64_t cut, version;
@@ -241,6 +246,45 @@ static void ss_monitor_reset(struct ss_monitor *m) {
     m->fd = m->wd[0] = m->wd[1] = -1;
 }
 #ifdef __linux__
+static void ss_track_write_event(struct ss_monitor *m, unsigned f, unsigned mask) {
+    if (mask & IN_MODIFY) m->open_edits |= 1u << f;
+    if (mask & IN_CLOSE_WRITE) {
+        ++m->close_count[f];
+        m->open_edits &= ~(1u << f);
+    }
+    if (mask & ~(IN_MODIFY | IN_CLOSE_WRITE)) m->unsafe_events |= 1u << f;
+    if (mask & (IN_MODIFY | IN_CLOSE_WRITE | IN_CREATE)) m->uncommitted_file[f] = 1;
+    if (mask & IN_MOVED_TO) m->uncommitted_file[f] = 0;
+}
+
+static uint64_t ss_file_event(struct ss_monitor *m, unsigned f, const struct inotify_event *e) {
+    uint64_t affected = 0;
+    const char *base = strrchr(m->paths[f], '/');
+    if (!e->len || (base && !strcmp(base + 1, e->name))) {
+                    /* Linux reports CLOSE_WRITE even for O_RDWR descriptors
+                     * that never wrote a byte. Pair closes with MODIFY across
+                     * drain calls, including drains interrupted by a stock writer. */
+        if ((e->mask & IN_CLOSE_WRITE) && !(m->open_edits & (1u << f))) return 0;
+        ss_track_write_event(m, f, e->mask);
+        affected = f ? SS_EXT : SS_DAT;
+    }
+    if (e->mask & IN_IGNORED) m->wd[f] = -1;
+    return affected;
+}
+
+static uint64_t ss_inotify_record(struct ss_monitor *m, const struct inotify_event *e) {
+    uint64_t affected = 0;
+    if (e->mask & IN_Q_OVERFLOW) {
+        affected |= SS_ALL;
+        m->uncommitted_file[0] = m->uncommitted_file[1] = 1;
+    }
+    for (int f = 0; f < 2; f++) {
+        if (e->wd != m->wd[f]) continue;
+        affected |= ss_file_event(m, (unsigned) f, e);
+    }
+    return affected;
+}
+
 static uint64_t ss_drain_events(struct ss_monitor *m) {
     if (m->fd < 0) return 0;
     union {
@@ -255,35 +299,12 @@ static uint64_t ss_drain_events(struct ss_monitor *m) {
         for (size_t p = 0; p < (size_t) n;) {
             const struct inotify_event *e = (const void *) (events.bytes + p);
             p += sizeof *e + e->len;
-            if (e->mask & IN_Q_OVERFLOW) {
-                affected |= SS_ALL;
-                m->uncommitted_file[0] = m->uncommitted_file[1] = 1;
-            }
-            for (int f = 0; f < 2; f++) {
-                if (e->wd != m->wd[f]) continue;
-                const char *base = strrchr(m->paths[f], '/');
-                if (!e->len || (base && !strcmp(base + 1, e->name))) {
-                    /* Linux reports CLOSE_WRITE even for O_RDWR descriptors
-                     * that never wrote a byte. Pair closes with MODIFY across
-                     * drain calls, including drains interrupted by a stock writer. */
-                    if ((e->mask & IN_CLOSE_WRITE) && !(m->open_edits & (1u << f))) continue;
-                    affected |= f ? SS_EXT : SS_DAT;
-                    if (e->mask & IN_MODIFY) m->open_edits |= 1u << f;
-                    if (e->mask & IN_CLOSE_WRITE) {
-                        ++m->close_count[f];
-                        m->open_edits &= ~(1u << f);
-                    }
-                    if (e->mask & ~(IN_MODIFY | IN_CLOSE_WRITE)) m->unsafe_events |= 1u << f;
-                    if (e->mask & (IN_MODIFY | IN_CLOSE_WRITE | IN_CREATE)) m->uncommitted_file[f] = 1;
-                    if (e->mask & IN_MOVED_TO) m->uncommitted_file[f] = 0;
-                }
-                if (e->mask & IN_IGNORED) m->wd[f] = -1;
-            }
+            affected |= ss_inotify_record(m, e);
         }
     }
     return affected | SS_ALL;
 }
-static void ss_arm_paths(struct ss_monitor *m, const struct ss_file files[2]) {
+static void ss_reset_watches(struct ss_monitor *m, const struct ss_file files[2]) {
     if (m->fd < 0 || strcmp(m->paths[0], files[0].path) || strcmp(m->paths[1], files[1].path)) {
         if (m->fd >= 0) close(m->fd);
         for (int f = 0; f < 2; f++)
@@ -291,6 +312,10 @@ static void ss_arm_paths(struct ss_monitor *m, const struct ss_file files[2]) {
         m->fd = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
         m->wd[0] = m->wd[1] = -1;
     }
+}
+
+static void ss_arm_paths(struct ss_monitor *m, const struct ss_file files[2]) {
+    ss_reset_watches(m, files);
     for (int f = 0; f < 2; f++) {
         snprintf(m->paths[f], sizeof m->paths[f], "%s", files[f].path);
         if (m->fd < 0 || m->wd[f] >= 0 || !files[f].path[0]) continue;
@@ -344,225 +369,346 @@ static void fo_file_cut(unsigned, const struct ss_binding *, const struct ss_ima
  * connection. A changed token establishes committed activity, never its number or
  * affected rows. An unchanged rollback is quiet. Neither a close nor a WAL append
  * alone is used to claim that an intermediate row or analysis value was observed. */
-static void ss_monitor_deck(unsigned deck) {
-    pthread_mutex_lock(&ss_mu);
-    struct ss_binding before = ss_decks[deck];
-    pthread_mutex_unlock(&ss_mu);
-    struct ss_monitor *m = &ss_monitors[deck];
-    if (!before.topics || !before.ref.track_id || before.retired) {
-        if (m->seeded) ss_monitor_reset(m);
-        return;
+struct ss_observation {
+    unsigned deck, proof_cause;
+    struct ss_binding before;
+    struct ss_binding *current;
+    struct ss_monitor *monitor;
+    struct ss_image image;
+    uint64_t filesystem_events, confirmed[2], rank[2], gap, proof_before, known[2], version, touched;
+    int source_rc, row_retired, changed[2];
+};
+static int ss_monitor_ready(struct ss_observation *o) {
+    if (!o->before.topics || !o->before.ref.track_id || o->before.retired) {
+        if (o->monitor->seeded) ss_monitor_reset(o->monitor);
+        return 0;
     }
-    if (!m->seeded || m->cut != before.cut) {
-        ss_monitor_reset(m);
-        m->seeded = 1;
-        m->cut = before.cut;
+    if (!o->monitor->seeded || o->monitor->cut != o->before.cut) {
+        ss_monitor_reset(o->monitor);
+        o->monitor->seeded = 1;
+        o->monitor->cut = o->before.cut;
     }
-    if (before.writing) {
+    if (o->before.writing) {
         struct st_source live;
-        if (!ss_source(&before.ref, &live)) return;
+        if (!ss_source(&o->before.ref, &live)) return 0;
     }
-    m->pending_events |= ss_drain_events(m);
-    uint64_t filesystem_events = m->pending_events;
-    uint64_t confirmed[2] = {0}, rank[2] = {0};
-    uint64_t gap = filesystem_events == SS_ALL ? SS_ALL : m->pending_db_gap;
-    unsigned proof_cause = m->proof_pending_cause | (filesystem_events == SS_ALL ? DS_PROOF_FILESYSTEM : 0);
-    uint64_t proof_before = m->pending_db_gap ? m->proof_pending_before : m->version;
-    uint64_t known[2] = {0};
-    int row_retired = 0;
-    struct ss_image im = {0};
-    int source_rc = ss_source(&before.ref, &im.src);
-    uint64_t version = 0;
+    return 1;
+}
+
+static void ss_begin_observation(struct ss_observation *o) {
+    o->monitor->pending_events |= ss_drain_events(o->monitor);
+    o->filesystem_events = o->monitor->pending_events;
+    o->gap = o->filesystem_events == SS_ALL ? SS_ALL : o->monitor->pending_db_gap;
+    o->proof_cause = o->monitor->proof_pending_cause | (o->filesystem_events == SS_ALL ? DS_PROOF_FILESYSTEM : 0);
+    o->proof_before = o->monitor->pending_db_gap ? o->monitor->proof_pending_before : o->monitor->version;
+    o->source_rc = ss_source(&o->before.ref, &o->image.src);
+    o->image.rc = o->source_rc;
+}
+
+static void ss_read_observed_row(struct ss_observation *o) {
+    if (!o->monitor->row_ready || o->monitor->version != o->version) {
+        memset(&o->monitor->row, 0, sizeof o->monitor->row);
+        int ambiguous = 0;
+        o->image.rc = st_read_row_checked(o->monitor->db, o->before.ref.track_id, &o->monitor->row, &ambiguous);
+        o->row_retired = o->image.rc == AZ_NOT_FOUND || ambiguous;
+        if (!o->image.rc) ss_read_format(o->monitor->db, o->before.ref.track_id, &o->monitor->row.metadata);
+        o->monitor->row_ready = o->image.rc == AZ_OK;
+    } else o->image.rc = AZ_OK;
+}
+
+static void ss_observed_metadata(struct ss_observation *o) {
     char path[1024];
-    im.rc = source_rc;
-    if (!source_rc) {
-        im.rc = AZ_FAILED;
-        if (!m->db && st_source_path(im.src.mount, "/PIONEER/rekordbox/exportLibrary.db", path))
-            m->db = ss_open_database(path, &im.src, &m->db_fd);
-        if (m->db && !ss_database_version(m->db, &version)) {
-            if (m->version && m->version != version) { gap |= SS_ALL; proof_cause |= DS_PROOF_DATABASE; }
-            if (!m->row_ready || m->version != version) {
-                memset(&m->row, 0, sizeof m->row);
-                int ambiguous = 0;
-                im.rc = st_read_row_checked(m->db, before.ref.track_id, &m->row, &ambiguous);
-                row_retired = im.rc == AZ_NOT_FOUND || ambiguous;
-                if (!im.rc) ss_read_format(m->db, before.ref.track_id, &m->row.metadata);
-                m->row_ready = im.rc == AZ_OK;
-            } else im.rc = AZ_OK;
-            m->version = version;
-            uint64_t after = 0;
-            if (ss_database_version(m->db, &after) || after != version) {
-                im.rc = AZ_STALE;
-                row_retired = 0;
-                m->row_ready = 0;
-                gap |= SS_ALL;
-                proof_cause |= DS_PROOF_READ;
-            } else if (!im.rc) {
-                im.metadata = m->row.metadata;
-                im.duration_ticks = m->row.duration_ticks;
-                if (m->row.content[0] && st_source_path(im.src.mount, m->row.content, path) && strlen(path) < sizeof im.metadata.path) {
-                    memcpy(im.metadata.path, path, strlen(path) + 1);
-                    im.metadata.valid |= AZ_META_PATH;
-                }
-                for (int f = 0; f < 2; f++) ss_file_probe(&im.src, &m->row, f, &im.file[f]);
-                ss_arm_paths(m, im.file);
-                for (int f = 0; f < 2; f++) {
-                    const struct ss_file *old = &before.image.file[f];
-                    if (before.ready && old->signature && old->signature != im.file[f].signature &&
-                        old->inode == im.file[f].inode && old->device == im.file[f].device)
-                        m->uncommitted_file[f] = 1;
-                    const struct ss_write_proof *proof = &before.completed[f];
-                    if (proof->revision && m->confirmed[f] != proof->revision) {
-                        char digest[65];
-                        if (im.file[f].signature == proof->signature && im.file[f].device == proof->device &&
-                            im.file[f].inode == proof->inode && ss_digest(&im.file[f], digest) &&
-                            !memcmp(digest, proof->digest, sizeof digest)) {
+    o->image.metadata = o->monitor->row.metadata;
+    o->image.duration_ticks = o->monitor->row.duration_ticks;
+    if (o->monitor->row.content[0] && st_source_path(o->image.src.mount, o->monitor->row.content, path) && strlen(path) < sizeof o->image.metadata.path) {
+        memcpy(o->image.metadata.path, path, strlen(path) + 1);
+        o->image.metadata.valid |= AZ_META_PATH;
+    }
+}
+
+static int ss_writer_isolated(struct ss_observation *o, unsigned f, const struct ss_write_proof *proof) {
+    return proof->only && o->monitor->fd >= 0 && o->monitor->wd[f] >= 0 &&
+           !(o->monitor->unsafe_events & (1u << f)) && proof->ordinal > o->monitor->confirmed_rank[f] &&
+           o->monitor->close_count[f] == proof->ordinal - o->monitor->confirmed_rank[f];
+}
+
+static int ss_file_proof_matches(struct ss_observation *o, unsigned f, const struct ss_write_proof *proof, char digest[65]) {
+    return o->image.file[f].signature == proof->signature && o->image.file[f].device == proof->device &&
+           o->image.file[f].inode == proof->inode && ss_digest(&o->image.file[f], digest) &&
+           !memcmp(digest, proof->digest, sizeof proof->digest);
+}
+
+static void ss_confirm_file(struct ss_observation *o, unsigned f) {
+    const struct ss_write_proof *proof = &o->before.completed[f];
+    if (proof->revision && o->monitor->confirmed[f] != proof->revision) {
+        char digest[65];
+        if (ss_file_proof_matches(o, f, proof, digest)) {
                             /* The native writer closed these exact files. If the
                              * watcher saw another closer, an overflow, different
-                             * unrelated bytes or any replacement, retain its gap. */
-                            if (proof->only && m->fd >= 0 && m->wd[f] >= 0 &&
-                                !(m->unsafe_events & (1u << f)) && proof->ordinal > m->confirmed_rank[f] &&
-                                m->close_count[f] == proof->ordinal - m->confirmed_rank[f]) known[f] = proof->only;
-                            m->uncommitted_file[f] = 0;
-                            confirmed[f] = proof->revision;
-                            rank[f] = proof->ordinal;
-                        }
-                    }
-                    if (m->uncommitted_file[f] && im.file[f].rc == AZ_OK)
-                        im.file[f].rc = AZ_STALE;
-                }
+                             * unrelated bytes or any replacement, retain its o->gap. */
+            if (ss_writer_isolated(o, f, proof)) o->known[f] = proof->only;
+            o->monitor->uncommitted_file[f] = 0;
+            o->confirmed[f] = proof->revision;
+            o->rank[f] = proof->ordinal;
+        }
+    }
+}
+
+static int ss_observed_inplace_edit(const struct ss_observation *o, const struct ss_file *old, int f) {
+    return o->before.ready && old->signature && old->signature != o->image.file[f].signature &&
+           old->inode == o->image.file[f].inode && old->device == o->image.file[f].device;
+}
+
+static void ss_observed_files(struct ss_observation *o) {
+    for (int f = 0; f < 2; f++) ss_file_probe(&o->image.src, &o->monitor->row, f, &o->image.file[f]);
+    ss_arm_paths(o->monitor, o->image.file);
+    for (int f = 0; f < 2; f++) {
+        const struct ss_file *old = &o->before.image.file[f];
+        if (ss_observed_inplace_edit(o, old, f))
+            o->monitor->uncommitted_file[f] = 1;
+        ss_confirm_file(o, (unsigned) f);
+        if (o->monitor->uncommitted_file[f] && o->image.file[f].rc == AZ_OK)
+            o->image.file[f].rc = AZ_STALE;
+    }
+}
+
+static void ss_check_observed_row(struct ss_observation *o) {
+    o->monitor->version = o->version;
+    uint64_t after = 0;
+    if (ss_database_version(o->monitor->db, &after) || after != o->version) {
+        o->image.rc = AZ_STALE;
+        o->row_retired = 0;
+        o->monitor->row_ready = 0;
+        o->gap |= SS_ALL;
+        o->proof_cause |= DS_PROOF_READ;
+    } else if (!o->image.rc) {
+        ss_observed_metadata(o);
+        ss_observed_files(o);
+    }
+}
+
+static void ss_observe_database(struct ss_observation *o) {
+    char path[1024];
+    if (!o->source_rc) {
+        o->image.rc = AZ_FAILED;
+        if (!o->monitor->db && st_source_path(o->image.src.mount, "/PIONEER/rekordbox/exportLibrary.db", path))
+            o->monitor->db = ss_open_database(path, &o->image.src, &o->monitor->db_fd);
+        if (o->monitor->db && !ss_database_version(o->monitor->db, &o->version)) {
+            if (o->monitor->version && o->monitor->version != o->version) {
+                o->gap |= SS_ALL;
+                o->proof_cause |= DS_PROOF_DATABASE;
             }
+            ss_read_observed_row(o);
+            ss_check_observed_row(o);
         }
         struct st_source chk;
-        source_rc = ss_source(&before.ref, &chk);
-        if (source_rc) im.rc = source_rc;
+        o->source_rc = ss_source(&o->before.ref, &chk);
+        if (o->source_rc) o->image.rc = o->source_rc;
     }
-    if (before.ready && source_rc) {
-        proof_cause |= DS_PROOF_SOURCE;
-        /* A normal disconnection is an invalidation. Only charge a capture gap
+}
+
+static void ss_observe_source_loss(struct ss_observation *o) {
+    if (o->before.ready && o->source_rc) {
+        o->proof_cause |= DS_PROOF_SOURCE;
+        /* A normal disconnection is an invalidation. Only charge a capture o->gap
          * if the committed activity token cannot close the interval, the observer
-         * already found a file gap, or a pinned revision was still owed. */
+         * already found a file o->gap, or a pinned revision was still owed. */
         uint64_t final_version = 0;
-        if (!m->db || ss_database_version(m->db, &final_version) || final_version != m->version) gap |= SS_ALL;
-        gap |= before.pending;
+        if (!o->monitor->db || ss_database_version(o->monitor->db, &final_version) || final_version != o->monitor->version) o->gap |= SS_ALL;
+        o->gap |= o->before.pending;
         for (unsigned l = 0; l < SS_SAVED_LANES; l++)
-            if (before.pinned[l]) gap |= AZ_STATUS_TOPIC(ss_saved_topic[l]);
+            if (o->before.pinned[l]) o->gap |= AZ_STATUS_TOPIC(ss_saved_topic[l]);
     }
-    pthread_mutex_lock(&ss_mu);
-    struct ss_binding *d = &ss_decks[deck];
+}
+
+static int ss_observation_current(struct ss_observation *o) {
     /* A writer can begin and finish while this pass is checking SQLite/files.
      * Its notification may already have been read. Keep both the notification
-     * and the previous certificate rank for the retry against the new proof. */
-    if (d->cut != before.cut || d->retired || !d->topics ||
-        (!source_rc && (d->writing || d->serial != before.serial))) {
-        if (gap == SS_ALL) {
-            m->pending_db_gap = SS_ALL;
-            m->proof_pending_cause = proof_cause;
-            m->proof_pending_before = proof_before;
+     * and the previous certificate o->rank for the retry against the new proof. */
+    if (o->current->cut != o->before.cut || o->current->retired || !o->current->topics ||
+        (!o->source_rc && (o->current->writing || o->current->serial != o->before.serial))) {
+        if (o->gap == SS_ALL) {
+            o->monitor->pending_db_gap = SS_ALL;
+            o->monitor->proof_pending_cause = o->proof_cause;
+            o->monitor->proof_pending_before = o->proof_before;
         }
+        return 0;
+    }
+    return 1;
+}
+
+static void ss_accept_file_proofs(struct ss_observation *o) {
+    o->monitor->pending_db_gap = 0;
+    o->monitor->proof_pending_cause = 0;
+    o->monitor->pending_events = 0;
+    o->monitor->unsafe_events = 0;
+    for (unsigned f = 0; f < 2; f++)
+        if (o->confirmed[f]) {
+            o->monitor->confirmed[f] = o->confirmed[f];
+            o->monitor->confirmed_rank[f] = o->rank[f];
+        }
+}
+
+static int ss_clean_file_change(struct ss_observation *o, int f) {
+    return o->known[f] && o->image.rc == AZ_OK && o->current->image.rc == AZ_OK &&
+           o->image.file[f].rc == AZ_OK && o->current->image.file[f].rc == AZ_OK;
+}
+
+static int ss_file_change_gap(struct ss_observation *o, int f, int clean) {
+    return !clean && ((o->filesystem_events & (f ? SS_TOPIC(PHRASES) : SS_TOPIC(GRID))) ||
+                      (o->current->ready && o->changed[f] && o->image.rc == AZ_OK && o->current->image.rc == AZ_OK));
+}
+
+static void ss_observed_changes(struct ss_observation *o) {
+    o->touched = !o->current->ready || o->image.rc != o->current->image.rc ? SS_ALL : 0;
+    o->touched |= ss_metadata_changes(&o->current->image, &o->image);
+    for (int f = 0; f < 2; f++) {
+        if (o->monitor->confirmed[f] > o->current->consumed[f]) o->current->consumed[f] = o->monitor->confirmed[f];
+        o->changed[f] = memcmp(&o->current->image.file[f], &o->image.file[f], sizeof o->image.file[f]) != 0;
+        uint64_t components = f ? SS_EXT : SS_DAT;
+        int clean = ss_clean_file_change(o, f);
+        if (o->changed[f]) o->touched |= clean ? o->known[f] : components;
+        if (ss_file_change_gap(o, f, clean)) {
+            o->gap |= components;
+            o->proof_cause |= DS_PROOF_FILE_CHANGE;
+        }
+    }
+}
+
+static void ss_close_file_changes(struct ss_observation *o) {
+    if (o->before.ready && !o->source_rc && o->image.rc != AZ_OK && o->current->image.rc == AZ_OK) {
+        o->gap |= SS_ALL;
+        o->proof_cause |= DS_PROOF_READ;
+    }
+    if (o->current->ready && (o->changed[0] || o->changed[1] || (o->gap & (SS_DAT | SS_EXT))))
+        fo_file_cut(o->deck, o->current, &o->image, o->known, o->monitor->close_count, o->gap);
+    memset(o->monitor->close_count, 0, sizeof o->monitor->close_count);
+}
+
+static void ss_publish_observed_gap(struct ss_observation *o) {
+    if (o->current->ready && (o->gap & o->current->topics) && atomic_load_explicit(&ds_proof_enabled, memory_order_acquire)) {
+        struct ds_proof_context previous = ds_proof_context;
+        ds_proof_context = ss_proof_context(o->current, DS_PROOF_GAP, o->proof_cause);
+        ds_proof_context.connection = (uintptr_t) o->monitor->db;
+        ds_proof_context.db_before = o->proof_before;
+        ds_proof_context.db_after = o->version;
+        ds_publish_file(o->deck, o->current->epoch, &o->current->ref, st_now(), NULL, 0, o->gap & o->current->topics, AZ_STATUS_CAPTURE_GAP);
+        ds_proof_context = previous;
+    } else if (o->current->ready && (o->gap & o->current->topics))
+        ds_publish_file(o->deck, o->current->epoch, &o->current->ref, st_now(), NULL, 0, o->gap & o->current->topics, AZ_STATUS_CAPTURE_GAP);
+    if (atomic_load_explicit(&ds_proof_enabled, memory_order_acquire)) {
+        o->current->proof_connection = (uintptr_t) o->monitor->db;
+        o->current->proof_version = o->version;
+    }
+}
+
+static int ss_provider_replaced(const struct ss_observation *o, unsigned i) {
+    if (!o->current->provider[i]) return 1;
+    if (!i) return 0;
+    const struct ss_file *next = &o->image.file[i - 1], *old = &o->current->image.file[i - 1];
+    return next->inode != old->inode || next->device != old->device || strcmp(next->path, old->path);
+}
+
+static void ss_renew_file_providers(struct ss_observation *o) {
+    for (unsigned i = 0; i < 3; i++) {
+            /* Replacement changes the producer incarnation, even at equal bytes. */
+        if (ss_provider_replaced(o, i)) o->current->provider[i] = ss_file_provider();
+    }
+        /* Hot and memory lists can draw from both files. Neither single container
+         * identity denotes this combined cue producer. */
+    if (!o->current->provider[3] || o->current->provider[1] != o->before.provider[1] || o->current->provider[2] != o->before.provider[2])
+        o->current->provider[3] = ss_file_provider();
+}
+
+static void ss_renew_field_revisions(struct ss_observation *o, uint64_t serial) {
+    for (unsigned t = 0; t < AZ_STATUS_TOPIC_COUNT; t++) {
+        uint64_t bit = AZ_STATUS_TOPIC(t);
+        if (!(o->touched & bit)) continue;
+        uint64_t revision = serial;
+            /* Draining the same positive commit through the monitor must not
+             * manufacture a second saved collection edition. */
+        if (!(o->gap & bit))
+            for (unsigned f = 0; f < 2; f++)
+                if ((o->known[f] & bit) && o->confirmed[f]) revision = o->confirmed[f];
+        o->current->revision[t] = revision;
+    }
+}
+
+static int ss_commit_observation(struct ss_observation *o) {
+    o->touched |= o->gap;
+    if (o->touched || !o->current->ready) {
+        uint64_t serial = ss_new_id(&ss_serial);
+        if (!serial) {
+            return 0;
+        }
+        ss_renew_file_providers(o);
+        ss_renew_field_revisions(o, serial);
+        o->current->image = o->image;
+        o->current->serial = serial;
+        o->current->ready = 1;
+        o->current->pending |= o->touched & o->current->topics;
+    }
+    return 1;
+}
+
+static void ss_retire_observed_binding(struct ss_observation *o) {
+    if (o->source_rc || o->row_retired) {
+        o->current->retired = 1;
+        o->current->pending = 0;
+        if (o->row_retired && ss_pins[o->deck].epoch == o->before.epoch && ss_pins[o->deck].token) {
+            ss_pins[o->deck].retired = 1;
+            ss_pins[o->deck].published = 0;
+        }
+    }
+}
+
+static void ss_publish_observed_retirement(struct ss_observation *o) {
+    if ((o->source_rc || o->row_retired) && atomic_load_explicit(&ds_proof_enabled, memory_order_acquire)) {
+        struct ds_proof_context previous = ds_proof_context;
+        ds_proof_context = ss_proof_context(&o->before, DS_PROOF_RETIRE, DS_PROOF_SOURCE);
+        ds_retire_file_binding(o->deck, o->before.epoch, &o->before.ref);
+        ds_proof_context = previous;
+    } else if (o->source_rc || o->row_retired) ds_retire_file_binding(o->deck, o->before.epoch, &o->before.ref);
+}
+static void ss_monitor_deck(unsigned deck) {
+    struct ss_observation o = {.deck = deck, .monitor = &ss_monitors[deck]};
+    pthread_mutex_lock(&ss_mu);
+    o.before = ss_decks[deck];
+    pthread_mutex_unlock(&ss_mu);
+    if (!ss_monitor_ready(&o)) return;
+    ss_begin_observation(&o);
+    ss_observe_database(&o);
+    ss_observe_source_loss(&o);
+    pthread_mutex_lock(&ss_mu);
+    o.current = &ss_decks[deck];
+    if (!ss_observation_current(&o)) {
         pthread_mutex_unlock(&ss_mu);
         return;
     }
-    m->pending_db_gap = 0;
-    m->proof_pending_cause = 0;
-    m->pending_events = 0;
-    m->unsafe_events = 0;
-    for (unsigned f = 0; f < 2; f++)
-        if (confirmed[f]) {
-            m->confirmed[f] = confirmed[f];
-            m->confirmed_rank[f] = rank[f];
-        }
-    uint64_t touched = !d->ready || im.rc != d->image.rc ? SS_ALL : 0;
-    touched |= ss_metadata_changes(&d->image, &im);
-    int changed[2];
-    for (int f = 0; f < 2; f++) {
-        if (m->confirmed[f] > d->consumed[f]) d->consumed[f] = m->confirmed[f];
-        changed[f] = memcmp(&d->image.file[f], &im.file[f], sizeof im.file[f]) != 0;
-        uint64_t components = f ? SS_EXT : SS_DAT;
-        int clean = known[f] && im.rc == AZ_OK && d->image.rc == AZ_OK &&
-                    im.file[f].rc == AZ_OK && d->image.file[f].rc == AZ_OK;
-        if (changed[f]) touched |= clean ? known[f] : components;
-        if (!clean && ((filesystem_events & (f ? SS_TOPIC(PHRASES) : SS_TOPIC(GRID))) ||
-                       (d->ready && changed[f] && im.rc == AZ_OK && d->image.rc == AZ_OK))) {
-            gap |= components;
-            proof_cause |= DS_PROOF_FILE_CHANGE;
-        }
+    ss_accept_file_proofs(&o);
+    ss_observed_changes(&o);
+    ss_close_file_changes(&o);
+    ss_publish_observed_gap(&o);
+    if (!ss_commit_observation(&o)) {
+        pthread_mutex_unlock(&ss_mu);
+        return;
     }
-    if (before.ready && !source_rc && im.rc != AZ_OK && d->image.rc == AZ_OK) {
-        gap |= SS_ALL;
-        proof_cause |= DS_PROOF_READ;
-    }
-    if (d->ready && (changed[0] || changed[1] || (gap & (SS_DAT | SS_EXT))))
-        fo_file_cut(deck, d, &im, known, m->close_count, gap);
-    memset(m->close_count, 0, sizeof m->close_count);
-    if (d->ready && (gap & d->topics) && atomic_load_explicit(&ds_proof_enabled, memory_order_acquire)) {
-        struct ds_proof_context previous = ds_proof_context;
-        ds_proof_context = ss_proof_context(d, DS_PROOF_GAP, proof_cause);
-        ds_proof_context.connection = (uintptr_t) m->db;
-        ds_proof_context.db_before = proof_before;
-        ds_proof_context.db_after = version;
-        ds_publish_file(deck, d->epoch, &d->ref, st_now(), NULL, 0, gap & d->topics, AZ_STATUS_CAPTURE_GAP);
-        ds_proof_context = previous;
-    } else if (d->ready && (gap & d->topics))
-        ds_publish_file(deck, d->epoch, &d->ref, st_now(), NULL, 0, gap & d->topics, AZ_STATUS_CAPTURE_GAP);
-    if (atomic_load_explicit(&ds_proof_enabled, memory_order_acquire)) {
-        d->proof_connection = (uintptr_t) m->db;
-        d->proof_version = version;
-    }
-    touched |= gap;
-    if (touched || !d->ready) {
-        uint64_t serial = ss_new_id(&ss_serial);
-        if (!serial) {
-            pthread_mutex_unlock(&ss_mu);
-            return;
-        }
-        for (unsigned i = 0; i < 3; i++) {
-            /* Replacement changes the producer incarnation, even at equal bytes. */
-            if (!d->provider[i] || (i && (im.file[i - 1].inode != d->image.file[i - 1].inode ||
-                                          im.file[i - 1].device != d->image.file[i - 1].device ||
-                                          strcmp(im.file[i - 1].path, d->image.file[i - 1].path)))) d->provider[i] = ss_file_provider();
-        }
-        /* Hot and memory lists can draw from both files. Neither single container
-         * identity denotes this combined cue producer. */
-        if (!d->provider[3] || d->provider[1] != before.provider[1] || d->provider[2] != before.provider[2])
-            d->provider[3] = ss_file_provider();
-        for (unsigned t = 0; t < AZ_STATUS_TOPIC_COUNT; t++) {
-            uint64_t bit = AZ_STATUS_TOPIC(t);
-            if (!(touched & bit)) continue;
-            uint64_t revision = serial;
-            /* Draining the same positive commit through the monitor must not
-             * manufacture a second saved collection edition. */
-            if (!(gap & bit))
-                for (unsigned f = 0; f < 2; f++)
-                    if ((known[f] & bit) && confirmed[f]) revision = confirmed[f];
-            d->revision[t] = revision;
-        }
-        d->image = im;
-        d->serial = serial;
-        d->ready = 1;
-        d->pending |= touched & d->topics;
-    }
-    if (source_rc || row_retired) {
-        d->retired = 1;
-        d->pending = 0;
-        if (row_retired && ss_pins[deck].epoch == before.epoch && ss_pins[deck].token) {
-            ss_pins[deck].retired = 1;
-            ss_pins[deck].published = 0;
-        }
-    }
-    int pending = d->pending != 0;
+    ss_retire_observed_binding(&o);
+    int pending = o.current->pending != 0;
     pthread_mutex_unlock(&ss_mu);
-    if ((source_rc || row_retired) && atomic_load_explicit(&ds_proof_enabled, memory_order_acquire)) {
-        struct ds_proof_context previous = ds_proof_context;
-        ds_proof_context = ss_proof_context(&before, DS_PROOF_RETIRE, DS_PROOF_SOURCE);
-        ds_retire_file_binding(deck, before.epoch, &before.ref);
-        ds_proof_context = previous;
-    } else if (source_rc || row_retired) ds_retire_file_binding(deck, before.epoch, &before.ref);
+    ss_publish_observed_retirement(&o);
     if (pending) st_worker_wake();
 }
 /* A worker pass reads each relevant container once. Per-component parsing preserves
  * independent failures. A bad PSSI payload cannot poison GRID or PWAV. */
 static int ss_file_current(const struct st_source *, const struct ss_file *);
+static int ss_pin_physical(int rc, const struct azjs_origin *origin, const struct azsdk_source_sample *native) {
+    unsigned need = AZS_OWNER_OBSERVED | AZS_CURRENT | AZS_PHYSICAL;
+    if (rc != AZS_OK || (native->flags & need) != need || native->physical_status != AZS_PHYSICAL_OK ||
+        !origin->track_id || !native->mount_id || !native->inode) return AZ_STALE;
+    return AZ_OK;
+}
+
 static int ss_pin_witness(uint64_t, struct azjs_origin *, struct azsdk_source_sample *);
 #include "sdk_status_cue_origin.c"
 #include "sdk_status_file_input.c"
@@ -577,6 +723,34 @@ struct ss_parse {
     az_cue_entry hot[8];
     char siblings[SS_SAVED_LANES][2][65];
 };
+static int fm_retimed_matches(const struct fo_read *r, const struct fm_edition *e, const struct ss_binding *b) {
+    return !(!r || r->kind != 2 || r->complete != 1 || !r->retimed ||
+             !st_ref_equal(&r->source.ref, &b->ref) || memcmp(r->files, b->image.file, sizeof r->files) ||
+             !(e->tags.present & 1u) || (e->tags.ambiguous & 1u));
+}
+
+static void fm_update_phrase(struct fm_edition *e, const struct ss_parse *parsed) {
+    e->phrase_end = 0;
+    for (unsigned i = 0; i < parsed->data.view.phrase_count; i++)
+        if (parsed->data.phrases[i].end_beat > e->phrase_end) e->phrase_end = parsed->data.phrases[i].end_beat;
+    e->tags.value[1] = parsed->map_tags.value[1];
+    e->tags.present = (e->tags.present & ~2u) | (parsed->map_tags.present & 2u);
+    e->tags.ambiguous = (e->tags.ambiguous & ~2u) | (parsed->map_tags.ambiguous & 2u);
+}
+
+static void fm_update_grid(struct fm_edition *e, const struct ss_binding *b, const struct ss_parse *parsed) {
+    e->beats = parsed->data.view.beat_count;
+    for (unsigned i = 0; i < FO_READS; i++) {
+        struct fo_read *r = fo_reads[i];
+        if (!fm_retimed_matches(r, e, b)) continue;
+        for (unsigned j = 0; j < r->count; j++)
+            if (r->retimed & (1u << j)) {
+                r->tags[j] = e->tags.value[0];
+                r->retimed &= ~(1u << j);
+            }
+    }
+}
+
 static void fm_update(unsigned deck, const struct ss_binding *b, uint64_t topics, const struct ss_parse *parsed) {
     struct fm_edition *e = &fm_editions[deck];
     if (e->cut != b->cut) {
@@ -596,27 +770,8 @@ static void fm_update(unsigned deck, const struct ss_binding *b, uint64_t topics
         e->tags.ambiguous = (e->tags.ambiguous & ~(1u << tag)) | (parsed->map_tags.ambiguous & (1u << tag));
         unsigned availability = c ? parsed->phrases : parsed->grid;
         if (availability == AZ_AVAIL_READY) e->ready |= bit;
-        if (c) {
-            e->phrase_end = 0;
-            for (unsigned i = 0; i < parsed->data.view.phrase_count; i++)
-                if (parsed->data.phrases[i].end_beat > e->phrase_end) e->phrase_end = parsed->data.phrases[i].end_beat;
-            e->tags.value[1] = parsed->map_tags.value[1];
-            e->tags.present = (e->tags.present & ~2u) | (parsed->map_tags.present & 2u);
-            e->tags.ambiguous = (e->tags.ambiguous & ~2u) | (parsed->map_tags.ambiguous & 2u);
-        } else {
-            e->beats = parsed->data.view.beat_count;
-            for (unsigned i = 0; i < FO_READS; i++) {
-                struct fo_read *r = fo_reads[i];
-                if (!r || r->kind != 2 || r->complete != 1 || !r->retimed ||
-                    !st_ref_equal(&r->source.ref, &b->ref) || memcmp(r->files, b->image.file, sizeof r->files) ||
-                    !(e->tags.present & 1u) || (e->tags.ambiguous & 1u)) continue;
-                for (unsigned j = 0; j < r->count; j++)
-                    if (r->retimed & (1u << j)) {
-                        r->tags[j] = e->tags.value[0];
-                        r->retimed &= ~(1u << j);
-                    }
-            }
-        }
+        if (c) fm_update_phrase(e, parsed);
+        else fm_update_grid(e, b, parsed);
     }
 }
 static unsigned ss_availability(int rc) {
@@ -626,10 +781,26 @@ static unsigned ss_availability(int rc) {
 }
 /* A confirmed writer can exempt other fields only if all PMAI framing and
  * bytes outside the component that writer owns remain identical. */
-static int ss_sibling_digest(unsigned lane, const uint8_t *data, size_t size, char digest[65]) {
+static void ss_hash_sibling(azsha256_ctx *hash, unsigned lane, const uint8_t *tag, size_t h, size_t n) {
+    if (lane == SS_SAVED_GRID && !memcmp(tag, "PQTZ", 4) && h >= 24) {
+            /* The stock offset writer only changes this signed millisecond field. */
+        azsha256_update(hash, tag, 18);
+        azsha256_update(hash, tag + 20, n - 20);
+    } else if (lane != SS_SAVED_CUES || (memcmp(tag, "PCOB", 4) && memcmp(tag, "PCO2", 4))) {
+        azsha256_update(hash, tag, n);
+    }
+}
+
+static int ss_pmai_extent(const uint8_t *data, size_t size, size_t *start) {
     if (!data || size < 12 || size > ST_FILE_MAX || memcmp(data, "PMAI", 4) || hc_be32(data + 8) != size) return 0;
-    size_t at = hc_be32(data + 4);
-    if (at < 12 || at > size) return 0;
+    *start = hc_be32(data + 4);
+    if (*start < 12 || *start > size) return 0;
+    return 1;
+}
+
+static int ss_sibling_digest(unsigned lane, const uint8_t *data, size_t size, char digest[65]) {
+    size_t at = 0;
+    if (!ss_pmai_extent(data, size, &at)) return 0;
     azsha256_ctx hash;
     azsha256_init(&hash);
     azsha256_update(&hash, data, 8);
@@ -639,84 +810,104 @@ static int ss_sibling_digest(unsigned lane, const uint8_t *data, size_t size, ch
         const uint8_t *tag = data + at;
         size_t h = hc_be32(tag + 4), n = hc_be32(tag + 8);
         if (h < 12 || h > n || n > size - at) return 0;
-        if (lane == SS_SAVED_GRID && !memcmp(tag, "PQTZ", 4) && h >= 24) {
-            /* The stock offset writer only changes this signed millisecond field. */
-            azsha256_update(&hash, tag, 18);
-            azsha256_update(&hash, tag + 20, n - 20);
-        } else if (lane != SS_SAVED_CUES || (memcmp(tag, "PCOB", 4) && memcmp(tag, "PCO2", 4))) {
-            azsha256_update(&hash, tag, n);
-        }
+        ss_hash_sibling(&hash, lane, tag, h, n);
         at += n;
     }
     azsha256_final_hex(&hash, digest);
     return 1;
 }
-static void ss_decode_image(const struct ss_image *im, uint64_t topics, struct ss_parse *out,
-                            uint8_t *const buf[2], const size_t sizes[2], const int rc[2]) {
+struct ss_component {
+    uint64_t topic;
+    uint32_t mask;
+    unsigned containers;
+    az_component_info *info;
+    uint32_t *availability;
+};
+
+static int ss_component_result(int initial, unsigned containers, const int rc[2]) {
+    int result = initial;
+    for (int f = 0; f < 2; f++) {
+        if (!(containers & (1u << f))) continue;
+        if (rc[f] && rc[f] != AZ_UNSUPPORTED) result = rc[f];
+    }
+    return result;
+}
+
+static void ss_decode_cues(struct ss_parse *out, int result, const uint8_t *inputs[2], const size_t sizes[2]) {
     struct st_data *d = &out->data;
-    st_data_init(d);
-    d->beat_ticks = out->grid_ticks;
-    d->cue_ticks = out->cue_ticks;
+            /* Hot and memory containers have their own declarations and payloads.
+             * Keep one malformed list from hiding its independently decodable peer. */
+    for (int hot = 1; hot >= 0; hot--) {
+        d->view.cue_count = 0;
+        d->view.cues_info.availability = AZ_AVAIL_UNSUPPORTED;
+        int list_rc = result;
+        const uint8_t *selected[ST_CUES] = {0};
+        if (!list_rc) list_rc = st_parse_origins(d, inputs, sizes, AZ_DATA_CUES, 1u << hot, selected);
+        if (list_rc) out->origin.failed = 1;
+        else fo_scan_list(&out->origin, inputs, sizes, (unsigned) hot, selected, d);
+        out->cue_availability[hot] = list_rc ? ss_availability(list_rc) : d->view.cues_info.availability;
+        if (hot && out->cue_availability[hot] == AZ_AVAIL_READY) {
+            out->hot_count = d->view.cue_count; /* unique slots 1..8 after parser validation */
+            memcpy(out->hot, d->cues, out->hot_count * sizeof out->hot[0]);
+            memcpy(out->hot_ticks, out->cue_ticks, 2 * out->hot_count * sizeof out->hot_ticks[0]);
+        }
+    }
+}
+
+static void ss_apply_grid_offset(struct ss_parse *out) {
+    struct st_data *d = &out->data;
+    if (out->grid == AZ_AVAIL_READY && d->grid_offset_ms) {
+        double offset = d->grid_offset_ms / 1000.0;
+        for (unsigned j = 0; j < d->view.beat_count; j++) {
+            d->beats[j].time_s += offset;
+            out->grid_ticks[j] += d->grid_offset_ms;
+        }
+    }
+}
+
+static void ss_calibrate_overview(const struct ss_image *im, struct ss_parse *out) {
+    struct st_data *d = &out->data;
+    if (out->overview == AZ_AVAIL_READY) {
+        if (im->metadata.valid & AZ_META_DURATION)
+            d->view.waveform.seconds_per_sample = im->metadata.duration_s / d->view.waveform.sample_count;
+        else out->overview = AZ_AVAIL_UNSUPPORTED;
+    }
+}
+
+static void ss_decode_file_tags(struct ss_parse *out, uint8_t *const buf[2], const size_t sizes[2], const int rc[2]) {
     const uint8_t *tag_inputs[] = {buf[0], buf[1]};
     if (!fm_scan(tag_inputs, sizes, &out->map_tags, NULL, 0)) out->map_tags.ambiguous = 7;
     for (unsigned f = 0; f < 2; f++)
         if (rc[f] == AZ_OK)
             for (unsigned l = 0; l < SS_SAVED_LANES; l++)
                 ss_sibling_digest(l, buf[f], sizes[f], out->siblings[l][f]);
-    const struct {
-        uint64_t topic;
-        uint32_t mask;
-        unsigned containers;
-        az_component_info *info;
-        uint32_t *availability;
-    } components[] = {
+}
+
+static void ss_decode_image(const struct ss_image *im, uint64_t topics, struct ss_parse *out,
+                            uint8_t *const buf[2], const size_t sizes[2], const int rc[2]) {
+    struct st_data *d = &out->data;
+    st_data_init(d);
+    d->beat_ticks = out->grid_ticks;
+    d->cue_ticks = out->cue_ticks;
+    ss_decode_file_tags(out, buf, sizes, rc);
+    const struct ss_component components[] = {
         {SS_TOPIC(GRID), AZ_DATA_GRID, 1, &d->view.grid_info, &out->grid},
         {SS_TOPIC(PHRASES), AZ_DATA_PHRASES, 2, &d->view.phrases_info, &out->phrases},
         {SS_TOPIC(CUES), AZ_DATA_CUES, 3, NULL, NULL},
         {SS_TOPIC(OVERVIEW), AZ_DATA_WAVEFORM, 1, &d->view.waveform_info, &out->overview}};
     for (unsigned i = 0; i < 4; i++) {
         if (!(topics & components[i].topic)) continue;
-        int result = im->rc;
-        for (int f = 0; f < 2; f++) {
-            if (!(components[i].containers & (1u << f))) continue;
-            if (rc[f] && rc[f] != AZ_UNSUPPORTED) result = rc[f];
-        }
+        int result = ss_component_result(im->rc, components[i].containers, rc);
         const uint8_t *inputs[2] = {buf[0], buf[1]};
         if (components[i].mask == AZ_DATA_CUES) {
-            /* Hot and memory containers have their own declarations and payloads.
-             * Keep one malformed list from hiding its independently decodable peer. */
-            for (int hot = 1; hot >= 0; hot--) {
-                d->view.cue_count = 0;
-                d->view.cues_info.availability = AZ_AVAIL_UNSUPPORTED;
-                int list_rc = result;
-                const uint8_t *selected[ST_CUES] = {0};
-                if (!list_rc) list_rc = st_parse_origins(d, inputs, sizes, AZ_DATA_CUES, 1u << hot, selected);
-                if (list_rc) out->origin.failed = 1;
-                else fo_scan_list(&out->origin, inputs, sizes, (unsigned) hot, selected, d);
-                out->cue_availability[hot] = list_rc ? ss_availability(list_rc) : d->view.cues_info.availability;
-                if (hot && out->cue_availability[hot] == AZ_AVAIL_READY) {
-                    out->hot_count = d->view.cue_count; /* unique slots 1..8 after parser validation */
-                    memcpy(out->hot, d->cues, out->hot_count * sizeof out->hot[0]);
-                    memcpy(out->hot_ticks, out->cue_ticks, 2 * out->hot_count * sizeof out->hot_ticks[0]);
-                }
-            }
+            ss_decode_cues(out, result, inputs, sizes);
             continue;
         }
         if (!result) result = st_parse_component(d, inputs, sizes, components[i].mask);
         *components[i].availability = result ? ss_availability(result) : components[i].info->availability;
-        if (components[i].mask == AZ_DATA_GRID && out->grid == AZ_AVAIL_READY && d->grid_offset_ms) {
-            double offset = d->grid_offset_ms / 1000.0;
-            for (unsigned j = 0; j < d->view.beat_count; j++) {
-                d->beats[j].time_s += offset;
-                out->grid_ticks[j] += d->grid_offset_ms;
-            }
-        }
+        if (components[i].mask == AZ_DATA_GRID) ss_apply_grid_offset(out);
     }
-    if (out->overview == AZ_AVAIL_READY) {
-        if (im->metadata.valid & AZ_META_DURATION)
-            d->view.waveform.seconds_per_sample = im->metadata.duration_s / d->view.waveform.sample_count;
-        else out->overview = AZ_AVAIL_UNSUPPORTED;
-    }
+    ss_calibrate_overview(im, out);
 }
 static void ss_parse_image(const struct ss_image *im, uint64_t topics, struct ss_parse *out) {
     uint8_t *buf[2] = {NULL, NULL};
@@ -763,67 +954,107 @@ static unsigned ss_meta_status(const struct ss_binding *b, unsigned bit) {
     if (b->image.rc) return ss_availability(b->image.rc);
     return (b->image.metadata.valid & bit) ? AZ_AVAIL_READY : AZ_AVAIL_UNSUPPORTED;
 }
-static int ss_publish_image(unsigned deck, const struct ss_binding *b, uint64_t topics,
-                            struct ss_parse *parsed, uint64_t observed) {
-    struct ss_fields p = {.observed = observed ? observed : st_now(), .binding = b};
+static void ss_build_metadata(struct ss_fields *p, uint64_t topics, const double *precision) {
+    const struct ss_binding *b = p->binding;
     const az_track_metadata *m = &b->image.metadata;
-    const double precision = 1.0; /* exportLibrary's integral duration is in seconds */
     if (topics & SS_TOPIC(METADATA)) {
-        ss_field(&p, AZ_STATUS_METADATA, AZ_STATUS_METADATA_CONTENT_ID, 0,
+        ss_field(p, AZ_STATUS_METADATA, AZ_STATUS_METADATA_CONTENT_ID, 0,
                  b->image.rc ? ss_availability(b->image.rc) : AZ_AVAIL_READY, &b->ref.track_id, 1);
         const char *values[] = {m->title, m->artist, m->album, m->path, m->format};
         const unsigned bits[] = {AZ_META_TITLE, AZ_META_ARTIST, AZ_META_ALBUM, AZ_META_PATH, AZ_META_FORMAT};
         for (unsigned i = 0; i < sizeof bits / sizeof bits[0]; i++)
-            ss_field(&p, AZ_STATUS_METADATA, AZ_STATUS_METADATA_TITLE + i, 0,
+            ss_field(p, AZ_STATUS_METADATA, AZ_STATUS_METADATA_TITLE + i, 0,
                      ss_meta_status(b, bits[i]), values[i], (unsigned) strlen(values[i]));
-        ss_field(&p, AZ_STATUS_METADATA, AZ_STATUS_METADATA_DURATION_S, 0,
+        ss_field(p, AZ_STATUS_METADATA, AZ_STATUS_METADATA_DURATION_S, 0,
                  ss_meta_status(b, AZ_META_DURATION), &m->duration_s, 1);
-        ss_field(&p, AZ_STATUS_METADATA, AZ_STATUS_METADATA_DURATION_PRECISION_S, 0,
-                 ss_meta_status(b, AZ_META_DURATION), &precision, 1);
+        ss_field(p, AZ_STATUS_METADATA, AZ_STATUS_METADATA_DURATION_PRECISION_S, 0,
+                 ss_meta_status(b, AZ_META_DURATION), precision, 1);
     }
+}
+
+static void ss_build_key_tempo(struct ss_fields *p, uint64_t topics) {
+    const struct ss_binding *b = p->binding;
+    const az_track_metadata *m = &b->image.metadata;
     if (topics & SS_TOPIC(KEY))
-        ss_field(&p, AZ_STATUS_KEY, AZ_STATUS_KEY_ORIGINAL, 0,
+        ss_field(p, AZ_STATUS_KEY, AZ_STATUS_KEY_ORIGINAL, 0,
                  ss_meta_status(b, AZ_META_KEY), m->key, (unsigned) strlen(m->key));
     if (topics & SS_TOPIC(TEMPO))
-        ss_field(&p, AZ_STATUS_TEMPO, AZ_STATUS_TEMPO_ORIGINAL_BPM, 0,
+        ss_field(p, AZ_STATUS_TEMPO, AZ_STATUS_TEMPO_ORIGINAL_BPM, 0,
                  ss_meta_status(b, AZ_META_TEMPO), &m->original_bpm, 1);
+}
+
+static void ss_build_phrases(struct ss_fields *p, uint64_t topics, const struct ss_parse *parsed) {
+    const struct st_data *d = parsed ? &parsed->data : NULL;
+    if (topics & SS_TOPIC(PHRASES))
+        ss_field(p, AZ_STATUS_PHRASES, AZ_STATUS_PHRASES_SAVED, 2, d ? parsed->phrases : AZ_AVAIL_FAILED,
+                 d ? d->phrases : NULL, d ? d->view.phrase_count : 0);
+}
+
+static void ss_build_maps(struct ss_fields *p, uint64_t topics, const struct ss_parse *parsed) {
     const struct st_data *d = parsed ? &parsed->data : NULL;
     if (topics & SS_TOPIC(GRID))
-        ss_field(&p, AZ_STATUS_GRID, AZ_STATUS_GRID_SAVED, 1, d ? parsed->grid : AZ_AVAIL_FAILED,
+        ss_field(p, AZ_STATUS_GRID, AZ_STATUS_GRID_SAVED, 1, d ? parsed->grid : AZ_AVAIL_FAILED,
                  d ? d->beats : NULL, d ? d->view.beat_count : 0);
-    if (topics & SS_TOPIC(PHRASES))
-        ss_field(&p, AZ_STATUS_PHRASES, AZ_STATUS_PHRASES_SAVED, 2, d ? parsed->phrases : AZ_AVAIL_FAILED,
-                 d ? d->phrases : NULL, d ? d->view.phrase_count : 0);
+    ss_build_phrases(p, topics, parsed);
+}
+
+static void ss_build_cues(struct ss_fields *p, uint64_t topics, const struct ss_parse *parsed) {
+    const struct st_data *d = parsed ? &parsed->data : NULL;
     if (topics & SS_TOPIC(CUES)) {
-        ss_field(&p, AZ_STATUS_CUES, AZ_STATUS_CUES_SAVED_HOT, 3,
+        ss_field(p, AZ_STATUS_CUES, AZ_STATUS_CUES_SAVED_HOT, 3,
                  d ? parsed->cue_availability[1] : AZ_AVAIL_FAILED,
                  d ? parsed->hot : NULL, d ? parsed->hot_count : 0);
-        ss_field(&p, AZ_STATUS_CUES, AZ_STATUS_CUES_SAVED_MEMORY, 3,
+        ss_field(p, AZ_STATUS_CUES, AZ_STATUS_CUES_SAVED_MEMORY, 3,
                  d ? parsed->cue_availability[0] : AZ_AVAIL_FAILED,
                  d ? d->cues : NULL, d ? d->view.cue_count : 0);
     }
+}
+
+static void ss_build_overview(struct ss_fields *p, uint64_t topics, const struct ss_parse *parsed) {
+    const struct st_data *d = parsed ? &parsed->data : NULL;
     if (topics & SS_TOPIC(OVERVIEW))
-        ss_field(&p, AZ_STATUS_OVERVIEW, AZ_STATUS_OVERVIEW_SAVED, 1, d ? parsed->overview : AZ_AVAIL_FAILED,
+        ss_field(p, AZ_STATUS_OVERVIEW, AZ_STATUS_OVERVIEW_SAVED, 1, d ? parsed->overview : AZ_AVAIL_FAILED,
                  d ? &d->view.waveform : NULL, 1);
+}
+
+static const struct ds_time_axis *ss_field_clock(const struct ds_field *field, const struct ds_time_axis *const clocks[5]) {
+    if (field->topic == AZ_STATUS_METADATA &&
+        (field->field == AZ_STATUS_METADATA_DURATION_S || field->field == AZ_STATUS_METADATA_DURATION_PRECISION_S))
+        return field->field == AZ_STATUS_METADATA_DURATION_S ? clocks[0] : clocks[1];
+    else if (field->topic == AZ_STATUS_GRID) return clocks[4];
+    else if (field->topic == AZ_STATUS_CUES)
+        return field->field == AZ_STATUS_CUES_SAVED_HOT ? clocks[2] : clocks[3];
+    else if (field->topic == AZ_STATUS_OVERVIEW) return clocks[0];
+    return NULL;
+}
+
+static void ss_attach_clocks(struct ss_fields *p, const struct ds_time_axis *const clocks[5]) {
+    /* Preserve the original integral extent. PWAV calibration divides that
+     * source duration by the column count only in the public waveform value. */
+    for (unsigned i = 0; i < p->n; i++) {
+        struct ds_field *field = &p->field[i];
+        if (field->info.info.availability != AZ_AVAIL_READY) continue;
+        field->clock = ss_field_clock(field, clocks);
+    }
+}
+
+static int ss_publish_image(unsigned deck, const struct ss_binding *b, uint64_t topics,
+                            struct ss_parse *parsed, uint64_t observed) {
+    struct ss_fields p = {.observed = observed ? observed : st_now(), .binding = b};
+    const double precision = 1.0; /* exportLibrary's integral duration is in seconds */
+    ss_build_metadata(&p, topics, &precision);
+    ss_build_key_tempo(&p, topics);
+    ss_build_maps(&p, topics, parsed);
+    ss_build_cues(&p, topics, parsed);
+    ss_build_overview(&p, topics, parsed);
     const int64_t precision_tick = 1;
     const struct ds_time_axis duration_clock = {1, &b->image.duration_ticks, 1, 1, NULL};
     const struct ds_time_axis precision_clock = {1, &precision_tick, 1, 1, NULL};
     const struct ds_time_axis hot_clock = {1000, parsed ? parsed->hot_ticks : NULL, 1, 1000, NULL};
     const struct ds_time_axis memory_clock = {1000, parsed ? parsed->cue_ticks : NULL, 1, 1000, NULL};
     const struct ds_time_axis grid_clock = {1000, parsed ? parsed->grid_ticks : NULL, 1, 1000, NULL};
-    /* Preserve the original integral extent. PWAV calibration divides that
-     * source duration by the column count only in the public waveform value. */
-    for (unsigned i = 0; i < p.n; i++) {
-        struct ds_field *field = &p.field[i];
-        if (field->info.info.availability != AZ_AVAIL_READY) continue;
-        if (field->topic == AZ_STATUS_METADATA &&
-            (field->field == AZ_STATUS_METADATA_DURATION_S || field->field == AZ_STATUS_METADATA_DURATION_PRECISION_S))
-            field->clock = field->field == AZ_STATUS_METADATA_DURATION_S ? &duration_clock : &precision_clock;
-        else if (field->topic == AZ_STATUS_GRID) field->clock = &grid_clock;
-        else if (field->topic == AZ_STATUS_CUES)
-            field->clock = field->field == AZ_STATUS_CUES_SAVED_HOT ? &hot_clock : &memory_clock;
-        else if (field->topic == AZ_STATUS_OVERVIEW) field->clock = &duration_clock;
-    }
+    const struct ds_time_axis *clocks[] = {&duration_clock, &precision_clock, &hot_clock, &memory_clock, &grid_clock};
+    ss_attach_clocks(&p, clocks);
     return ds_publish_file(deck, b->epoch, &b->ref, p.observed, p.field, p.n, 0, 0);
 }
 static int ss_publish_baseline(unsigned deck, const struct ss_binding *b, uint64_t topics, struct ss_parse *parsed) {
@@ -845,6 +1076,73 @@ static int ss_pin_witness(uint64_t token, struct azjs_origin *origin, struct azs
 /* Only st_worker removes jobs. Native writers append under ss_mu. Each
  * edition is read and decoded once for its interested loads. An unavailable
  * native witness fences later editions of that deck without blocking peers. */
+static struct ss_parse *ss_decode_saved(struct ss_saved_revision *q, uint64_t topics, int mounted) {
+    struct ss_parse *parsed = mounted ? calloc(1, sizeof *parsed) : NULL;
+    if (parsed) {
+        const struct ss_image committed = {0};
+        ss_decode_image(&committed, topics, parsed, q->bytes, q->sizes, q->rc);
+    }
+    return parsed;
+}
+
+static int ss_saved_target_current(const struct ss_binding *b, const struct ss_saved_revision *q, unsigned deck) {
+    unsigned lane = q->lane;
+    return !(b->cut != q->target[deck].cut || b->epoch != q->target[deck].epoch ||
+             b->interest[lane] != q->target[deck].interest || !st_ref_equal(&b->ref, &q->ref));
+}
+
+static int ss_saved_pin_matches(const struct ss_saved_revision *q, unsigned deck, const struct st_source *source, const struct azjs_origin *origin, const struct azsdk_source_sample *native, uint64_t pin, int witness) {
+    return witness == AZ_OK && ss_pins[deck].token == pin && !ss_pins[deck].retired &&
+           origin->track_id == q->ref.track_id && native->device == source->device &&
+           native->inode == source->inode && native->mount_id == source->mount_id;
+}
+
+static int ss_saved_liveness(const struct ss_saved_revision *q, unsigned deck, const struct st_source *source, int *live) {
+    uint64_t pin = q->target[deck].source_pin;
+    if (*live && pin) {
+        struct azjs_origin origin = {0};
+        struct azsdk_source_sample native = {0};
+        int witness = ss_pin_witness(pin, &origin, &native);
+        if (witness == AZ_BUSY) return AZ_BUSY;
+        *live = ss_saved_pin_matches(q, deck, source, &origin, &native, pin, witness);
+    }
+    return AZ_OK;
+}
+
+static void ss_deliver_saved(struct ss_saved_revision *q, unsigned deck, const struct st_source *source, int mounted, struct ss_parse *parsed, unsigned *blocked) {
+    unsigned bit = 1u << deck, lane = q->lane, topic = ss_saved_topic[lane], provider = ss_saved_provider[lane];
+    uint64_t topics = AZ_STATUS_TOPIC(topic);
+    struct ss_binding *b = &ss_decks[deck];
+    if (!ss_saved_target_current(b, q, deck)) {
+        q->targets &= ~bit;
+        return;
+    }
+    int live = mounted;
+    if (ss_saved_liveness(q, deck, source, &live) == AZ_BUSY) {
+        *blocked |= bit;
+        return;
+    }
+    if (b->pinned[lane]) --b->pinned[lane];
+    q->targets &= ~bit;
+    if (b->retired || !(b->topics & topics)) return;
+    if (live && parsed) {
+        struct ss_binding cut = {.epoch = b->epoch, .ref = q->ref};
+        cut.provider[provider] = q->target[deck].provider;
+        cut.revision[topic] = q->revision;
+        ss_publish_image(deck, &cut, topics, parsed, q->observed);
+    } else ds_publish_file(deck, b->epoch, &q->ref, q->observed, NULL, 0, topics, AZ_STATUS_REVISION_LOST);
+}
+
+static int ss_finish_saved(struct ss_saved_revision *q, unsigned *index) {
+    int finished = !q->targets;
+    if (finished) {
+        --ss_saved_count;
+        memmove(ss_saved_queue + (*index), ss_saved_queue + (*index) + 1, (ss_saved_count - (*index)) * sizeof *ss_saved_queue);
+        ss_saved_bytes -= q->total;
+    } else ++(*index);
+    return finished;
+}
+
 static void ss_drain_saved(void) {
     unsigned blocked[SS_SAVED_LANES] = {0}, index = 0;
     for (unsigned n = 0; n < SS_SAVE_QUEUE; n++) {
@@ -854,7 +1152,7 @@ static void ss_drain_saved(void) {
             break;
         }
         struct ss_saved_revision *q = ss_saved_queue[index];
-        unsigned lane = q->lane, topic = ss_saved_topic[lane], provider = ss_saved_provider[lane];
+        unsigned lane = q->lane, topic = ss_saved_topic[lane];
         uint64_t topics = AZ_STATUS_TOPIC(topic);
         unsigned candidates = q->targets & ~blocked[lane];
         pthread_mutex_unlock(&ss_mu);
@@ -864,56 +1162,120 @@ static void ss_drain_saved(void) {
         }
         struct st_source source;
         int mounted = !ss_source(&q->ref, &source);
-        struct ss_parse *parsed = mounted ? calloc(1, sizeof *parsed) : NULL;
-        if (parsed) {
-            const struct ss_image committed = {0};
-            ss_decode_image(&committed, topics, parsed, q->bytes, q->sizes, q->rc);
-        }
+        struct ss_parse *parsed = ss_decode_saved(q, topics, mounted);
         pthread_mutex_lock(&ss_mu);
         for (unsigned deck = 0; deck < 4; deck++) {
             unsigned bit = 1u << deck;
             if (!(candidates & bit)) continue;
-            struct ss_binding *b = &ss_decks[deck];
-            if (b->cut != q->target[deck].cut || b->epoch != q->target[deck].epoch ||
-                b->interest[lane] != q->target[deck].interest || !st_ref_equal(&b->ref, &q->ref)) {
-                q->targets &= ~bit;
-                continue;
-            }
-            int live = mounted;
-            uint64_t pin = q->target[deck].source_pin;
-            if (live && pin) {
-                struct azjs_origin origin = {0};
-                struct azsdk_source_sample native = {0};
-                int witness = ss_pin_witness(pin, &origin, &native);
-                if (witness == AZ_BUSY) {
-                    blocked[lane] |= bit;
-                    continue;
-                }
-                live = witness == AZ_OK && ss_pins[deck].token == pin && !ss_pins[deck].retired &&
-                       origin.track_id == q->ref.track_id && native.device == source.device &&
-                       native.inode == source.inode && native.mount_id == source.mount_id;
-            }
-            if (b->pinned[lane]) --b->pinned[lane];
-            q->targets &= ~bit;
-            if (b->retired || !(b->topics & topics)) continue;
-            if (live && parsed) {
-                struct ss_binding cut = {.epoch = b->epoch, .ref = q->ref};
-                cut.provider[provider] = q->target[deck].provider;
-                cut.revision[topic] = q->revision;
-                ss_publish_image(deck, &cut, topics, parsed, q->observed);
-            } else ds_publish_file(deck, b->epoch, &q->ref, q->observed, NULL, 0, topics, AZ_STATUS_REVISION_LOST);
+            ss_deliver_saved(q, deck, &source, mounted, parsed, &blocked[lane]);
         }
-        int finished = !q->targets;
-        if (finished) {
-            --ss_saved_count;
-            memmove(ss_saved_queue + index, ss_saved_queue + index + 1, (ss_saved_count - index) * sizeof *ss_saved_queue);
-            ss_saved_bytes -= q->total;
-        } else ++index;
+        int finished = ss_finish_saved(q, &index);
         pthread_mutex_unlock(&ss_mu);
         free(parsed);
         if (finished) ss_release_saved(q);
     }
 }
+static unsigned ss_group_jobs(const struct ss_binding jobs[4], unsigned deck, uint64_t *topics) {
+        /* Two decks playing the same qualified reference and revision share one parse. */
+    unsigned members = 0;
+    for (unsigned i = deck; i < 4; i++)
+        if (jobs[i].pending && jobs[i].ready && !jobs[i].retired &&
+            st_ref_equal(&jobs[deck].ref, &jobs[i].ref) &&
+            ss_image_same(&jobs[deck].image, &jobs[i].image)) {
+            members |= 1u << i;
+            *topics |= jobs[i].pending;
+        }
+    return members;
+}
+
+static uint64_t ss_stale_job_files(const struct st_source *current, const struct ss_binding *job, uint64_t topics) {
+    uint64_t stale = 0;
+    if ((topics & SS_DAT) && !ss_file_current(current, &job->image.file[0])) stale |= SS_DAT;
+    if ((topics & SS_EXT) && !ss_file_current(current, &job->image.file[1])) stale |= SS_EXT;
+    return stale;
+}
+
+static int ss_job_source_live(unsigned deck, const struct ss_binding *d, const struct st_source *current) {
+    uint64_t token = ss_pins[deck].epoch == d->epoch ? ss_pins[deck].token : 0;
+    int source_live = !token || !ss_pins[deck].retired;
+    if (token && source_live) {
+        struct azjs_origin origin = {0};
+        struct azsdk_source_sample native = {0};
+        source_live = ss_pin_witness(token, &origin, &native) == AZ_OK && origin.track_id == d->ref.track_id &&
+                      native.device == current->device && native.inode == current->inode && native.mount_id == current->mount_id;
+    }
+    return source_live;
+}
+
+static uint64_t ss_job_publish_topics(const struct ss_binding *d, uint64_t pending, uint64_t stale) {
+    uint64_t publish = pending & d->pending & d->topics & ~stale;
+            /* A busy source can leave earlier immutable revisions queued.
+             * Never publish a current file image ahead of their callbacks. */
+    for (unsigned l = 0; l < SS_SAVED_LANES; l++)
+        if (d->pinned[l]) publish &= ~AZ_STATUS_TOPIC(ss_saved_topic[l]);
+    return publish;
+}
+
+static int ss_job_current(const struct ss_binding *current, const struct ss_binding *job) {
+    return !current->writing && current->cut == job->cut && current->serial == job->serial && !current->retired;
+}
+
+static void ss_update_cue_edition(unsigned i, const struct ss_binding *d, uint64_t publish, const struct ss_parse *parsed) {
+    if (!(publish & SS_TOPIC(CUES))) return;
+    struct fo_edition *ed = &fo_editions[i];
+    ed->cut = d->cut;
+    ed->provider = d->provider[3];
+    ed->revision = d->revision[AZ_STATUS_CUES];
+    if (parsed) ed->scan = parsed->origin;
+    else ed->scan.failed = 1;
+    azfile_native_refresh(i, d->epoch);
+}
+
+static void ss_update_siblings(struct ss_binding *d, const struct ss_parse *parsed) {
+    if (!parsed) return;
+    for (unsigned f = 0; f < 2; f++)
+        for (unsigned l = 0; l < SS_SAVED_LANES; l++)
+            if (parsed->siblings[l][f][0]) memcpy(d->siblings[l][f], parsed->siblings[l][f], sizeof d->siblings[l][f]);
+}
+
+static void ss_publish_jobs(struct ss_binding jobs[4], unsigned deck, unsigned members, const struct st_source *current, uint64_t stale, struct ss_parse *parsed) {
+        /* Let the monitor order the path change and any loss before this
+         * component can be published. Other containers and metadata still proceed. */
+    for (unsigned i = deck; i < 4; i++) {
+        if (!(members & (1u << i))) continue;
+        pthread_mutex_lock(&ss_mu);
+        struct ss_binding *d = &ss_decks[i];
+        int source_live = ss_job_source_live(i, d, current);
+        uint64_t publish = ss_job_publish_topics(d, jobs[i].pending, stale);
+        if (source_live && ss_job_current(d, &jobs[i]) && publish && ss_publish_baseline(i, d, publish, parsed) == AZ_OK) {
+            d->pending &= ~publish;
+            fm_update(i, d, publish, parsed);
+            ss_update_cue_edition(i, d, publish, parsed);
+            ss_update_siblings(d, parsed);
+        }
+        pthread_mutex_unlock(&ss_mu);
+        jobs[i].pending = 0;
+    }
+}
+
+static void ss_work_group(struct ss_binding jobs[4], unsigned deck) {
+    uint64_t topics = 0;
+    unsigned members = ss_group_jobs(jobs, deck, &topics);
+    struct ss_parse *parsed = NULL;
+    if (topics & (SS_DAT | SS_EXT)) {
+        parsed = calloc(1, sizeof *parsed);
+        if (parsed) ss_parse_image(&jobs[deck].image, topics, parsed);
+    }
+    struct st_source current;
+    if (ss_source(&jobs[deck].ref, &current)) {
+        free(parsed);
+        return;
+    }
+    uint64_t stale = ss_stale_job_files(&current, &jobs[deck], topics);
+    ss_publish_jobs(jobs, deck, members, &current, stale, parsed);
+    free(parsed);
+}
+
 static void ss_work(void) {
     ss_drain_saved();
     struct ss_binding jobs[4];
@@ -922,70 +1284,7 @@ static void ss_work(void) {
     pthread_mutex_unlock(&ss_mu);
     for (unsigned deck = 0; deck < 4; deck++) {
         if (!jobs[deck].pending || !jobs[deck].ready || jobs[deck].retired) continue;
-        /* Two decks playing the same qualified reference and revision share one parse. */
-        unsigned members = 0;
-        uint64_t topics = 0;
-        for (unsigned i = deck; i < 4; i++)
-            if (jobs[i].pending && jobs[i].ready && !jobs[i].retired &&
-                st_ref_equal(&jobs[deck].ref, &jobs[i].ref) &&
-                ss_image_same(&jobs[deck].image, &jobs[i].image)) {
-                members |= 1u << i;
-                topics |= jobs[i].pending;
-            }
-        struct ss_parse *parsed = NULL;
-        if (topics & (SS_DAT | SS_EXT)) {
-            parsed = calloc(1, sizeof *parsed);
-            if (parsed) ss_parse_image(&jobs[deck].image, topics, parsed);
-        }
-        struct st_source current;
-        if (ss_source(&jobs[deck].ref, &current)) {
-            free(parsed);
-            continue;
-        }
-        uint64_t stale = 0;
-        if ((topics & SS_DAT) && !ss_file_current(&current, &jobs[deck].image.file[0])) stale |= SS_DAT;
-        if ((topics & SS_EXT) && !ss_file_current(&current, &jobs[deck].image.file[1])) stale |= SS_EXT;
-        /* Let the monitor order the path change and any loss before this
-         * component can be published. Other containers and metadata still proceed. */
-        for (unsigned i = deck; i < 4; i++) {
-            if (!(members & (1u << i))) continue;
-            pthread_mutex_lock(&ss_mu);
-            struct ss_binding *d = &ss_decks[i];
-            uint64_t token = ss_pins[i].epoch == d->epoch ? ss_pins[i].token : 0;
-            int source_live = !token || !ss_pins[i].retired;
-            if (token && source_live) {
-                struct azjs_origin origin = {0};
-                struct azsdk_source_sample native = {0};
-                source_live = ss_pin_witness(token, &origin, &native) == AZ_OK && origin.track_id == d->ref.track_id &&
-                              native.device == current.device && native.inode == current.inode && native.mount_id == current.mount_id;
-            }
-            uint64_t publish = jobs[i].pending & d->pending & d->topics & ~stale;
-            /* A busy source can leave earlier immutable revisions queued.
-             * Never publish a current file image ahead of their callbacks. */
-            for (unsigned l = 0; l < SS_SAVED_LANES; l++)
-                if (d->pinned[l]) publish &= ~AZ_STATUS_TOPIC(ss_saved_topic[l]);
-            if (source_live && !d->writing && d->cut == jobs[i].cut && d->serial == jobs[i].serial && !d->retired && publish &&
-                ss_publish_baseline(i, d, publish, parsed) == AZ_OK) {
-                d->pending &= ~publish;
-                fm_update(i, d, publish, parsed);
-                if (publish & SS_TOPIC(CUES)) {
-                    struct fo_edition *ed = &fo_editions[i];
-                    ed->cut = d->cut;
-                    ed->provider = d->provider[3];
-                    ed->revision = d->revision[AZ_STATUS_CUES];
-                    if (parsed) ed->scan = parsed->origin;
-                    else ed->scan.failed = 1;
-                    azfile_native_refresh(i, d->epoch);
-                }
-                if (parsed)
-                    for (unsigned f = 0; f < 2; f++)
-                        for (unsigned l = 0; l < SS_SAVED_LANES; l++)
-                            if (parsed->siblings[l][f][0]) memcpy(d->siblings[l][f], parsed->siblings[l][f], sizeof d->siblings[l][f]);
-            }
-            pthread_mutex_unlock(&ss_mu);
-            jobs[i].pending = 0;
-        }
-        free(parsed);
+        ss_work_group(jobs, deck);
     }
     pthread_mutex_lock(&ss_mu);
     for (unsigned deck = 0; deck < 4; deck++) fm_publish(deck);
@@ -1010,10 +1309,7 @@ static int ss_pin_witness(uint64_t token, struct azjs_origin *origin, struct azs
     int rc = azsdk_sources_status_read(origin->owner, native, sizeof *native);
     if (rc == AZS_BUSY) return AZ_BUSY;
     if (rc == AZS_STALE || rc == AZS_UNKNOWN) return AZ_CANCELLED;
-    unsigned need = AZS_OWNER_OBSERVED | AZS_CURRENT | AZS_PHYSICAL;
-    if (rc != AZS_OK || (native->flags & need) != need || native->physical_status != AZS_PHYSICAL_OK ||
-        !origin->track_id || !native->mount_id || !native->inode) return AZ_STALE;
-    return AZ_OK;
+    return ss_pin_physical(rc, origin, native);
 }
 static int ss_pin_identity(uint64_t token, struct st_source *src, az_track_ref *ref) {
     struct azjs_origin origin = {0};
@@ -1033,70 +1329,56 @@ static int ss_pin_identity(uint64_t token, struct st_source *src, az_track_ref *
     }
     return count == 1 ? AZ_OK : AZ_STALE;
 }
-static int ss_resolve_pin(unsigned deck) {
-    pthread_mutex_lock(&ss_mu);
-    uint64_t epoch = ss_pins[deck].epoch, token = ss_pins[deck].token;
-    int published = ss_pins[deck].published;
-    az_track_ref old = ss_pins[deck].ref;
-    int interested = ss_decks[deck].topics != 0 && !ss_pins[deck].retired;
-    pthread_mutex_unlock(&ss_mu);
-    if (!epoch || !token || !interested) return 0;
-    struct st_source source;
-    az_track_ref ref = {0};
-    int rc = ss_pin_identity(token, &source, &ref);
-    if (rc == AZ_OK && published && st_ref_equal(&ref, &old)) return 1;
-    /* A connection/filesystem observation can be temporarily incomplete. A
-     * later proof may recover the original incarnation, never a replacement
-     * port/source or row on this pack token. */
-    if (old.track_id && rc != AZ_BUSY) {
+static int ss_pin_read_row(uint64_t token, struct st_source *source, const az_track_ref *ref) {
+    char path[1024];
+    int rc = AZ_STALE;
+    if (st_source_path(source->mount, "/PIONEER/rekordbox/exportLibrary.db", path)) {
+        int fd = -1;
+        void *db = ss_open_database(path, source, &fd);
+        if (db) {
+            struct st_resolution row = {0};
+            uint64_t before = 0, after = 0;
+            rc = ss_database_version(db, &before);
+            if (!rc) rc = st_read_row(db, ref->track_id, &row);
+            if (ss_database_version(db, &after) || before != after) rc = AZ_BUSY;
+            ss_close_database(db, fd);
+            az_track_ref checked = {0};
+            if (!rc && (ss_pin_identity(token, source, &checked) || !st_ref_equal(ref, &checked))) rc = AZ_STALE;
+        }
+    }
+    return rc;
+}
+
+static int ss_pin_preserve_incarnation(const az_track_ref *old, const az_track_ref *ref, int rc) {
+    if (old->track_id && rc != AZ_BUSY) {
         struct st_source pinned;
-        if (ss_source(&old, &pinned) || (rc == AZ_OK && !st_ref_equal(&old, &ref)))
+        if (ss_source(old, &pinned) || (rc == AZ_OK && !st_ref_equal(old, ref)))
             rc = AZ_CANCELLED;
     }
-    if (rc == AZ_OK && !published) {
-        char path[1024];
-        rc = AZ_STALE;
-        if (st_source_path(source.mount, "/PIONEER/rekordbox/exportLibrary.db", path)) {
-            int fd = -1;
-            void *db = ss_open_database(path, &source, &fd);
-            if (db) {
-                struct st_resolution row = {0};
-                uint64_t before = 0, after = 0;
-                rc = ss_database_version(db, &before);
-                if (!rc) rc = st_read_row(db, ref.track_id, &row);
-                if (ss_database_version(db, &after) || before != after) rc = AZ_BUSY;
-                ss_close_database(db, fd);
-                az_track_ref checked = {0};
-                if (!rc && (ss_pin_identity(token, &source, &checked) || !st_ref_equal(&ref, &checked))) rc = AZ_STALE;
-            }
+    return rc;
+}
+
+static void ss_publish_pin(unsigned deck, uint64_t epoch, uint64_t token, const az_track_ref *ref) {
+    int32_t port = (int32_t) ref->source_id;
+    uint64_t now = st_now();
+    az_status_field_info_v1 info = {{AZ_AVAIL_READY, AZ_PROV_DERIVED, token, now},
+                                    AZ_STATUS_LOAD_SCOPE,
+                                    1,
+                                    epoch,
+                                    token};
+    struct ds_field fields[] = {{AZ_STATUS_LOAD, AZ_STATUS_LOAD_TRACK, info, ref, NULL},
+                                {AZ_STATUS_LOAD, AZ_STATUS_LOAD_SOURCE, info, &port, NULL}};
+    if (ds_publish(deck, epoch, 0, now, fields, 2, NULL, NULL, 0, 0) == AZ_OK) {
+        pthread_mutex_lock(&ss_mu);
+        if (ss_pins[deck].epoch == epoch && ss_pins[deck].token == token) {
+            ss_pins[deck].ref = *ref;
+            ss_pins[deck].published = 1;
         }
+        pthread_mutex_unlock(&ss_mu);
     }
-    if (rc == AZ_BUSY) return 1;
-    pthread_mutex_lock(&ss_mu);
-    int current = ss_pins[deck].epoch == epoch && ss_pins[deck].token == token && ss_decks[deck].epoch == epoch;
-    pthread_mutex_unlock(&ss_mu);
-    if (!current) return 0;
-    if (published) {
-        (void) ds_retire_file_binding(deck, epoch, &old);
-    } else if (!rc) {
-        int32_t port = (int32_t) ref.source_id;
-        uint64_t now = st_now();
-        az_status_field_info_v1 info = {{AZ_AVAIL_READY, AZ_PROV_DERIVED, token, now},
-                                        AZ_STATUS_LOAD_SCOPE,
-                                        1,
-                                        epoch,
-                                        token};
-        struct ds_field fields[] = {{AZ_STATUS_LOAD, AZ_STATUS_LOAD_TRACK, info, &ref, NULL},
-                                    {AZ_STATUS_LOAD, AZ_STATUS_LOAD_SOURCE, info, &port, NULL}};
-        if (ds_publish(deck, epoch, 0, now, fields, 2, NULL, NULL, 0, 0) == AZ_OK) {
-            pthread_mutex_lock(&ss_mu);
-            if (ss_pins[deck].epoch == epoch && ss_pins[deck].token == token) {
-                ss_pins[deck].ref = ref;
-                ss_pins[deck].published = 1;
-            }
-            pthread_mutex_unlock(&ss_mu);
-        }
-    }
+}
+
+static void ss_retire_pin(unsigned deck, uint64_t epoch, uint64_t token, int published, int rc) {
     if (published || rc == AZ_CANCELLED) {
         pthread_mutex_lock(&ss_mu);
         if (ss_pins[deck].epoch == epoch && ss_pins[deck].token == token) {
@@ -1105,6 +1387,57 @@ static int ss_resolve_pin(unsigned deck) {
         }
         pthread_mutex_unlock(&ss_mu);
     }
+}
+
+struct ss_pin_snapshot {
+    uint64_t epoch, token;
+    int published;
+    az_track_ref ref;
+};
+static int ss_capture_pin(unsigned deck, struct ss_pin_snapshot *snapshot) {
+    pthread_mutex_lock(&ss_mu);
+    snapshot->epoch = ss_pins[deck].epoch;
+    snapshot->token = ss_pins[deck].token;
+    snapshot->published = ss_pins[deck].published;
+    snapshot->ref = ss_pins[deck].ref;
+    int interested = ss_decks[deck].topics != 0 && !ss_pins[deck].retired;
+    pthread_mutex_unlock(&ss_mu);
+    if (!snapshot->epoch || !snapshot->token || !interested) return 0;
+    return 1;
+}
+
+static int ss_pin_current(unsigned deck, uint64_t epoch, uint64_t token) {
+    pthread_mutex_lock(&ss_mu);
+    int current = ss_pins[deck].epoch == epoch && ss_pins[deck].token == token && ss_decks[deck].epoch == epoch;
+    pthread_mutex_unlock(&ss_mu);
+    return current;
+}
+
+static void ss_apply_pin_resolution(unsigned deck, const struct ss_pin_snapshot *snapshot, const az_track_ref *ref, int rc) {
+    if (snapshot->published) (void) ds_retire_file_binding(deck, snapshot->epoch, &snapshot->ref);
+    else if (!rc) ss_publish_pin(deck, snapshot->epoch, snapshot->token, ref);
+    ss_retire_pin(deck, snapshot->epoch, snapshot->token, snapshot->published, rc);
+}
+
+static int ss_resolve_pin(unsigned deck) {
+    struct ss_pin_snapshot snapshot;
+    if (!ss_capture_pin(deck, &snapshot)) return 0;
+    uint64_t epoch = snapshot.epoch, token = snapshot.token;
+    int published = snapshot.published;
+    az_track_ref old = snapshot.ref;
+    struct st_source source;
+    az_track_ref ref = {0};
+    int rc = ss_pin_identity(token, &source, &ref);
+    if (rc == AZ_OK && published && st_ref_equal(&ref, &old)) return 1;
+    /* A connection/filesystem observation can be temporarily incomplete. A
+     * later proof may recover the original incarnation, never a replacement
+     * port/source or row on this pack token. */
+    rc = ss_pin_preserve_incarnation(&old, &ref, rc);
+    if (rc == AZ_OK && !published) rc = ss_pin_read_row(token, &source, &ref);
+    if (rc == AZ_BUSY) return 1;
+    int current = ss_pin_current(deck, epoch, token);
+    if (!current) return 0;
+    ss_apply_pin_resolution(deck, &snapshot, &ref, rc);
     return 1;
 }
 static void ss_native_load(unsigned deck, uint64_t epoch, uint64_t token) {
@@ -1188,8 +1521,18 @@ static int ss_start(void) {
 /* Once a component is no longer watched, a future registration must not replay
  * a READY field left over from an interval with no commit observation. The
  * reducer preserves native siblings when withdrawing our file projection. */
+static unsigned ss_topic_provider(unsigned t) {
+    if (t == AZ_STATUS_CUES) return 3;
+    if (t == AZ_STATUS_PHRASES) return 2;
+    return t == AZ_STATUS_GRID || t == AZ_STATUS_OVERVIEW ? 1 : 0;
+}
+
+static int ss_withdraw_ready(const struct ss_binding *b, uint64_t topics) {
+    return topics && b->ready && !b->retired && ss_local(&b->ref);
+}
+
 static void ss_withdraw(unsigned deck, struct ss_binding *b, uint64_t topics) {
-    if (!topics || !b->ready || b->retired || !ss_local(&b->ref)) return;
+    if (!ss_withdraw_ready(b, topics)) return;
     static const uint64_t fields[AZ_STATUS_TOPIC_COUNT] = {
         [AZ_STATUS_METADATA] = 0xffu,
         [AZ_STATUS_KEY] = 1u << AZ_STATUS_KEY_ORIGINAL,
@@ -1201,9 +1544,7 @@ static void ss_withdraw(unsigned deck, struct ss_binding *b, uint64_t topics) {
     struct ss_fields p = {.binding = b, .observed = st_now()};
     for (unsigned t = 0; t < AZ_STATUS_TOPIC_COUNT; t++) {
         if (!(topics & AZ_STATUS_TOPIC(t))) continue;
-        unsigned source = t == AZ_STATUS_CUES ? 3 : t == AZ_STATUS_PHRASES                         ? 2
-                                                : (t == AZ_STATUS_GRID || t == AZ_STATUS_OVERVIEW) ? 1
-                                                                                                   : 0;
+        unsigned source = ss_topic_provider(t);
         for (unsigned f = 0; f < 8; f++)
             if (fields[t] & (1u << f)) ss_field(&p, t, f, source, AZ_AVAIL_STALE, NULL, 0);
     }

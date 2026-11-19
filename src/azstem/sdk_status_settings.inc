@@ -24,34 +24,33 @@ static void setting_receipt(unsigned deck, unsigned index, uint64_t owner, unsig
     r.valid = valid;
     azn_emit(&r);
 }
+static uintptr_t setting_quantize_object(const State *s, const Slot *slot, uintptr_t facade, uintptr_t functions) {
+    uintptr_t q = word(facade + 0x48);
+    return q == word(functions + 0x20) && q == word(slot->facade + 0x50) && table(q, s->profile.quantize) ? q : 0;
+}
+static uintptr_t setting_sync_object(const State *s, const struct SettingProfile *p, uintptr_t bundle, uintptr_t state_facade, uintptr_t functions) {
+    uintptr_t sync = word(state_facade + 0x68), facade = word(bundle + 0x60);
+    return table(facade, s->bias + p->sync_facade) && sync == word(facade + 0x68) && sync == word(functions + 0x78) &&
+                   table(sync, s->bias + p->sync_function)
+               ? sync
+               : 0;
+}
+static uintptr_t setting_key_object(const State *s, const struct SettingProfile *p, uintptr_t bundle, uintptr_t state_facade) {
+    uintptr_t key = word(state_facade + 0x78), facade = word(bundle + 0x48);
+    return table(facade, s->bias + p->key_facade) && key == word(facade + 0x78) && table(key, s->bias + p->key_function) ? key + 8 : 0;
+}
 static uintptr_t setting_object(Slot *slot, unsigned i) {
     State *s = &(state());
     if (s->build < 1 || s->build > 2 || !coherent(slot)) return 0;
-    const SettingProfile *p = &(setting_profiles[s->build - 1]);
+    const struct SettingProfile *p = &(setting_profiles[s->build - 1]);
     uintptr_t bundle = word(slot->unit + 0x190);
     uintptr_t state_facade = word(bundle + 0x30);
     if (!table(state_facade, s->bias + p->state_facade)) return 0;
     uintptr_t functions = word(slot->unit + 0x188);
     if (!pointer(functions)) return 0;
-    if (!i) {
-        uintptr_t q = word(state_facade + 0x48);
-        return q == word(functions + 0x20) && q == word(slot->facade + 0x50) &&
-                       table(q, s->profile.quantize)
-                   ? q
-                   : 0;
-    }
-    if (i >= 2) {
-        uintptr_t sync = word(state_facade + 0x68), facade = word(bundle + 0x60);
-        return table(facade, s->bias + p->sync_facade) && sync == word(facade + 0x68) && sync == word(functions + 0x78) &&
-                       table(sync, s->bias + p->sync_function)
-                   ? sync
-                   : 0;
-    }
-    uintptr_t key = word(state_facade + 0x78), facade = word(bundle + 0x48);
-    return table(facade, s->bias + p->key_facade) && key == word(facade + 0x78) &&
-                   table(key, s->bias + p->key_function)
-               ? key + 8
-               : 0;
+    if (!i) return setting_quantize_object(s, slot, state_facade, functions);
+    if (i >= 2) return setting_sync_object(s, p, bundle, state_facade, functions);
+    return setting_key_object(s, p, bundle, state_facade);
 }
 
 #include "sdk_status_key.inc"
@@ -79,169 +78,148 @@ static void status_settings_retire(unsigned d, Slot *slot) {
     slip_retire(d);
     for (unsigned i = 0; i < 4; i++) setting_end(d, i, &(slot->settings[i]));
 }
+static bool setting_frame_current(const Setting *v, uintptr_t address, uintptr_t previous, uint64_t seed) {
+    return address == previous && (!address || (v->seed == seed && v->sealed_fault == atomic_load_explicit(&(v->fault), memory_order_acquire)));
+}
+static uintptr_t setting_replace_owner(unsigned d, unsigned i, Setting *v, uintptr_t address) {
+    v->raw = -1;
+    setting_end(d, i, v);
+    if (!address) return 0;
+    uint64_t next = atomic_fetch_add_explicit(&(setting_incarnation), 1, memory_order_relaxed) + 1;
+    if (!next || next >= UINT64_C(0x0100000000000000)) return 0;
+    atomic_store_explicit(&(v->provider), AZSP_SETTINGS | next, memory_order_relaxed);
+    atomic_store_explicit(&(v->address), address, memory_order_release);
+    azn_capability(d, setting_caps[i], 1);
+    if (i == 2 && atomic_load_explicit(&(sync_installed), memory_order_acquire)) azn_capability(d, AZN_CAP_SYNC_ROLE, 1);
+    return address;
+}
+static unsigned setting_value(uintptr_t address, unsigned i) {
+    if (i == 3) return integer(address + 0x170) != 0;
+    static const unsigned offsets[] = {16, 8, 0xb8};
+    return byte(address + offsets[i]);
+}
+static void setting_seed_sync(unsigned d, const Slot *slot, Setting *v, unsigned i, unsigned value) {
+    if (i != 2 || v->raw >= 0) return;
+    int raw = -1;
+    if (azn_sync_seed(d, slot->unit, &raw) && ((raw == 2 && value == 1) || (!raw && !value))) v->raw = raw;
+}
+static void setting_publish_frame(unsigned d, const Slot *slot, unsigned i, Setting *v, uintptr_t address, uint64_t seed, uint64_t fence) {
+    unsigned value = setting_value(address, i);
+    setting_seed_sync(d, slot, v, i, value);
+    if (atomic_load_explicit(&(v->fault), memory_order_acquire) != fence) return;
+    setting_receipt(d, i, atomic_load_explicit(&(v->provider), memory_order_relaxed), value, value <= 1, v->raw);
+    v->last = value;
+    v->seed = seed;
+    v->sealed_fault = fence;
+}
+static void setting_frame(unsigned d, Slot *slot, unsigned i, uint64_t seed) {
+    Setting *v = &slot->settings[i];
+    uintptr_t address = setting_object(slot, i), previous = atomic_load_explicit(&(v->address), memory_order_acquire);
+    if (setting_frame_current(v, address, previous, seed)) return;
+    if (atomic_flag_test_and_set_explicit(&(v->busy), memory_order_acquire)) return;
+    uint64_t fence = atomic_load_explicit(&(v->fault), memory_order_acquire);
+    if (address != previous) address = setting_replace_owner(d, i, v, address);
+    if (address) setting_publish_frame(d, slot, i, v, address, seed, fence);
+    atomic_flag_clear_explicit(&(v->busy), memory_order_release);
+}
 static void status_settings_frame(unsigned d, Slot *slot) {
     key_frame(d, slot);
     slip_frame(d, slot);
     const uint64_t interest = azn_interest(d);
     unsigned installed = atomic_load_explicit(&(setting_installed), memory_order_acquire);
     uint64_t seed = azn_seed_id(d);
+    static const unsigned topics[] = {AZ_STATUS_SETTINGS, AZ_STATUS_SETTINGS, AZ_STATUS_SYNC, AZ_STATUS_TEMPO};
     for (unsigned i = 0; i < 4; i++) {
-        if (!(interest & AZ_STATUS_TOPIC(i == 3 ? AZ_STATUS_TEMPO : i == 2 ? AZ_STATUS_SYNC
-                                                                           : AZ_STATUS_SETTINGS))) continue;
-        if (!(installed & (1u << i))) continue;
-        __auto_type v = &(slot->settings[i]);
-        uintptr_t address = setting_object(slot, i), previous = atomic_load_explicit(&(v->address), memory_order_acquire);
-        if (address == previous && (!address || (v->seed == seed && v->sealed_fault == atomic_load_explicit(&(v->fault), memory_order_acquire)))) continue;
-        if (atomic_flag_test_and_set_explicit(&(v->busy), memory_order_acquire)) continue;
-        uint64_t fence = atomic_load_explicit(&(v->fault), memory_order_acquire);
-        if (address != previous) {
-            v->raw = -1;
-            setting_end(d, i, v);
-            if (address) {
-                uint64_t next = atomic_fetch_add_explicit(&(setting_incarnation), 1, memory_order_relaxed) + 1;
-                if (!next || next >= UINT64_C(0x0100000000000000)) address = 0;
-                else {
-                    atomic_store_explicit(&(v->provider), AZSP_SETTINGS | next, memory_order_relaxed);
-                    atomic_store_explicit(&(v->address), address, memory_order_release);
-                    azn_capability(d, setting_caps[i], 1);
-                    if (i == 2 && atomic_load_explicit(&(sync_installed), memory_order_acquire)) azn_capability(d, AZN_CAP_SYNC_ROLE, 1);
-                }
-            }
-        }
-        if (address) {
-            unsigned value = i == 3 ? integer(address + 0x170) != 0 : byte(address + (i == 2 ? 0xb8 : i ? 8
-                                                                                                        : 16));
-            if (i == 2 && v->raw < 0) {
-                int raw = -1;
-                if (azn_sync_seed(d, slot->unit, &raw) && ((raw == 2 && value == 1) || (!raw && !value))) v->raw = raw;
-            }
-            if (atomic_load_explicit(&(v->fault), memory_order_acquire) == fence) {
-                setting_receipt(d, i, atomic_load_explicit(&(v->provider), memory_order_relaxed), value, value <= 1, v->raw);
-                v->last = value;
-                v->seed = seed;
-                v->sealed_fault = fence;
-            }
-        }
-        atomic_flag_clear_explicit(&(v->busy), memory_order_release);
+        if (!(interest & AZ_STATUS_TOPIC(topics[i])) || !(installed & (1u << i))) continue;
+        setting_frame(d, slot, i, seed);
     }
 }
 static void set_raw_sync(Setting *v, unsigned index, unsigned value, unsigned mode) {
     if (index == 2) v->raw = mode == 2 && value == 1 ? 2 : mode == 1 && !value ? 0
                                                                                : -1;
 }
-static void setting_writer_0(void *self, unsigned arg0) {
-    __auto_type original = ((void (*)(void *, unsigned)) trampoline_address(&setting_original[0]));
-    Setting *owned = NULL;
-    unsigned deck = 0;
-    uintptr_t address = ((uintptr_t) (self));
-    uint64_t provider = 0, fence = 0;
+struct SettingWrite {
+    Setting *owned;
+    unsigned deck;
+    uintptr_t address;
+    uint64_t provider, fence;
+};
+static struct SettingWrite setting_begin_write(unsigned index, uintptr_t address) {
+    struct SettingWrite write = {.address = address};
     for (unsigned d = 0; d < 4; d++) {
-        __auto_type v = &(state().decks[d].settings[0]);
+        Setting *v = &state().decks[d].settings[index];
         if (atomic_load_explicit(&(v->address), memory_order_acquire) != address) continue;
         if (atomic_flag_test_and_set_explicit(&(v->busy), memory_order_acquire)) {
             atomic_fetch_add_explicit(&(v->fault), 1, memory_order_acq_rel);
-            azn_setting_gap(d, setting_kinds[0]);
+            azn_setting_gap(d, setting_kinds[index]);
             break;
         }
-        owned = v;
-        deck = d;
-        provider = atomic_load_explicit(&(v->provider), memory_order_acquire);
-        fence = atomic_load_explicit(&(v->fault), memory_order_acquire);
+        write.owned = v;
+        write.deck = d;
+        write.provider = atomic_load_explicit(&(v->provider), memory_order_acquire);
+        write.fence = atomic_load_explicit(&(v->fault), memory_order_acquire);
         break;
     }
-    EXIT_FLAG_GUARD(release, (owned ? &owned->busy : NULL));
+    return write;
+}
+static bool setting_write_current(const struct SettingWrite *write) {
+    return write->owned && write->provider && atomic_load_explicit(&(write->owned->address), memory_order_acquire) == write->address &&
+           atomic_load_explicit(&(write->owned->provider), memory_order_acquire) == write->provider &&
+           atomic_load_explicit(&(write->owned->fault), memory_order_acquire) == write->fence;
+}
+static void setting_finish_write(const struct SettingWrite *write, unsigned index, unsigned mode) {
+    if (!setting_write_current(write)) return;
+    unsigned value = setting_value(write->address, index);
+    if (index != 1) set_raw_sync(write->owned, index, value, mode);
+    setting_receipt(write->deck, index, write->provider, value, value <= 1, write->owned->raw);
+}
+static void setting_writer_0(void *self, unsigned arg0) {
+    __auto_type original = ((void (*)(void *, unsigned)) trampoline_address(&setting_original[0]));
+    uintptr_t address = (uintptr_t) self;
+    struct SettingWrite write = setting_begin_write(0, address);
+    EXIT_FLAG_GUARD(release, (write.owned ? &write.owned->busy : NULL));
     /* Master Tempo's actual writer also resets the key-shift factor. */
     KeyCapture key __attribute__((cleanup(key_capture_drop)));
-    key_capture_init(&key, 0 == 1 ? address + 16 : 0);
+    key_capture_init(&key, 0);
     SliderLockWrite lock __attribute__((cleanup(slider_lock_write_drop)));
-    slider_lock_write_init(&lock, 0 == 2 ? address : 0);
+    slider_lock_write_init(&lock, 0);
     SyncRoleWriter role __attribute__((cleanup(sync_role_writer_drop)));
-    sync_role_writer_init(&role, 0 == 2 ? address : 0);
+    sync_role_writer_init(&role, 0);
     original(self, arg0);
     key_capture_finish(&key);
-    if (owned && provider && atomic_load_explicit(&(owned->address), memory_order_acquire) == address &&
-        atomic_load_explicit(&(owned->provider), memory_order_acquire) == provider && atomic_load_explicit(&(owned->fault), memory_order_acquire) == fence) {
-        unsigned value = byte(address + (0 == 2 ? 0xb8 : 0 ? 8
-                                                           : 16));
-        set_raw_sync(owned, 0, value, arg0);
-        setting_receipt(deck, 0, provider, value, value <= 1, owned->raw);
-    }
+    setting_finish_write(&write, 0, arg0);
 }
 static void setting_writer_1(void *self, unsigned arg0, unsigned arg1) {
     __auto_type original = ((void (*)(void *, unsigned, unsigned)) trampoline_address(&setting_original[1]));
-    Setting *owned = NULL;
-    unsigned deck = 0;
-    uintptr_t address = ((uintptr_t) (self));
-    uint64_t provider = 0, fence = 0;
-    for (unsigned d = 0; d < 4; d++) {
-        __auto_type v = &(state().decks[d].settings[1]);
-        if (atomic_load_explicit(&(v->address), memory_order_acquire) != address) continue;
-        if (atomic_flag_test_and_set_explicit(&(v->busy), memory_order_acquire)) {
-            atomic_fetch_add_explicit(&(v->fault), 1, memory_order_acq_rel);
-            azn_setting_gap(d, setting_kinds[1]);
-            break;
-        }
-        owned = v;
-        deck = d;
-        provider = atomic_load_explicit(&(v->provider), memory_order_acquire);
-        fence = atomic_load_explicit(&(v->fault), memory_order_acquire);
-        break;
-    }
-    EXIT_FLAG_GUARD(release, (owned ? &owned->busy : NULL));
+    uintptr_t address = (uintptr_t) self;
+    struct SettingWrite write = setting_begin_write(1, address);
+    EXIT_FLAG_GUARD(release, (write.owned ? &write.owned->busy : NULL));
     /* Master Tempo's actual writer also resets the key-shift factor. */
     KeyCapture key __attribute__((cleanup(key_capture_drop)));
-    key_capture_init(&key, 1 == 1 ? address + 16 : 0);
+    key_capture_init(&key, address + 16);
     SliderLockWrite lock __attribute__((cleanup(slider_lock_write_drop)));
-    slider_lock_write_init(&lock, 1 == 2 ? address : 0);
+    slider_lock_write_init(&lock, 0);
     SyncRoleWriter role __attribute__((cleanup(sync_role_writer_drop)));
-    sync_role_writer_init(&role, 1 == 2 ? address : 0);
+    sync_role_writer_init(&role, 0);
     original(self, arg0, arg1);
     key_capture_finish(&key);
-    if (owned && provider && atomic_load_explicit(&(owned->address), memory_order_acquire) == address &&
-        atomic_load_explicit(&(owned->provider), memory_order_acquire) == provider && atomic_load_explicit(&(owned->fault), memory_order_acquire) == fence) {
-        unsigned value = byte(address + (1 == 2 ? 0xb8 : 1 ? 8
-                                                           : 16));
-
-        setting_receipt(deck, 1, provider, value, value <= 1, owned->raw);
-    }
+    setting_finish_write(&write, 1, arg0);
 }
 static void setting_writer_2(void *self, unsigned arg0) {
     __auto_type original = ((void (*)(void *, unsigned)) trampoline_address(&setting_original[2]));
-    Setting *owned = NULL;
-    unsigned deck = 0;
-    uintptr_t address = ((uintptr_t) (self));
-    uint64_t provider = 0, fence = 0;
-    for (unsigned d = 0; d < 4; d++) {
-        __auto_type v = &(state().decks[d].settings[2]);
-        if (atomic_load_explicit(&(v->address), memory_order_acquire) != address) continue;
-        if (atomic_flag_test_and_set_explicit(&(v->busy), memory_order_acquire)) {
-            atomic_fetch_add_explicit(&(v->fault), 1, memory_order_acq_rel);
-            azn_setting_gap(d, setting_kinds[2]);
-            break;
-        }
-        owned = v;
-        deck = d;
-        provider = atomic_load_explicit(&(v->provider), memory_order_acquire);
-        fence = atomic_load_explicit(&(v->fault), memory_order_acquire);
-        break;
-    }
-    EXIT_FLAG_GUARD(release, (owned ? &owned->busy : NULL));
+    uintptr_t address = (uintptr_t) self;
+    struct SettingWrite write = setting_begin_write(2, address);
+    EXIT_FLAG_GUARD(release, (write.owned ? &write.owned->busy : NULL));
     /* Master Tempo's actual writer also resets the key-shift factor. */
     KeyCapture key __attribute__((cleanup(key_capture_drop)));
-    key_capture_init(&key, 2 == 1 ? address + 16 : 0);
+    key_capture_init(&key, 0);
     SliderLockWrite lock __attribute__((cleanup(slider_lock_write_drop)));
-    slider_lock_write_init(&lock, 2 == 2 ? address : 0);
+    slider_lock_write_init(&lock, address);
     SyncRoleWriter role __attribute__((cleanup(sync_role_writer_drop)));
-    sync_role_writer_init(&role, 2 == 2 ? address : 0);
+    sync_role_writer_init(&role, address);
     original(self, arg0);
     key_capture_finish(&key);
-    if (owned && provider && atomic_load_explicit(&(owned->address), memory_order_acquire) == address &&
-        atomic_load_explicit(&(owned->provider), memory_order_acquire) == provider && atomic_load_explicit(&(owned->fault), memory_order_acquire) == fence) {
-        unsigned value = byte(address + (2 == 2 ? 0xb8 : 2 ? 8
-                                                           : 16));
-        set_raw_sync(owned, 2, value, arg0);
-        setting_receipt(deck, 2, provider, value, value <= 1, owned->raw);
-    }
+    setting_finish_write(&write, 2, arg0);
 }
 static int status_settings_install(State *s, int build, azn_setting_patch_fn patch) {
     /* One instruction only. The quantize leaf occupies eight bytes, and the

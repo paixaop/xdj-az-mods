@@ -11,6 +11,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <sys/eventfd.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #include "sdk_status_engine.c"
 #include "../common/azstatus_native.h"
@@ -36,7 +37,7 @@ static void sdk_status_store_interest(unsigned d, uint64_t t) {
     (void) d;
     (void) t;
 }
-static unsigned store_reseeds;
+static _Atomic unsigned store_reseeds;
 static void sdk_status_store_reseed(unsigned deck, uint64_t epoch, uint64_t topics) {
     assert(deck < 4 && epoch && topics == AZ_STATUS_TOPIC(AZ_STATUS_KEY));
     ++store_reseeds;
@@ -58,16 +59,27 @@ static _Atomic(const struct azstatus_native_v1 *) ds_native_api;
 static const int EPB_V130 = 1, EPB_V200 = 2;
 static int g_ep147_build;
 static uintptr_t g_ep_img_lo, g_ep_img_hi;
+static struct {
+    uintptr_t address, value;
+} fixture_vtables[8];
+static unsigned fixture_vtable_count, fixture_hook_calls, fixture_hook_failure;
+static int fixture_hook_enabled, fixture_vtable_wrong;
+static void fixture_original(void) {}
 static int img_q(uintptr_t a, uintptr_t *b) {
-    (void) a;
-    (void) b;
+    for (unsigned i = 0; i < fixture_vtable_count; i++)
+        if (fixture_vtables[i].address == a) {
+            *b = fixture_vtables[i].value + fixture_vtable_wrong;
+            return 1;
+        }
     return 0;
 }
 static int azm_patch_vtable(uintptr_t addr, void *fn, void **previous) {
     (void) addr;
-    (void) fn;
-    (void) previous;
-    return -1;
+    if (!fixture_hook_enabled) return -1;
+    assert(fn && previous);
+    if (++fixture_hook_calls == fixture_hook_failure) return -1;
+    *previous = (void *) fixture_original;
+    return 1;
 }
 static int azm_install_island_hook_at(uintptr_t target, void *hook, void **orig, const char *name) {
     (void) name;
@@ -461,7 +473,9 @@ static int pad_certificate_collision(void) {
     memcpy((void *) certptr, &form.cert, 8);
     memcpy((void *) (self + 8), &swptr, 8);
     memcpy((void *) (self + 0x38), &certptr, 8);
-    sw[0x58] = 1; cert[0x152] = 1; *(unsigned char *) (self + 0xb0) = 1;
+    sw[0x58] = 1;
+    cert[0x152] = 1;
+    *(unsigned char *) (self + 0xb0) = 1;
     ds_pad_profile = &form;
     ds_pad_original[6] = fake_pad_certificate;
     atomic_store(&ds_pad_ready, 1);
@@ -526,7 +540,10 @@ static uintptr_t fake_pad_refresh(uintptr_t self) {
     if (pad_refresh_switcher) memcpy((void *) (self + 8), &pad_refresh_switcher, sizeof pad_refresh_switcher);
     return 20;
 }
-struct pad_refresh_call { uintptr_t self; unsigned role; };
+struct pad_refresh_call {
+    uintptr_t self;
+    unsigned role;
+};
 static void *pad_refresh_thread(void *arg) {
     const struct pad_refresh_call *call = arg;
     pad_refresh_role = call->role;
@@ -539,7 +556,11 @@ static void *pad_refresh_thread(void *arg) {
     }
     return NULL;
 }
-enum { PAD_REFRESH, PAD_INACTIVE, PAD_RESELECT };
+enum {
+    PAD_REFRESH,
+    PAD_INACTIVE,
+    PAD_RESELECT
+};
 static uintptr_t pad_select_object;
 static unsigned pad_select_callback_writes;
 static uintptr_t fake_pad_select(uintptr_t selector, uintptr_t topic, uintptr_t button, unsigned on) {
@@ -605,10 +626,14 @@ static int pad_refresh_collision(int scenario) {
     _Alignas(16) unsigned char owner[0x140] = {0}, sw[2][0x80] = {{0}}, cert[0x40] = {0};
     uintptr_t self = (uintptr_t) owner + 16, swptr = (uintptr_t) sw[0], certptr = (uintptr_t) cert;
     memcpy(owner, &form.ctrl, 8);
-    memcpy(sw[0], &form.switcher, 8); memcpy(sw[1], &form.switcher, 8);
+    memcpy(sw[0], &form.switcher, 8);
+    memcpy(sw[1], &form.switcher, 8);
     memcpy(cert, &form.cert, 8);
-    memcpy((void *) (self + 8), &swptr, 8); memcpy((void *) (self + 0x38), &certptr, 8);
-    sw[0][0x58] = 1; cert[0x22] = 1; *(unsigned char *) (self + 0xb0) = 1;
+    memcpy((void *) (self + 8), &swptr, 8);
+    memcpy((void *) (self + 0x38), &certptr, 8);
+    sw[0][0x58] = 1;
+    cert[0x22] = 1;
+    *(unsigned char *) (self + 0xb0) = 1;
     ds_pad_profile = &form;
     ds_pad_original[3] = fake_pad_refresh;
     atomic_store(&ds_pad_ready, 1);
@@ -682,7 +707,8 @@ static int pad_refresh_collision(int scenario) {
     assert(ds_pad_alternate(self) == 20);
     assert(atomic_load(&ds_pad_slots[0].poisoned) && (atomic_load(&ds_gui_gap) & ds_pad_bit(0)));
     atomic_store(&ds_pad_slots[0].writing, 0);
-    atomic_store(&ds_gui_armed, 0); atomic_store(&ds_gui_gap, 0);
+    atomic_store(&ds_gui_armed, 0);
+    atomic_store(&ds_gui_gap, 0);
     pad_refresh_mode = UINT_MAX;
     assert(ds_pad_alternate(self) == 20); /* No-op must still recover poison. */
     assert(!atomic_load(&ds_pad_slots[0].poisoned) && ds_pad_seed(0).master == 3);
@@ -693,7 +719,8 @@ static int pad_refresh_collision(int scenario) {
     assert(ds_pad_alternate(self) == 20);
     assert(atomic_load(&ds_pad_slots[0].poisoned) && (atomic_load(&ds_gui_gap) & ds_pad_bit(0)));
     atomic_store(&ds_pad_slots[0].writing, 0);
-    atomic_store(&ds_gui_armed, 0); atomic_store(&ds_gui_gap, 0);
+    atomic_store(&ds_gui_armed, 0);
+    atomic_store(&ds_gui_gap, 0);
     pad_refresh_switcher = 0;
     assert(ds_pad_alternate(self) == 20);
     assert(!atomic_load(&ds_pad_slots[0].poisoned) && ds_pad_seed(0).master == 0);
@@ -764,10 +791,14 @@ static int key_load_race(void) {
     g_ep147_build = EPB_V200;
     key_parent[1] = (uintptr_t) parent;
     uint32_t deck = 1;
-    control[0] = ds_model_ctrl(DS_MODEL_KEY); control[1] = 1;
-    slider_control[0] = ds_model_ctrl(DS_MODEL_SLIDER); slider_control[1] = 1;
-    parent[0x1090 / 8] = (uintptr_t) self; parent[0x1098 / 8] = (uintptr_t) control;
-    parent[0x10e0 / 8] = (uintptr_t) slider; parent[0x10e8 / 8] = (uintptr_t) slider_control;
+    control[0] = ds_model_ctrl(DS_MODEL_KEY);
+    control[1] = 1;
+    slider_control[0] = ds_model_ctrl(DS_MODEL_SLIDER);
+    slider_control[1] = 1;
+    parent[0x1090 / 8] = (uintptr_t) self;
+    parent[0x1098 / 8] = (uintptr_t) control;
+    parent[0x10e0 / 8] = (uintptr_t) slider;
+    parent[0x10e8 / 8] = (uintptr_t) slider_control;
     memcpy(self + 0xd4, &deck, sizeof deck);
     memcpy(slider + 0xb0, &deck, sizeof deck);
     ds_model_original[DS_MODEL_KEY] = firmware_key;
@@ -778,7 +809,7 @@ static int key_load_race(void) {
     atomic_store(&ds_model_ready[DS_MODEL_SLIDER], 1);
     assert(ds_publish(1, 1, DS_BOUNDARY, ds_now(), NULL, 0, NULL, NULL, 0, 0) == AZ_OK);
     const az_deck_watch_v1 watch = {sizeof watch, AZ_DATA_VERSION, 2, 30,
-                                   AZ_STATUS_TOPIC(AZ_STATUS_KEY) | AZ_STATUS_TOPIC(AZ_STATUS_TEMPO)};
+                                    AZ_STATUS_TOPIC(AZ_STATUS_KEY) | AZ_STATUS_TOPIC(AZ_STATUS_TEMPO)};
     struct key_race_log log = {0};
     az_deck_subscription sub;
     assert(ds_register(1, &watch, key_race_change, &log, &sub) == AZ_OK);
@@ -799,9 +830,11 @@ static int key_load_race(void) {
     assert(!strcmp(log.keys[0], "8A") && !strcmp(log.keys[1], "3A") &&
            log.epochs[0] == 2 && log.epochs[1] == 2 && !log.gaps);
     /* A skipped native load cannot leak its parked values into a newer load. */
-    native_load = 3; value[0] = 2;
+    native_load = 3;
+    value[0] = 2;
     ds_key_writer(self, value);
-    ratio = .42f; ds_slider_writer(slider, &ratio);
+    ratio = .42f;
+    ds_slider_writer(slider, &ratio);
     until(&log.markers, 2);
     native_load = 4;
     adopt_key_load(4);
@@ -829,12 +862,16 @@ static int key_load_race(void) {
     puts("PASS key receipts before LOAD, ordered replay, wake-before-park, obsolete-load rejection and bounded overflow");
     return 0;
 }
+#include "sdkstatus_gui_install_test.inc"
+#include "sdkstatus_gui_recovery_test.inc"
 int main(int argc, char **argv) {
     ui = eventfd(0, EFD_NONBLOCK);
     assert(ui >= 0);
     ds.enabled = 1;
     static const struct azstatus_native_v1 api = {.load_seed = load_seed};
     atomic_store(&ds_native_api, &api);
+    if (argc == 2 && !strcmp(argv[1], "hook-install")) return gui_hook_installation();
+    if (argc == 2 && !strcmp(argv[1], "model-recovery")) return gui_model_recovery();
     if (argc == 2 && !strcmp(argv[1], "load-race")) return key_load_race();
     if (argc == 2 && !strcmp(argv[1], "pad-race")) return pad_dependency_collision();
     if (argc == 2 && !strcmp(argv[1], "pad-certificate")) return pad_certificate_collision();

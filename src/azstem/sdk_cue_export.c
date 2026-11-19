@@ -13,7 +13,7 @@ static int cue_export_request(int deck, const struct azstem_cue_observation_v1 *
     memcpy(size, out, sizeof *size);
     if (*size < sizeof *out) return 0;
     uint32_t version;
-    memcpy(&version, (const unsigned char *)out + sizeof *size, sizeof version);
+    memcpy(&version, (const unsigned char *) out + sizeof *size, sizeof version);
     return version == 1;
 }
 
@@ -27,8 +27,7 @@ static void cue_export_copy(struct azstem_cue_observation_v1 *out, uint32_t size
                             const struct azsdk_cue_sample *sample) {
     const struct azstem_cue_observation_v1 value = {
         size, 1, sample->unit_generation, sample->revision, sample->observed_ns,
-        sample->changed_index_mask, 0
-    };
+        sample->changed_index_mask, 0};
     memcpy(out, &value, sizeof value);
 }
 
