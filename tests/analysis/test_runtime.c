@@ -9,7 +9,7 @@
 #include <string.h>
 #include <time.h>
 static const char *audio;
-static atomic_int acquisitions, publications, releases, blocked, entered, pending, link_result, outcomes, acquire_result;
+static atomic_int acquisitions, publications, releases, blocked, entered, pending, link_result, outcomes, acquire_result, with_grid;
 static void (*source_wake)(void);
 static atomic_uint_fast64_t cancel_after_publish;
 static void pause_ms(void) { struct timespec t = {0, 1000000}; nanosleep(&t, NULL); }
@@ -24,11 +24,18 @@ int analysis_source_acquire(az_analysis_owner owner, const analysis_source_reque
         .needed = request->components, .deck = (unsigned)request->deck,
         .load_epoch = request->load, .track = request->track};
     snprintf(input->audio_path, sizeof input->audio_path, "%s", audio);
+    if (atomic_load(&with_grid) && (request->components & AZ_DATA_PHRASES)) {
+        input->beat_count = 26; input->bpm = 120;
+        input->beats = calloc(input->beat_count, sizeof *input->beats);
+        assert(input->beats);
+        for (unsigned i = 0; i < input->beat_count; i++)
+            input->beats[i] = (az_beat){.time_s = i * 0.5, .bpm = 120, .beat_in_bar = i % 4 + 1};
+    }
     return atomic_load(&acquire_result);
 }
 int analysis_source_publish(az_analysis_owner owner, const analysis_source_input *input,
                             const az_analysis_result_v1 *result) {
-    assert(input->lease && result->vocals.count);
+    assert(input->lease && (result->vocals.count || result->phrases.count));
     if (!analysis_owner_current(owner)) return AZ_STALE;
     atomic_fetch_add(&publications, 1);
     uint64_t cancel_id = atomic_load(&cancel_after_publish);
@@ -211,12 +218,14 @@ static void automatic_operation(void) {
     analysis_owner_core_retire();
     analysis_runtime_retire(core);
 }
+#include "test_api.inc"
 int main(int argc, char **argv) {
     assert(argc == 3); audio = argv[1];
     az_analysis_capabilities_v1 caps = {.size = sizeof caps};
     assert(analysis_runtime_capabilities(&caps) == AZ_OK && caps.max_workers == 3);
     assert(analysis_runtime_start(argv[2]) == AZ_OK);
     az_analysis_owner owner = analysis_owner_begin(0);
+    public_contract(owner);
     invalid_requests(owner); acquisition_outcomes(owner); computation(owner); pending_link(owner); cancel_publication_collection(owner);
     capacity_and_retirement(owner); automatic_operation();
     analysis_runtime_shutdown();

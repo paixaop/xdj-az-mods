@@ -36,7 +36,7 @@ clean:
 	rm -rf $(OUT)
 -include $(ENGINE_OBJ:.o=.d)
 
-$(OUT)/test_runtime: tests/analysis/test_runtime.c src/azmod/analysis_runtime.c src/azmod/analysis_owner.c $(ENGINE_OBJ)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
+$(OUT)/test_runtime: tests/analysis/test_runtime.c tests/analysis/test_api.inc src/azmod/analysis_api.c src/azmod/analysis_runtime.c src/azmod/analysis_owner.c $(ENGINE_OBJ)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $(filter-out %.inc src/azmod/analysis_api.c,$^) $(LDLIBS) -o $@
 test-runtime: $(OUT)/test_runtime
 	$(OUT)/test_runtime tests/analysis/fixtures/pvdi-voice.wav $(ANALYSIS_ASSETS)
