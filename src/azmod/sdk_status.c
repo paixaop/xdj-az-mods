@@ -37,8 +37,9 @@ static void sdk_status_ui_drain(void) {
 }
 #ifndef SDK_PROC_IMPL
 #include "sdk_status_store.h"
-#include "sdk_status_native.c"
-#include "sdk_status_gui.c"
+#include "sdk_status_native.h"
+#include "sdk_status_gui.h"
+#include "sdk_status_native_host.c"
 #else
 /* The normal-loader fixture has no EP147 units or libraries. Inject receipts
  * at the reducer boundary; all registration, pinning and UI delivery is real. */
@@ -80,7 +81,7 @@ static void sdk_status_start(void) {
     ds_enable();
     ds_native_start();
 #ifndef SDK_PROC_IMPL
-    ds_start_metrics(access(CM_ROOT "/azmod.deck-status.metrics", F_OK) == 0, DS_NATIVE_PENDING_BYTES);
+    ds_start_metrics(access(CM_ROOT "/azmod.deck-status.metrics", F_OK) == 0, ds_native_pending_bytes());
 #endif
 }
 /* Core consumers use the existing provider and source identities, without a

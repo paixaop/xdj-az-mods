@@ -68,7 +68,9 @@ static void test_observer_interest(void) {
     az_deck_watch_v1 watch = {sizeof watch, AZ_DATA_VERSION, 1, 30, AZ_STATUS_TOPIC(AZ_STATUS_LOAD)};
     az_deck_subscription subscription = 0;
     assert(ds_register(3, &watch, receive, NULL, &subscription) == AZ_OK);
+    assert(ds_owner_subscriptions(3) == 1);
     assert(ds_drain(4) == 1 && callbacks == 1);
+    assert(ds_owner_subscriptions(3) == 0);
     assert(ds_release(3, subscription) == AZ_STALE);
     for (unsigned d = 0; d < 4; ++d) {
         assert(native_interest[d] == AZ_STATUS_TOPIC(AZ_STATUS_LOAD));

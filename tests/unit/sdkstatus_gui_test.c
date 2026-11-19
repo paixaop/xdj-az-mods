@@ -38,7 +38,7 @@ void az_status_host_store_interest(unsigned d, uint64_t t) {
     (void) t;
 }
 static _Atomic unsigned store_reseeds;
-static void sdk_status_store_reseed(unsigned deck, uint64_t epoch, uint64_t topics) {
+void sdk_status_store_reseed(unsigned deck, uint64_t epoch, uint64_t topics) {
     assert(deck < 4 && epoch && topics == AZ_STATUS_TOPIC(AZ_STATUS_KEY));
     ++store_reseeds;
 }
@@ -56,7 +56,7 @@ static _Atomic(const struct azstatus_native_v1 *) ds_native_api;
 #define BPMSTATE_LIVE 0xa0
 #define BPMCTRL_OFF 16
 #define BPMCTRL_VT 0
-static const int EPB_V130 = 1, EPB_V200 = 2;
+enum { EPB_V130 = 1, EPB_V200 = 2 };
 static int g_ep147_build;
 static uintptr_t g_ep_img_lo, g_ep_img_hi;
 static struct {
@@ -88,6 +88,12 @@ static int azm_install_island_hook_at(uintptr_t target, void *hook, void **orig,
 #define azm_install_hook azm_patch_vtable
 static uintptr_t key_parent[4];
 static uintptr_t perdeck_block(int d) { return key_parent[d]; }
+#include "sdk_status_native_host.c"
+int ds_native_load_seed(unsigned deck, struct azstatus_native_receipt *receipt) {
+    const struct azstatus_native_v1 *api = atomic_load_explicit(&ds_native_api, memory_order_acquire);
+    *receipt = (struct azstatus_native_receipt) {.size = sizeof *receipt, .version = 1};
+    return api && api->load_seed && api->load_seed(deck, receipt) && receipt->load_generation;
+}
 #include "sdk_status_gui.c"
 
 static uint64_t native_load = 1;

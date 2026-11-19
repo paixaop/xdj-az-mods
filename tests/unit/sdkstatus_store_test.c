@@ -126,6 +126,7 @@ __attribute__((visibility("hidden"))) void azfile_native_refresh(unsigned deck, 
     ++origin_refresh[deck];
 }
 #include "libfd.h"
+#include "sdk_status_host.h"
 int az_status_host_reader_register(int descriptor) { return libfd_add(descriptor, LIBFD_STATUS); }
 void az_status_host_reader_release(int descriptor) { libfd_del(descriptor); }
 #include "sdk_status_store.c"

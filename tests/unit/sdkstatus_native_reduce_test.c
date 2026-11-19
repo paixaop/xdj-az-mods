@@ -9,7 +9,7 @@
 #include "../../src/common/azaltstack.h"
 #include "sdk_status_engine.c"
 void az_status_host_gui_interest(uint64_t topics) { (void) topics; }
-static void ds_gui_load(unsigned deck) { (void) deck; }
+void ds_gui_load(unsigned deck) { (void) deck; }
 void az_status_host_wake(void) {}
 void az_status_host_deadline(uint64_t ns) { (void) ns; }
 void az_status_host_store_binding(unsigned d, uint64_t e, const az_track_ref *r, uint64_t cut) {
@@ -22,7 +22,7 @@ void az_status_host_store_interest(unsigned d, uint64_t topics) {
     (void) d;
     (void) topics;
 }
-static void sdk_status_store_reseed(unsigned d, uint64_t e, uint64_t t) {
+void sdk_status_store_reseed(unsigned d, uint64_t e, uint64_t t) {
     (void) d;
     (void) e;
     (void) t;
@@ -30,7 +30,7 @@ static void sdk_status_store_reseed(unsigned d, uint64_t e, uint64_t t) {
 int az_status_host_live(int owner) { return owner >= 0; }
 #include "../../src/common/azstatus_source.h"
 static uint64_t last_source_pin;
-static void ss_native_load(unsigned deck, uint64_t epoch, uint64_t token) {
+void ss_native_load(unsigned deck, uint64_t epoch, uint64_t token) {
     (void) deck;
     (void) epoch;
     last_source_pin = token;
@@ -991,7 +991,34 @@ static void test_native_load_join(void) {
 #include "sdkstatus_native_fields_test.inc"
 #include "sdkstatus_native_service_test.inc"
 #include "sdkstatus_native_maps_test.inc"
+static int seed_response;
+static int test_load_seed(unsigned deck, struct azstatus_native_receipt *out) {
+    assert(deck == 2 && out->size == sizeof *out && out->version == 1);
+    out->load_generation = seed_response == 2 ? 47 : 0;
+    return seed_response != 0;
+}
+static void test_load_seed_boundary(void) {
+    struct azstatus_native_receipt receipt;
+    assert(!ds_native_load_seed(2, &receipt));
+    assert(receipt.size == sizeof receipt && receipt.version == 1 && !receipt.load_generation);
+    struct azstatus_native_v1 api = {.size = sizeof api, .version = 1};
+    atomic_store(&ds_native_api, &api);
+    assert(!ds_native_load_seed(2, &receipt));
+    api.load_seed = test_load_seed;
+    assert(!ds_native_load_seed(2, &receipt));
+    seed_response = 1;
+    assert(!ds_native_load_seed(2, &receipt));
+    seed_response = 2;
+    assert(ds_native_load_seed(2, &receipt) && receipt.load_generation == 47);
+    assert(ds_native_pending_bytes() == DS_NATIVE_PENDING_BYTES);
+    atomic_store(&ds_native_api, NULL);
+    puts("PASS copied native load seed: unavailable, refused and unqualified reads fail; accepted load retains its generation");
+}
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "load-seed")) {
+        test_load_seed_boundary();
+        return 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "map-clocks")) {
         test_native_map_clocks();
         return 0;
@@ -1353,3 +1380,8 @@ int main(int argc, char **argv) {
 }
 
 void az_status_host_native_interest(unsigned d, uint64_t topics) { ds_native_interest(d, topics); }
+
+int az_status_host_build(void) { return g_ep147_build; }
+int az_status_host_install_island(uintptr_t address, void *hook, void **original, const char *name) {
+    return azm_install_island_hook_at(address, hook, original, name);
+}
