@@ -62,6 +62,17 @@ class SlipCapture(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("PASS slip probe", result.stdout)
 
+    def test_core_startup(self):
+        cc = shutil.which(os.environ.get("CC", "clang"))
+        if not cc:
+            self.skipTest("C compiler unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            binary = pathlib.Path(directory) / "startup"
+            subprocess.run([cc, "-std=gnu11", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
+                            "-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-pthread",
+                            str(ROOT / "tests/unit/slip-startup-test.c"), "-o", str(binary)], check=True)
+            subprocess.run([str(binary)], check=True, timeout=5)
+
     def test_by_value_record(self):
         self.run_fixture(["capture"])
 
