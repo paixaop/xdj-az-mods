@@ -498,6 +498,38 @@ static void nonblocking_publication_retirement(const az_analysis_result_v1 *resu
     fixture_released = 0;
     puts(core ? "Core publication: retirement during native validation prevents file/native writes" : "Mod publication: retirement during native validation prevents file/native writes");
 }
+static void external_analysis_edit(const char *path) {
+    size_t size = 0;
+    int failed = 0;
+    uint8_t *file = read_analysis(path, &size, &failed);
+    uint8_t tag[12] = {'E', 'D', 'I', 'T', 0, 0, 0, 12, 0, 0, 0, 12};
+    size_t updated_size = size + sizeof tag;
+    uint8_t *updated = malloc(updated_size);
+    assert(file && !failed && updated);
+    memcpy(updated, file, size);
+    memcpy(updated + size, tag, sizeof tag);
+    sa_put32(updated + 8, (uint32_t) updated_size);
+    analysis_write(path, updated, updated_size);
+    free(updated);
+    free(file);
+}
+static void edit_during_native_retry(az_analysis_owner owner, const analysis_source_input *input,
+                                     const az_analysis_result_v1 *result, const char *path) {
+    struct publication_request publication = {.owner = owner, .input = *input, .result = result};
+    atomic_store(&fixture_skip_current, 0);
+    atomic_store(&fixture_current_entered, 0);
+    atomic_store(&fixture_resume_current, 0);
+    atomic_store(&fixture_pause_current, 1);
+    pthread_t worker;
+    assert(!pthread_create(&worker, NULL, publish_during_retirement, &publication));
+    while (!atomic_load(&fixture_current_entered)) usleep(1000);
+    /* The vocal signature was checked before this native validation callback.
+     * A read-only retry must not adopt an edit that follows that check. */
+    external_analysis_edit(path);
+    atomic_store(&fixture_resume_current, 1);
+    assert(!pthread_join(worker, NULL));
+    assert(publication.outcome == AZ_BUSY && fixture_publish_calls == 2);
+}
 static void busy_publication(const az_analysis_result_v1 *phrases, int scenario) {
     az_analysis_owner owner = scenario == 3 ? analysis_owner_core_begin() : owner_at(0);
     az_vocal_frame_v1 frames[22] = {0};
@@ -537,22 +569,13 @@ static void busy_publication(const az_analysis_result_v1 *phrases, int scenario)
         assert(fixture_publish_calls == 3 && fixture_published == 1);
     } else {
         if (scenario == 1) {
-            size_t size = 0;
-            int failed = 0;
-            uint8_t *file = read_analysis(paths[1], &size, &failed);
-            uint8_t tag[12] = {'E', 'D', 'I', 'T', 0, 0, 0, 12, 0, 0, 0, 12};
-            size_t updated_size = size + sizeof tag;
-            uint8_t *updated = malloc(updated_size);
-            assert(file && !failed && updated);
-            memcpy(updated, file, size);
-            memcpy(updated + size, tag, sizeof tag);
-            sa_put32(updated + 8, (uint32_t) updated_size);
-            analysis_write(paths[1], updated, updated_size);
-            free(updated);
-            free(file);
+            external_analysis_edit(paths[1]);
             saved[1] = st_disk_sig(paths[1]);
         } else if (scenario == 2) {
             fixture_current = 0;
+        } else if (scenario == 5) {
+            edit_during_native_retry(owner, &input, &result, paths[2]);
+            saved[2] = st_disk_sig(paths[2]);
         } else {
             if (scenario == 3) analysis_owner_core_retire();
             else analysis_owner_retire(0);
@@ -560,7 +583,7 @@ static void busy_publication(const az_analysis_result_v1 *phrases, int scenario)
         }
         fixture_publish_busy = 0;
         assert(analysis_source_publish(owner, &input, &result) == AZ_STALE);
-        assert(fixture_publish_calls == 1 && !fixture_published);
+        assert(fixture_publish_calls == (scenario == 5 ? 2 : 1) && !fixture_published);
     }
     for (unsigned i = 0; i < 3; i++) assert(st_disk_sig(paths[i]) == saved[i]);
     int fd = open(input.audio_path, O_RDONLY);
@@ -774,7 +797,7 @@ int main(void) {
     core_source_lifetime(&loaded_result);
     nonblocking_publication_retirement(&loaded_result, 0);
     nonblocking_publication_retirement(&loaded_result, 1);
-    for (int scenario = 0; scenario < 5; scenario++) busy_publication(&loaded_result, scenario);
+    for (int scenario = 0; scenario < 6; scenario++) busy_publication(&loaded_result, scenario);
     puts("Native publication continuation: durable files retained through BUSY; same lease completes without rewrites; changed result, files, load and owners refused");
     assert(acquire_loaded(-1, AZ_DATA_PHRASES, 0, 44, &job) == AZ_STALE);
     assert(acquire_loaded(0, AZ_DATA_PHRASES, 0, 43, &job) == AZ_STALE);

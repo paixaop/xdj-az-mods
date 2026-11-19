@@ -492,9 +492,6 @@ static int sa_publication_publish(struct sa_publication *s) {
 static int sa_publication_notify(struct sa_publication *s) {
     struct sa_job *j = s->job;
     if (!sa_owner_live(j)) return AZ_STALE;
-    j->signatures[2] = st_disk_sig(j->dat);
-    j->signatures[3] = st_disk_sig(j->ext);
-    j->signatures[4] = st_disk_sig(j->ex2);
     if (j->loaded && s->packet.pn) {
         int rc = j->maps->publish_phrases((unsigned) j->deck, j->load, &j->native_map, s->packet.phrase, s->packet.pn);
         if (rc) return rc;
@@ -515,6 +512,11 @@ static int sa_publication_run(struct sa_publication *s) {
     if (!sa_publication_stage(s)) return AZ_FAILED;
     if (!sa_current(s->job)) return AZ_STALE;
     if (!sa_publication_publish(s)) return AZ_FAILED;
+    /* Only our durable writes advance this baseline. Native-only retries must
+     * not adopt another writer's edits as the saved publication's identity. */
+    s->job->signatures[2] = st_disk_sig(s->job->dat);
+    s->job->signatures[3] = st_disk_sig(s->job->ext);
+    s->job->signatures[4] = st_disk_sig(s->job->ex2);
     s->files_saved = 1;
     return sa_publication_notify(s);
 }
