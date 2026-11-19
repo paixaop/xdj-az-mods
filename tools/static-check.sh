@@ -8,8 +8,8 @@
 #                                         under guest/ or src/) with TU's compile flags: the controls' mode
 #
 # Scope: the release (AZMOD_RELEASE) translation units of azmod.so, azstem.so and the handoff guard,
-# with everything they #include in guest/azmod, guest/azstem, guest/common and guest/azhandoff.
-# guest/azrs has no C sources. Vendored stb_vorbis.c is not analyzed. In the published source
+# with everything they #include in guest/azmod, guest/azstem, guest/common, guest/azhandoff
+# and guest/analysis. Vendored stb_vorbis and analysis dependencies are not analyzed. In the published source
 # layout the same sources sit in src/ (with src/Makefile and src/.clang-tidy): the script uses
 # src/ when there is no guest/.
 #
@@ -63,7 +63,7 @@ cd "$ROOT/$S"
 [ -f "$SC/cppcheck.supp" ] || die "no tools/static-check/cppcheck.supp"
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
-make -n -B azmod azstem azhandoff CC=gcc > "$W/make-n.txt" 2>"$W/make-n.err" || { cat "$W/make-n.err"; die "make -n failed"; }
+LC_ALL=C make --print-directory -n -B azmod azstem azhandoff CC=gcc > "$W/make-n.txt" 2>"$W/make-n.err" || { cat "$W/make-n.err"; die "make -n failed"; }
 python3 "$SC/compdb.py" "$PWD" < "$W/make-n.txt" > "$W/full.json" || die "compdb.py failed"
 
 # the units to analyze: every entry, or (--as) the copy with its unit's flags and include path
@@ -88,7 +88,7 @@ echo "static-check: $(clang-tidy-10 --version | grep -o 'LLVM version [0-9.]*'),
 
 # ---- clang-tidy: every unit, two at a time. The atomic-compat header lets clang compile the
 # __atomic_* builtins applied to _Atomic objects, which GCC accepts (see the header).
-HF=".*/$S/(azmod|azstem|common|azhandoff)/.*"
+HF=".*/$S/(azmod|azstem|common|azhandoff|analysis)/.*"
 export W HF SC
 xargs -P2 -I{} sh -c 'f="$1"; clang-tidy-10 -p "$W" --quiet -header-filter="$HF" \
     -extra-arg=-include"$SC/clang-atomic-compat.h" "$f" > "$W/tidy.$(echo "$f" | tr / _).log" 2>&1; \

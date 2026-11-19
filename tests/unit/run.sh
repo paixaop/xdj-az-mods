@@ -4199,6 +4199,7 @@ echo
 # frame buffer by one is reported by cppcheck. The copies live under guest/out (docker shares the
 # source tree, not $TMPDIR).
 echo "=== static analysis (static-check.sh) ==="
+if python3 tools/static-check/test_compdb.py; then :; else failures=$((failures + 1)); fi
 if [ -n "$COMPILE_ONLY" ]; then echo "(compile-only pass: static-check.sh not run)"
 elif bash tools/static-check.sh; then :; else failures=$((failures + 1)); fi
 SCC="$ROOT/guest/out/unit-staticctl"; rm -rf "$SCC"; mkdir -p "$SCC/real" "$SCC/uaf" "$SCC/oob"
