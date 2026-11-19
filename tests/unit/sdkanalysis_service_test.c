@@ -138,11 +138,35 @@ static void fixture_release(const struct aznm_packet *map) {
     assert(map->owner == 1);
     fixture_released++;
 }
+static uint32_t fixture_spool_track;
+static uint64_t fixture_spool_after, fixture_spool_signature;
+static char fixture_spool_path[PATH_MAX];
+static void fixture_saved_link(void) {
+    if (!fixture_spool_track) return;
+    char directory[PATH_MAX], prefix[64];
+    snprintf(directory, sizeof directory, "%s/sdb1/PIONEER/azspool", g_media);
+    snprintf(prefix, sizeof prefix, "track-analysis-%08x-", fixture_spool_track);
+    DIR *dir = opendir(directory);
+    assert(dir);
+    struct dirent *entry;
+    unsigned found = 0;
+    while ((entry = readdir(dir))) {
+        if (strncmp(entry->d_name, prefix, strlen(prefix))) continue;
+        if (strtoull(entry->d_name + strlen(prefix), NULL, 10) <= fixture_spool_after) continue;
+        snprintf(fixture_spool_path, sizeof fixture_spool_path, "%s/%s", directory, entry->d_name);
+        fixture_spool_signature = st_disk_sig(fixture_spool_path);
+        assert(fixture_spool_signature);
+        found++;
+    }
+    closedir(dir);
+    assert(found == 1);
+}
 static int fixture_publish(unsigned deck, uint64_t load, const struct aznm_packet *map, const void *bytes, uint32_t n) {
     if (fixture_valid(deck, load, map)) return AZ_STALE;
     assert(n == 56 && !memcmp(bytes, "PSSI", 4));
     fixture_publish_calls++;
     if (fixture_publish_busy) return AZ_BUSY;
+    fixture_saved_link();
     fixture_published++;
     return AZ_OK;
 }
@@ -679,6 +703,207 @@ static void link_failure_case(az_track_ref ref, const az_analysis_result_v1 *res
     assert(st_disk_sig(saved) == durable_grid);
     analysis_source_release(&input);
 }
+struct loaded_reuse {
+    az_track_ref ref;
+    uint64_t seed_lease;
+    char database[PATH_MAX], paths[3][PATH_MAX];
+};
+static int reuse_request(az_analysis_owner owner, const analysis_source_request *request, analysis_source_input *input) {
+    int rc = AZ_BUSY;
+    for (unsigned i = 0; i < 1000 && rc == AZ_BUSY; i++) {
+        rc = analysis_source_acquire(owner, request, input);
+        if (rc == AZ_BUSY) usleep(1000);
+    }
+    return rc;
+}
+static int reuse_outcome(const analysis_source_input *input) {
+    int rc = AZ_BUSY;
+    for (unsigned i = 0; i < 1000 && rc == AZ_BUSY; i++) {
+        rc = analysis_source_outcome(input->owner, input);
+        if (rc == AZ_BUSY) usleep(1000);
+    }
+    return rc;
+}
+static _Atomic unsigned reuse_wakes;
+static void reuse_wake(void) { atomic_fetch_add(&reuse_wakes, 1); }
+static struct loaded_reuse loaded_reuse_seed(az_track_ref ref, const az_analysis_result_v1 *complete, unsigned track) {
+    struct loaded_reuse fixture = {.ref = ref};
+    fixture.ref.track_id = track;
+    char audio[PATH_MAX], statement[1024];
+    snprintf(fixture.database, sizeof fixture.database, "%s/sdb1/PIONEER/rekordbox/exportLibrary.db", g_media);
+    snprintf(audio, sizeof audio, "%s/sdb1/reuse-%u.wav", g_media, track);
+    analysis_write(audio, "audio-placeholder", 17);
+    sqlite3 *db = NULL;
+    assert(!sqlite3_open(fixture.database, &db));
+    snprintf(statement, sizeof statement, "INSERT INTO content(content_id,path) VALUES(%u,'/reuse-%u.wav')", track, track);
+    sql(db, statement);
+    struct st_resolution row = {0};
+    assert(st_read_row(db, track, &row) == AZ_OK && row.analysis_generated);
+    assert(!sqlite3_close(db));
+    const char *suffix[3] = {"DAT", "EXT", "2EX"};
+    for (unsigned i = 0; i < 3; i++) {
+        snprintf(fixture.paths[i], sizeof fixture.paths[i], "%s/sdb1%s", g_media, row.analysis);
+        memcpy(fixture.paths[i] + strlen(fixture.paths[i]) - 3, suffix[i], 4);
+    }
+    analysis_source_input initial = {0};
+    analysis_source_request seed = {.track = fixture.ref, .components = AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS};
+    assert(reuse_request(owner_at(0), &seed, &initial) == AZ_OK);
+    assert(publish_result(0, &initial, complete) == AZ_PENDING);
+    fixture.seed_lease = initial.lease;
+    analysis_source_release(&initial);
+    fixture_source_kind = AZ_STATUS_SOURCE_USB1;
+    fixture_loaded_ref = fixture.ref;
+    fixture_native_phrases = 1;
+    return fixture;
+}
+static void reuse_spool_path(const struct loaded_reuse *fixture, uint64_t lease, char path[PATH_MAX]) {
+    snprintf(path, PATH_MAX, "%s/sdb1/PIONEER/azspool/track-analysis-%08x-%llu.sql", g_media,
+             fixture->ref.track_id, (unsigned long long) lease);
+}
+static void reuse_commit_without_polling(const struct loaded_reuse *fixture, analysis_source_input *input) {
+    char spool[PATH_MAX];
+    reuse_spool_path(fixture, input->lease, spool);
+    assert(!access(spool, F_OK));
+    atomic_store(&reuse_wakes, 0);
+    analysis_source_set_wake(reuse_wake);
+    sqlite3 *db = NULL;
+    assert(!sqlite3_open(fixture->database, &db));
+    assert(apply_analysis_spool(db, spool) == 0);
+    assert(!sqlite3_close(db));
+    /* No outcome/status call drives progress: wait only for the service's wake. */
+    for (unsigned i = 0; i < 3000 && !atomic_load(&reuse_wakes); i++) usleep(1000);
+    assert(atomic_load(&reuse_wakes));
+    await_link(input, AZ_OK);
+    analysis_source_set_wake(NULL);
+    analysis_source_release(input);
+}
+static void loaded_link_reuse(az_track_ref ref, const az_analysis_result_v1 *complete, int scenario) {
+    struct loaded_reuse fixture = loaded_reuse_seed(ref, complete, (unsigned) (40 + scenario));
+    if (scenario == 1 || scenario == 2 || scenario == 4) fixture_native_phrases = 0;
+    if (scenario == 2 || scenario == 4) assert(!unlink(fixture.paths[2]));
+    if (scenario == 3) assert(!unlink(fixture.paths[0]) && !unlink(fixture.paths[1]));
+    if (scenario == 1) {
+        fixture_spool_track = fixture.ref.track_id;
+        fixture_spool_after = fixture.seed_lease;
+        fixture_spool_signature = 0;
+    }
+    int published = fixture_published;
+    __atomic_store_n(&g_ls_leftover, 0, __ATOMIC_RELEASE);
+    analysis_source_input input = {0};
+    analysis_source_request request = {.loaded = 1, .deck = 0, .load = 44, .components = AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS};
+    int rc = reuse_request(owner_at(0), &request, &input);
+    fprintf(stderr, "Loaded link reuse: scenario=%d acquire=%d lease=%llu\n", scenario, rc, (unsigned long long) input.lease);
+    if (scenario == 1) {
+        fixture_spool_track = 0;
+        assert(fixture_spool_signature && st_disk_sig(fixture_spool_path) == fixture_spool_signature);
+    }
+    if (scenario == 3) {
+        assert(rc == ANALYSIS_SOURCE_COMPLETE && !input.lease);
+        assert(!st_disk_sig(fixture.paths[0]) && !st_disk_sig(fixture.paths[1]));
+        return; /* Native PSSI plus a vocal file is not complete durable ANLZ. */
+    }
+    assert(rc == (scenario == 2 || scenario == 4 ? AZ_OK : AZ_PENDING) && input.lease);
+    if (scenario == 2 || scenario == 4) {
+        assert(input.needed == AZ_ANALYSIS_VOCALS);
+        char spool[PATH_MAX];
+        reuse_spool_path(&fixture, input.lease, spool);
+        assert(access(spool, F_OK) && errno == ENOENT);
+        assert(!__atomic_load_n(&g_ls_leftover, __ATOMIC_ACQUIRE));
+        /* A commit cannot race the remaining computation: no native transaction
+         * is submitted until its vocal file has been durably published. */
+        az_analysis_result_v1 vocal = *complete;
+        vocal.beats = NULL;
+        vocal.beat_count = 0;
+        memset(&vocal.phrases, 0, sizeof vocal.phrases);
+        if (scenario == 4) {
+            sqlite3 *external = NULL;
+            assert(!sqlite3_open(fixture.database, &external));
+            sql(external, "UPDATE content SET title='external edit' WHERE content_id=44");
+            assert(!sqlite3_close(external));
+            assert(publish_result(0, &input, &vocal) == AZ_STALE);
+            assert(!st_disk_sig(fixture.paths[2]) && !st_disk_sig(spool));
+            analysis_source_release(&input);
+            return;
+        }
+        assert(publish_result(0, &input, &vocal) == AZ_PENDING);
+        assert(st_disk_sig(spool));
+    }
+    assert(fixture_published == published + (scenario == 1 || scenario == 2));
+    int outcome = reuse_outcome(&input);
+    fprintf(stderr, "Loaded link reuse: initial outcome=%d\n", outcome);
+    assert(outcome == AZ_PENDING);
+    reuse_commit_without_polling(&fixture, &input);
+}
+static void native_only_phrase_reuse(az_track_ref ref) {
+    fixture_loaded_ref = ref;
+    fixture_loaded_ref.track_id = 99999; /* No USB row or persistent files. */
+    fixture_native_phrases = 1;
+    for (unsigned streaming = 0; streaming < 2; streaming++) {
+        fixture_source_kind = streaming ? AZ_STATUS_SOURCE_STREAMING : AZ_STATUS_SOURCE_USB1;
+        analysis_source_input input = {0};
+        assert(acquire_loaded(0, AZ_DATA_PHRASES, 0, 44, &input) == ANALYSIS_SOURCE_COMPLETE && !input.lease);
+    }
+}
+struct reuse_admission {
+    az_analysis_owner owner;
+    analysis_source_input input;
+    int rc;
+};
+static void *reuse_acquire(void *opaque) {
+    struct reuse_admission *admission = opaque;
+    analysis_source_request request = {.loaded = 1, .deck = 0, .load = 44, .components = AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS};
+    admission->rc = reuse_request(admission->owner, &request, &admission->input);
+    return NULL;
+}
+static void loaded_reuse_freshness(az_track_ref ref, const az_analysis_result_v1 *complete, int scenario) {
+    struct loaded_reuse fixture = loaded_reuse_seed(ref, complete, (unsigned) (50 + scenario));
+    struct reuse_admission admission = {.owner = scenario == 1 ? analysis_owner_core_begin() : owner_at(0)};
+    int published = fixture_published;
+    if (scenario == 3) fixture_native_phrases = 0;
+    atomic_store(&fixture_skip_current, scenario == 3 ? 0 : 1); /* Before refresh, or final validation before first enqueue. */
+    atomic_store(&fixture_current_entered, 0);
+    atomic_store(&fixture_resume_current, 0);
+    atomic_store(&fixture_pause_current, 1);
+    pthread_t worker;
+    assert(!pthread_create(&worker, NULL, reuse_acquire, &admission));
+    while (!atomic_load(&fixture_current_entered)) usleep(1000);
+    if (scenario == 0) analysis_source_retire(analysis_owner_retire(0));
+    else if (scenario == 1) {
+        analysis_owner_core_retire();
+        analysis_source_retire(admission.owner);
+    } else if (scenario == 3) analysis_write(fixture.paths[2], "malformed", 9);
+    else external_analysis_edit(fixture.paths[0]);
+    atomic_store(&fixture_resume_current, 1);
+    assert(!pthread_join(worker, NULL));
+    assert(admission.rc == (scenario == 3 ? AZ_FAILED : AZ_STALE) && !admission.input.lease);
+    assert(fixture_published == published);
+    analysis_source_release(&admission.input);
+    if (scenario == 0) analysis_owner_thread_bind(analysis_owner_begin(0));
+}
+
+static void failed_refresh_releases_link(az_track_ref ref, const az_analysis_result_v1 *complete) {
+    (void) loaded_reuse_seed(ref, complete, 60);
+    fixture_native_phrases = 0;
+    fixture_publish_busy = 1;
+    az_analysis_owner owner = owner_at(0);
+    analysis_source_request request = {.loaded = 1, .deck = 0, .load = 44, .components = AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS};
+    for (unsigned attempt = 0; attempt < 12; attempt++) {
+        analysis_source_input input = {0};
+        int calls = fixture_publish_calls, rc = AZ_BUSY;
+        for (unsigned i = 0; i < 1000 && rc == AZ_BUSY && fixture_publish_calls == calls; i++) {
+            rc = analysis_source_acquire(owner, &request, &input);
+            if (rc == AZ_BUSY && fixture_publish_calls == calls) usleep(1000);
+        }
+        fprintf(stderr, "Native refresh refusal: attempt=%u rc=%d published_calls=%d\n", attempt, rc, fixture_publish_calls - calls);
+        assert(rc == AZ_BUSY && fixture_publish_calls == calls + 1 && !input.lease);
+        analysis_source_release(&input);
+    }
+    fixture_publish_busy = 0;
+    analysis_source_input input = {0};
+    assert(reuse_request(owner, &request, &input) == AZ_PENDING);
+    analysis_source_release(&input);
+}
+
 int main(void) {
     analysis_owner_thread_bind(analysis_owner_begin(0));
     typed_grid_result_validation();
@@ -1057,6 +1282,13 @@ int main(void) {
     assert(acquire_loaded(0, AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS, 0, 44, &job) == AZ_OK && job.needed == AZ_ANALYSIS_VOCALS);
     assert(publish_result(0, &job, &vocal_result) == AZ_OK);
     assert(analysis_vocal_intervals_loaded(owner_at(0), 0, 44, &vocals, NULL, 0) == AZ_OK && !vocals.interval_count);
+    az_analysis_result_v1 reused = baseline_result;
+    reused.vocals = vocal_result.vocals;
+    for (int scenario = 0; scenario < 5; scenario++) loaded_link_reuse(ref, &reused, scenario);
+    for (int scenario = 0; scenario < 4; scenario++) loaded_reuse_freshness(ref, &reused, scenario);
+    native_only_phrase_reuse(ref);
+    failed_refresh_releases_link(ref, &reused);
+    puts("Loaded saved reuse: autonomous link completion, deferred partial linkage, native-only availability and owner/source refusal passed");
     link_failure_case(ref, &baseline_result, 0);
     link_failure_case(ref, &baseline_result, 1);
     puts("Link outcomes: real transaction commit failure and later row edit preserve saved files without false success");

@@ -35,7 +35,7 @@ struct sa_open_result {
 };
 struct sa_job {
     uint64_t id;
-    int owner, needs_link;
+    int owner, needs_link, link_queued;
     az_analysis_owner lifetime;
     char reader_path[1024];
     struct st_source source;
@@ -62,6 +62,7 @@ static pthread_mutex_t sa_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int sa_source_owner_index(az_analysis_owner owner);
 static int sa_link_analysis(struct sa_job *job);
 static int sa_link_enqueue(struct sa_job *job, const char *path);
+static void sa_link_release(uint64_t id);
 static void sa_link_wake(void);
 static int sa_cleaner_start(void);
 static int sa_owner_live(const struct sa_job *job) {
@@ -354,6 +355,7 @@ static int sa_link_sql(const struct sa_job *job, char sql[13000]) {
     return n > 0 && n < 13000 ? n : 0;
 }
 static int sa_link_analysis(struct sa_job *job) {
+    if (job->link_queued) return 1;
     char sql[13000], relative[128], path[1024];
     int n = sa_link_sql(job, sql);
     if (!n) return 0;
@@ -367,6 +369,7 @@ static int sa_link_analysis(struct sa_job *job) {
         unlink(path);
         ok = 0;
     }
+    if (ok) job->link_queued = 1;
     return ok;
 }
 /* Encoded native persistence tags, borrowed during one publication. */
@@ -800,12 +803,19 @@ static int sa_grid_same(const struct sa_job *j, const uint8_t *grid, uint32_t si
         if (!sa_grid_row_same(grid + at, j->native_grid + at, rate)) return 0;
     return 1;
 }
+/* The locator transaction changes the DB signature. Keep it deferred while
+ * this same request still needs vocals, so its own commit cannot stale its input. */
+static int sa_saved_link(struct sa_job *job) {
+    if (!job->needs_link || (job->needed & AZ_ANALYSIS_VOCALS)) return AZ_OK;
+    return sa_link_analysis(job) ? AZ_OK : AZ_FAILED;
+}
 static int sa_saved_phrases_publish(struct sa_job *j, const uint8_t *grid, uint32_t grid_size,
                                     const uint8_t *phrase, uint32_t phrase_size) {
     if (!phrase || !sa_u16(phrase + 16)) return AZ_OK;
     if (!sa_grid_same(j, grid, grid_size) || !sa_loaded_current(j) || !sa_owner_live(j)) return AZ_STALE;
-    if (j->needs_link && !sa_link_analysis(j)) return AZ_FAILED;
-    int rc = j->maps->publish_phrases((unsigned) j->deck, j->load, &j->native_map, phrase, phrase_size);
+    int rc = sa_saved_link(j);
+    if (rc) return rc;
+    rc = j->maps->publish_phrases((unsigned) j->deck, j->load, &j->native_map, phrase, phrase_size);
     return rc ? rc : AZ_NOT_FOUND;
 }
 static int sa_saved_phrases(struct sa_job *j, const uint8_t *dat, size_t dat_size, const uint8_t *ext, size_t ext_size) {
@@ -836,14 +846,15 @@ static int sa_recapture_loaded(struct sa_job *j) {
     return rc;
 }
 static int sa_loaded_phrase_need(struct sa_job *j, uint32_t native_phrases) {
-    j->needed = native_phrases ? 0 : AZ_DATA_PHRASES;
+    j->needed = (j->needed & AZ_ANALYSIS_VOCALS) | (native_phrases ? 0 : AZ_DATA_PHRASES);
     if (native_phrases) return AZ_OK;
     int rc = sa_refresh_saved(j);
     if (rc != AZ_NOT_FOUND) return rc;
-    j->needed = 0;
+    j->needed &= ~AZ_DATA_PHRASES;
     return j->vocals ? sa_recapture_loaded(j) : AZ_OK;
 }
 static int sa_loaded_vocal_need(struct sa_job *j) {
+    j->needed &= ~AZ_ANALYSIS_VOCALS;
     if (!j->vocals) return AZ_OK;
     int failed = 0;
     size_t n = 0;
@@ -856,9 +867,9 @@ static int sa_loaded_vocal_need(struct sa_job *j) {
 }
 /* Publishing saved phrases retires the old packet; a vocal lease recaptures it. */
 static int sa_loaded_needs(struct sa_job *j, uint32_t native_phrases) {
-    int rc = sa_loaded_phrase_need(j, native_phrases);
+    int rc = sa_loaded_vocal_need(j);
     if (rc) return rc;
-    rc = sa_loaded_vocal_need(j);
+    rc = sa_loaded_phrase_need(j, native_phrases);
     return rc ? rc : j->needed ? AZ_OK
                                : ANALYSIS_SOURCE_COMPLETE;
 }
@@ -895,6 +906,15 @@ static struct sa_job *sa_find_owned_job(uint64_t id, int owner) {
         if (sa_jobs[i].id == id && sa_jobs[i].owner == owner) found = &sa_jobs[i];
     return found;
 }
+/* Native-only reuse does not authorize a locator to absent persistent maps.
+ * Complete saved files may still need their existing conditional transaction. */
+static int sa_usb_reuse_link(struct sa_job *job, uint32_t stored_needed, int rc) {
+    if (rc != ANALYSIS_SOURCE_COMPLETE || !job->needs_link) return rc;
+    if (job->link_queued) return AZ_PENDING;
+    if (stored_needed) return rc;
+    if (!sa_current(job)) return AZ_STALE;
+    return sa_link_analysis(job) ? AZ_PENDING : AZ_FAILED;
+}
 static int sa_usb_bind(struct sa_job *j, uint32_t phrases, struct sa_open_result *result) {
     struct sa_job *found = sa_find_owned_job(result->job, j->owner);
     if (!found || found->lifetime.generation != j->lifetime.generation) {
@@ -902,10 +922,14 @@ static int sa_usb_bind(struct sa_job *j, uint32_t phrases, struct sa_open_result
         return AZ_STALE;
     }
     sa_usb_attach(found, j);
+    uint32_t stored_needed = found->needed;
     int rc = sa_loaded_current(found) ? sa_loaded_needs(found, phrases) : AZ_STALE;
     result->needed = found->needed;
-    if (rc == ANALYSIS_SOURCE_COMPLETE && found->needs_link) rc = AZ_PENDING;
-    if (rc) sa_job_drop(found);
+    rc = sa_usb_reuse_link(found, stored_needed, rc);
+    if (rc) {
+        if (rc != AZ_PENDING) sa_link_release(found->id);
+        sa_job_drop(found);
+    }
     return rc;
 }
 static int sa_usb_register(struct sa_job *j, uint32_t phrases, struct sa_open_result *result) {
@@ -1272,7 +1296,6 @@ static int sa_link_progress(struct sa_link *link) {
     link->admitted = 1;
     return AZ_PENDING;
 }
-static void sa_link_release(uint64_t id);
 static int sa_links_service(void) {
     int pending = 0, changed = 0;
     pthread_mutex_lock(&sa_mutex);
