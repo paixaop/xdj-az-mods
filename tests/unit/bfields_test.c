@@ -829,16 +829,25 @@ static int wait_answer(unsigned cid, const char *title, int field) {
     return 0;
 }
 
-/* Failure evidence only: keep the worker deadline and acceptance conditions intact. */
-static void worker_diagnostic(pthread_t worker, unsigned cid, const char *title, int field, int answer) {
+/* -1 marks a predicate the original short-circuit expression never evaluated. */
+struct worker_observation {
+    int answer, state, landed, closes;
+    char text[B2_TEXT_MAX];
+};
+/* Preserve the evaluated values separately from this later synchronized snapshot. */
+static void worker_diagnostic(pthread_t worker, unsigned cid, const char *title, int field,
+                              const struct worker_observation *seen) {
     char text[B2_TEXT_MAX] = "";
     int kind = 0, state = ent_state(cid, title, field, text, &kind), policy = -1;
     struct sched_param priority = {0};
     int schedule_rc = pthread_getschedparam(worker, &policy, &priority);
+    fprintf(stderr, "browse worker observed: cid=%u answer=%d state=%d text=[%s] landed=%d closes=%d "
+                    "(-1/unevaluated means short-circuited)\n",
+            cid, seen->answer, seen->state, seen->state < 0 ? "unevaluated" : seen->text, seen->landed, seen->closes);
     fprintf(stderr,
-            "browse worker: cid=%u answer=%d state=%d text=[%s] kind=%d landed=%d opens=%d closes=%d "
+            "browse worker later: cid=%u state=%d text=[%s] kind=%d landed=%d opens=%d closes=%d "
             "schedule_rc=%d policy=%d priority=%d\n",
-            cid, answer, state, text, kind, __atomic_load_n(&g_b2_landed, __ATOMIC_ACQUIRE),
+            cid, state, text, kind, __atomic_load_n(&g_b2_landed, __ATOMIC_ACQUIRE),
             __atomic_load_n(&g_open_n, __ATOMIC_ACQUIRE), __atomic_load_n(&g_close_n, __ATOMIC_ACQUIRE),
             schedule_rc, policy, priority.sched_priority);
 }
@@ -1689,10 +1698,11 @@ int main(void) {
     }
     char tx[B2_TEXT_MAX];
     int kk = 0;
-    int answer = wait_answer(110, "T10", B2_COMMENTS);
-    int known = answer == 2 && (ent_state(110, "T10", B2_COMMENTS, tx, 0), !strcmp(tx, "4A")) &&
-                __atomic_load_n(&g_b2_landed, __ATOMIC_ACQUIRE) == 1;
-    if (!known) worker_diagnostic(wt, 110, "T10", B2_COMMENTS, answer);
+    struct worker_observation first = {.answer = wait_answer(110, "T10", B2_COMMENTS), .state = -1, .landed = -1, .closes = -1};
+    int known = first.answer == 2 &&
+                (first.state = ent_state(110, "T10", B2_COMMENTS, first.text, 0), !strcmp(first.text, "4A")) &&
+                (first.landed = __atomic_load_n(&g_b2_landed, __ATOMIC_ACQUIRE)) == 1;
+    if (!known) worker_diagnostic(wt, 110, "T10", B2_COMMENTS, &first);
     CHECK("one stick holds it: known, its value", known);
     set_stick(1, "4A", 0, 0);
     CHECK("two sticks agree: known", wait_answer(111, "T11", B2_COMMENTS) == 2);
@@ -1711,10 +1721,11 @@ int main(void) {
     advance(1000);
     set_stick(0, "only0", 0, 0);
     set_stick(1, 0, 0, 0);
-    int st = wait_answer(114, "T14", B2_COMMENTS);
-    ent_state(114, "T14", B2_COMMENTS, tx, 0);
-    int released = st == 2 && !strcmp(tx, "only0") && __atomic_load_n(&g_close_n, __ATOMIC_ACQUIRE) >= 1;
-    if (!released) worker_diagnostic(wt, 114, "T14", B2_COMMENTS, st);
+    struct worker_observation eject = {.answer = wait_answer(114, "T14", B2_COMMENTS), .state = -1, .landed = -1, .closes = -1};
+    eject.state = ent_state(114, "T14", B2_COMMENTS, eject.text, 0);
+    int released = eject.answer == 2 && !strcmp(eject.text, "only0") &&
+                   (eject.closes = __atomic_load_n(&g_close_n, __ATOMIC_ACQUIRE)) >= 1;
+    if (!released) worker_diagnostic(wt, 114, "T14", B2_COMMENTS, &eject);
     CHECK("stick 1 let go of: its connection closed, stick 0 still answers", released);
     __atomic_store_n(&g_b2_stop, 1, __ATOMIC_RELEASE);
     b2_lock();
