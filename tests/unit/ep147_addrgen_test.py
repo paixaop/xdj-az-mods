@@ -230,10 +230,11 @@ class AddressGeneratorTest(unittest.TestCase):
                 'unsigned mask=0; for(unsigned i=0;i<SDK_CACHE_TARGET_COUNT;i++) {\n'
                 'assert(out[i].slot>0 && out[i].slot<AZCE_KIND_COUNT && !(mask&(1u<<out[i].slot))); mask|=1u<<out[i].slot;\n'
                 'printf("%d %u %lx %u ",b,out[i].slot,(unsigned long)out[i].address,out[i].island_only);\n'
-                'for(unsigned j=0;j<16;j++)printf("%02x",out[i].expected[j]); puts(""); }\n'
+                'for(unsigned j=0;j<16;j++) { printf("%02x",out[i].expected[j]); }\n'
+                'puts(""); }\n'
                 'assert(mask==((1u<<AZCE_KIND_COUNT)-2)); } return 0; }\n')
             subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-O1', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function', str(source), '-o', str(binary)], check=True)
-            output = subprocess.check_output([str(binary)], text=True)
+            output = subprocess.check_output([str(binary)], universal_newlines=True)
             kinds = {name: int(value) for name, value in re.findall(r'^#define (AZCE_KIND_[A-Z_]+) (\d+)$', (ROOT / 'src/common/azcacheentry.h').read_text(), re.M)}
             expected = {(str(index + 1), str(kinds[row['kind']])):
                         (int(row['profiles'][version]['entry'], 16), int(row['hook'] == 'island'), row['profiles'][version]['first16'])

@@ -385,7 +385,7 @@ static int azsdk_cache_reply_code_profile(int build, struct azsdk_cache_reply_co
     for version in VERSIONS:
         row = catalog['reply_promotion']['profiles'][version]
         start, end, pc = number(row['entry']), number(row['end']), number(row['return_pc'])
-        text += '        {0x%x,0x%x,%d,"%s"},\n' % (start, pc, end - start, row['sha256'])
+        text += '        {0x%x, 0x%x, %d, "%s"},\n' % (start, pc, end - start, row['sha256'])
     return text + '''    };
     if (!out || (build != 1 && build != 2)) return 0;
     *out = profiles[build - 1];
