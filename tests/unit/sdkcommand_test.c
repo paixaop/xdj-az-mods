@@ -780,6 +780,49 @@ static void pending_delivery_identity(void) {
     assert(scmd_poll(&f.engine, 0, 1, &out) == AZ_STALE && !memcmp(&saved, &out, sizeof out));
     assert(scmd_destroy(&f.engine) == AZ_OK);
 }
+/* A native admission can be pending while its advertised capability remains
+ * known. No missing capability or conflicting load may reserve native work. */
+static unsigned admission_reservations;
+static int admission_reserve(const struct azexit_request *identity) {
+    assert(identity->token && identity->load_generation == 1 && identity->deck == 0);
+    admission_reservations++;
+    return AZ_LIMIT;
+}
+static int admission_begin(void *context, const az_command_request *request, struct scmd_target *target) {
+    struct fixture *f = context;
+    f->begins++;
+    *target = f->target[request->deck];
+    return f->begin_error;
+}
+static void native_admission(void) {
+    struct fixture f = FIXTURE_INIT;
+    initialize(&f);
+    static const struct azexit_delivery_v2 delivery = {.reserve = admission_reserve};
+    f.engine.delivery = &delivery;
+    f.adapter.begin = admission_begin;
+    az_command_request r = request(1, 0);
+    az_command_result out = result();
+    enum scmd_detail detail;
+    admission_reservations = 0;
+    const int errors[] = {AZ_STALE, AZ_FAILED, AZ_BUSY, AZ_PENDING, AZ_OK};
+    for (unsigned i = 0; i < sizeof errors / sizeof errors[0]; i++) {
+        f.begin_error = errors[i];
+        int expected = i < 2 ? errors[i] : AZ_LIMIT;
+        assert(scmd_admit(&f.engine, 0, &r, NULL, NULL, NULL, &f.adapter, &out, &detail, 0) == expected);
+        assert(out.outcome == AZ_COMMAND_REJECTED && out.reason == expected);
+        assert(scmd_find_id(&f.engine, 0, r.request_id) == NULL);
+    }
+    assert(admission_reservations == 3 && f.begins == 5);
+    f.begin_error = AZ_BUSY;
+    f.target[0].commands = 0;
+    assert(scmd_admit(&f.engine, 0, &r, NULL, NULL, NULL, &f.adapter, &out, &detail, 0) == AZ_UNSUPPORTED);
+    assert(detail == SCMD_DETAIL_CAPABILITY && admission_reservations == 3);
+    f.target[0].commands = SCMD_ALL_COMMANDS;
+    f.target[0].load_generation++;
+    assert(scmd_admit(&f.engine, 0, &r, NULL, NULL, NULL, &f.adapter, &out, &detail, 0) == AZ_STALE);
+    assert(detail == SCMD_DETAIL_LOAD && admission_reservations == 3);
+    assert(scmd_destroy(&f.engine) == AZ_OK);
+}
 int main(void) {
     assert(setvbuf(stdout, NULL, _IOLBF, 0) == 0);
     operation_deck_matrix();
@@ -804,9 +847,10 @@ int main(void) {
     RUN(events);
     RUN(concurrent_callers);
     RUN(pending_delivery_identity);
+    RUN(native_admission);
 #undef RUN
     alarm(0);
-    puts("sdk command engine: 14 suites passed; no native firmware was called");
+    puts("sdk command engine: 16 suites passed; no native firmware was called");
     return 0;
 }
 #endif

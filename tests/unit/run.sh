@@ -4002,7 +4002,7 @@ $CC "${CFLAGS[@]}" -pthread -I"$d" -o "$d/real" $T/sdkdata_test.c -lm
 suite "sdk track data, parser, timing and concurrent consumers" "$d/real"
 $CC "${CFLAGS[@]}" -Iguest/azmod -o "$d/analysis-write" $T/sdkanalysis_write_test.c
 suite "sdk analysis insertion preserves existing ANLZ data" "$d/analysis-write"
-$CC "${CFLAGS[@]}" -Wno-unused-function -pthread -Iguest/azmod -o "$d/callbacks" $T/sdk_data_callbacks_test.c -lm
+$CC "${CFLAGS[@]}" -Wno-unused-function -pthread -Iguest/azmod -o "$d/callbacks" $T/sdk_data_callbacks_test.c guest/azmod/sdk_command_engine.c -lm
 suite "sdk data and command callbacks without mod polling" "$d/callbacks"
 python3 "$T/sdk_review_controls.py" guest/azmod "$d/review"
 for v in timing-size timing-version; do
@@ -4016,12 +4016,12 @@ $CC "${CFLAGS[@]}" -pthread -I"$d" -DST_ENGINE_HEADER='"broken.h"' -o "$d/contro
 control "sdk track data: duplicate IDs merged across sources" "$d/control"
 
 if [ "$(uname -s)" = Linux ]; then
-    $CC "${CFLAGS[@]}" $SDK_EXPORT -pthread -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$OUT/sdkdata/provider" $T/sdktrack_test.c -lsqlite3 -ldl -lm
+    $CC "${CFLAGS[@]}" $SDK_EXPORT -pthread -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$OUT/sdkdata/provider" $T/sdktrack_test.c guest/azmod/sdk_command_engine.c -lsqlite3 -ldl -lm
     suite "sdk stored track disk provider" "$OUT/sdkdata/provider"
-    $CC "${CFLAGS[@]}" $SDK_EXPORT -Wno-unused-function -Wno-missing-field-initializers -pthread -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$d/analysis-service" $T/sdkanalysis_service_test.c -lsqlite3 -ldl -lm
+    $CC "${CFLAGS[@]}" $SDK_EXPORT -Wno-unused-function -Wno-missing-field-initializers -pthread -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$d/analysis-service" $T/sdkanalysis_service_test.c guest/azmod/sdk_command_engine.c -lsqlite3 -ldl -lm
     suite "sdk analysis source leases and USB persistence" "$d/analysis-service"
     for v in database-alias database-uri missing-parent wave-errors analysis-binding track-fifo wave-fifo analysis-path-limit preview-extension; do
-        $CC "${CFLAGS[@]}" $SDK_EXPORT -pthread -I"$d/review/$v" -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$d/$v" $T/sdktrack_test.c -lsqlite3 -ldl -lm
+        $CC "${CFLAGS[@]}" $SDK_EXPORT -pthread -I"$d/review/$v" -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$d/$v" $T/sdktrack_test.c guest/azmod/sdk_command_engine.c -lsqlite3 -ldl -lm
         control "sdk stored track: $v regression" "$d/$v"
     done
 else

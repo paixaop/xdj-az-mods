@@ -81,6 +81,7 @@ AZMOD_SRCS := azmod/azmod.c azmod/menu.c azmod/text.c azmod/azconf.c
 AZMOD_HDRS := $(wildcard azmod/*.h azmod/*.c azmod/*.inc azmod/*.S azmod/*.def) $(wildcard common/*.h common/*.c common/*.S) azstem/sdk_native.map
 AZSDK_NATIVE_CFLAGS := $(AZ_UNWIND) -std=gnu11 -O2 $(AZ_WARN) -fPIC $(NO_OUTLINE_ATOMICS) -fvisibility=hidden
 $(AZMOD): $(AZMOD_SRCS) $(AZMOD_HDRS) | $(OUT)
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/sdk_command_engine.o azmod/sdk_command_engine.c
 	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/azcache_scopes.o common/azcache_scopes.c
 	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/sdk_native_sources.o azmod/sdk_native_sources.c
 	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/sdk_connection_hooks.o azmod/sdk_connection_hooks.c
@@ -92,7 +93,7 @@ $(AZMOD): $(AZMOD_SRCS) $(AZMOD_HDRS) | $(OUT)
 	$(CC) $(AZ_UNWIND) -fPIC -c -o $(OUT)/sdk_cache_entry_asm.o azmod/sdk_cache_entry.S
 	$(CC) $(AZ_UNWIND) -fPIC -c -o $(OUT)/sdk_slip_entry_asm.o azmod/sdk_slip_entry.S
 	$(CC) $(AZ_UNWIND) -fPIC -c -o $(OUT)/sdk_slip_getter_entry.o azmod/sdk_slip_getter_entry.S
-	$(CC) $(AZMOD_CFLAGS) -Wl,--version-script=azstem/sdk_native.map -o $@.full $(AZMOD_SRCS) $(OUT)/azcache_scopes.o $(OUT)/sdk_native_sources.o $(OUT)/sdk_connection_hooks.o $(OUT)/sdk_cache_message.o $(OUT)/sdk_native_slip.o $(OUT)/sdk_slip_hooks.o $(OUT)/sdk_cache_entry.o $(OUT)/sdk_cache_entry_asm.o $(OUT)/sdk_slip_entry_asm.o $(OUT)/sdk_slip_getters.o $(OUT)/sdk_slip_getter_entry.o -ldl -lpthread -Wl,-Bstatic -lXtst -Wl,-Bdynamic -Wl,--exclude-libs,libXtst.a -lX11 -lXext -lfreetype -lm
+	$(CC) $(AZMOD_CFLAGS) -Wl,--version-script=azstem/sdk_native.map -o $@.full $(AZMOD_SRCS) $(OUT)/sdk_command_engine.o $(OUT)/azcache_scopes.o $(OUT)/sdk_native_sources.o $(OUT)/sdk_connection_hooks.o $(OUT)/sdk_cache_message.o $(OUT)/sdk_native_slip.o $(OUT)/sdk_slip_hooks.o $(OUT)/sdk_cache_entry.o $(OUT)/sdk_cache_entry_asm.o $(OUT)/sdk_slip_entry_asm.o $(OUT)/sdk_slip_getters.o $(OUT)/sdk_slip_getter_entry.o -ldl -lpthread -Wl,-Bstatic -lXtst -Wl,-Bdynamic -Wl,--exclude-libs,libXtst.a -lX11 -lXext -lfreetype -lm
 	$(call az_strip_keep_assets,$@)
 	@echo "Built: $@"
 

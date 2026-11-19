@@ -14,5 +14,5 @@ esac
 awk '/^static int st_mod_owner\(/,/^}/' src/azmod/sdk_track.c > "$task_tmp/owner.inc"
 awk '/^static int sdk_command_submit\(/,/^}/' src/azmod/sdk_track.c > "$task_tmp/submit.inc"
 "${HOST_CC:-cc}" -std=c11 "${flags[@]}" -DSDK_EXIT_OWNER_INC="\"$task_tmp/owner.inc\"" -DSDK_EXIT_SUBMIT_INC="\"$task_tmp/submit.inc\"" \
-    tests/unit/sdkexit_public_test.c tests/unit/sdkexit_compat_test.c -o "$task_tmp/compat"
+    tests/unit/sdkexit_public_test.c tests/unit/sdkexit_compat_test.c src/azmod/sdk_command_engine.c -o "$task_tmp/compat"
 "$task_tmp/compat"

@@ -13,7 +13,7 @@ tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 *) echo 'SAN must be plain, asan or tsan' >&2; exit 2 ;;
 esac
 compiler=${HOST_CC:-cc}
-"$compiler" "${flags[@]}" -Isrc/azmod tests/unit/sdkcommand_test.c -lm -o "$task_tmp/real"
+"$compiler" "${flags[@]}" -Isrc/azmod tests/unit/sdkcommand_test.c src/azmod/sdk_command_engine.c -lm -o "$task_tmp/real"
 cat > "$task_tmp/adapter.c" <<'C'
 #include "sdk_command_engine.h"
 #include <stddef.h>
@@ -30,7 +30,7 @@ tsan)
     nm "$task_tmp/real" | grep '__tsan_init' >/dev/null || { echo 'FAIL: TSan instrumentation missing'; exit 1; } ;;
 esac
 "$task_tmp/real"
-python3 - src/azmod/sdk_command_engine.h "$task_tmp" <<'PY'
+python3 - src/azmod/sdk_command_engine.c "$task_tmp" <<'PY'
 from pathlib import Path
 import re
 import sys
@@ -63,10 +63,11 @@ for name, (old, new) in controls.items():
     assert text.count(old) == 1, (name, text.count(old))
     directory = output / name
     directory.mkdir()
-    (directory / 'sdk_command_engine.h').write_text(text.replace(old, new))
+    (directory / 'sdk_command_engine.c').write_text(text.replace(old, new))
 grown = output / 'request-growth'
 grown.mkdir()
-(grown / 'sdk_command_engine.h').write_text(text)
+(grown / 'sdk_command_engine.c').write_text(text)
+(grown / 'sdk_command_engine.h').write_text((source.parent / 'sdk_command_engine.h').read_text())
 header = (source.parent / 'azmod-mod.h').read_text()
 old = 'char comment[128];\n} az_command_request;'
 assert header.count(old) == 1
@@ -117,31 +118,31 @@ print('CONTROL caught:', label)
 PY
 }
 wrapper_flags=(-DSDK_COMMAND_OWNER_INC="\"$task_tmp/owner.inc\"")
-"$compiler" "${flags[@]}" "${wrapper_flags[@]}" -DSDK_COMMAND_SUBMIT_INC="\"$task_tmp/submit.inc\"" -Isrc/azmod tests/unit/sdkcommand_wrapper_test.c -lm -o "$task_tmp/wrappers"
+"$compiler" "${flags[@]}" "${wrapper_flags[@]}" -DSDK_COMMAND_SUBMIT_INC="\"$task_tmp/submit.inc\"" -Isrc/azmod tests/unit/sdkcommand_wrapper_test.c src/azmod/sdk_command_engine.c -lm -o "$task_tmp/wrappers"
 "$task_tmp/wrappers"
 for control in wrapper-submit-owner wrapper-poll-owner wrapper-cancel-owner wrapper-release-owner wrapper-arguments wrapper-poll-state wrapper-cancel-state wrapper-release-state; do
-    "$compiler" "${flags[@]}" "${wrapper_flags[@]}" -DSDK_COMMAND_SUBMIT_INC="\"$task_tmp/$control/submit.inc\"" -DSDK_COMMAND_IMPL="\"$task_tmp/$control/sdk_command.c\"" -Isrc/azmod tests/unit/sdkcommand_wrapper_test.c -lm -o "$task_tmp/$control-test"
+    "$compiler" "${flags[@]}" "${wrapper_flags[@]}" -DSDK_COMMAND_SUBMIT_INC="\"$task_tmp/$control/submit.inc\"" -DSDK_COMMAND_IMPL="\"$task_tmp/$control/sdk_command.c\"" -Isrc/azmod tests/unit/sdkcommand_wrapper_test.c src/azmod/sdk_command_engine.c -lm -o "$task_tmp/$control-test"
     expect_failure "$task_tmp/$control-test" 'Assertion|assertion|ERROR: AddressSanitizer:|runtime error:' "$control"
 done
-if "$compiler" "${flags[@]}" -I"$task_tmp/request-growth" -Isrc/azmod tests/unit/sdkcommand_test.c -lm -o "$task_tmp/request-growth-test" >"$task_tmp/request-growth.log" 2>&1; then
+if "$compiler" "${flags[@]}" -I"$task_tmp/request-growth" -Isrc/azmod tests/unit/sdkcommand_test.c "$task_tmp/request-growth/sdk_command_engine.c" -lm -o "$task_tmp/request-growth-test" >"$task_tmp/request-growth.log" 2>&1; then
     echo 'FAIL: appended command argument escaped validation/comparison review'; exit 1
 fi
 grep 'command request grew' "$task_tmp/request-growth.log" >/dev/null || { cat "$task_tmp/request-growth.log"; exit 1; }
 echo 'CONTROL caught: request growth requires explicit validation/comparison update'
 for control in owner arguments id-replay load revision persistence deadline cancel-claim deck-barrier timeout-barrier completion-load completion-revision completion-order premature-completion lease terminal result-size; do
-    "$compiler" "${flags[@]}" -I"$task_tmp/$control" -Isrc/azmod tests/unit/sdkcommand_test.c -lm -o "$task_tmp/$control-test"
+    "$compiler" "${flags[@]}" -I"$task_tmp/$control" -Isrc/azmod tests/unit/sdkcommand_test.c "$task_tmp/$control/sdk_command_engine.c" -lm -o "$task_tmp/$control-test"
     expect_failure "$task_tmp/$control-test" 'Assertion|assertion|ERROR: AddressSanitizer:|runtime error:' "$control"
 done
 case ${SAN:-plain} in
 asan)
     # Check each sanitizer separately so the planted heap fault cannot be consumed
     # by UBSan before AddressSanitizer itself demonstrates its instrumentation.
-    "$compiler" "${flags[@]}" -fno-sanitize=undefined -DSCMD_TEST_HEAP -Isrc/azmod tests/unit/sdkcommand_test.c -lm -o "$task_tmp/heap"
+    "$compiler" "${flags[@]}" -fno-sanitize=undefined -DSCMD_TEST_HEAP -Isrc/azmod tests/unit/sdkcommand_test.c src/azmod/sdk_command_engine.c -lm -o "$task_tmp/heap"
     expect_failure "$task_tmp/heap" 'AddressSanitizer: heap-buffer-overflow' 'ASan heap fault'
-    "$compiler" "${flags[@]}" -fno-sanitize=address -DSCMD_TEST_SIGNED -Isrc/azmod tests/unit/sdkcommand_test.c -lm -o "$task_tmp/signed"
+    "$compiler" "${flags[@]}" -fno-sanitize=address -DSCMD_TEST_SIGNED -Isrc/azmod tests/unit/sdkcommand_test.c src/azmod/sdk_command_engine.c -lm -o "$task_tmp/signed"
     expect_failure "$task_tmp/signed" 'runtime error: signed integer overflow' 'UBSan signed overflow' ;;
 tsan)
-    "$compiler" "${flags[@]}" -DSCMD_TEST_RACE -Isrc/azmod tests/unit/sdkcommand_test.c -lm -o "$task_tmp/race"
+    "$compiler" "${flags[@]}" -DSCMD_TEST_RACE -Isrc/azmod tests/unit/sdkcommand_test.c src/azmod/sdk_command_engine.c -lm -o "$task_tmp/race"
     expect_failure "$task_tmp/race" 'ThreadSanitizer: data race' 'TSan race' ;;
 esac
 echo "sdk commands: ${SAN:-plain} tests, 17 policy controls, 8 wrapper controls and request-growth control passed"

@@ -25,5 +25,5 @@ awk '/^static int sdk_command_submit\(/,/^}/' src/azmod/sdk_track.c > "$task_tmp
 "${HOST_CC:-cc}" -std=gnu11 -fexceptions -fasynchronous-unwind-tables "${flags[@]}" -c src/azstem/sdk_native_commands.c -o "$task_tmp/native-commands.o"
 "${HOST_CC:-cc}" -std=gnu11 "${flags[@]}" -fexceptions -fasynchronous-unwind-tables -c tests/unit/native_unwind.c -o "$task_tmp/native-guard.o"
 "${HOST_CC:-cc}" -std=gnu11 -fexceptions -fasynchronous-unwind-tables "${flags[@]}" -DAZSDK_EXIT_TESTING -DAZSDK_CUE_STAGE_TESTING \
-    src/azstem/sdk_exit.c "$task_tmp/native-commands.o" "$task_tmp/native-guard.o" tests/unit/sdkexit_test.c "$task_tmp/public.o" ${NATIVE_RUNTIME:--lstdc++ -ldl} -o "$task_tmp/stage"
+    src/azstem/sdk_exit.c src/azmod/sdk_command_engine.c "$task_tmp/native-commands.o" "$task_tmp/native-guard.o" tests/unit/sdkexit_test.c "$task_tmp/public.o" ${NATIVE_RUNTIME:--lstdc++ -ldl} -o "$task_tmp/stage"
 for build in 1 2; do "$task_tmp/stage" "$build" 8; done
