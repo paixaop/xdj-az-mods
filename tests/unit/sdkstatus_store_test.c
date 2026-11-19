@@ -32,7 +32,7 @@ static az_status_grid_ref_v1 saved_map[4];
 static pthread_mutex_t test_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t test_cv = PTHREAD_COND_INITIALIZER;
 int ds_publish_file(unsigned deck, uint64_t epoch, const az_track_ref *ref, uint64_t observed,
-                           const struct ds_field *fields, size_t count, uint64_t lost, unsigned reason) {
+                    const struct ds_field *fields, size_t count, uint64_t lost, unsigned reason) {
     assert(ref->source_id && observed);
     pthread_mutex_lock(&test_mu);
     last_epoch[deck] = epoch;
@@ -122,7 +122,7 @@ int ds_retire_file_binding(unsigned deck, uint64_t epoch, const az_track_ref *re
 static unsigned bindings;
 static az_track_ref bound_ref;
 int ds_publish(unsigned deck, uint64_t epoch, unsigned flags, uint64_t now, const struct ds_field *fields, size_t count,
-                      const az_status_occurrence_v1 *occ, const az_status_phrase_transition_v1 *phrase, uint64_t lost, unsigned reason) {
+               const az_status_occurrence_v1 *occ, const az_status_phrase_transition_v1 *phrase, uint64_t lost, unsigned reason) {
     assert(deck < 4 && epoch && !flags && now && count == 2 && !occ && !phrase && !lost && !reason);
     assert(fields[0].topic == AZ_STATUS_LOAD && fields[0].field == AZ_STATUS_LOAD_TRACK);
     bound_ref = *(const az_track_ref *) fields[0].value;

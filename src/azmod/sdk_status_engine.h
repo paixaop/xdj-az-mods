@@ -38,13 +38,17 @@ void ds_retire(int);
 unsigned ds_drain(unsigned);
 int sdk_status_analysis_bind(ds_core_load_fn);
 int az_status_loaded_reference(unsigned, uint64_t, az_track_ref *);
-struct ds_deck_stamp { uint64_t epoch, last_epoch, motion_generation; };
+struct ds_deck_stamp {
+    uint64_t epoch, last_epoch, motion_generation;
+};
 void ds_read_stamp(unsigned, struct ds_deck_stamp *);
 /* Metadata for one coherent cut. Absent fields are zeroed. */
 void ds_read_receipts(unsigned, struct ds_field *, size_t, uint64_t *);
 void ds_set_stem_binding(void (*)(unsigned, uint64_t, uint64_t, const char *));
 void ds_watch_stems(unsigned, int);
-struct ds_phrase_span { az_status_coord_v1 start, end; };
+struct ds_phrase_span {
+    az_status_coord_v1 start, end;
+};
 int ds_read_phrase_span(unsigned, uint64_t, const struct ds_path *, struct ds_phrase_span *);
 int ds_path_inside_span(const struct ds_phrase_span *, const struct ds_path *);
 int ds_native_loop_ref(unsigned, uint64_t, uint64_t, uint64_t, unsigned, unsigned, az_status_cue_ref_v1 *);

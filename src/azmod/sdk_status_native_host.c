@@ -7,7 +7,7 @@ void az_status_host_master_cut(void (*prepare)(void), void (*consume)(const stru
     pthread_mutex_lock(&g_master_state_mu);
     if (prepare) prepare();
     struct ds_master_state state = {atomic_load_explicit(&g_master_event, memory_order_acquire),
-        g_master_state.revision, g_master_state.observed_ns, g_master_state.deck};
+                                    g_master_state.revision, g_master_state.observed_ns, g_master_state.deck};
     consume(&state, user);
     pthread_mutex_unlock(&g_master_state_mu);
 }

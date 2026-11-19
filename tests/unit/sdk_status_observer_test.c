@@ -34,9 +34,7 @@ static void observe(unsigned deck, uint64_t cut, uint64_t load, int ready, const
     track = *ref;
 }
 static struct ds_field field(unsigned key, uint64_t load, unsigned provenance, uint64_t revision, const void *value) {
-    return (struct ds_field) {.topic = AZ_STATUS_LOAD, .field = key, .info = {
-        .info = {AZ_AVAIL_READY, provenance, revision, ds_now()}, .scope = AZ_STATUS_LOAD_SCOPE,
-        .scope_id = load, .provider_id = 9, .count = 1}, .value = value};
+    return (struct ds_field) {.topic = AZ_STATUS_LOAD, .field = key, .info = {.info = {AZ_AVAIL_READY, provenance, revision, ds_now()}, .scope = AZ_STATUS_LOAD_SCOPE, .scope_id = load, .provider_id = 9, .count = 1}, .value = value};
 }
 static void publish(unsigned key, uint64_t load, unsigned provenance, uint64_t revision, const void *value, unsigned flags) {
     struct ds_field f = field(key, load, provenance, revision, value);

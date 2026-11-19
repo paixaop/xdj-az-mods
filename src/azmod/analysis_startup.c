@@ -13,7 +13,10 @@ static void core_analysis_start(void) {
     char assets[1200];
     int rc = core_analysis_assets(assets, sizeof assets);
     if (rc == AZ_OK) rc = analysis_host_start(assets, az_on(AZF_TRACK_ANALYSIS));
-    if (rc != AZ_OK) { dbg("analysis: core startup failed (%d)\n", rc); return; }
+    if (rc != AZ_OK) {
+        dbg("analysis: core startup failed (%d)\n", rc);
+        return;
+    }
     azmod_analysis_enable = analysis_host_enable;
     rc = sdk_status_analysis_bind(analysis_runtime_load);
     if (rc == AZ_OK) azmod_analysis_status = analysis_runtime_deck_status;

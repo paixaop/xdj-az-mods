@@ -8,7 +8,7 @@
 /* Narrow native operations supplied by azmod's existing host. Weak slots use
  * its single destructor registry; native hooks use its original install chain.
  * No host state or native object is exported to an SDK client. */
-int bp_host_thread_create(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *);
+int bp_host_thread_create(pthread_t *, const pthread_attr_t *, void *(*) (void *), void *);
 int bp_host_message_thread(void);
 long bp_host_now_ms(void);
 uintptr_t bp_host_weak_get(_Atomic uintptr_t *);

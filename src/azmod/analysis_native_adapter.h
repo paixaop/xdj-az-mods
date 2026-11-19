@@ -6,7 +6,7 @@
 #pragma GCC visibility push(hidden)
 /* Host glue: stable configuration, one native thread trampoline and guarded spool admission. */
 const char *az_analysis_state_dir(void);
-int az_analysis_thread_create(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *);
+int az_analysis_thread_create(pthread_t *, const pthread_attr_t *, void *(*) (void *), void *);
 int az_analysis_spool_admit(int stick);
 int az_status_loaded_reference(unsigned deck, uint64_t load, az_track_ref *out);
 #pragma GCC visibility pop

@@ -360,7 +360,10 @@ static int sa_link_analysis(struct sa_job *job) {
     struct sa_staged spool = {.dir = -1};
     int ok = sa_stage(job, path, (const uint8_t *) sql, (size_t) n, &spool) && sa_publish(&spool);
     sa_stage_drop(&spool);
-    if (ok && !sa_link_enqueue(job, path)) { unlink(path); ok = 0; }
+    if (ok && !sa_link_enqueue(job, path)) {
+        unlink(path);
+        ok = 0;
+    }
     return ok;
 }
 /* Encoded native persistence tags, borrowed during one publication. */
@@ -1091,7 +1094,7 @@ static int sv_read(struct sa_job *j, az_vocal_snapshot_v1 *out, az_vocal_interva
     return rc;
 }
 int analysis_vocal_intervals(az_analysis_owner lifetime, const az_track_ref *track, az_vocal_snapshot_v1 *out,
-                               az_vocal_interval *intervals, uint32_t capacity) {
+                             az_vocal_interval *intervals, uint32_t capacity) {
     int owner = sa_source_owner_index(lifetime);
     if (!analysis_owner_current(lifetime)) return AZ_STALE;
     if (owner < 0 || !out || st_record_size(out) < sizeof *out ||
@@ -1141,7 +1144,7 @@ static int sv_loaded_read(struct sa_job *j, const struct azn_maps_api *maps, az_
     return rc;
 }
 int analysis_vocal_intervals_loaded(az_analysis_owner lifetime, int deck, uint64_t load, az_vocal_snapshot_v1 *out,
-                                      az_vocal_interval *intervals, uint32_t capacity) {
+                                    az_vocal_interval *intervals, uint32_t capacity) {
     int owner = sa_source_owner_index(lifetime);
     if (!analysis_owner_current(lifetime)) return AZ_STALE;
     if (deck < 0 || deck >= 4 || !load ||
@@ -1237,7 +1240,10 @@ static int sa_links_service(void) {
     for (unsigned i = 0; i < 8; ++i) {
         struct sa_link *link = &sa_links[i];
         if (!link->id) continue;
-        if (!analysis_owner_current(link->owner)) { sa_link_release(link->id); continue; }
+        if (!analysis_owner_current(link->owner)) {
+            sa_link_release(link->id);
+            continue;
+        }
         if (link->outcome != AZ_PENDING) continue;
         link->outcome = sa_link_progress(link);
         pending |= link->outcome == AZ_PENDING;
@@ -1356,7 +1362,7 @@ static int sa_input_grid(const struct sa_job *job, analysis_source_input *input)
     return rc == AZ_NOT_FOUND && !job->loaded ? AZ_OK : rc;
 }
 static int sa_input_copy(az_analysis_owner owner, const analysis_source_request *request,
-                          const struct sa_open_result *lease, analysis_source_input *input) {
+                         const struct sa_open_result *lease, analysis_source_input *input) {
     pthread_mutex_lock(&sa_mutex);
     struct sa_job *job = sa_find_job(sa_source_owner_index(owner), lease->job);
     int rc = AZ_STALE;
@@ -1379,16 +1385,14 @@ static int sa_input_request_valid(const analysis_source_request *request, const 
            !(request->components & ~(AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS));
 }
 int analysis_source_acquire(az_analysis_owner owner, const analysis_source_request *request,
-                             analysis_source_input *input) {
+                            analysis_source_input *input) {
     if (!sa_input_request_valid(request, input)) return AZ_INVALID;
     if (!analysis_owner_current(owner)) return AZ_STALE;
     struct sa_open_result lease = {0};
     int vocals = !!(request->components & AZ_ANALYSIS_VOCALS);
-    int rc = request->loaded ? sa_open_loaded(owner, request->deck, request->load, &lease, vocals) :
-                              sa_open(owner, &request->track, &lease, 0, vocals);
+    int rc = request->loaded ? sa_open_loaded(owner, request->deck, request->load, &lease, vocals) : sa_open(owner, &request->track, &lease, 0, vocals);
     if (rc != AZ_OK && rc != AZ_PENDING) return rc;
-    *input = (analysis_source_input) {.lease = lease.job, .owner = owner, .reader_fd = -1, .bpm = lease.original_bpm,
-                                      .track = lease.track, .deck = (unsigned) request->deck};
+    *input = (analysis_source_input) {.lease = lease.job, .owner = owner, .reader_fd = -1, .bpm = lease.original_bpm, .track = lease.track, .deck = (unsigned) request->deck};
     memcpy(input->audio_path, lease.audio_path, sizeof input->audio_path);
     if (rc == AZ_PENDING) return rc;
     rc = sa_input_copy(owner, request, &lease, input);
@@ -1396,7 +1400,7 @@ int analysis_source_acquire(az_analysis_owner owner, const analysis_source_reque
     return rc;
 }
 int analysis_source_publish(az_analysis_owner owner, const analysis_source_input *input,
-                             const az_analysis_result_v1 *result) {
+                            const az_analysis_result_v1 *result) {
     if (!input || !input->lease) return AZ_INVALID;
     if (!analysis_owner_current(owner) || owner.generation != input->owner.generation) return AZ_STALE;
     return sa_commit_typed(sa_source_owner_index(owner), input->lease, result);

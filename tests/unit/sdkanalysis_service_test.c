@@ -160,14 +160,17 @@ const char *az_analysis_state_dir(void) { return st_test_state; }
 int az_analysis_thread_create(pthread_t *t, const pthread_attr_t *a, void *(*f)(void *), void *x) {
     return pthread_create(t, a, f, x);
 }
-static void sa_put16(uint8_t *p, unsigned n) { p[0] = n >> 8; p[1] = n; }
+static void sa_put16(uint8_t *p, unsigned n) {
+    p[0] = n >> 8;
+    p[1] = n;
+}
 static uint8_t *read_analysis(const char *path, size_t *size, int *failed) {
     uint8_t *bytes = st_read_file(path, size);
     if (!bytes || !sa_framed(bytes, *size)) *failed = 1;
     return bytes;
 }
 static az_analysis_owner owner_at(int slot) {
-    return slot < 0 ? (az_analysis_owner){0} : analysis_owner_get((unsigned) slot);
+    return slot < 0 ? (az_analysis_owner) {0} : analysis_owner_get((unsigned) slot);
 }
 static int acquire_track(int slot, uint32_t components, const az_track_ref *track, analysis_source_input *input) {
     analysis_source_request request = {.components = components, .track = *track};
@@ -251,7 +254,8 @@ static void owner_lifecycle(const az_track_ref *track) {
     pid_t child = fork();
     assert(child >= 0);
     if (!child) {
-        close(ready[0]); close(resume[1]);
+        close(ready[0]);
+        close(resume[1]);
         char mark = 1, bytes[17];
         assert(write(ready[1], &mark, 1) == 1);
         assert(read(resume[0], &mark, 1) == 1);
@@ -260,9 +264,11 @@ static void owner_lifecycle(const az_track_ref *track) {
         int own = open(jobs[0].audio_path, O_RDONLY);
         assert(own >= 0 && read(own, bytes, sizeof bytes) == sizeof bytes);
         assert(!memcmp(bytes, "audio-placeholder", sizeof bytes));
-        close(own); _exit(0);
+        close(own);
+        _exit(0);
     }
-    close(ready[1]); close(resume[0]);
+    close(ready[1]);
+    close(resume[0]);
     char mark;
     assert(read(ready[0], &mark, 1) == 1 && mark);
     analysis_source_retire(analysis_owner_retire(0));
@@ -295,7 +301,8 @@ static void owner_lifecycle(const az_track_ref *track) {
     assert(write(resume[1], "x", 1) == 1);
     int status;
     assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && !WEXITSTATUS(status));
-    close(ready[0]); close(resume[1]);
+    close(ready[0]);
+    close(resume[1]);
     for (unsigned i = 0; i < 4; ++i) input_reader_close(&jobs[i]);
     analysis_source_retire(analysis_owner_retire(0));
     analysis_source_retire(analysis_owner_retire(1));
@@ -333,7 +340,12 @@ static void acquisition_failure_cleanup(const az_track_ref *track) {
     free(saved);
     puts("Analysis input failure: allocation refusal closes opened audio and releases admission capacity");
 }
-struct pending_request { az_analysis_owner owner; az_track_ref track; analysis_source_input input; int result; };
+struct pending_request {
+    az_analysis_owner owner;
+    az_track_ref track;
+    analysis_source_input input;
+    int result;
+};
 static void *acquire_pending_after_replacement(void *opaque) {
     struct pending_request *request = opaque;
     analysis_source_request source = {.components = AZ_DATA_PHRASES, .track = request->track};
@@ -375,10 +387,12 @@ static void pending_admission_lifetime(const az_track_ref *track, int core) {
     if (core) analysis_owner_core_retire();
     else analysis_owner_retire(1);
     analysis_source_retire(replacement);
-    puts(core ? "Core pending-link admission: old generation refused, replacement usable" :
-                "Mod pending-link admission: old generation refused, replacement usable");
+    puts(core ? "Core pending-link admission: old generation refused, replacement usable" : "Mod pending-link admission: old generation refused, replacement usable");
 }
-struct retirement_request { az_analysis_owner owner; int result; };
+struct retirement_request {
+    az_analysis_owner owner;
+    int result;
+};
 static void *acquire_during_retirement(void *opaque) {
     struct retirement_request *request = opaque;
     analysis_source_request source = {.loaded = 1, .deck = 0, .load = 44, .components = AZ_DATA_PHRASES};
@@ -437,7 +451,12 @@ static void core_source_lifetime(const az_analysis_result_v1 *result) {
     analysis_owner_core_retire();
     fixture_released = 0;
 }
-struct publication_request { az_analysis_owner owner; analysis_source_input input; const az_analysis_result_v1 *result; int outcome; };
+struct publication_request {
+    az_analysis_owner owner;
+    analysis_source_input input;
+    const az_analysis_result_v1 *result;
+    int outcome;
+};
 static void *publish_during_retirement(void *opaque) {
     struct publication_request *request = opaque;
     request->outcome = analysis_source_publish(request->owner, &request->input, request->result);
@@ -469,10 +488,12 @@ static void nonblocking_publication_retirement(const az_analysis_result_v1 *resu
     analysis_source_release(&request.input);
     if (!core) analysis_owner_thread_bind(analysis_owner_begin(0));
     fixture_released = 0;
-    puts(core ? "Core publication: retirement during native validation prevents file/native writes" :
-                "Mod publication: retirement during native validation prevents file/native writes");
+    puts(core ? "Core publication: retirement during native validation prevents file/native writes" : "Mod publication: retirement during native validation prevents file/native writes");
 }
-static int refuse_commit(void *unused) { (void) unused; return 1; }
+static int refuse_commit(void *unused) {
+    (void) unused;
+    return 1;
+}
 static void link_failure_case(az_track_ref ref, const az_analysis_result_v1 *result, int later_edit) {
     char database[PATH_MAX], audio[PATH_MAX], statement[1024], spool[PATH_MAX];
     snprintf(database, sizeof database, "%s/sdb1/PIONEER/rekordbox/exportLibrary.db", g_media);
@@ -546,7 +567,8 @@ int main(void) {
     ref.track_id = 10;
     owner_lifecycle(&ref);
     analysis_source_input missing = {0};
-    az_track_ref absent = ref; absent.track_id = 999;
+    az_track_ref absent = ref;
+    absent.track_id = 999;
     assert(acquire_track(0, AZ_DATA_PHRASES, &absent, &missing) == AZ_NOT_FOUND);
     analysis_source_input job = {0};
     assert(acquire_track(-1, AZ_DATA_PHRASES, &ref, &job) == AZ_STALE);
@@ -575,13 +597,12 @@ int main(void) {
     phrase[35] = 1;
     phrase[37] = 1;
     az_beat baseline_beats[2] = {{.time_s = 0, .bpm = 120, .beat_in_bar = 1},
-                                  {.time_s = 0.5, .bpm = 120, .beat_in_bar = 2}};
+                                 {.time_s = 0.5, .bpm = 120, .beat_in_bar = 2}};
     az_analysis_phrase_v1 baseline_phrase = {.start_beat = 1, .kind = 1};
-    az_analysis_result_v1 baseline_result = {.size = sizeof baseline_result, .version = AZ_DATA_VERSION,
-        .source_rate = 44100, .source_frames = 44100, .beats = baseline_beats, .beat_count = 2,
-        .phrases = {.mood = 1, .end_beat = 2, .count = 1, .entries = &baseline_phrase}};
+    az_analysis_result_v1 baseline_result = {.size = sizeof baseline_result, .version = AZ_DATA_VERSION, .source_rate = 44100, .source_frames = 44100, .beats = baseline_beats, .beat_count = 2, .phrases = {.mood = 1, .end_beat = 2, .count = 1, .entries = &baseline_phrase}};
     az_analysis_result_v1 loaded_result = baseline_result;
-    loaded_result.beats = NULL; loaded_result.beat_count = 0;
+    loaded_result.beats = NULL;
+    loaded_result.beat_count = 0;
     assert(publish_result(-1, &job, &baseline_result) == AZ_STALE);
     /* A mutated audio file invalidates the lease without writing either container. */
     analysis_write(path, "changed-audio-placeholder", 25);
@@ -608,7 +629,7 @@ int main(void) {
     nonblocking_retirement(1);
     acquisition_failure_cleanup(&ref);
     az_analysis_result_v1 short_result = {.size = 4, .version = AZ_DATA_VERSION};
-    assert(publish_result(0, &(analysis_source_input){.lease = 1, .owner = owner_at(0)}, &short_result) == AZ_INVALID);
+    assert(publish_result(0, &(analysis_source_input) {.lease = 1, .owner = owner_at(0)}, &short_result) == AZ_INVALID);
     /* A row without an analysis location gets complete files and a conditional
      * native-spool update. Apostrophes in audio paths remain literal SQL data. */
     snprintf(path, sizeof path, "%s/sdb1/PIONEER/rekordbox/exportLibrary.db", g_media);
@@ -623,7 +644,7 @@ int main(void) {
     analysis_source_input saved_link = job;
     pending_admission_lifetime(&ref, 0);
     pending_admission_lifetime(&ref, 1);
-    job = (analysis_source_input){0};
+    job = (analysis_source_input) {0};
     int reopened;
     do { reopened = acquire_track(0, AZ_DATA_PHRASES, &ref, &job); } while (reopened == AZ_BUSY);
     assert(reopened == AZ_PENDING && job.lease);
@@ -727,7 +748,7 @@ int main(void) {
     assert(acquire_loaded(0, AZ_DATA_PHRASES, 0, 44, &job) == AZ_OK);
     assert(!job.track.track_id && !job.track.source_id);
     analysis_source_input streaming_job = job;
-    job = (analysis_source_input){0};
+    job = (analysis_source_input) {0};
     assert(acquire_loaded(0, AZ_DATA_PHRASES, 0, 44, &job) == AZ_BUSY);
     fixture_source_ready = 0;
     assert(publish_result(0, &streaming_job, &loaded_result) == AZ_STALE);
@@ -773,10 +794,7 @@ int main(void) {
     memset(pvdi + 24 + 20, 4, 2);
     az_vocal_frame_v1 vocal_frames[22] = {0};
     for (unsigned i = 0; i < 22; i++) vocal_frames[i].activity = pvdi[24 + i];
-    az_analysis_result_v1 vocal_result = {.size = sizeof vocal_result, .version = AZ_DATA_VERSION,
-        .source_rate = 44100, .source_frames = 44100,
-        .vocals = {.sample_rate = 22050, .hop_samples = 1024, .method = AZ_VOCAL_LSTM,
-                   .count = 22, .frames = vocal_frames}};
+    az_analysis_result_v1 vocal_result = {.size = sizeof vocal_result, .version = AZ_DATA_VERSION, .source_rate = 44100, .source_frames = 44100, .vocals = {.sample_rate = 22050, .hop_samples = 1024, .method = AZ_VOCAL_LSTM, .count = 22, .frames = vocal_frames}};
     char vocals_path[1024], saved_dat[1024], saved_ext[1024];
     snprintf(vocals_path, sizeof vocals_path, "%s/sdb1/DJ.2EX", g_media);
     snprintf(saved_dat, sizeof saved_dat, "%s/sdb1/DJ.DAT", g_media);

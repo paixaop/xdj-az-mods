@@ -46,7 +46,10 @@ int __wrap_open(const char *path, int flags, ...) {
     }
     mode_t mode = 0;
     if (flags & O_CREAT) {
-        va_list args; va_start(args, flags); mode = va_arg(args, int); va_end(args);
+        va_list args;
+        va_start(args, flags);
+        mode = va_arg(args, int);
+        va_end(args);
     }
     return __real_open(path, flags, mode);
 }
@@ -911,7 +914,10 @@ int main(int argc, char **argv) {
     assert(sdk_track_resolve("mod-b", 0, 10, &a) == AZ_INVALID);
     assert(sdk_track_resolve("mod-a", 0, 10, &a) == AZ_OK && sdk_track_resolve("mod-a", 1, 10, &b) == AZ_OK);
     assert(a.source_id != b.source_id && !st_ref_equal(&a, &b));
-    if (st_test_real_worker) { stored_worker_roundtrip(&a); return 0; }
+    if (st_test_real_worker) {
+        stored_worker_roundtrip(&a);
+        return 0;
+    }
     stored_service_lifetime(&a);
     uint64_t ticket;
     assert(sdk_track_request("mod-a", &a, 31, &ticket) == AZ_OK);

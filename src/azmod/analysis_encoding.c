@@ -149,7 +149,7 @@ uint8_t *sa_encode_native(const az_analysis_result_v1 *r, struct sa_tags *tags) 
     tags->pn = r->phrases.count ? 32 + r->phrases.count * 24 : 0;
     tags->vn = r->vocals.count ? 24 + r->vocals.count : 0;
     tags->rate = r->source_rate;
-    tags->frames = (uint32_t)r->source_frames;
+    tags->frames = (uint32_t) r->source_frames;
     tags->method = r->vocals.method;
     uint8_t *bytes = calloc(tags->gn + tags->pn + tags->vn, 1);
     if (!bytes) return NULL;

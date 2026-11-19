@@ -19,7 +19,7 @@ track reference with physical USB identity, read-only library resolution and fil
 signatures. Beatport sources are completed/decrypted downloads observed through
 the native source provider. Native Track resources remain private. The owned input
 uses an already opened read-only descriptor and an opaque owner generation;
-retirement revokes publication without invalidating that locator or independent
+retirement revokes new publication admission without invalidating that locator or independent
 open readers. The runtime releases the input descriptor only after every decoder
 child has joined, so a delayed child cannot open a reused descriptor number.
 Native providers and publication remain gated by their firmware instruction and
@@ -69,9 +69,13 @@ validate the current audio-keyed cache without creating or evicting it.
 Core automatic work and each mod lifetime have distinct owner identities. SDK
 workers must retain the generation inherited from their tracked worker; an old or
 unqualified worker cannot reopen admission after re-enable. Retirement revokes
-admission/publication immediately, signals asynchronous cleanup, and never waits
-for a mod tick. Inputs remain owned until all engine children join. Caller-owned
-result/interval copies survive request release and owner retirement.
+new admission, signals asynchronous cleanup, and never waits for a mod tick.
+Publication rechecks that same owner after blocking source/native validation;
+passing this final check admits the operation. Retirement after admission cannot
+roll back file or native writes already in progress. Successfully published
+components retain the existing partial-publication semantics. Inputs remain owned
+until all engine children join. Caller-owned result/interval copies survive
+request release and owner retirement.
 
 A qualified source with every requested component already populated yields
 COMPLETE with `AZ_NOT_FOUND`, indicating no new result array. Missing input/grid,

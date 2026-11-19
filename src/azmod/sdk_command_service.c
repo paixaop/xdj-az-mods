@@ -575,8 +575,8 @@ int sdk_exit_submit(int owner, const az_command_request *r, az_command_result *o
     return sdk_exit_submit_common(owner, r, NULL, NULL, out);
 }
 int sdk_exit_submit_async(int owner, const az_command_request *r,
-                                                         az_command_completion_fn callback, void *user,
-                                                         az_command_result *out) {
+                          az_command_completion_fn callback, void *user,
+                          az_command_result *out) {
     return sdk_exit_submit_common(owner, r, callback, user, out);
 }
 

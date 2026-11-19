@@ -28,8 +28,7 @@ static int slip_diagnostic_install(uintptr_t address, void *replacement, void **
 static void slip_diagnostic_at_start(void) {
     if (access("/home/root/settings/azmod.slip-capture.on", F_OK) != 0) return;
     static const struct az_slip_diagnostic_host host = {
-        slip_diagnostic_log, slip_diagnostic_worker, slip_diagnostic_install
-    };
+        slip_diagnostic_log, slip_diagnostic_worker, slip_diagnostic_install};
     const char *tag = "";
     if (g_ep147_build == EPB_V130) tag = "ep147-79d43e5de779fc1b";
     if (g_ep147_build == EPB_V200) tag = "ep147-9e9454e357389ece";

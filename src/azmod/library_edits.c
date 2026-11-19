@@ -3133,7 +3133,8 @@ static int ls_apply_verify(struct ls_apply *s) {
     if (rc || !statement) return rc ? rc : -1;
     int step = g_sq.step(statement);
     rc = g_sq.finalize(statement);
-    return rc ? rc : step == 100 ? 0 : -1;
+    return rc ? rc : step == 100 ? 0
+                                 : -1;
 }
 static void ls_apply_art(struct ls_apply *s) {
     const char *cut = strstr(s->path, "/PIONEER/azspool/");

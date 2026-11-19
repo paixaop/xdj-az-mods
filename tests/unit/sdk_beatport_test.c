@@ -32,7 +32,7 @@ static cm_mod *cm_self(const char *id, uintptr_t ra, const char *op) {
     return id && !strcmp(id, "beatport-remember") ? &g_cm[0] : id && !strcmp(id, "other") ? &g_cm[1]
                                                                                           : NULL;
 }
-#define CM_RA() ((uintptr_t)0)
+#define CM_RA() ((uintptr_t) 0)
 static int message_thread = 1;
 static long fake_now;
 static int on_msg_thread(void) { return message_thread; }

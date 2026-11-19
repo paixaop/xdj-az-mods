@@ -75,7 +75,7 @@ static struct ds_gui_record ds_master_seed(const struct ds_master_state *state) 
     int valid = revision && revision != UINT64_MAX && revision == state->revision &&
                 state->deck >= 0 && state->observed;
     return (struct ds_gui_record) {.kind = DS_GUI_MASTER, .revision = revision, .observed = valid ? state->observed : ds_now(), .master = valid ? state->deck : -1, .availability = valid ? AZ_AVAIL_READY : revision ? AZ_AVAIL_STALE
-                                                                                                                                                                                                                                         : AZ_AVAIL_LOADING};
+                                                                                                                                                                                                                      : AZ_AVAIL_LOADING};
 }
 static void ds_master_apply(const struct ds_gui_record *r, int gap) {
     static int previous[4] = {-99, -99, -99, -99};

@@ -1586,16 +1586,16 @@ int az_analysis_thread_create(pthread_t *thread, const pthread_attr_t *attribute
 #ifndef SDK_PROC_IMPL
 static int sdk_command_target(int deck, uint64_t load, az_command_target_v1 *out) {
     static const struct az_command_target_source source = {
-        sd_deck_snapshot_v1, sdk_native_cues, sdk_data_capabilities
-    };
+        sd_deck_snapshot_v1, sdk_native_cues, sdk_data_capabilities};
     struct timespec time;
     if (clock_gettime(CLOCK_MONOTONIC, &time)) return AZ_FAILED;
-    uint64_t now = (uint64_t)time.tv_sec * UINT64_C(1000000000) + time.tv_nsec;
+    uint64_t now = (uint64_t) time.tv_sec * UINT64_C(1000000000) + time.tv_nsec;
     return az_command_target_read(&source, deck, load, now, out);
 }
 #endif
 static const az_observation_v1 g_sdk_observation = {
-    .abi = AZ_OBSERVATION_ABI, .size = sizeof(az_observation_v1),
+    .abi = AZ_OBSERVATION_ABI,
+    .size = sizeof(az_observation_v1),
 #ifndef SDK_PROC_IMPL
     .data_capabilities = sdk_data_capabilities,
     .deck_snapshot = sd_deck_snapshot_v1,
@@ -1606,7 +1606,8 @@ static const az_observation_v1 g_sdk_observation = {
     .deck_status_release = sdk_deck_status_release,
 };
 static const az_commands_v1 g_sdk_command_service = {
-    .abi = AZ_COMMANDS_ABI, .size = sizeof(az_commands_v1),
+    .abi = AZ_COMMANDS_ABI,
+    .size = sizeof(az_commands_v1),
 #ifndef SDK_PROC_IMPL
     .command_submit = sdk_command_submit,
     .command_poll = sdk_command_poll,
