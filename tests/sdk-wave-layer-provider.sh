@@ -17,11 +17,11 @@ tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer);;
 *) echo 'SAN must be plain, asan or tsan' >&2;exit 2;;
 esac
 command=("${HOST_CC:-gcc}" "${flags[@]}" '-DLIB_INC="sdk_lib.c"'
-         -Itests/unit -Isrc/azmod tests/unit/sdktrack_test.c src/azmod/sdk_command_engine.c src/azmod/track_storage.c -lsqlite3 -ldl -lm -o "$task_tmp/provider")
+         -Itests/unit -Isrc/azmod tests/unit/sdktrack_test.c src/azmod/sdk_command_engine.c src/azmod/sdk_command_service.c src/azmod/track_service.c src/azmod/track_storage.c -Wl,--wrap=open,--wrap=pread -lsqlite3 -ldl -lm -o "$task_tmp/provider")
 python3 - "$task_tmp/command.json" "${command[@]}" <<'PY'
 from pathlib import Path
 import hashlib,json,sys
-files=['tests/unit/sdktrack_test.c','tests/sdk-wave-layer-provider.sh','src/azmod/sdk_track.c', 'src/azmod/track_storage.c', 'src/azmod/track_storage.h', 'src/azmod/library_sql.h',
+files=['tests/unit/sdktrack_test.c','tests/sdk-wave-layer-provider.sh','src/azmod/sdk_track.c', 'src/azmod/track_service.c', 'src/azmod/track_service.h', 'src/azmod/track_storage.c', 'src/azmod/track_storage.h', 'src/azmod/library_sql.h',
        'src/azmod/sdk_wave_provider.h','src/azmod/sdk_waveform.h','src/azmod/sdk_data_engine.h',
        'src/azmod/azmod-mod.h']
 Path(sys.argv[1]).write_text(json.dumps({'argv':sys.argv[2:],'sha256':{f:hashlib.sha256(Path(f).read_bytes()).hexdigest()for f in files},'scope':'real file-provider functions; disposable SQLite fixtures, no firmware/source-load/native controls'},indent=2)+'\n')

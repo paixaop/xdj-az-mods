@@ -18,25 +18,37 @@
 #include <pthread.h>
 #include <errno.h>
 #include <signal.h>
+#include "../../src/common/azsources.h"
 /* Fail an existing file open without depending on test-user/root permissions. */
 static const char *st_test_open_path;
 static int st_test_open_error;
 static int st_test_count_reads;
 static size_t st_test_read_bytes, st_test_largest_read;
-static ssize_t st_test_pread(int fd, void *out, size_t n, off_t offset) {
-    ssize_t rc = pread(fd, out, n, offset);
+#ifdef __APPLE__
+#define __real_pread pread
+#define __real_open open
+#endif
+ssize_t __real_pread(int, void *, size_t, off_t);
+ssize_t __wrap_pread(int fd, void *out, size_t n, off_t offset) {
+    ssize_t rc = __real_pread(fd, out, n, offset);
     if (st_test_count_reads) {
         if (n > st_test_largest_read) st_test_largest_read = n;
         if (rc > 0) st_test_read_bytes += (size_t) rc;
     }
     return rc;
 }
-static int st_test_open(const char *path, int flags) {
+#include <stdarg.h>
+int __real_open(const char *, int, ...);
+int __wrap_open(const char *path, int flags, ...) {
     if (st_test_open_path && !strcmp(path, st_test_open_path)) {
         errno = st_test_open_error;
         return -1;
     }
-    return open(path, flags);
+    mode_t mode = 0;
+    if (flags & O_CREAT) {
+        va_list args; va_start(args, flags); mode = va_arg(args, int); va_end(args);
+    }
+    return __real_open(path, flags, mode);
 }
 static char st_test_mountinfo[PATH_MAX];
 #ifdef __APPLE__
@@ -49,13 +61,15 @@ static int st_test_thread_name(pthread_t thread, const char *name) {
 #endif
 #define ST_MOUNTINFO st_test_mountinfo
 #define g_cm (&g_mod)
-#define az_thread_create pthread_create
-#define open st_test_open
-#define pread st_test_pread
-#include "sdk_command_service.c"
+static int st_test_real_worker;
+static int st_test_start_worker(pthread_t *t, const pthread_attr_t *a, void *(*f)(void *), void *x) {
+    return st_test_real_worker ? pthread_create(t, a, f, x) : 0; /* The fixture drives the actual bounded worker pass explicitly. */
+}
+#define az_thread_create st_test_start_worker
 #include "sdk_track.c"
-#undef pread
-#undef open
+#include "sdk_wave_provider.h"
+#undef az_thread_create
+#define az_thread_create pthread_create
 #ifdef __APPLE__
 #undef st_mtim
 #undef pthread_setname_np
@@ -168,14 +182,14 @@ static void provider_bindings(const az_track_ref *ref) {
         uint64_t ticket;
         assert((wave ? sdk_waveform_request("mod-a", ref, &query, &ticket)
                      : sdk_track_request("mod-a", ref, AZ_DATA_GRID, &ticket)) == AZ_OK);
-        st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
+        track_service_work();
         const az_track_snapshot *track = NULL;
         const az_wave_snapshot *window = NULL;
         assert((wave ? sdk_waveform_acquire("mod-a", ticket, &window)
                      : sdk_track_acquire("mod-a", ticket, &track)) == AZ_OK);
         assert(wave ? window->columns[0] == 0x11 : st_test_seconds(track->beats[1].time_s, .5, 1000));
         assert(!unlink(alias) && !symlink(second, alias));
-        st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
+        track_service_work();
         const az_track_snapshot *new_track = NULL;
         const az_wave_snapshot *new_window = NULL;
         CHECK("retargeting an analysis symlink invalidates its snapshot",
@@ -186,7 +200,7 @@ static void provider_bindings(const az_track_ref *ref) {
         assert(sdk_track_release("mod-a", ticket) == AZ_OK);
         assert((wave ? sdk_waveform_request("mod-a", ref, &query, &ticket)
                      : sdk_track_request("mod-a", ref, AZ_DATA_GRID, &ticket)) == AZ_OK);
-        st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
+        track_service_work();
         assert((wave ? sdk_waveform_acquire("mod-a", ticket, &new_window)
                      : sdk_track_acquire("mod-a", ticket, &new_track)) == AZ_OK);
         CHECK("a new request reads the replacement analysis target",
@@ -234,7 +248,7 @@ static void provider_paths(const az_track_ref *ref) {
     /* An in-source database symlink is allowed, but its real sidecars still count. */
     assert(!rename(dbname, backup) && !symlink("actual%23#?.db", dbname));
     st_data_init(data);
-    CHECK("in-source database symlink resolves", st_disk_load(ref, AZ_DATA_METADATA, data, NULL) == AZ_OK);
+    CHECK("in-source database symlink resolves", track_service_disk_load(ref, AZ_DATA_METADATA, data, NULL) == AZ_OK);
     FILE *f;
     const char *suffixes[] = {"-wal", "-journal"};
     for (unsigned i = 0; i < 2; i++) {
@@ -242,10 +256,10 @@ static void provider_paths(const az_track_ref *ref) {
         f = fopen(wal, "wb");
         assert(f && fputs("committed sidecar", f) >= 0 && !fclose(f));
         st_data_init(data);
-        CHECK("database symlink cannot hide a nonempty sidecar", st_disk_load(ref, AZ_DATA_METADATA, data, NULL) == AZ_STALE);
+        CHECK("database symlink cannot hide a nonempty sidecar", track_service_disk_load(ref, AZ_DATA_METADATA, data, NULL) == AZ_STALE);
         assert(!unlink(wal));
         st_data_init(data);
-        CHECK("quiet symlink target is readable again", st_disk_load(ref, AZ_DATA_METADATA, data, NULL) == AZ_OK);
+        CHECK("quiet symlink target is readable again", track_service_disk_load(ref, AZ_DATA_METADATA, data, NULL) == AZ_OK);
     }
     assert(!unlink(dbname) && !rename(backup, dbname));
 
@@ -279,12 +293,12 @@ static void provider_paths(const az_track_ref *ref) {
     f = fopen(analysis, "wb");
     assert(f && fwrite(empty, 1, sizeof empty, f) == sizeof empty && !fclose(f));
     st_data_init(data);
-    CHECK("oversized analysis paths cannot select their truncated prefix", st_disk_load(ref, AZ_DATA_GRID, data, NULL) == AZ_LIMIT);
+    CHECK("oversized analysis paths cannot select their truncated prefix", track_service_disk_load(ref, AZ_DATA_GRID, data, NULL) == AZ_LIMIT);
     st_data_init(data);
     data->wave_query = (az_wave_query) {sizeof(az_wave_query), 1, AZ_WAVE_PWV3_MONO, 0, 1, 0};
-    CHECK("detail requests reject oversized analysis paths", st_disk_load(ref, ST_DETAIL, data, NULL) == AZ_LIMIT);
+    CHECK("detail requests reject oversized analysis paths", track_service_disk_load(ref, ST_DETAIL, data, NULL) == AZ_LIMIT);
     st_data_init(data);
-    CHECK("metadata-only requests do not depend on analysis path limits", st_disk_load(ref, AZ_DATA_METADATA, data, NULL) == AZ_OK);
+    CHECK("metadata-only requests do not depend on analysis path limits", track_service_disk_load(ref, AZ_DATA_METADATA, data, NULL) == AZ_OK);
     assert(!unlink(analysis));
     assert(!sqlite3_open(dbname, &db));
     sql(db, "UPDATE content SET analysisDataFilePath='/new/nested/analysis.DAT' WHERE content_id=10");
@@ -296,7 +310,7 @@ static void provider_paths(const az_track_ref *ref) {
           st_source_path(source, "/new/nested/analysis.DAT", missing) && !strcmp(missing, analysis));
     uint64_t ticket;
     assert(sdk_track_request("mod-a", ref, AZ_DATA_GRID, &ticket) == AZ_OK);
-    st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
+    track_service_work();
     const az_track_snapshot *view;
     assert(sdk_track_acquire("mod-a", ticket, &view) == AZ_OK && view->grid_info.availability == AZ_AVAIL_UNSUPPORTED);
     snprintf(analysis, sizeof analysis, "%s/sdb1/new", g_media);
@@ -314,11 +328,11 @@ static void provider_paths(const az_track_ref *ref) {
     };
     f = fopen(analysis, "wb");
     assert(f && fwrite(grid, 1, sizeof grid, f) == sizeof grid && !fclose(f));
-    st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
+    track_service_work();
     CHECK("creating missing analysis directories invalidates cached absence", sdk_track_acquire("mod-a", ticket, &view) == AZ_STALE);
     assert(sdk_track_release("mod-a", ticket) == AZ_OK);
     assert(sdk_track_request("mod-a", ref, AZ_DATA_GRID, &ticket) == AZ_OK);
-    st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
+    track_service_work();
     assert(sdk_track_acquire("mod-a", ticket, &view) == AZ_OK);
     CHECK("fresh request sees the newly created beat grid", view->grid_info.availability == AZ_AVAIL_READY && view->beat_count == 2 && st_test_seconds(view->beats[1].time_s, .5, 1000));
     assert(sdk_track_release("mod-a", ticket) == AZ_OK);
@@ -360,7 +374,7 @@ static void provider_previews(const az_track_ref *ref) {
         az_wave_query query = {sizeof query, AZ_DATA_VERSION, encoding, 1, AZ_WAVE_WINDOW_MAX, 0};
         uint64_t ticket;
         assert(sdk_waveform_request("mod-a", ref, &query, &ticket) == AZ_OK);
-        st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
+        track_service_work();
         const az_wave_snapshot *view = NULL;
         int rc = sdk_waveform_acquire("mod-a", ticket, &view);
         CHECK("PWV4/PWV6 previews load from the correct EXT/2EX sibling", rc == AZ_OK && view);
@@ -378,7 +392,7 @@ static void provider_previews(const az_track_ref *ref) {
         az_wave_query query = {sizeof query, AZ_DATA_VERSION, AZ_WAVE_PWV6_PREVIEW, outside[i], 1, 0};
         uint64_t ticket;
         assert(sdk_waveform_request("mod-a", ref, &query, &ticket) == AZ_OK);
-        st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
+        track_service_work();
         const az_wave_snapshot *view = NULL;
         CHECK("preview out-of-range first column fails without a snapshot", sdk_waveform_acquire("mod-a", ticket, &view) == AZ_INVALID && !view);
         assert(sdk_track_release("mod-a", ticket) == AZ_OK);
@@ -389,7 +403,7 @@ static void provider_previews(const az_track_ref *ref) {
     az_wave_query query = {sizeof query, AZ_DATA_VERSION, AZ_WAVE_PWV6_PREVIEW, 0, 4, 0};
     uint64_t ticket;
     assert(sdk_waveform_request("mod-a", ref, &query, &ticket) == AZ_OK);
-    st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
+    track_service_work();
     const az_wave_snapshot *view = NULL;
     CHECK("preview with missing DB duration remains unsupported", sdk_waveform_acquire("mod-a", ticket, &view) == AZ_UNSUPPORTED && !view);
     assert(sdk_track_release("mod-a", ticket) == AZ_OK);
@@ -400,7 +414,7 @@ static void provider_previews(const az_track_ref *ref) {
     assert(!unlink(path));
     query.column_count = 1;
     assert(sdk_waveform_request("mod-a", ref, &query, &ticket) == AZ_OK);
-    st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
+    track_service_work();
     view = NULL;
     CHECK("missing 2EX does not substitute EXT for a PWV6 preview", sdk_waveform_acquire("mod-a", ticket, &view) == AZ_UNSUPPORTED && !view);
     assert(sdk_track_release("mod-a", ticket) == AZ_OK);
@@ -442,16 +456,16 @@ static void provider_mono_previews(const az_track_ref *ref) {
             az_wave_query query = {sizeof query, 1, encoding, 1, AZ_WAVE_WINDOW_MAX, 0};
             /* Exercise every owner through the same production queue/provider,
              * including immutable cache sharing, independently of deck state. */
-            assert(st_request_with_wave(&g_st, deck_owner, ref, ST_DETAIL, &query, &ticket) == AZ_OK);
-            st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
+            assert(track_service_wave_request(deck_owner, ref, &query, &ticket) == AZ_OK);
+            track_service_work();
             const az_wave_snapshot *view = NULL;
-            int rc = st_wave_acquire(&g_st, deck_owner, ticket, &view);
+            int rc = track_service_wave_acquire(deck_owner, ticket, &view);
             CHECK("PWV2/PWAV public range selects DAT rather than EXT", rc == AZ_OK && view);
             if (rc == AZ_OK && view) {
                 CHECK("mono preview preserves exact byte columns and file provenance", view->encoding == encoding && view->column_count == 4 && view->total_columns == 5 && view->bytes_per_column == 1 && view->columns[0] == encoding * 16 + 1 && view->info.provenance == AZ_PROV_FILE);
                 CHECK("mono preview uses metadata duration rather than detail clock", st_test_seconds(view->start_s, 60.2, 5) && st_test_seconds(view->seconds_per_column, 60.2, 5));
             }
-            assert(st_release(&g_st, deck_owner, ticket, 0) == AZ_OK);
+            assert(track_service_release(deck_owner, ticket, 0) == AZ_OK);
         }
     }
     assert(!unlink(path) && !unlink(decoy));
@@ -514,7 +528,7 @@ static void resolution_mutate(void) {
 }
 static int resolution_metadata(const az_track_ref *ref, struct st_data *data) {
     st_data_init(data);
-    return st_disk_load(ref, AZ_DATA_METADATA, data, NULL);
+    return track_service_disk_load(ref, AZ_DATA_METADATA, data, NULL);
 }
 /* Distinct actual loads bypass the waveform snapshot cache. Only source-bound
  * metadata/analysis resolution may be reused; every window still reads its file. */
@@ -558,7 +572,7 @@ static void provider_resolution_reuse(az_track_ref *ref, const az_track_ref *oth
         st_data_init(data);
         uint32_t encoding = i < 2 ? AZ_WAVE_PWV7_BANDS : AZ_WAVE_PWV7_LAYERED_RAW;
         data->wave_query = (az_wave_query) {sizeof(az_wave_query), AZ_DATA_VERSION, encoding, i, 2, 0};
-        int rc = st_disk_load(ref, ST_DETAIL, data, NULL);
+        int rc = track_service_disk_load(ref, ST_DETAIL, data, NULL);
         CHECK("resolution reuse still reads each actual raw/derived window", rc == AZ_OK &&
                                                                                  data->wave_view.first_column == i && data->wave_view.column_count == 2 &&
                                                                                  data->wave_view.encoding == encoding && data->detail[encoding == AZ_WAVE_PWV7_BANDS ? 0 : 2] == 200 + i);
@@ -588,7 +602,7 @@ static void provider_resolution_reuse(az_track_ref *ref, const az_track_ref *oth
     f = fopen(sidecar, "wb");
     assert(f && fputs("pending fixture transaction", f) >= 0 && !fclose(f));
     before = resolution_opens;
-    CHECK("stored freshness observes a nonquiet database", !st_disk_fresh(ref, data, NULL));
+    CHECK("stored freshness observes a nonquiet database", !track_service_disk_fresh(ref, data, NULL));
     assert(!unlink(sidecar));
     CHECK("freshness-observed nonquiet state retires its matching locator", resolution_metadata(ref, data) == AZ_OK && resolution_opens == before + 1);
     f = fopen(sidecar, "wb");
@@ -624,7 +638,7 @@ static void provider_resolution_reuse(az_track_ref *ref, const az_track_ref *oth
     uint64_t signature = st_disk_sig(database);
     assert(!rename(database, backup) && !symlink("resolution-target.db", database));
     assert(st_disk_sig(database) == signature);
-    CHECK("canonical DB retarget invalidates a held stored snapshot", !st_disk_fresh(ref, held, NULL));
+    CHECK("canonical DB retarget invalidates a held stored snapshot", !track_service_disk_fresh(ref, held, NULL));
     before = resolution_opens;
     CHECK("same inode through a different canonical DB path is re-resolved", resolution_metadata(ref, data) == AZ_OK &&
                                                                                  !strcmp(data->files[0], backup) && resolution_opens == before + 1);
@@ -734,14 +748,14 @@ static void provider_layered_detail(const az_track_ref *ref) {
     uint64_t tickets[4] = {0};
     const az_wave_snapshot *views[4] = {NULL};
     for (unsigned owner = 0; owner < 4; ++owner) {
-        int rc = owner ? st_request_with_wave(&g_st, owner, ref, ST_DETAIL, &query, &tickets[owner])
+        int rc = owner ? track_service_wave_request(owner, ref, &query, &tickets[owner])
                        : sdk_waveform_request("mod-a", ref, &query, &tickets[owner]);
         if (rc != AZ_OK) {
             fprintf(stderr, "FAIL layered-provider: missing derived layered waveform request (owner=%u rc=%d)\n", owner, rc);
             abort();
         }
-        st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
-        rc = st_wave_acquire(&g_st, owner, tickets[owner], &views[owner]);
+        track_service_work();
+        rc = track_service_wave_acquire(owner, tickets[owner], &views[owner]);
         CHECK("layered request selects actual 2EX PWV7 rather than valid DAT/EXT decoys", rc == AZ_OK && views[owner]);
         if (rc != AZ_OK || !views[owner]) continue;
         const az_wave_snapshot *v = views[owner];
@@ -753,23 +767,23 @@ static void provider_layered_detail(const az_track_ref *ref) {
     uint64_t raw_ticket;
     query.encoding = AZ_WAVE_PWV7_BANDS;
     assert(sdk_waveform_request("mod-a", ref, &query, &raw_ticket) == AZ_OK);
-    st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
+    track_service_work();
     const az_wave_snapshot *raw_view = NULL;
     CHECK("existing raw PWV7 remains byte-for-byte file data", sdk_waveform_acquire("mod-a", raw_ticket, &raw_view) == AZ_OK && raw_view && raw_view->encoding == AZ_WAVE_PWV7_BANDS && raw_view->data_bytes == 12 && raw_view->bytes_per_column == 3 && raw_view->info.provenance == AZ_PROV_FILE && !memcmp(raw_view->columns, raw + 3, 12));
     f = fopen(ext, "ab");
     assert(f && fputc(0, f) == 0 && !fclose(f));
-    st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
+    track_service_work();
     for (unsigned owner = 0; owner < 4; ++owner) {
         const az_wave_snapshot *v = NULL;
-        CHECK("changing EXT decoy cannot invalidate a2EX layered snapshot", st_wave_acquire(&g_st, owner, tickets[owner], &v) == AZ_OK && v == views[owner]);
+        CHECK("changing EXT decoy cannot invalidate a2EX layered snapshot", track_service_wave_acquire(owner, tickets[owner], &v) == AZ_OK && v == views[owner]);
     }
     f = fopen(path, "ab");
     assert(f && fputc(0, f) == 0 && !fclose(f));
-    st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
+    track_service_work();
     for (unsigned owner = 0; owner < 4; ++owner) {
         const az_wave_snapshot *v = NULL;
-        CHECK("changing actual2EX invalidates every caller without overwriting held layered bytes", st_wave_acquire(&g_st, owner, tickets[owner], &v) == AZ_STALE && !v && views[owner] && !memcmp(views[owner]->columns, expected, sizeof expected));
-        assert(st_release(&g_st, owner, tickets[owner], 0) == AZ_OK);
+        CHECK("changing actual2EX invalidates every caller without overwriting held layered bytes", track_service_wave_acquire(owner, tickets[owner], &v) == AZ_STALE && !v && views[owner] && !memcmp(views[owner]->columns, expected, sizeof expected));
+        assert(track_service_release(owner, tickets[owner], 0) == AZ_OK);
     }
     assert(sdk_track_release("mod-a", raw_ticket) == AZ_OK);
     /* Check the bounded streaming transform on a file much larger than the
@@ -810,7 +824,50 @@ static void provider_layered_detail(const az_track_ref *ref) {
     sql(db, "UPDATE content SET analysisDataFilePath='/analysis.DAT' WHERE content_id=10");
     assert(!sqlite3_close(db));
 }
-int main(void) {
+static void stored_service_lifetime(const az_track_ref *ref) {
+    track_service_owner_init(5);
+    uint64_t tickets[4], refused = 77, before;
+    assert(track_service_event_head(NULL) == AZ_INVALID);
+    assert(track_service_event_head(&before) == AZ_OK);
+    for (unsigned i = 0; i < 4; ++i)
+        assert(track_service_request(5, ref, AZ_DATA_METADATA, &tickets[i]) == AZ_OK);
+    track_service_work();
+    const az_track_snapshot *view = NULL;
+    assert(track_service_acquire(5, tickets[0], &view) == AZ_OK);
+    char title[sizeof view->metadata.title];
+    memcpy(title, view->metadata.title, sizeof title);
+    track_service_owner_retire(5);
+    assert(track_service_owner_retired(5));
+    assert(track_service_request(5, ref, AZ_DATA_METADATA, &refused) == AZ_STALE && refused == 77);
+    track_service_work();
+    assert(!memcmp(title, view->metadata.title, sizeof title));
+    assert(track_service_release(5, tickets[0], 0) == AZ_OK);
+    track_service_owner_init(5);
+    assert(!track_service_owner_retired(5));
+    assert(track_service_request(5, ref, AZ_DATA_METADATA, &refused) == AZ_OK && refused != tickets[0]);
+    assert(track_service_acquire(5, tickets[0], &view) == AZ_STALE);
+    assert(track_service_release(5, refused, 0) == AZ_OK);
+    uint64_t after;
+    assert(track_service_event_head(&after) == AZ_OK && after > before);
+}
+static void stored_worker_roundtrip(const az_track_ref *ref) {
+    uint64_t ticket;
+    assert(track_service_request(6, ref, AZ_DATA_METADATA, &ticket) == AZ_OK);
+    track_service_wake();
+    const az_track_snapshot *view = NULL;
+    int rc = AZ_PENDING;
+    for (unsigned n = 0; n < 2000 && (rc == AZ_PENDING || rc == AZ_BUSY); ++n) {
+        rc = track_service_acquire(6, ticket, &view);
+        if (rc != AZ_OK) usleep(1000);
+    }
+    assert(rc == AZ_OK && view && !strcmp(view->metadata.title, "Track Ten"));
+    track_service_owner_retire(6);
+    assert(!strcmp(view->metadata.title, "Track Ten"));
+    assert(track_service_release(6, ticket, 0) == AZ_OK);
+    puts("Stored data compiled worker: asynchronous request, immutable acquire and late release passed");
+}
+int main(int argc, char **argv) {
+    st_test_real_worker = argc > 1 && !strcmp(argv[1], "worker");
     /* The FIFO watchdog writes its failure from a signal handler. Keep it
      * from landing inside a buffered PASS line when both streams share a log. */
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -828,8 +885,8 @@ int main(void) {
     make_stick("sda1", "B");
     plug("sda1", "4-1", "sda1");
     mountinfo(root, 100);
-    g_st_enabled = 1;
-    g_st_started = 1;
+    track_service_configure(1);
+    assert(track_service_start_worker() == AZ_OK);
     assert(sdk_sq_resolve());
     g_sdk_sq.key = st_test_database_key;
     short_records();
@@ -854,9 +911,11 @@ int main(void) {
     assert(sdk_track_resolve("mod-b", 0, 10, &a) == AZ_INVALID);
     assert(sdk_track_resolve("mod-a", 0, 10, &a) == AZ_OK && sdk_track_resolve("mod-a", 1, 10, &b) == AZ_OK);
     assert(a.source_id != b.source_id && !st_ref_equal(&a, &b));
+    if (st_test_real_worker) { stored_worker_roundtrip(&a); return 0; }
+    stored_service_lifetime(&a);
     uint64_t ticket;
     assert(sdk_track_request("mod-a", &a, 31, &ticket) == AZ_OK);
-    st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
+    track_service_work();
     const az_track_snapshot *view;
     assert(sdk_track_acquire("mod-a", ticket, &view) == AZ_OK);
     assert(!strcmp(view->metadata.title, "Track Ten") && view->metadata.original_bpm == 128 && st_test_seconds(view->metadata.duration_s, 301, 1));
@@ -869,15 +928,15 @@ int main(void) {
     assert(wf);
     fputs("pending", wf);
     fclose(wf);
-    st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
+    track_service_work();
     assert(sdk_track_acquire("mod-a", ticket, &view) == AZ_STALE);
     assert(sdk_track_release("mod-a", ticket) == AZ_OK);
     assert(sdk_track_request("mod-a", &a, 31, &ticket) == AZ_OK);
-    st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
+    track_service_work();
     assert(sdk_track_acquire("mod-a", ticket, &view) == AZ_STALE);
     assert(sdk_track_release("mod-a", ticket) == AZ_OK && !unlink(wal));
     assert(sdk_track_request("mod-a", &a, 31, &ticket) == AZ_OK);
-    st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
+    track_service_work();
     assert(sdk_track_acquire("mod-a", ticket, &view) == AZ_OK);
     /* Missing EXT creation must invalidate a previously cached absence. */
     char path[PATH_MAX];
@@ -886,7 +945,7 @@ int main(void) {
     assert(f);
     fputs("bad", f);
     fclose(f);
-    st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
+    track_service_work();
     assert(sdk_track_acquire("mod-a", ticket, &view) == AZ_STALE);
     assert(sdk_track_release("mod-a", ticket) == AZ_OK);
     /* Real provider window: streaming headers, clipped tail, shared ticket lifetime and edits. */
@@ -914,7 +973,7 @@ int main(void) {
     uint64_t wt, ws;
     assert(sdk_waveform_request("mod-a", &a, &query, &wt) == AZ_OK);
     assert(sdk_waveform_request("mod-a", &a, &query, &ws) == AZ_OK);
-    st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
+    track_service_work();
     const az_wave_snapshot *wv, *shared_wave;
     assert(sdk_waveform_acquire("mod-a", wt, &wv) == AZ_OK);
     assert(wv->column_count == 50 && wv->total_columns == 200 && wv->columns[0] == 150 && wv->columns[49] == 199);
@@ -926,7 +985,7 @@ int main(void) {
     assert(f);
     fputc(0, f);
     fclose(f);
-    st_work(&g_st, st_disk_load, st_disk_fresh, NULL);
+    track_service_work();
     assert(sdk_waveform_acquire("mod-a", wt, &shared_wave) == AZ_STALE);
     assert(wv->columns[0] == 150); /* Pinned old data survives invalidation. */
     assert(sdk_track_release("mod-a", wt) == AZ_OK && sdk_track_release("mod-a", ws) == AZ_OK);
@@ -945,7 +1004,7 @@ int main(void) {
     struct st_data *data = malloc(sizeof *data);
     assert(data);
     st_data_init(data);
-    assert(st_disk_load(&a, 1, data, NULL) == AZ_STALE);
+    assert(track_service_disk_load(&a, 1, data, NULL) == AZ_STALE);
     /* A malicious analysis path must not escape the selected source. */
     char source[PATH_MAX], out[1024];
     snprintf(source, sizeof source, "%s/sdb1", g_media);
@@ -993,11 +1052,11 @@ int main(void) {
     assert(sdk_track_request("mod-a", &a, 1, &ticket) == AZ_UNSUPPORTED);
     g_sdk_sq.ok = 1;
     source_generation_exhaustion(root);
-    g_st_enabled = 0;
+    track_service_configure(0);
     assert(sdk_data_capabilities(&caps) == AZ_OK && !caps.stored_components);
     assert(sdk_track_resolve("mod-a", 0, 10, &newer) == AZ_UNSUPPORTED);
     free(data);
-    st_destroy(&g_st);
+    track_service_work();
     char cmd[PATH_MAX + 20];
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", root);
     assert(!system(cmd));

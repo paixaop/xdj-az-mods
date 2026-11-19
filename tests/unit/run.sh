@@ -3948,9 +3948,9 @@ mutate "$d/real.c" "$d/ctl-rw.c" 's/suffix\[\] = "\?immutable=1"/suffix[] = ""/;
 mutate "$d/real.c" "$d/ctl-ui.c"      's/    if \(g_cm_on_ui\)\n/    if (0)\n/'
 mutate "$d/real.c" "$d/ctl-anyport.c" 's/ \|\| sdk_port_of_sysfs\(real\) != stick \+ 1\)/)/'
 mutate "$d/real.c" "$d/ctl-guess.c"   's/    if \(hits != 1\)\n/    if (hits < 1)\n/'
-mutate "$d/real.c" "$d/ctl-kickstick.c" 's/if \(!src\[0\] \|\| \(strncmp\(src, mount, ml\) == 0 && src\[ml\] == .\/.\) \|\| sdk_spool_waits\(src\)\) \{/if (!src[0]) {/'
-mutate "$d/real.c" "$d/ctl-kickother.c" 's/ \|\| sdk_spool_waits\(src\)\) \{/) {/'
-mutate "$d/real.c" "$d/ctl-kickunknown.c" 's/if \(!src\[0\] \|\| \(strncmp/if ((strncmp/; s/return 1; \/\* not on a stick it knows/return 0; \/* not on a stick it knows/; s/    if \(!end\)\n        return 1;/    if (!end)\n        return 0;/'
+mutate "$d/real.c" "$d/ctl-kickstick.c" 's/if \(!strncmp\(source, mount, length\) && source\[length\] == .\/.\) return "from that USB";/if (0) return "from that USB";/'
+mutate "$d/real.c" "$d/ctl-kickother.c" 's/return sdk_spool_waits\(source\) \? "from a USB with a spool waiting" : NULL;/return NULL;/'
+mutate "$d/real.c" "$d/ctl-kickunknown.c" 's/if \(!source\[0\]\) return "from a USB it cannot place";/if (!source[0]) return NULL;/; s/return 1; \/\* not on a stick it knows/return 0; \/* not on a stick it knows/; s/    if \(!end\)\n        return 1;/    if (!end)\n        return 0;/'
 mutate "$d/real.c" "$d/ctl-trunc.c"   's/            rc = 1; \/\* the first k rows; the rest did not fit \*\//            rc = 0;/g'
 if [ "$(uname -s)" = Linux ]; then SDK_EXPORT=-rdynamic; else SDK_EXPORT=-Wl,-export_dynamic; fi
 for v in real ctl-rw ctl-ui ctl-anyport ctl-guess ctl-kickstick ctl-kickunknown ctl-kickother ctl-trunc; do
@@ -4016,12 +4016,12 @@ $CC "${CFLAGS[@]}" -pthread -I"$d" -DST_ENGINE_HEADER='"broken.h"' -o "$d/contro
 control "sdk track data: duplicate IDs merged across sources" "$d/control"
 
 if [ "$(uname -s)" = Linux ]; then
-    $CC "${CFLAGS[@]}" $SDK_EXPORT -pthread -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$OUT/sdkdata/provider" $T/sdktrack_test.c guest/azmod/sdk_command_engine.c guest/azmod/track_storage.c -lsqlite3 -ldl -lm
+    $CC "${CFLAGS[@]}" $SDK_EXPORT -pthread -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$OUT/sdkdata/provider" $T/sdktrack_test.c guest/azmod/sdk_command_engine.c guest/azmod/sdk_command_service.c guest/azmod/track_service.c guest/azmod/track_storage.c -Wl,--wrap=open,--wrap=pread -lsqlite3 -ldl -lm
     suite "sdk stored track disk provider" "$OUT/sdkdata/provider"
-    $CC "${CFLAGS[@]}" $SDK_EXPORT -Wno-unused-function -Wno-missing-field-initializers -pthread -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -DLSAPPLY_INC="\"$OUT/lsapply/real.inc\"" -o "$d/analysis-service" $T/sdkanalysis_service_test.c guest/azmod/analysis_owner.c guest/azmod/analysis_source.c guest/azmod/analysis_encoding.c guest/azmod/sdk_command_engine.c guest/azmod/track_storage.c -lsqlite3 -ldl -lm
+    $CC "${CFLAGS[@]}" $SDK_EXPORT -Wno-unused-function -Wno-missing-field-initializers -pthread -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -DLSAPPLY_INC="\"$OUT/lsapply/real.inc\"" -o "$d/analysis-service" $T/sdkanalysis_service_test.c guest/azmod/analysis_owner.c guest/azmod/analysis_source.c guest/azmod/analysis_encoding.c guest/azmod/sdk_command_engine.c guest/azmod/sdk_command_service.c guest/azmod/track_service.c guest/azmod/track_storage.c -lsqlite3 -ldl -lm
     suite "sdk analysis source leases and USB persistence" "$d/analysis-service"
     for v in database-alias database-uri missing-parent wave-errors analysis-binding track-fifo wave-fifo analysis-path-limit preview-extension; do
-        $CC "${CFLAGS[@]}" $SDK_EXPORT -pthread -I"$d/review/$v" -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$d/$v" $T/sdktrack_test.c guest/azmod/sdk_command_engine.c "$d/review/$v/track_storage.c" -lsqlite3 -ldl -lm
+        $CC "${CFLAGS[@]}" $SDK_EXPORT -pthread -I"$d/review/$v" -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$d/$v" $T/sdktrack_test.c guest/azmod/sdk_command_engine.c guest/azmod/sdk_command_service.c "$d/review/$v/track_service.c" "$d/review/$v/track_storage.c" -Wl,--wrap=open,--wrap=pread -lsqlite3 -ldl -lm
         control "sdk stored track: $v regression" "$d/$v"
     done
 else

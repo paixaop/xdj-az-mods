@@ -5,6 +5,8 @@
 #include <poll.h>
 #include "libfd.h"
 #include "../common/azsha256.h"
+#include "../common/azsources.h"
+#include "track_service.h"
 #include "../common/azstatus_source.h"
 #include "../common/azstatus_identity.h"
 #include "sdk_status_proof.h"
@@ -697,7 +699,7 @@ static void ss_monitor_deck(unsigned deck) {
     int pending = o.current->pending != 0;
     pthread_mutex_unlock(&ss_mu);
     ss_publish_observed_retirement(&o);
-    if (pending) st_worker_wake();
+    if (pending) track_service_wake();
 }
 /* A worker pass reads each relevant container once. Per-component parsing preserves
  * independent failures. A bad PSSI payload cannot poison GRID or PWAV. */
@@ -1448,7 +1450,7 @@ static void ss_native_load(unsigned deck, uint64_t epoch, uint64_t token) {
         ss_pins[deck].token = token;
     }
     pthread_mutex_unlock(&ss_mu);
-    if (atomic_load(&g_st_status_jobs)) ss_signal();
+    if (track_service_status_started()) ss_signal();
 }
 static void *ss_observe(void *unused) {
     (void) unused;
@@ -1495,7 +1497,7 @@ static int ss_open_wakeup(void) {
 }
 static int ss_start(void) {
     pthread_mutex_lock(&ss_start_mu);
-    if (!ss_started && g_sdk_sq.ok > 0 && !st_start_worker() && ss_open_wakeup()) {
+    if (!ss_started && g_sdk_sq.ok > 0 && !track_service_start_worker() && ss_open_wakeup()) {
         pthread_t thread;
         pthread_attr_t attr;
         pthread_attr_init(&attr);
@@ -1505,7 +1507,7 @@ static int ss_start(void) {
         struct sched_param priority = {0};
         pthread_attr_setschedparam(&attr, &priority);
         if (!az_thread_create(&thread, &attr, ss_observe, NULL)) {
-            atomic_store(&g_st_status_jobs, ss_work);
+            track_service_status_register(ss_work);
             ss_started = 1;
         } else {
             close(ss_wake_pipe[0]);
@@ -1565,9 +1567,9 @@ static void sdk_status_store_interest(unsigned deck, uint64_t topics) {
     d->pending &= topics;
     d->topics = topics;
     pthread_mutex_unlock(&ss_mu);
-    if ((topics || atomic_load(&g_st_status_jobs)) && ss_start()) {
+    if ((topics || track_service_status_started()) && ss_start()) {
         ss_signal();
-        st_worker_wake();
+        track_service_wake();
     }
 }
 /* A native-preferred field was withdrawn. Re-offer the qualified file projection
@@ -1579,7 +1581,7 @@ static void sdk_status_store_reseed(unsigned deck, uint64_t epoch, uint64_t topi
     int wake = d->epoch == epoch && d->ready && !d->retired && (d->topics & ss_topics(topics));
     if (wake) d->pending |= d->topics & ss_topics(topics);
     pthread_mutex_unlock(&ss_mu);
-    if (wake) st_worker_wake();
+    if (wake) track_service_wake();
 }
 static void sdk_status_store_binding(unsigned deck, uint64_t epoch, const az_track_ref *ref, uint64_t cut) {
     if (deck >= 4) return;
@@ -1595,5 +1597,5 @@ static void sdk_status_store_binding(unsigned deck, uint64_t epoch, const az_tra
         if (epoch && ss_local(ref)) d->ref = *ref;
     }
     pthread_mutex_unlock(&ss_mu);
-    if (atomic_load(&g_st_status_jobs)) ss_signal();
+    if (track_service_status_started()) ss_signal();
 }

@@ -48,6 +48,7 @@ static void ds_master_capture(uint64_t revision, uint64_t observed, int master, 
 #undef clock_gettime
 #undef azm_install_hook
 static int g_st_enabled = 1;
+static int track_service_enabled(void) { return g_st_enabled; }
 static _Atomic(azstem_deck_observation_v1_fn) g_sd_observation;
 static _Atomic(azstem_load_observation_v1_fn) g_sd_load_observation;
 static _Atomic(azstem_cue_observation_v1_fn) g_sd_cue_observation;

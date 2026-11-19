@@ -18,11 +18,9 @@ static int sdk_on_data_event(const char *id, void (*fn)(const az_data_change *, 
     int owner = sdk_callback_owner(id, CM_RA(), (uintptr_t) fn, "on_data_event");
     if (owner < 0) return AZ_INVALID;
     if (g_sdk_callbacks[owner].data) return AZ_LIMIT;
-    if (pthread_mutex_trylock(&g_st.mu)) return AZ_BUSY;
-    uint64_t after = g_st.sequence;
-    int exhausted = g_st.events_exhausted;
-    pthread_mutex_unlock(&g_st.mu);
-    if (exhausted) return AZ_LIMIT;
+    uint64_t after;
+    int rc = track_service_event_head(&after);
+    if (rc) return rc;
     g_sdk_callbacks[owner].after = after;
     g_sdk_callbacks[owner].data_user = user;
     g_sdk_callbacks[owner].data = fn;
@@ -37,13 +35,13 @@ static int sdk_on_command_complete(const char *id, void (*fn)(const az_command_r
     return AZ_OK;
 }
 static int sdk_data_owner_active(int owner) {
-    return g_cm[owner].state == AZCM_LOADED && !st_owner_retired(&g_st, owner);
+    return g_cm[owner].state == AZCM_LOADED && !track_service_owner_retired(owner);
 }
 static void sdk_data_owner_callbacks(int owner) {
     if (!sdk_data_owner_active(owner) || !g_sdk_callbacks[owner].data) return;
     for (int n = 0; n < 16; ++n) {
         az_data_change event = {.size = sizeof event};
-        int rc = st_event_read(&g_st, owner, g_sdk_callbacks[owner].after, &event);
+        int rc = track_service_event(owner, g_sdk_callbacks[owner].after, &event);
         if (rc != AZ_OK) break; /* Contention retries on the next UI turn. */
         g_sdk_callbacks[owner].after = event.sequence;
         g_sdk_callbacks[owner].data(&event, g_sdk_callbacks[owner].data_user);

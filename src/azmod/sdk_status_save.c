@@ -106,7 +106,7 @@ static void sw_release(struct sw_batch *batch) {
     pthread_mutex_unlock(&ss_mu);
     if (batch->count) {
         ss_signal();
-        st_worker_wake();
+        track_service_wake();
     }
     batch->count = 0;
 }

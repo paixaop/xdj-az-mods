@@ -200,7 +200,7 @@ __attribute__((visibility("hidden"))) void azfile_map_pair(unsigned deck, uint64
         if (fm_pair_sources(deck, tokens)) fm_replace_pair(p, epoch, tokens);
     }
     pthread_mutex_unlock(&ss_mu);
-    st_worker_wake();
+    track_service_wake();
 }
 /* Called after the raw FILE collections have reached the reducer. The native
  * paired consumer is the association authority. File tags and epochs prove

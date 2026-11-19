@@ -18,7 +18,6 @@ static char st_test_mountinfo[PATH_MAX];
 #define ST_MOUNTINFO st_test_mountinfo
 #define g_cm (&g_mod)
 #define az_thread_create pthread_create
-#include "sdk_command_service.c"
 #include "sdk_track.c"
 unsigned azsdk_sources_sweep(void) { return 0; }
 static int st_test_database_key(void *db, const void *key, int bytes) { return sqlite3_key(db, key, bytes); }

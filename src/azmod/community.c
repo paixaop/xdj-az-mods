@@ -2150,9 +2150,9 @@ static void cm_services_start(void) {
 #ifndef SDK_PROC_IMPL
     /* Resolve the shared SQL table before any community worker can read it. */
     /* Public SDK data and command services are available on a normal install. */
-    g_st_enabled = access("/home/root/settings/azmod.track-data.off", F_OK) != 0;
-    if (g_st_enabled || ds_enabled()) sdk_sq_resolve();
-    if (g_st_enabled) {
+    track_service_configure(access("/home/root/settings/azmod.track-data.off", F_OK) != 0);
+    if (track_service_enabled() || ds_enabled()) sdk_sq_resolve();
+    if (track_service_enabled()) {
         azexit_service_fn get_exit;
         *(void **) &get_exit = dlsym(RTLD_DEFAULT, "azstem_exit_service_v1");
         const struct azexit_service *api = get_exit ? get_exit() : NULL;

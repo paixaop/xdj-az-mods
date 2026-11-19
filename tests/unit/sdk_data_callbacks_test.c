@@ -38,6 +38,19 @@ static int cm_command_code(cm_mod *mod, uintptr_t address) {
 }
 #include "sdk_command_service.c"
 #include "sdk_command.c"
+/* Callback routing fixture: the cache implementation is exercised through the
+ * same production engine primitives; provider service tests link its actual owner. */
+static int track_service_event_head(uint64_t *sequence) {
+    if (pthread_mutex_trylock(&g_st.mu)) return AZ_BUSY;
+    int rc = g_st.events_exhausted ? AZ_LIMIT : AZ_OK;
+    if (!rc) *sequence = g_st.sequence;
+    pthread_mutex_unlock(&g_st.mu);
+    return rc;
+}
+static int track_service_owner_retired(int owner) { return st_owner_retired(&g_st, owner); }
+static int track_service_event(int owner, uint64_t after, az_data_change *out) {
+    return st_event_read(&g_st, owner, after, out);
+}
 #include "sdk_data_callbacks.c"
 static int counts[CM_MAX], commands[CM_MAX], saw_missed, last_status;
 static uint64_t last_ticket;

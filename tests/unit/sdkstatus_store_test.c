@@ -678,6 +678,7 @@ static void map_origin_cases(const struct st_source *src, sqlite3 *writer, const
 #include "sdkstatus_store_validation_test.inc"
 #include "sdkstatus_save_install_test.inc"
 int main(int argc, char **argv) {
+    st_test_real_worker = 1;
 #if defined(__linux__)
     if (argc == 2 && !strcmp(argv[1], "install")) return test_save_hooks();
 #endif
