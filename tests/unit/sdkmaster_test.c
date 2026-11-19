@@ -4,6 +4,8 @@
 #include "azmod-mod.h"
 #include "sdk_analysis.h"
 #include "sdk_data_engine.h"
+#include "track_service.h"
+#include "library_sql.h"
 #include "../common/azdeckinfo.h"
 #include "../common/aztimestamp.h"
 #include "../common/azloadexport.h"
@@ -47,8 +49,6 @@ static void ds_master_capture(uint64_t revision, uint64_t observed, int master, 
 #include MASTER_INC
 #undef clock_gettime
 #undef azm_install_hook
-static int g_st_enabled = 1;
-static int track_service_enabled(void) { return g_st_enabled; }
 static _Atomic(azstem_deck_observation_v1_fn) g_sd_observation;
 static _Atomic(azstem_load_observation_v1_fn) g_sd_load_observation;
 static _Atomic(azstem_cue_observation_v1_fn) g_sd_cue_observation;
@@ -65,9 +65,8 @@ static int cm_tempo_read(int d, double *bpm, uint64_t *generation, uint64_t *rev
     *generation = *revision = *ns = 0;
     return 0;
 }
-static struct {
-    int ok;
-} g_sdk_sq;
+static const struct az_library_sql g_sdk_sq;
+const struct az_library_sql *az_storage_sql(void) { return &g_sdk_sq; }
 static uint64_t sdk_command_capabilities(void) { return 0; }
 #include DECK_DATA_INC
 static unsigned calls;
@@ -134,6 +133,7 @@ static void *reader(void *arg) {
     return NULL;
 }
 int main(void) {
+    track_service_configure(1);
     g_orig_master_xm = original;
     assert(!(sd_live_fields() & AZ_LIVE_MASTER));
     for (int d = 0; d < 4; ++d) assert(!(snapshot(d).valid & AZ_LIVE_MASTER));
@@ -184,10 +184,10 @@ int main(void) {
     assert(!(snapshot(0).valid & AZ_LIVE_MASTER));
     uint64_t id = 1;
     event(&id);
-    g_st_enabled = 0;
+    track_service_configure(0);
     assert(!supported());
     assert(!(snapshot(0).valid & AZ_LIVE_MASTER));
-    g_st_enabled = 1;
+    track_service_configure(1);
     assert(snapshot(0).valid & AZ_LIVE_MASTER);
     /* Public reads and the native publisher must not wait on each other. A
      * dropped event invalidates the older receipt until another confirmation. */
