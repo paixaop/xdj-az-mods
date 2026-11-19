@@ -238,24 +238,29 @@ static void ar_retry_deadline(struct timespec *deadline) {
     clock_gettime(CLOCK_REALTIME, deadline);
     deadline->tv_sec++;
 }
+static void ar_wait_retry(int retry) {
+    if (!retry || ar.stopping) return;
+    struct timespec deadline;
+    ar_retry_deadline(&deadline);
+    pthread_cond_timedwait(&ar.wake, &ar.mutex, &deadline);
+    ar.notification++;
+}
 static void ar_process_job(struct ar_job *job) {
     pthread_mutex_unlock(&ar.mutex);
     char error[160] = {0};
     int rc = job->status.state == AZ_ANALYSIS_SAVED ? ar_pending(job) : ar_compute(job, error);
+    int busy = job->status.state == AZ_ANALYSIS_SAVED && rc == AZ_BUSY;
+    if (busy) rc = AZ_PENDING;
     if (rc != AZ_PENDING) analysis_source_release(&job->input);
     pthread_mutex_lock(&ar.mutex);
     snprintf(job->status.diagnostic, sizeof job->status.diagnostic, "%s", error);
-    int retry = job->automatic && ar_retryable(rc);
+    int retry = busy || (job->automatic && ar_retryable(rc));
     if (rc == AZ_PENDING) {
         job->status.state = AZ_ANALYSIS_SAVED;
         job->status.result = AZ_PENDING;
         job->status.completed_components = job->request.components;
     } else ar_collect(job, rc);
-    if (retry && !ar.stopping) {
-        struct timespec deadline;
-        ar_retry_deadline(&deadline);
-        pthread_cond_timedwait(&ar.wake, &ar.mutex, &deadline);
-    }
+    ar_wait_retry(retry);
 }
 static void ar_shutdown_jobs(void) {
     pthread_mutex_unlock(&ar.mutex);

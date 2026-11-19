@@ -9,7 +9,7 @@
 #include <string.h>
 #include <time.h>
 static const char *audio;
-static atomic_int acquisitions, publications, releases, blocked, entered, pending, link_result;
+static atomic_int acquisitions, publications, releases, blocked, entered, pending, link_result, outcomes;
 static void (*source_wake)(void);
 static atomic_uint_fast64_t cancel_after_publish;
 static void pause_ms(void) { struct timespec t = {0, 1000000}; nanosleep(&t, NULL); }
@@ -38,6 +38,7 @@ int analysis_source_publish(az_analysis_owner owner, const analysis_source_input
 int analysis_source_outcome(az_analysis_owner owner, const analysis_source_input *input) {
     assert(input->lease);
     if (!analysis_owner_current(owner)) return AZ_STALE;
+    atomic_fetch_add(&outcomes, 1);
     return atomic_load(&link_result);
 }
 void analysis_source_release(analysis_source_input *input) {
@@ -150,8 +151,13 @@ static void pending_link(az_analysis_owner owner) {
     az_analysis_status_v1 saved = wait_state(owner, id, AZ_ANALYSIS_SAVED);
     assert(saved.result == AZ_PENDING && saved.completed_components == AZ_ANALYSIS_VOCALS);
     int count = atomic_load(&publications);
-    atomic_store(&link_result, AZ_FAILED);
+    int checks = atomic_load(&outcomes);
+    atomic_store(&link_result, AZ_BUSY);
     assert(source_wake); source_wake();
+    for (int i = 0; i < 2000 && atomic_load(&outcomes) == checks; i++) pause_ms();
+    assert(atomic_load(&outcomes) > checks);
+    assert(wait_state(owner, id, AZ_ANALYSIS_SAVED).result == AZ_PENDING);
+    atomic_store(&link_result, AZ_FAILED); /* retry must progress without another wake */
     assert(wait_state(owner, id, AZ_ANALYSIS_FAILED).result == AZ_FAILED);
     assert(atomic_load(&publications) == count); /* no second decode/publication */
     release_request(owner, id);
