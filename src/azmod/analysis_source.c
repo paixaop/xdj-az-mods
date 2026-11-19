@@ -93,15 +93,18 @@ static int sa_source_signatures_match(const struct sa_job *j, const struct st_so
     return st_resolution_source_equal(source, &j->source) && st_database_quiet(j->database) &&
            st_disk_sig(j->database) == j->signatures[0] && sa_disk_files_match(j);
 }
-static int sa_current(const struct sa_job *j) {
-    if (!sa_owner_live(j)) return 0;
-    if (j->vocals && st_disk_sig(j->ex2) != j->signatures[4]) return 0;
-    if (j->loaded && !sa_loaded_current(j)) return 0;
+static int sa_source_current(const struct sa_job *j) {
     if (j->streaming) return sa_disk_files_match(j);
     struct st_source source;
     if (st_source_read((int) j->source.ref.source_id - 1, &source)) return 0;
     source.ref.track_id = j->source.ref.track_id;
     return sa_source_paths_match(j, &source) && sa_source_signatures_match(j, &source);
+}
+static int sa_current(const struct sa_job *j) {
+    if (!sa_owner_live(j)) return 0;
+    if (j->vocals && st_disk_sig(j->ex2) != j->signatures[4]) return 0;
+    if (j->loaded && !sa_loaded_current(j)) return 0;
+    return sa_source_current(j) && sa_owner_live(j);
 }
 static uint8_t *sa_read(const char *path, size_t *size, int *failed) {
     struct stat sb;
@@ -756,7 +759,7 @@ static int sa_grid_same(const struct sa_job *j, const uint8_t *grid, uint32_t si
 static int sa_saved_phrases_publish(struct sa_job *j, const uint8_t *grid, uint32_t grid_size,
                                     const uint8_t *phrase, uint32_t phrase_size) {
     if (!phrase || !sa_u16(phrase + 16)) return AZ_OK;
-    if (!sa_grid_same(j, grid, grid_size) || !sa_loaded_current(j)) return AZ_STALE;
+    if (!sa_grid_same(j, grid, grid_size) || !sa_loaded_current(j) || !sa_owner_live(j)) return AZ_STALE;
     if (j->needs_link && !sa_link_analysis(j)) return AZ_FAILED;
     int rc = j->maps->publish_phrases((unsigned) j->deck, j->load, &j->native_map, phrase, phrase_size);
     return rc ? rc : AZ_NOT_FOUND;

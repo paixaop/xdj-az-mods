@@ -66,6 +66,7 @@ static int fixture_current = 1, fixture_published, fixture_native_phrases;
 static _Atomic int fixture_released;
 static uint32_t fixture_grid_count = 2;
 static _Atomic int fixture_pause_current, fixture_current_entered, fixture_resume_current;
+static _Atomic int fixture_skip_current;
 static _Atomic int fixture_pause_admission, fixture_admission_entered, fixture_resume_admission;
 static _Atomic int fixture_fail_input_beats;
 void *__real_calloc(size_t count, size_t size);
@@ -96,7 +97,9 @@ static int fixture_capture(unsigned deck, uint64_t load, struct aznm_packet *out
     return AZ_OK;
 }
 static int fixture_valid(unsigned deck, uint64_t load, const struct aznm_packet *map) {
-    if (atomic_exchange(&fixture_pause_current, 0)) {
+    int skip = atomic_load(&fixture_skip_current);
+    if (skip) atomic_fetch_sub(&fixture_skip_current, 1);
+    if (!skip && atomic_exchange(&fixture_pause_current, 0)) {
         atomic_store(&fixture_current_entered, 1);
         while (!atomic_load(&fixture_resume_current)) usleep(1000);
     }
@@ -434,6 +437,41 @@ static void core_source_lifetime(const az_analysis_result_v1 *result) {
     analysis_owner_core_retire();
     fixture_released = 0;
 }
+struct publication_request { az_analysis_owner owner; analysis_source_input input; const az_analysis_result_v1 *result; int outcome; };
+static void *publish_during_retirement(void *opaque) {
+    struct publication_request *request = opaque;
+    request->outcome = analysis_source_publish(request->owner, &request->input, request->result);
+    return NULL;
+}
+static void nonblocking_publication_retirement(const az_analysis_result_v1 *result, int core) {
+    struct publication_request request = {.owner = core ? analysis_owner_core_begin() : owner_at(0), .result = result};
+    analysis_source_request source = {.loaded = 1, .deck = 0, .load = 44, .components = AZ_DATA_PHRASES};
+    assert(analysis_source_acquire(request.owner, &source, &request.input) == AZ_OK);
+    char dat[PATH_MAX], ext[PATH_MAX];
+    snprintf(dat, sizeof dat, "%s/sdb1/DJ.DAT", g_media);
+    snprintf(ext, sizeof ext, "%s/sdb1/DJ.EXT", g_media);
+    uint64_t before_dat = st_disk_sig(dat), before_ext = st_disk_sig(ext);
+    /* Pause the final validation after staging, not the initial validation. */
+    atomic_store(&fixture_skip_current, 1);
+    atomic_store(&fixture_current_entered, 0);
+    atomic_store(&fixture_resume_current, 0);
+    atomic_store(&fixture_pause_current, 1);
+    pthread_t worker;
+    assert(!pthread_create(&worker, NULL, publish_during_retirement, &request));
+    while (!atomic_load(&fixture_current_entered)) usleep(1000);
+    if (core) analysis_owner_core_retire();
+    else analysis_owner_retire(0);
+    analysis_source_retire(request.owner);
+    atomic_store(&fixture_resume_current, 1);
+    assert(!pthread_join(worker, NULL));
+    assert(request.outcome == AZ_STALE && !fixture_published);
+    assert(st_disk_sig(dat) == before_dat && st_disk_sig(ext) == before_ext);
+    analysis_source_release(&request.input);
+    if (!core) analysis_owner_thread_bind(analysis_owner_begin(0));
+    fixture_released = 0;
+    puts(core ? "Core publication: retirement during native validation prevents file/native writes" :
+                "Mod publication: retirement during native validation prevents file/native writes");
+}
 static int refuse_commit(void *unused) { (void) unused; return 1; }
 static void link_failure_case(az_track_ref ref, const az_analysis_result_v1 *result, int later_edit) {
     char database[PATH_MAX], audio[PATH_MAX], statement[1024], spool[PATH_MAX];
@@ -563,6 +601,11 @@ int main(void) {
     file = read_analysis(path, &n, &failed);
     assert(file && !failed && sa_tag_count(file, n, "PSSI") == 1);
     free(file);
+    /* Cached-file reuse publishes to native maps during acquisition. It must
+     * observe retirement at that publication boundary too. */
+    fixture_loaded_ref = ref;
+    nonblocking_retirement(0);
+    nonblocking_retirement(1);
     acquisition_failure_cleanup(&ref);
     az_analysis_result_v1 short_result = {.size = 4, .version = AZ_DATA_VERSION};
     assert(publish_result(0, &(analysis_source_input){.lease = 1, .owner = owner_at(0)}, &short_result) == AZ_INVALID);
@@ -619,6 +662,8 @@ int main(void) {
     nonblocking_retirement(0);
     nonblocking_retirement(1);
     core_source_lifetime(&loaded_result);
+    nonblocking_publication_retirement(&loaded_result, 0);
+    nonblocking_publication_retirement(&loaded_result, 1);
     assert(acquire_loaded(-1, AZ_DATA_PHRASES, 0, 44, &job) == AZ_STALE);
     assert(acquire_loaded(0, AZ_DATA_PHRASES, 0, 43, &job) == AZ_STALE);
     assert(acquire_loaded(0, AZ_DATA_PHRASES, 0, 44, &job) == AZ_OK);
