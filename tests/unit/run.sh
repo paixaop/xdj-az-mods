@@ -3386,6 +3386,14 @@ for v in real ctl-norotate ctl-nocap; do
 done
 suite "logcap" "$d/real" "$d/scratch-real"
 
+# Analysis failures use normal bounded logging, independently of debug-only tracing.
+d="$OUT/analysis-log"; mkdir -p "$d/scratch"
+{ extract guest/azmod/azmod.c '^static FILE \*azlog_open\(.*\) \{$'
+  extract guest/azmod/azmod.c '^static void analysis_diagnostic\('; } > "$d/real.inc"
+grep -q 'azmod-analysis.log' "$d/real.inc" || { echo "analysis log extraction failed"; exit 2; }
+$CC "${CFLAGS[@]}" -I$T -DANALYSIS_LOG_INC="\"$d/real.inc\"" -o "$d/real" $T/analysis_log_test.c
+suite "analysis diagnostic logging" "$d/real" "$d/scratch"
+
 # azrs.sh: the log() function, run on its own with a small cap
 azrs_log_test() { # $1 = azrs.sh -> 0 when 2000 lines leave log <= cap + 32 lines and a log.1
     local w; w=$(mktemp -d "$OUT/azrs.XXXXXX")
