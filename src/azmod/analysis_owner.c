@@ -28,7 +28,7 @@ void analysis_owner_thread_bind(az_analysis_owner owner) {
 }
 az_analysis_owner analysis_owner_for_caller(unsigned slot) {
     if (thread_owner.kind == AZ_ANALYSIS_OWNER_MOD && thread_owner.slot == slot) return thread_owner;
-    return analysis_owner_get(slot);
+    return (az_analysis_owner) {0};
 }
 az_analysis_owner analysis_owner_core(void) {
     return (az_analysis_owner) {atomic_load_explicit(&generations[ANALYSIS_OWNERS], memory_order_acquire), 0, AZ_ANALYSIS_OWNER_CORE};

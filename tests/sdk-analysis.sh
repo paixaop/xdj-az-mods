@@ -10,6 +10,8 @@ case ${SAN:-plain} in
     asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer) ;;
     *) echo 'SAN must be plain or asan' >&2; exit 2 ;;
 esac
+${HOST_CC:-cc} "${flags[@]}" -Isrc/azmod tests/unit/analysis_owner_test.c src/azmod/analysis_owner.c -o "$task_tmp/owners"
+"$task_tmp/owners"
 ${HOST_CC:-cc} "${flags[@]}" -Isrc/azmod tests/unit/sdkanalysis_write_test.c -o "$task_tmp/write"
 "$task_tmp/write"
 ${HOST_CC:-cc} "${flags[@]}" -Isrc/azmod tests/unit/sdkvocal_test.c -lm -o "$task_tmp/vocals"

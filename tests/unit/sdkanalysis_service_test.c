@@ -224,6 +224,8 @@ static void owner_lifecycle(const az_track_ref *track) {
     assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && !WEXITSTATUS(status));
     close(ready[0]); close(resume[1]);
     az_analysis_owner after = analysis_owner_begin(0);
+    assert(!analysis_owner_current(analysis_owner_for_caller(0)));
+    analysis_owner_thread_bind(after);
     assert(after.generation != before.generation && !analysis_owner_current(before));
     assert(sdk_analysis_close("mod-a", jobs[0].job) == AZ_STALE);
     for (unsigned i = 0; i < 4; ++i) {
@@ -233,10 +235,10 @@ static void owner_lifecycle(const az_track_ref *track) {
     analysis_source_retire(analysis_owner_retire(0));
     analysis_source_retire(analysis_owner_retire(1));
     await_retirement(0); await_retirement(1);
-    analysis_owner_begin(0);
+    analysis_owner_thread_bind(analysis_owner_begin(0));
 }
 int main(void) {
-    analysis_owner_begin(0);
+    analysis_owner_thread_bind(analysis_owner_begin(0));
     typed_grid_result_validation();
     char root_template[] = "/tmp/az-analysis.XXXXXX", root[PATH_MAX], path[PATH_MAX];
     assert(mkdtemp(root_template) && realpath(root_template, root));

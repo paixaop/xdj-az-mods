@@ -35,7 +35,7 @@ static int sa_link_enqueue(struct sa_job *job, const char *path);
 static void sa_link_wake(void);
 static int sa_cleaner_start(void);
 static az_analysis_owner sa_lifetime(int owner) {
-    return owner == 32 ? analysis_owner_core() : analysis_owner_for_caller((unsigned) owner);
+    return owner == 32 ? analysis_owner_core() : analysis_owner_get((unsigned) owner);
 }
 static int sa_owner_live(const struct sa_job *job) {
     return analysis_owner_current(job->lifetime);
@@ -45,7 +45,9 @@ static void sa_job_drop(struct sa_job *job);
 static int sa_grid_same(const struct sa_job *, const uint8_t *, uint32_t);
 static const uint8_t *sa_find_tag(const uint8_t *, size_t, const char[4], uint32_t *);
 static int sa_owner(const char *id, const char *name, uintptr_t caller) {
-    return (g_cm_on_ui || g_sdk_on_tap_thread) ? -1 : st_mod_owner(id, caller, name);
+    if (g_cm_on_ui || g_sdk_on_tap_thread) return -1;
+    int owner = st_mod_owner(id, caller, name);
+    return analysis_owner_current(analysis_owner_for_caller((unsigned) owner)) ? owner : -1;
 }
 static int sa_disk_files_match(const struct sa_job *j) {
     return st_disk_sig(j->audio) == j->signatures[1] && st_disk_sig(j->dat) == j->signatures[2] &&
@@ -580,7 +582,8 @@ static int sa_commit(int owner, uint64_t job, const void *data, uint32_t size) {
 }
 #include "sdk_analysis_typed.c"
 static int sdk_analysis_close(const char *id, uint64_t job) {
-    int owner = sa_owner(id, "analysis_close", CM_RA());
+    if (g_cm_on_ui || g_sdk_on_tap_thread) return AZ_INVALID;
+    int owner = st_mod_owner(id, CM_RA(), "analysis_close");
     if (owner < 0 || !job) return AZ_INVALID;
     if (pthread_mutex_trylock(&sa_mutex)) return AZ_BUSY;
     int rc = AZ_STALE;

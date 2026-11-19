@@ -327,7 +327,7 @@ static int sd_thread_start(const char *id, const char *name, void *(*fn)(void *)
     s->arg = arg;
     s->owner = owner;
 #ifndef SDK_PROC_IMPL
-    s->analysis_owner = analysis_owner_for_caller((unsigned) owner);
+    s->analysis_owner = g_cm_on_ui ? analysis_owner_get((unsigned) owner) : analysis_owner_for_caller((unsigned) owner);
 #endif
     snprintf(s->name, sizeof s->name, "%s", name && *name ? name : c->id);
     pthread_attr_t at;
