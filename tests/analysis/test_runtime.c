@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
+#define _GNU_SOURCE 1
 #define _POSIX_C_SOURCE 200809L
 #include "../../src/azmod/analysis_runtime.h"
 #include <assert.h>
