@@ -24,7 +24,7 @@ struct ar_job {
     analysis_source_input input;
     uint64_t outcome_checked;
     atomic_int cancelled;
-    int released, automatic;
+    int released, automatic, publishing;
     struct timespec started;
 };
 struct ar_load {
@@ -171,17 +171,22 @@ static int ar_compute(struct ar_job *job, char error[160]) {
     if (rc) return rc;
     rc = ar_engine(job, &job->input, error);
     if (rc == AZ_OK && ar_cancelled(job)) rc = AZ_STALE;
-    if (rc == AZ_OK) rc = analysis_source_publish(job->owner, &job->input, ta_result_view(job->result));
+    if (rc == AZ_OK) {
+        job->publishing = 1;
+        rc = analysis_source_publish(job->owner, &job->input, ta_result_view(job->result));
+    }
     return rc;
 }
 static void ar_finish(struct ar_job *job, int rc) {
+    job->publishing = 0;
     job->status.result = rc == ANALYSIS_SOURCE_COMPLETE ? AZ_NOT_FOUND : rc;
     job->status.state = rc == AZ_OK || rc == ANALYSIS_SOURCE_COMPLETE ? AZ_ANALYSIS_COMPLETE : AZ_ANALYSIS_FAILED;
     if (atomic_load(&job->cancelled)) {
         job->status.state = AZ_ANALYSIS_CANCELLED;
         job->status.result = AZ_STALE;
     }
-    if (rc == AZ_OK) job->status.completed_components = job->request.components;
+    if (rc == AZ_OK || rc == ANALYSIS_SOURCE_COMPLETE)
+        job->status.completed_components = job->request.components;
     if (!job->status.diagnostic[0] && rc)
         snprintf(job->status.diagnostic, sizeof job->status.diagnostic, "analysis result %d", rc);
 }
@@ -235,7 +240,8 @@ static struct ar_job *ar_next(void) {
     for (unsigned n = 0; n < ANALYSIS_SLOTS; n++) {
         unsigned slot = (ar.next + n) % ANALYSIS_SLOTS;
         struct ar_job *job = &ar.jobs[slot];
-        int pending = job->status.state == AZ_ANALYSIS_SAVED && job->outcome_checked != ar.notification;
+        int pending = (job->status.state == AZ_ANALYSIS_SAVED || job->publishing) &&
+                      job->outcome_checked != ar.notification;
         if (job->status.state != AZ_ANALYSIS_QUEUED && !pending) continue;
         ar.next = (slot + 1) % ANALYSIS_SLOTS;
         if (!pending) job->status.state = AZ_ANALYSIS_RUNNING;
@@ -256,22 +262,31 @@ static void ar_wait_retry(int retry) {
     pthread_cond_timedwait(&ar.wake, &ar.mutex, &deadline);
     ar.notification++;
 }
+static int ar_advance(struct ar_job *job, char error[160]) {
+    if (job->status.state == AZ_ANALYSIS_SAVED) return ar_pending(job);
+    if (!job->publishing) return ar_compute(job, error);
+    if (ar_cancelled(job)) return AZ_STALE;
+    return analysis_source_publish(job->owner, &job->input, ta_result_view(job->result));
+}
+static void ar_saved(struct ar_job *job, int busy) {
+    job->status.result = AZ_PENDING;
+    if (!busy) job->publishing = 0;
+    job->status.state = job->publishing ? AZ_ANALYSIS_RUNNING : AZ_ANALYSIS_SAVED;
+    if (!job->publishing) job->status.completed_components = job->request.components;
+    ar_publish_status(job);
+}
 static void ar_process_job(struct ar_job *job) {
     pthread_mutex_unlock(&ar.mutex);
     char error[160] = {0};
-    int rc = job->status.state == AZ_ANALYSIS_SAVED ? ar_pending(job) : ar_compute(job, error);
-    int busy = job->status.state == AZ_ANALYSIS_SAVED && rc == AZ_BUSY;
+    int rc = ar_advance(job, error);
+    int busy = (job->status.state == AZ_ANALYSIS_SAVED || job->publishing) && rc == AZ_BUSY;
     if (busy) rc = AZ_PENDING;
     if (rc != AZ_PENDING) analysis_source_release(&job->input);
     pthread_mutex_lock(&ar.mutex);
     snprintf(job->status.diagnostic, sizeof job->status.diagnostic, "%s", error);
     int retry = busy || (job->automatic && ar_retryable(rc));
-    if (rc == AZ_PENDING) {
-        job->status.state = AZ_ANALYSIS_SAVED;
-        job->status.result = AZ_PENDING;
-        job->status.completed_components = job->request.components;
-        ar_publish_status(job);
-    } else ar_collect(job, rc);
+    if (rc == AZ_PENDING) ar_saved(job, busy);
+    else ar_collect(job, rc);
     ar_wait_retry(retry);
 }
 static void ar_shutdown_jobs(void) {

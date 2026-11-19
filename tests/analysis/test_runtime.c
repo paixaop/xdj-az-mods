@@ -9,7 +9,7 @@
 #include <string.h>
 #include <time.h>
 static const char *audio;
-static atomic_int acquisitions, publications, releases, blocked, entered, pending, link_result, outcomes, acquire_result, with_grid;
+static atomic_int acquisitions, publications, releases, blocked, entered, pending, link_result, outcomes, acquire_result, with_grid, publish_busy, publish_attempts;
 static void (*source_wake)(void);
 static atomic_uint_fast64_t cancel_after_publish;
 static void pause_ms(void) { struct timespec t = {0, 1000000}; nanosleep(&t, NULL); }
@@ -37,6 +37,8 @@ int analysis_source_publish(az_analysis_owner owner, const analysis_source_input
                             const az_analysis_result_v1 *result) {
     assert(input->lease && (result->vocals.count || result->phrases.count));
     if (!analysis_owner_current(owner)) return AZ_STALE;
+    atomic_fetch_add(&publish_attempts, 1);
+    if (atomic_load(&publish_busy) && atomic_fetch_sub(&publish_busy, 1) > 0) return AZ_BUSY;
     atomic_fetch_add(&publications, 1);
     uint64_t cancel_id = atomic_load(&cancel_after_publish);
     if (cancel_id) assert(analysis_runtime_cancel(owner, cancel_id) == AZ_OK);
@@ -170,6 +172,19 @@ static void pending_link(az_analysis_owner owner) {
     release_request(owner, id);
     atomic_store(&pending, 0);
 }
+static void busy_publication(az_analysis_owner owner) {
+    int opened = atomic_load(&acquisitions), committed = atomic_load(&publications);
+    int attempts = atomic_load(&publish_attempts);
+    atomic_store(&publish_busy, 2);
+    az_analysis_request_v1 r = request(1);
+    uint64_t id;
+    assert(submit(owner, &r, &id) == AZ_OK);
+    assert(wait_state(owner, id, AZ_ANALYSIS_COMPLETE).result == AZ_OK);
+    assert(atomic_load(&acquisitions) == opened + 1);
+    assert(atomic_load(&publications) == committed + 1);
+    assert(atomic_load(&publish_attempts) == attempts + 3);
+    release_request(owner, id);
+}
 static void acquisition_outcomes(az_analysis_owner owner) {
     const int outcomes[] = {AZ_NOT_FOUND, ANALYSIS_SOURCE_COMPLETE};
     const unsigned states[] = {AZ_ANALYSIS_FAILED, AZ_ANALYSIS_COMPLETE};
@@ -226,7 +241,7 @@ int main(int argc, char **argv) {
     assert(analysis_runtime_start(argv[2]) == AZ_OK);
     az_analysis_owner owner = analysis_owner_begin(0);
     public_contract(owner);
-    invalid_requests(owner); acquisition_outcomes(owner); computation(owner); pending_link(owner); cancel_publication_collection(owner);
+    invalid_requests(owner); acquisition_outcomes(owner); busy_publication(owner); computation(owner); pending_link(owner); cancel_publication_collection(owner);
     capacity_and_retirement(owner); automatic_operation();
     analysis_runtime_shutdown();
     assert(atomic_load(&releases) <= atomic_load(&acquisitions));
