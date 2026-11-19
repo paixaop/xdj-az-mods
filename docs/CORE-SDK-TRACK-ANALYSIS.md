@@ -77,17 +77,20 @@ components retain the existing partial-publication semantics. Inputs remain owne
 until all engine children join. Caller-owned result/interval copies survive
 request release and owner retirement.
 
-A qualified source with every requested component already populated yields
-COMPLETE with `AZ_NOT_FOUND`, indicating no new result array. Missing input/grid,
-source withdrawal and unavailable native services are failures or explicit retry
-conditions. A generic `AZ_NOT_FOUND` is not successful completion. The private
-source layer uses a separate completion outcome for validated reuse.
+A qualified source with every requested component already populated and no pending
+publication or library transaction yields COMPLETE with `AZ_NOT_FOUND`, indicating
+no new result array. Missing input/grid, source withdrawal and unavailable native
+services are failures or explicit retry conditions. A generic `AZ_NOT_FOUND` is
+not successful completion. The private source layer uses a separate completion
+outcome for validated reuse.
 
 When a USB row has no analysis locator, core queues a bounded conditional library
 transaction. The worker advances it without an SDK poll or mod spool kick. Playback
 can delay the transaction. Status stays SAVED/PENDING until COMMIT and the intended
-row outcome are verified. A zero-row update, conflicting locator, failed statement
-or failed COMMIT is not success. A failed later stage may leave reusable saved
+row outcome are verified. Successful linking yields COMPLETE with `AZ_OK`; when
+the request reused existing analysis, a result read still returns `AZ_NOT_FOUND`
+because it computed no new arrays. A zero-row update, conflicting locator, failed
+statement or failed COMMIT is not success. A failed later stage may leave reusable saved
 components; the existing later-open repair path remains supported. This is not a
 new persistent restart-recovery journal.
 
