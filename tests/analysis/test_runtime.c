@@ -359,4 +359,5 @@ int main(int argc, char **argv) {
     analysis_runtime_shutdown();
     assert(atomic_load(&releases) <= atomic_load(&acquisitions));
     puts("Core runtime computation, copied results, owner retirement, capacity and link outcomes passed");
+    return 0;
 }

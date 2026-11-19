@@ -21,7 +21,8 @@ def function(text, name):
 source=Path('src/azmod/community.c').read_text()
 init=function(source,'cm_run_init').replace('cm_run_init(', 'run_actual_init(', 1)
 parts=[function(service,'track_service_owner_init'),function(service,'track_service_owner_retire'),
-       function(track,'sdk_data_owner_init'),function(track,'sdk_data_retire_owner'),init]
+       function(track,'sdk_data_owner_init'),function(track,'sdk_data_retire_owner'),
+       function(source,'cm_retire_analysis'),init]
 Path(sys.argv[1]).write_text('\n'.join(parts)+'\n')
 PY
 flags=(-std=c11 -O1 -g -Wall -Wextra -Werror -pthread -Isrc/azmod)

@@ -1923,6 +1923,15 @@ static void cm_mark_initing(const cm_mod *c) {
         close(fd);
     }
 }
+#ifndef SDK_PROC_IMPL
+/* Revoke admission once; runtime cancellation precedes deferred source cleanup.
+ * The coordinator never joins workers or performs source I/O in this call. */
+static void cm_retire_analysis(unsigned slot) {
+    az_analysis_owner owner = analysis_owner_retire(slot);
+    analysis_runtime_retire(owner);
+    analysis_source_retire(owner);
+}
+#endif
 /* init() of an opened, checked mod; CM_INITING is already written. 0 = it runs. */
 static int cm_run_init(cm_mod *c, const az_mod_v1 *m) {
     c->m = m;
@@ -1941,7 +1950,7 @@ static int cm_run_init(cm_mod *c, const az_mod_v1 *m) {
         ds_retire((int) (c - g_cm));
         sdk_data_retire_owner((int) (c - g_cm));
 #ifndef SDK_PROC_IMPL
-        analysis_source_retire(analysis_owner_retire((unsigned) (c - g_cm)));
+        cm_retire_analysis((unsigned) (c - g_cm));
 #endif
         c->m = NULL;
         c->screen = NULL;   /* stays mapped (see cm_load_one); nothing of it is called again */
@@ -2679,7 +2688,7 @@ static int cm_live_off(cm_mod *c) {
     ds_retire(idx);
     sdk_data_retire_owner(idx);
 #ifndef SDK_PROC_IMPL
-    analysis_source_retire(analysis_owner_retire((unsigned) idx));
+    cm_retire_analysis((unsigned) idx);
 #endif
     snprintf(c->reason, sizeof c->reason, "Disabled");
     cm_stop_drained(c, idx);
