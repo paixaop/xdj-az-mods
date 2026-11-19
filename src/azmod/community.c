@@ -1914,6 +1914,7 @@ static int cm_run_init(cm_mod *c, const az_mod_v1 *m) {
     c->m = m;
     g_cm_loading = (int) (c - g_cm);
 #ifndef SDK_PROC_IMPL
+    analysis_owner_begin((unsigned) g_cm_loading);
     sdk_data_owner_init(g_cm_loading);
     sdk_command_owner_init(g_cm_loading);
 #endif
@@ -1925,6 +1926,9 @@ static int cm_run_init(cm_mod *c, const az_mod_v1 *m) {
     if (rc) {
         ds_retire((int) (c - g_cm));
         sdk_data_retire_owner((int) (c - g_cm));
+#ifndef SDK_PROC_IMPL
+        analysis_source_retire(analysis_owner_retire((unsigned) (c - g_cm)));
+#endif
         c->m = NULL;
         c->screen = NULL;   /* stays mapped (see cm_load_one); nothing of it is called again */
         cm_refuse(c, AZCM_FAILED, "Its init() returned %d%s", rc, c->nhooks ? " (after patching code; reload to clear)" : "");
@@ -2661,6 +2665,9 @@ static int cm_live_off(cm_mod *c) {
     __atomic_sub_fetch(&g_cm_live, 1, __ATOMIC_RELAXED);
     ds_retire(idx);
     sdk_data_retire_owner(idx);
+#ifndef SDK_PROC_IMPL
+    analysis_source_retire(analysis_owner_retire((unsigned) idx));
+#endif
     snprintf(c->reason, sizeof c->reason, "Disabled");
     cm_stop_drained(c, idx);
     c->screen = NULL;

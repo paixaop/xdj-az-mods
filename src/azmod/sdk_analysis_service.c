@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* Public worker-only source leases and ANLZ publication. Included by community.c. */
 #include "sdk_analysis_write.h"
+#include "analysis_source.h"
 #include "sdk_vocals.h"
 #include "../common/azstatus_maps.h"
 #include "../common/azstatus_native.h"
@@ -8,6 +9,9 @@
 struct sa_job {
     uint64_t id;
     int owner, needs_link;
+    az_analysis_owner lifetime;
+    int reader_fd;
+    char reader_path[1024];
     struct st_source source;
     char database[1024], audio[1024], dat[1024], ext[1024], ex2[1024];
     char relative_audio[2048], relative_dat[1024];
@@ -27,6 +31,13 @@ static struct sa_job sa_jobs[8];
 static uint64_t sa_serial;
 static pthread_mutex_t sa_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int sa_link_analysis(const struct sa_job *job);
+static int sa_cleaner_start(void);
+static az_analysis_owner sa_lifetime(int owner) {
+    return owner == 32 ? analysis_owner_core() : analysis_owner_for_caller((unsigned) owner);
+}
+static int sa_owner_live(const struct sa_job *job) {
+    return analysis_owner_current(job->lifetime);
+}
 static int sa_loaded_current(const struct sa_job *job);
 static void sa_job_drop(struct sa_job *job);
 static int sa_grid_same(const struct sa_job *, const uint8_t *, uint32_t);
@@ -60,6 +71,7 @@ static int sa_source_signatures_match(const struct sa_job *j, const struct st_so
            st_disk_sig(j->database) == j->signatures[0] && sa_disk_files_match(j);
 }
 static int sa_current(const struct sa_job *j) {
+    if (!sa_owner_live(j)) return 0;
     if (j->vocals && st_disk_sig(j->ex2) != j->signatures[4]) return 0;
     if (j->loaded && !sa_loaded_current(j)) return 0;
     if (j->streaming) return sa_disk_files_match(j);
@@ -159,18 +171,24 @@ static int sa_open_link_existing(struct sa_job *j, const az_track_ref *track, az
     memcpy(out, &linked, sizeof linked);
     return AZ_NOT_FOUND;
 }
+static int sa_reader_open(struct sa_job *j) {
+    j->reader_fd = open(j->audio, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (j->reader_fd < 0) return AZ_STALE;
+    snprintf(j->reader_path, sizeof j->reader_path, "/proc/%ld/fd/%d", (long) getpid(), j->reader_fd);
+    return AZ_OK;
+}
 static void sa_open_publish(struct sa_job *j, const az_track_ref *track, az_analysis_job_v1 *out,
                             unsigned slot, double bpm) {
     j->id = ++sa_serial;
     sa_jobs[slot] = *j;
     az_analysis_job_v1 result = {.size = out->size, .version = AZ_DATA_VERSION, .needed = j->needed, .job = j->id, .flags = j->needs_link ? AZ_ANALYSIS_NEEDS_LINK : 0, .track = *track, .original_bpm = bpm};
-    memcpy(result.audio_path, j->audio, sizeof result.audio_path);
+    memcpy(result.audio_path, j->reader_path, sizeof result.audio_path);
     memcpy(result.analysis_path, j->dat, sizeof result.analysis_path);
     memcpy(out, &result, sizeof result);
 }
 static int sa_open_reserved(int owner, const az_track_ref *track, az_analysis_job_v1 *out,
                             int loaded, int vocals, unsigned slot) {
-    struct sa_job j = {.owner = owner, .vocals = vocals};
+    struct sa_job j = {.owner = owner, .lifetime = sa_lifetime(owner), .reader_fd = -1, .vocals = vocals};
     struct st_resolution row = {0};
     int rc = sa_open_row(track, &j, &row);
     if (rc != AZ_OK) return rc;
@@ -180,11 +198,15 @@ static int sa_open_reserved(int owner, const az_track_ref *track, az_analysis_jo
     if (rc != AZ_OK) return rc;
     if (!loaded && !j.needed) return sa_open_link_existing(&j, track, out);
     if (!sa_current(&j)) return AZ_STALE;
+    rc = sa_reader_open(&j);
+    if (rc) return rc;
     sa_open_publish(&j, track, out, slot, row.metadata.original_bpm);
     return AZ_OK;
 }
 static int sa_open(int owner, const az_track_ref *track, az_analysis_job_v1 *out, int loaded, int vocals) {
     if (!sa_open_request_valid(owner, track, out)) return AZ_INVALID;
+    if (!analysis_owner_current(sa_lifetime(owner))) return AZ_STALE;
+    if (sa_cleaner_start()) return AZ_FAILED;
     if (!sdk_sq_resolve()) return AZ_UNSUPPORTED;
     if (pthread_mutex_trylock(&sa_mutex)) return AZ_BUSY;
     unsigned slot;
@@ -490,6 +512,7 @@ static int sa_publication_publish(struct sa_publication *s) {
 }
 static int sa_publication_notify(struct sa_publication *s) {
     struct sa_job *j = s->job;
+    if (!sa_owner_live(j)) return AZ_STALE;
     j->signatures[2] = st_disk_sig(j->dat);
     j->signatures[3] = st_disk_sig(j->ext);
     j->signatures[4] = st_disk_sig(j->ex2);
@@ -559,3 +582,5 @@ static int sdk_analysis_close(const char *id, uint64_t job) {
 
 #include "sdk_analysis_loaded.c"
 #include "sdk_vocal_service.c"
+
+#include "analysis_source_adapter.c"

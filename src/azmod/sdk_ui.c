@@ -282,12 +282,18 @@ struct sd_start {
     void *(*fn)(void *);
     void *arg;
     int owner;
+#ifndef SDK_PROC_IMPL
+    az_analysis_owner analysis_owner;
+#endif
     char name[16];
 };
 static void *sd_thread_entry(void *p) {
     struct sd_start s = *(struct sd_start *) p;
     free(p);
     pthread_setname_np(pthread_self(), s.name);
+#ifndef SDK_PROC_IMPL
+    analysis_owner_thread_bind(s.analysis_owner);
+#endif
     void *r = s.fn(s.arg);
     atomic_fetch_sub_explicit(&g_sd_threads[s.owner], 1, memory_order_relaxed);
     return r;
@@ -320,6 +326,9 @@ static int sd_thread_start(const char *id, const char *name, void *(*fn)(void *)
     s->fn = fn;
     s->arg = arg;
     s->owner = owner;
+#ifndef SDK_PROC_IMPL
+    s->analysis_owner = analysis_owner_for_caller((unsigned) owner);
+#endif
     snprintf(s->name, sizeof s->name, "%s", name && *name ? name : c->id);
     pthread_attr_t at;
     pthread_attr_init(&at);

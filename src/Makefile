@@ -77,7 +77,7 @@ AZMOD_CFLAGS += -DAZMOD_PROBES
 endif
 # menu.c #includes the Mod Menu's parts (ui_draw.c ... menu_composite.c, listed there): they are
 # not translation units of their own, and the azmod/*.c wildcard below makes them prerequisites.
-AZMOD_SRCS := azmod/azmod.c azmod/menu.c azmod/text.c azmod/azconf.c
+AZMOD_SRCS := azmod/azmod.c azmod/menu.c azmod/text.c azmod/azconf.c azmod/analysis_owner.c
 AZMOD_HDRS := $(wildcard azmod/*.h azmod/*.c azmod/*.inc azmod/*.S azmod/*.def) $(wildcard common/*.h common/*.c common/*.S) azstem/sdk_native.map
 AZSDK_NATIVE_CFLAGS := $(AZ_UNWIND) -std=gnu11 -O2 $(AZ_WARN) -fPIC $(NO_OUTLINE_ATOMICS) -fvisibility=hidden
 $(AZMOD): $(AZMOD_SRCS) $(AZMOD_HDRS) | $(OUT)

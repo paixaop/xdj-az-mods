@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <errno.h>
 #include <stdatomic.h>
+#include <sys/wait.h>
 static __thread int g_sdk_on_tap_thread;
 static char st_test_mountinfo[PATH_MAX];
 #define ST_MOUNTINFO st_test_mountinfo
@@ -162,7 +163,79 @@ static void typed_grid_result_validation(void) {
     beats[1].reserved = 1;
     assert(!sa_encode_result(&result, &size) && !size);
 }
+static unsigned active_jobs(int owner) {
+    unsigned count = 0;
+    pthread_mutex_lock(&sa_mutex);
+    for (unsigned i = 0; i < 8; ++i) count += sa_jobs[i].id && sa_jobs[i].owner == owner;
+    pthread_mutex_unlock(&sa_mutex);
+    return count;
+}
+static void await_retirement(int owner) {
+    for (unsigned i = 0; i < 1000 && active_jobs(owner); ++i) usleep(1000);
+    assert(!active_jobs(owner));
+}
+static void owner_lifecycle(const az_track_ref *track) {
+    az_analysis_owner before = analysis_owner_get(0);
+    az_analysis_job_v1 jobs[8];
+    memset(jobs, 0, sizeof jobs);
+    analysis_owner_begin(1);
+    for (unsigned i = 0; i < 8; ++i) {
+        jobs[i].size = sizeof jobs[i];
+        assert(sa_open((int) (i / 4), track, &jobs[i], 0, 1) == AZ_OK);
+    }
+    az_analysis_job_v1 overflow = {.size = sizeof overflow};
+    assert(sa_open(0, track, &overflow, 0, 1) == AZ_LIMIT);
+    int reader = open(jobs[0].audio_path, O_RDONLY);
+    assert(reader >= 0);
+    int ready[2], resume[2];
+    assert(!pipe(ready) && !pipe(resume));
+    pid_t child = fork();
+    assert(child >= 0);
+    if (!child) {
+        close(ready[0]); close(resume[1]);
+        int own = open(jobs[0].audio_path, O_RDONLY);
+        char mark = own >= 0, bytes[17];
+        assert(write(ready[1], &mark, 1) == 1 && mark);
+        assert(read(resume[0], &mark, 1) == 1);
+        assert(read(own, bytes, sizeof bytes) == sizeof bytes);
+        assert(!memcmp(bytes, "audio-placeholder", sizeof bytes));
+        close(own); _exit(0);
+    }
+    close(ready[1]); close(resume[0]);
+    char mark;
+    assert(read(ready[0], &mark, 1) == 1 && mark);
+    /* Failed init/live disable uses this same nonblocking retirement edge.
+     * Holding the lease mutex proves retirement does not wait for public work. */
+    pthread_mutex_lock(&sa_mutex);
+    analysis_source_retire(analysis_owner_retire(0));
+    assert(!analysis_owner_current(before));
+    pthread_mutex_unlock(&sa_mutex);
+    await_retirement(0);
+    assert(active_jobs(1) == 4);
+    assert(sa_open(0, track, &overflow, 0, 1) == AZ_STALE);
+    assert(open(jobs[0].audio_path, O_RDONLY) < 0);
+    char bytes[17];
+    assert(read(reader, bytes, sizeof bytes) == sizeof bytes);
+    assert(!memcmp(bytes, "audio-placeholder", sizeof bytes));
+    close(reader);
+    assert(write(resume[1], "x", 1) == 1);
+    int status;
+    assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && !WEXITSTATUS(status));
+    close(ready[0]); close(resume[1]);
+    az_analysis_owner after = analysis_owner_begin(0);
+    assert(after.generation != before.generation && !analysis_owner_current(before));
+    assert(sdk_analysis_close("mod-a", jobs[0].job) == AZ_STALE);
+    for (unsigned i = 0; i < 4; ++i) {
+        assert(sa_open(0, track, &jobs[i], 0, 1) == AZ_OK);
+        assert(jobs[i].job > jobs[7].job);
+    }
+    analysis_source_retire(analysis_owner_retire(0));
+    analysis_source_retire(analysis_owner_retire(1));
+    await_retirement(0); await_retirement(1);
+    analysis_owner_begin(0);
+}
 int main(void) {
+    analysis_owner_begin(0);
     typed_grid_result_validation();
     char root_template[] = "/tmp/az-analysis.XXXXXX", root[PATH_MAX], path[PATH_MAX];
     assert(mkdtemp(root_template) && realpath(root_template, root));
@@ -195,6 +268,7 @@ int main(void) {
     assert(!st_source_read(0, &source));
     ref = source.ref;
     ref.track_id = 10;
+    owner_lifecycle(&ref);
     az_analysis_job_v1 job = {.size = sizeof job};
     assert(sdk_analysis_open("mod-b", &ref, &job) == AZ_INVALID);
     g_cm_on_ui = 1;
