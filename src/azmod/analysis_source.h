@@ -19,6 +19,8 @@ typedef struct analysis_grid_shape {
 
 /* A core feature and a community initialization have separate lifetimes. */
 enum { AZ_ANALYSIS_OWNER_CORE = 1, AZ_ANALYSIS_OWNER_MOD = 2 };
+enum { ANALYSIS_SOURCE_COMPLETE = 100 }; /* Validated source already has requested components. */
+
 typedef struct az_analysis_owner {
     uint64_t generation;
     uint32_t slot, kind;

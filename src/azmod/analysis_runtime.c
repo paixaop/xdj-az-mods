@@ -175,8 +175,8 @@ static int ar_compute(struct ar_job *job, char error[160]) {
     return rc;
 }
 static void ar_finish(struct ar_job *job, int rc) {
-    job->status.result = rc;
-    job->status.state = rc == AZ_OK || rc == AZ_NOT_FOUND ? AZ_ANALYSIS_COMPLETE : AZ_ANALYSIS_FAILED;
+    job->status.result = rc == ANALYSIS_SOURCE_COMPLETE ? AZ_NOT_FOUND : rc;
+    job->status.state = rc == AZ_OK || rc == ANALYSIS_SOURCE_COMPLETE ? AZ_ANALYSIS_COMPLETE : AZ_ANALYSIS_FAILED;
     if (atomic_load(&job->cancelled)) {
         job->status.state = AZ_ANALYSIS_CANCELLED;
         job->status.result = AZ_STALE;
@@ -185,11 +185,23 @@ static void ar_finish(struct ar_job *job, int rc) {
     if (!job->status.diagnostic[0] && rc)
         snprintf(job->status.diagnostic, sizeof job->status.diagnostic, "analysis result %d", rc);
 }
+static void ar_publish_status(const struct ar_job *job) {
+    if (!job->automatic) return;
+    struct ar_load *deck = &ar.decks[job->request.deck];
+    if (deck->epoch == job->request.load_epoch) deck->status = job->status;
+}
 static void ar_finish_automatic(struct ar_job *job) {
     struct ar_load *deck = &ar.decks[job->request.deck];
     if (deck->epoch != job->request.load_epoch) return;
-    deck->status = job->status;
+    ar_publish_status(job);
     if (ar_retryable(job->status.result) && !atomic_load(&job->cancelled)) deck->attempted = 0;
+}
+static void ar_configuration_failure(struct ar_load *load, unsigned deck, const char *error) {
+    load->status = (az_analysis_status_v1){.size = sizeof load->status,
+        .version = AZ_DATA_VERSION, .request_id = ++ar.serial,
+        .state = AZ_ANALYSIS_FAILED, .result = AZ_INVALID,
+        .deck = deck, .load_epoch = load->epoch, .track = load->track};
+    snprintf(load->status.diagnostic, sizeof load->status.diagnostic, "%s", error);
 }
 static void ar_collect(struct ar_job *job, int rc) {
     ar_finish(job, rc);
@@ -206,9 +218,7 @@ static void ar_prepare_automatic(unsigned deck) {
     int rc = ta_execution_environment(AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS, &execution, error, sizeof error);
     load->attempted = load->epoch;
     if (rc) {
-        load->status.state = AZ_ANALYSIS_FAILED;
-        load->status.result = AZ_INVALID;
-        snprintf(load->status.diagnostic, sizeof load->status.diagnostic, "%s", error);
+        ar_configuration_failure(load, deck, error);
         return;
     }
     az_analysis_request_v1 r = {.size = sizeof r, .version = AZ_ANALYSIS_REQUEST_VERSION,
@@ -229,6 +239,7 @@ static struct ar_job *ar_next(void) {
         if (job->status.state != AZ_ANALYSIS_QUEUED && !pending) continue;
         ar.next = (slot + 1) % ANALYSIS_SLOTS;
         if (!pending) job->status.state = AZ_ANALYSIS_RUNNING;
+        ar_publish_status(job);
         job->outcome_checked = ar.notification;
         return job;
     }
@@ -259,6 +270,7 @@ static void ar_process_job(struct ar_job *job) {
         job->status.state = AZ_ANALYSIS_SAVED;
         job->status.result = AZ_PENDING;
         job->status.completed_components = job->request.components;
+        ar_publish_status(job);
     } else ar_collect(job, rc);
     ar_wait_retry(retry);
 }

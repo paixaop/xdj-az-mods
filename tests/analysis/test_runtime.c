@@ -9,7 +9,7 @@
 #include <string.h>
 #include <time.h>
 static const char *audio;
-static atomic_int acquisitions, publications, releases, blocked, entered, pending, link_result, outcomes;
+static atomic_int acquisitions, publications, releases, blocked, entered, pending, link_result, outcomes, acquire_result;
 static void (*source_wake)(void);
 static atomic_uint_fast64_t cancel_after_publish;
 static void pause_ms(void) { struct timespec t = {0, 1000000}; nanosleep(&t, NULL); }
@@ -24,7 +24,7 @@ int analysis_source_acquire(az_analysis_owner owner, const analysis_source_reque
         .needed = request->components, .deck = (unsigned)request->deck,
         .load_epoch = request->load, .track = request->track};
     snprintf(input->audio_path, sizeof input->audio_path, "%s", audio);
-    return AZ_OK;
+    return atomic_load(&acquire_result);
 }
 int analysis_source_publish(az_analysis_owner owner, const analysis_source_input *input,
                             const az_analysis_result_v1 *result) {
@@ -163,21 +163,50 @@ static void pending_link(az_analysis_owner owner) {
     release_request(owner, id);
     atomic_store(&pending, 0);
 }
+static void acquisition_outcomes(az_analysis_owner owner) {
+    const int outcomes[] = {AZ_NOT_FOUND, ANALYSIS_SOURCE_COMPLETE};
+    const unsigned states[] = {AZ_ANALYSIS_FAILED, AZ_ANALYSIS_COMPLETE};
+    az_analysis_request_v1 r = request(1);
+    for (unsigned i = 0; i < 2; i++) {
+        atomic_store(&acquire_result, outcomes[i]);
+        uint64_t id;
+        assert(submit(owner, &r, &id) == AZ_OK);
+        assert(wait_state(owner, id, states[i]).result == AZ_NOT_FOUND);
+        release_request(owner, id);
+    }
+    atomic_store(&acquire_result, AZ_OK);
+}
+static az_analysis_status_v1 wait_deck(unsigned deck, unsigned state) {
+    az_analysis_status_v1 status = {.size = sizeof status};
+    for (int i = 0; i < 10000; i++) {
+        if (analysis_runtime_deck_status(deck, &status) == AZ_OK && status.state == state) return status;
+        pause_ms();
+    }
+    abort();
+}
 static void automatic_operation(void) {
     az_analysis_owner core = analysis_owner_core_begin();
     int count = atomic_load(&acquisitions);
     /* Missing native grid gives a visible failure; it must run without a mod. */
+    atomic_store(&blocked, 1); atomic_store(&entered, 0);
     analysis_runtime_enable(core, 1);
     analysis_runtime_load(0, 2, 17, 1, NULL);
     analysis_runtime_load(0, 1, 17, 0, NULL); /* delayed old reduction cannot unload the new cut */
-    az_analysis_status_v1 status = {.size = sizeof status};
-    for (int i = 0; i < 10000; i++) {
-        analysis_runtime_deck_status(0, &status);
-        if (status.state == AZ_ANALYSIS_FAILED) break;
-        pause_ms();
-    }
-    assert(atomic_load(&acquisitions) > count && status.state == AZ_ANALYSIS_FAILED);
-    assert(status.result == AZ_FAILED);
+    assert(wait_deck(0, AZ_ANALYSIS_RUNNING).request_id);
+    atomic_store(&blocked, 0);
+    az_analysis_status_v1 status = wait_deck(0, AZ_ANALYSIS_FAILED);
+    assert(atomic_load(&acquisitions) > count && status.result == AZ_FAILED);
+    atomic_store(&acquire_result, AZ_PENDING); atomic_store(&link_result, AZ_PENDING);
+    analysis_runtime_load(0, 3, 18, 1, NULL);
+    assert(wait_deck(0, AZ_ANALYSIS_SAVED).result == AZ_PENDING);
+    atomic_store(&link_result, AZ_OK); source_wake();
+    assert(wait_deck(0, AZ_ANALYSIS_COMPLETE).result == AZ_OK);
+    atomic_store(&acquire_result, AZ_OK);
+    assert(!setenv("TRACK_ANALYSIS_STAGE_MODE", "invalid", 1));
+    analysis_runtime_load(0, 4, 19, 1, NULL);
+    status = wait_deck(0, AZ_ANALYSIS_FAILED);
+    assert(status.request_id && status.load_epoch == 19 && status.result == AZ_INVALID);
+    assert(!unsetenv("TRACK_ANALYSIS_STAGE_MODE"));
     analysis_runtime_enable(core, 0);
     analysis_owner_core_retire();
     analysis_runtime_retire(core);
@@ -188,7 +217,7 @@ int main(int argc, char **argv) {
     assert(analysis_runtime_capabilities(&caps) == AZ_OK && caps.max_workers == 3);
     assert(analysis_runtime_start(argv[2]) == AZ_OK);
     az_analysis_owner owner = analysis_owner_begin(0);
-    invalid_requests(owner); computation(owner); pending_link(owner); cancel_publication_collection(owner);
+    invalid_requests(owner); acquisition_outcomes(owner); computation(owner); pending_link(owner); cancel_publication_collection(owner);
     capacity_and_retirement(owner); automatic_operation();
     analysis_runtime_shutdown();
     assert(atomic_load(&releases) <= atomic_load(&acquisitions));
