@@ -29,6 +29,11 @@ int __wrap_poll(struct pollfd *fds, nfds_t count, int timeout) {
     if (atomic_load(&native_service_testing) && atomic_load(&native_service_stop)) return 0;
     return __real_poll(fds, count, timeout);
 }
+int __real___poll_chk(struct pollfd *, nfds_t, int, size_t);
+int __wrap___poll_chk(struct pollfd *fds, nfds_t count, int timeout, size_t bytes) {
+    if (atomic_load(&native_service_testing) && atomic_load(&native_service_stop)) return 0;
+    return __real___poll_chk(fds, count, timeout, bytes);
+}
 static struct azstatus_native_v1 native_service_api;
 static const struct azstatus_native_v1 *native_service_export;
 const struct azstatus_native_v1 *azstem_status_service_v1(void) { return native_service_export; }
