@@ -3,6 +3,8 @@
  * identity, never a borrowed native object. Public arrays are decoded by st_worker. */
 #include "../common/azstatus_cue_origin.h"
 #include "../common/azstatus_analysis_origin.h"
+struct sqlite3;
+struct sqlite3_stmt;
 __attribute__((visibility("hidden"))) void azfile_native_refresh(unsigned, uint64_t);
 enum {
     FO_READS = 64,
@@ -32,7 +34,7 @@ struct fo_read {
     struct ss_file files[2];
     char audio[1024];
     struct ss_monitor watch;
-    void *db;
+    struct sqlite3 *db;
     int db_fd;
 };
 static uint64_t fo_serial;
@@ -294,8 +296,8 @@ struct fo_locator {
     int physical_path_only;
 };
 struct fo_sql_bindings {
-    int (*utf16)(void *, int, const void *, int, void (*)(void *));
-    int (*utf8)(void *, int, const char *, int, void (*)(void *));
+    int (*utf16)(struct sqlite3_stmt *, int, const void *, int, void (*)(void *));
+    int (*utf8)(struct sqlite3_stmt *, int, const char *, int, void (*)(void *));
 };
 static int fo_root_valid(const char *root, size_t length) {
     return root && length > 8 && length < 1024 && !memcmp(root + length - 8, "/PIONEER", 8);
@@ -322,8 +324,8 @@ static int fo_sql_provider(const void *function, const void *expected) {
     return function && dladdr(function, &binding) && binding.dli_fbase == expected;
 }
 static int fo_sql_bindings(struct fo_sql_bindings *bindings, int need_utf8) {
-    bindings->utf16 = dlsym(RTLD_DEFAULT, "sqlite3_bind_text16");
-    bindings->utf8 = dlsym(RTLD_DEFAULT, "sqlite3_bind_text");
+    bindings->utf16 = (__typeof__(bindings->utf16)) dlsym(RTLD_DEFAULT, "sqlite3_bind_text16");
+    bindings->utf8 = (__typeof__(bindings->utf8)) dlsym(RTLD_DEFAULT, "sqlite3_bind_text");
     Dl_info provider = {0};
     if (!dladdr((void *) g_sdk_sq.bind_int64, &provider) || !fo_sql_provider((void *) bindings->utf16, provider.dli_fbase)) return 0;
     return !need_utf8 || fo_sql_provider((void *) bindings->utf8, provider.dli_fbase);
@@ -333,12 +335,12 @@ static int fo_open_database(struct fo_read *r) {
     return st_source_path(r->source.mount, "/PIONEER/rekordbox/exportLibrary.db", path) &&
            (r->db = ss_open_database(path, &r->source, &r->db_fd)) && !ss_database_version(r->db, &r->version);
 }
-static int fo_bind_locator(void *stmt, const struct fo_locator *where, const struct fo_sql_bindings *bindings) {
+static int fo_bind_locator(struct sqlite3_stmt *stmt, const struct fo_locator *where, const struct fo_sql_bindings *bindings) {
     if (!where->physical_path_only && bindings->utf16(stmt, 1, where->audio, (int) (2 * where->audio_units), NULL)) return 0;
     return !(where->analysis_utf8 ? bindings->utf8(stmt, 2, where->analysis_utf8, -1, NULL)
                                   : bindings->utf16(stmt, 2, where->analysis, (int) (2 * where->analysis_units), NULL));
 }
-static uint32_t fo_unique_content(void *stmt) {
+static uint32_t fo_unique_content(struct sqlite3_stmt *stmt) {
     if (g_sdk_sq.step(stmt) != 100) return 0;
     long long value = g_sdk_sq.col_int64(stmt, 0);
     if (value > 0 && (unsigned long long) value <= UINT32_MAX && g_sdk_sq.step(stmt) == 101) return (uint32_t) value;

@@ -105,17 +105,18 @@ __attribute__((visibility("hidden"))) int azsdk_sources_descriptor_identity(
     int descriptor, uint64_t mount_id, uint64_t device, uint64_t inode) AZS_NOTHROW;
 /* Borrowed read-only connection owned by the status worker. Verify its actual
  * VFS fd against the captured source, without acquiring or closing that fd. */
+struct sqlite3;
 __attribute__((visibility("hidden"))) int azsdk_sources_reader_fd(
-    void *connection, uint64_t mount_id, uint64_t device, uint64_t inode) AZS_NOTHROW;
+    struct sqlite3 *connection, uint64_t mount_id, uint64_t device, uint64_t inode) AZS_NOTHROW;
 /* Startup-only internal dependency. Prepares/reuses the exact module proof;
  * binds real forwarding to the one process-lifetime SourceState. The installer
  * publishes each genuine original before redirecting its entry. It must return
  * exactly 1 for an accepted install. Once installed, close retirement continues
  * even when source diagnostics are disabled. No reset/uninstall or public
  * source/load capability is created by a successful return. */
-typedef int (*azsdk_source_connection_installer)(uintptr_t, void *, void **, void *);
+struct az_connection_installer;
 __attribute__((visibility("hidden"))) int azsdk_sources_install_connections(
-    azsdk_source_connection_installer installer, void *context) AZS_NOTHROW;
+    struct az_connection_installer installer) AZS_NOTHROW;
 
 #undef AZS_NOTHROW
 #endif

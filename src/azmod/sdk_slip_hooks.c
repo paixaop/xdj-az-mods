@@ -68,7 +68,7 @@ static int slip_install_entries(const struct azsdk_slip_native_profile *p, azsdk
 int azsdk_slip_install(const struct azsdk_slip_native_profile *p, azsdk_slip_installer install, void *context) {
     if (!p || !install || atomic_exchange_explicit(&attempted, true, memory_order_seq_cst)) return 0;
     if (!slip_profile_verified(p) || !slip_install_entries(p, install, context)) return 0;
-    const struct az_slip_profile profile = {p->construct_return, {p->parent_returns[0], p->parent_returns[1], p->parent_returns[2], p->parent_returns[3]}, p->source_control_vtable, p->parent_control_vtable, (void (*)(void *, const struct az_native_owner *)) p->registration};
+    const struct az_slip_profile profile = {p->construct_return, {p->parent_returns[0], p->parent_returns[1], p->parent_returns[2], p->parent_returns[3]}, p->source_control_vtable, p->parent_control_vtable, (az_slip_register_fn) p->registration};
     if (!az_slip_configure(&profile)) return 0;
     atomic_store_explicit(&ready, true, memory_order_release);
     return 1;

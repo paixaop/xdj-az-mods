@@ -57,45 +57,49 @@ static void retire(Slot *slot) {
     az_native_owner_reset(&slot->listener);
 }
 static void capture(Slot *, unsigned);
+struct OwnedListener;
+struct SlipListenerVtable {
+    void (*destroy)(struct OwnedListener *);
+    void (*delete_listener)(struct OwnedListener *);
+    void (*changed)(struct OwnedListener *, unsigned);
+};
 struct OwnedListener {
-    const void *const *vtable;
+    const struct SlipListenerVtable *vtable;
     Slot *slot;
 };
 struct ListenerControl {
     struct az_native_control base;
     struct OwnedListener receiver;
 };
-static void listener_destroy(void *object) { (void) object; }
-static void listener_delete(void *object) { (void) object; }
-static void listener_changed(void *object, unsigned raw) {
+static void listener_destroy(struct OwnedListener *object) { (void) object; }
+static void listener_delete(struct OwnedListener *object) { (void) object; }
+static void listener_changed(struct OwnedListener *object, unsigned raw) {
     AZ_NATIVE_ERRNO(preserve);
-    capture(((struct OwnedListener *) object)->slot, raw);
+    capture(object->slot, raw);
 }
-static const void *const listener_vtable[] = {
-    (void *) listener_destroy, (void *) listener_delete, (void *) listener_changed};
-static void control_dispose(void *control) { (void) control; }
-static void control_destroy(void *control) { free(control); }
-static void *control_deleter(void *control, const void *type) {
+static const struct SlipListenerVtable listener_vtable = {listener_destroy, listener_delete, listener_changed};
+static void control_dispose(struct az_native_control *control) { (void) control; }
+static void control_destroy(struct az_native_control *control) { free(control); }
+static void *control_deleter(struct az_native_control *control, const struct az_native_type_info *type) {
     (void) control;
     (void) type;
     return NULL;
 }
-static const void *const control_vtable[] = {
-    (void *) control_dispose, (void *) control_destroy, (void *) control_dispose,
-    (void *) control_destroy, (void *) control_deleter};
+static const struct az_native_control_vtable control_vtable = {
+    control_dispose, control_destroy, control_dispose, control_destroy, control_deleter};
 static void listener_registration_drop(Slot **slot) {
     if (*slot) retire(*slot);
 }
 static bool make_listener(Slot *slot) {
     struct ListenerControl *control = calloc(1, sizeof *control);
     if (!control) return false;
-    control->base = (struct az_native_control) {control_vtable, 1, 1};
-    control->receiver = (struct OwnedListener) {listener_vtable, slot};
+    control->base = (struct az_native_control) {&control_vtable, 1, 1};
+    control->receiver = (struct OwnedListener) {&listener_vtable, slot};
     slot->listener = (struct az_native_owner) {&control->receiver, &control->base};
     /* A const weak reference borrows the same two-word carrier during the call;
      * native code owns every weak copy it retains. The strong owner pins it. */
     Slot *pending __attribute__((cleanup(listener_registration_drop))) = slot;
-    state()->profile.registration((void *) slot->source, &slot->listener);
+    state()->profile.registration((struct az_slip_source *) slot->source, &slot->listener);
     pending = NULL;
     return true;
 }

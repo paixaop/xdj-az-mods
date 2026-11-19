@@ -1605,7 +1605,6 @@ static const az_library_v1 g_sdk_library = {
     .command_submit_async = sdk_command_submit_async,
     .command_acknowledge = sdk_command_acknowledge,
     .analysis_open = sdk_analysis_open,
-    .analysis_commit = sdk_analysis_commit,
     .analysis_close = sdk_analysis_close,
     .analysis_open_loaded = sdk_analysis_open_loaded,
     .analysis_open_v2 = sdk_analysis_open_v2,

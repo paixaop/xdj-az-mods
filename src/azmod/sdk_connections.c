@@ -5,11 +5,17 @@
  * first redirect and retains close retirement independently of diagnostics.
  */
 #include "../common/azsources.h"
+#include "../common/azconnectionhooks.h"
 
-static int sdk_connections_install_at(uintptr_t entry, void *replacement, void **original,
-                                      void *context) {
+static int sdk_connections_install_open(uintptr_t entry, az_native_sql_open replacement, az_native_sql_open *original,
+                                        void *context) {
     (void) context;
-    return azm_install_island_hook_at(entry, replacement, original, "sdk-connection");
+    return azm_install_island_hook_at(entry, (void *) replacement, (void **) original, "sdk-connection");
+}
+static int sdk_connections_install_close(uintptr_t entry, az_native_sql_close replacement, az_native_sql_close *original,
+                                         void *context) {
+    (void) context;
+    return azm_install_island_hook_at(entry, (void *) replacement, (void **) original, "sdk-connection");
 }
 
 static void sdk_connections_at_start(void) {
@@ -20,5 +26,6 @@ static void sdk_connections_at_start(void) {
      * The backend installs close first and admits births only after both
      * genuine originals are published by the installer.
      */
-    (void) azsdk_sources_install_connections(sdk_connections_install_at, NULL);
+    (void) azsdk_sources_install_connections((struct az_connection_installer) {
+        sdk_connections_install_open, sdk_connections_install_close, NULL});
 }

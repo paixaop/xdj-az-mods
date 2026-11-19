@@ -1,14 +1,15 @@
 # Track Analysis service
 
-`sdk_analysis_service.c` and `sdk_analysis_loaded.c` implement the public worker-only
-analysis leases appended to `az_library_v1`: `analysis_open`, `analysis_open_loaded`,
-`analysis_commit` and `analysis_close`. The public contract is documented in the SDK's
-`docs/18-track-analysis.md`. Keep the core and SDK public headers identical. Mods check
+`sdk_analysis_service.c`, `sdk_analysis_loaded.c` and `sdk_analysis_typed.c` implement
+the public worker-only analysis services appended to `az_library_v1`:
+`analysis_open_v2`, `analysis_open_loaded_v2`, `analysis_grid`,
+`analysis_commit_result` and `analysis_close`. The public contract is documented in
+the SDK's `docs/18-track-analysis.md`. Keep the core and SDK public headers identical. Mods check
 each used entry with `AZ_LIB_HAS`; the core owns all private native calls and hooks.
 
-`analysis_open` retains the file-only USB OneLibrary path. `analysis_open_loaded`
-accepts a deck and an accepted LOAD generation, requires a ready native grid, and
-pins the exact native map edition. Its native publication and Beatport source
+`analysis_open_v2` retains the file-only USB OneLibrary path. `analysis_open_loaded_v2`
+accepts a deck and an accepted LOAD generation. Phrase work requires a ready native
+grid and pins the exact native map edition. Its native publication and Beatport source
 providers are qualified only for firmware 2.00. Entry-point instruction checks and
 the required map-writer instrumentation gate the path; a matching public ABI alone
 does not enable it on another firmware profile.
@@ -27,7 +28,10 @@ A loaded lease creates a private mode-0400 PMAI/PQTZ snapshot. It preserves nati
 cell indexes, applies the holder's signed sample origin, converts using its actual
 sample rate, and rounds coordinates to whole milliseconds. `analysis_path` is this
 read-only snapshot; `audio_path` is a read-only input locator. Both are valid only for
-the retained job. The mod must return `TA01` with zero PQTZ length and plain PSSI.
+the retained job. The mod reads typed beats through `analysis_grid` and returns
+`az_analysis_result_v1` through `analysis_commit_result`, with no replacement beats
+for a loaded lease. The raw public `analysis_commit` entry is retired; its ABI slot
+is reserved and null. Internal `sa_commit` remains the shared publication engine.
 The core can save its own snapshot when disk PQTZ is absent; it never installs or
 retimes a native grid through this API.
 
@@ -39,7 +43,8 @@ before access, and a populated DAT PSSI takes precedence over an empty EXT place
 Conflicting populated DAT/EXT maps are refused.
 
 `sdk_analysis_write.h` supplies the bounded, format-only insertion/empty-tag replacement.
-The core validates the `TA01` sizes, allowed PCM rates, PQTZ/PSSI layouts, counts and
+The core encodes typed results as internal `TA03` packets, then validates packet
+sizes, allowed PCM rates, PQTZ/PSSI layouts, counts and
 phrase boundaries before staging. `sdk_status_map_analysis.inc` uses the firmware's
 native phrase parser and counted result, then verifies the current holder and installs
 it only into the unchanged empty phrase holder. Normal native notification publishes
@@ -134,7 +139,7 @@ evidence is in the parent workspace's `temp/physical-auto-20261116/` directory.
 
 The append-only `analysis_open_v2` and `analysis_open_loaded_v2` independently
 request missing phrases and `AZ_ANALYSIS_VOCALS`. Legacy opens remain phrase-only.
-New opens use TA02 with optional PQTZ/PSSI/PVDI payloads, actual PCM rate and source
+Typed publication supplies optional phrase/vocal maps, actual PCM rate and source
 frame count. The SDK's `docs/18-track-analysis.md` specifies every field and bound.
 The core validates the needed mask and PVDI coverage, saves `.2EX`, and records the
 heuristic method/exact duration in a hash-bound `AZVD` tag. It never replaces a

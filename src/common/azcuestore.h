@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include "aznative_calls.h"
 struct azcuepersist_witness;
 /* Native owner-thread API. Keep the manager's owner gate throughout a snapshot's
  * lifetime. These native objects must never cross the plugin bridge. Owned
@@ -17,9 +18,7 @@ typedef struct {
 typedef struct {
     _Alignas(8) unsigned char bytes[0xf8];
 } azcs_native_property;
-typedef struct {
-    void *data;
-} azcs_native_string;
+typedef struct az_native_string azcs_native_string;
 typedef struct {
     void (*copy_source)(uintptr_t *, const uintptr_t *);
     void (*copy_content)(uintptr_t *, const uintptr_t *);
@@ -34,10 +33,10 @@ typedef struct {
     void (*copy_property)(void *, const void *);
     azcs_native_cue (*serialize_property)(unsigned, const void *, bool);
     /* Native functions return their one-word counted value through hidden X8.
-     * Invoke through az_native_result_word, never a C small-aggregate return. */
-    void *where_from;
-    void *string_allocate;
-    void (*string_destroy)(void *);
+     * Invoke through the typed aznative_calls.h adapters. */
+    az_native_location_acquire_fn where_from;
+    az_native_string_allocate_fn string_allocate;
+    az_native_string_destroy_fn string_destroy;
     void (*color_construct)(void *, unsigned, unsigned, unsigned);
 } azcs_profile;
 azcs_profile azcs_native_profile(int build, uintptr_t bias);

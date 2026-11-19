@@ -8,7 +8,7 @@ struct AnalysisMemory {
     uint64_t size;
 };
 struct AnalysisOps {
-    void *make; /* native nontrivial result: hidden destination, not a C value return */
+    az_native_phrase_make_fn make;
     void (*memory)(struct AnalysisMemory *, const void *, size_t);
     void (*memory_drop)(struct AnalysisMemory *);
     unsigned char (*grant)(uintptr_t);
@@ -28,7 +28,7 @@ struct AnalysisAtom {
     uint32_t count, reserved;
     struct AnalysisMemory rows, raw;
 };
-struct AnalysisAtomRef {
+struct az_native_phrase_atom_ref {
     const struct AnalysisAtom *value;
     uintptr_t control;
 };
@@ -57,8 +57,8 @@ static void analysis_make(void *opaque) {
     atom.count = (unsigned) call->pssi[16] << 8 | call->pssi[17];
     analysis_ops.memory(&atom.rows, call->pssi + 32, call->size - 32);
     analysis_ops.memory(&atom.raw, call->pssi, call->size);
-    const struct AnalysisAtomRef ref = {&atom, 0};
-    az_native_result_word(analysis_ops.make, &call->content, &ref);
+    const struct az_native_phrase_atom_ref ref = {&atom, 0};
+    call->content = (uintptr_t) az_native_phrase_make(analysis_ops.make, &ref);
 }
 static void configure_analysis(int build, uintptr_t bias) {
     if (atomic_load_explicit(&(analysis_ready), memory_order_acquire) || build != 2 || bias) return;
@@ -75,7 +75,7 @@ static void configure_analysis(int build, uintptr_t bias) {
         {0x2371890, {0xa9b77bfd, 0x910003fd, 0x910203e8, 0xa90153f3}}};
     for (unsigned i = 0; i < sizeof sites / sizeof *sites; ++i)
         if (memcmp(((const void *) (sites[i].address)), sites[i].words, sizeof sites[i].words)) return;
-    analysis_ops.make = ((void *) (sites[0].address));
+    analysis_ops.make = (az_native_phrase_make_fn) sites[0].address;
     analysis_ops.memory = ((__typeof__(analysis_ops.memory)) (sites[1].address));
     analysis_ops.memory_drop = ((__typeof__(analysis_ops.memory_drop)) (sites[2].address));
     analysis_ops.grant = ((__typeof__(analysis_ops.grant)) (sites[3].address));

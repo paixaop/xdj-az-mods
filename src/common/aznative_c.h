@@ -12,8 +12,20 @@
  * its vptr followed by the 32-bit strong and weak counts. A strong owner holds
  * one implicit weak reference. Only copy from an already-owned native scope.
  * may_alias permits these ABI views over native fields of another nominal type. */
+struct az_native_control;
+struct az_native_type_info;
+struct az_native_control_vtable {
+    void (*complete_destroy)(struct az_native_control *);
+    void (*deleting_destroy)(struct az_native_control *);
+    void (*dispose)(struct az_native_control *);
+    void (*destroy)(struct az_native_control *);
+    void *(*deleter)(struct az_native_control *, const struct az_native_type_info *);
+};
+_Static_assert(offsetof(struct az_native_control_vtable, dispose) == 16 &&
+                   offsetof(struct az_native_control_vtable, destroy) == 24,
+               "native control methods ABI");
 struct __attribute__((may_alias)) az_native_control {
-    const void *const *vtable;
+    const struct az_native_control_vtable *vtable;
     int strong, weak;
 };
 struct __attribute__((may_alias)) az_native_owner {
@@ -32,11 +44,11 @@ static inline bool az_native_alive(const struct az_native_control *c) {
 }
 static inline void az_native_weak_drop(struct az_native_control *c) {
     if (c && __atomic_fetch_sub(&c->weak, 1, __ATOMIC_ACQ_REL) == 1)
-        ((void (*)(void *)) c->vtable[3])(c);
+        c->vtable->destroy(c);
 }
 static inline void az_native_strong_drop(struct az_native_control *c) {
     if (c && __atomic_fetch_sub(&c->strong, 1, __ATOMIC_ACQ_REL) == 1) {
-        ((void (*)(void *)) c->vtable[2])(c);
+        c->vtable->dispose(c);
         az_native_weak_drop(c);
     }
 }
@@ -80,14 +92,6 @@ struct native_result_storage {
     unsigned char unused[8];
 };
 _Static_assert(sizeof(struct native_result_storage) == 24, "indirect native result ABI");
-static inline void az_native_result_word(void *function, void *result, const void *argument) {
-    struct native_result_storage value = ((struct native_result_storage (*)(const void *)) function)(argument);
-    __builtin_memcpy(result, &value.first, sizeof value.first);
-}
-static inline void az_native_result_pair(void *function, void *result, const void *argument) {
-    struct native_result_storage value = ((struct native_result_storage (*)(const void *)) function)(argument);
-    __builtin_memcpy(result, &value, 2 * sizeof(uintptr_t));
-}
 
 static inline void az_native_errno_restore(int *saved) { errno = *saved; }
 #define AZ_NATIVE_ERRNO(name) int name __attribute__((cleanup(az_native_errno_restore))) = errno

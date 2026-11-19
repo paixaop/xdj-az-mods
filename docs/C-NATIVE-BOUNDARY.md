@@ -50,15 +50,34 @@ boundary. Format C with the repository's unchanged clang-format 21.1.8 settings.
 ## Native return values
 
 Some firmware functions return an owned pointer or pointer pair indirectly even
-though ordinary C returns such small structs in registers. `az_native_result_word`
-and `az_native_result_pair` use a 24-byte C return carrier to select the indirect
-ABI. Only the initialized 8- or 16-byte prefix is copied to the caller; the remaining
-carrier bytes are never inspected. These adapters support AAPCS64 and SysV x86-64
-and accept one pointer-sized argument. They are not general signature adapters.
+though ordinary C returns such small structs in registers. `aznative_calls.h`
+provides separate typed calls for strings, players, locations, track state,
+editor text and phrase content. Each native function type uses a 24-byte C return
+carrier to select the indirect ABI. The wrapper copies only the initialized 8- or
+16-byte prefix into its typed result; the remaining carrier bytes are never
+inspected. These adapters support AAPCS64 and SysV x86-64. Keep the native size or
+object argument type on each operation instead of passing everything as `void *`.
 
 The carrier is only for calling firmware. It must never be returned from a hook
 to a smaller native destination. Hooks that must forward the original result
 address, caller address or captured registers retain their native entry shims.
+
+## Typed native bindings
+
+Convert qualified firmware addresses to function pointers at the binding boundary.
+Use the operation's prototype thereafter. Notification listeners and their control
+blocks have typed vtables; Slip retains its separate scalar callback contract.
+Their native layout and ownership rules remain unchanged.
+
+Connection installation has separate open and close callbacks and typed original
+function slots. The low-level upstream island installer still takes erased
+pointers; the local adapters contain that conversion. It must publish the original
+into the supplied slot before exposing the replacement entry. Close is installed
+first, and both originals must be valid before connection births are admitted.
+
+Generic callback contexts, serialized bytes and heterogeneous owner payloads retain
+their opaque pointer types. Public SDK layout and upstream SQL binding tables are
+unchanged by these local interface types.
 
 ## Retained contributed assembly
 
@@ -84,6 +103,8 @@ thread isolation and forced unwind. On Linux it also compiles an independent GCC
 `-fpcc-struct-return` oracle that returns exactly 8 or 16 bytes, checking the C
 adapters and destination canaries. `SAN=asan` and `SAN=tsan` enable the respective
 sanitizer passes. The suite is included in `tests/sdk-completion.sh`.
+It also runs `tests/native-types.sh`, which checks that valid bindings compile and
+incorrect callable signatures or object types are rejected by the compiler.
 
 The existing service and hook suites remain required. Host and compiler tests do
 not replace physical-deck acceptance of the resulting libraries.

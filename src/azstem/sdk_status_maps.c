@@ -10,7 +10,7 @@
 #include <math.h>
 #include <string.h>
 #include <stdbool.h>
-#include "../common/aznative_c.h"
+#include "../common/aznative_calls.h"
 #include "../common/aznative_sync.h"
 
 

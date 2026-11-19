@@ -1,6 +1,67 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 
 #include "native_abi_fixture.h"
+#include <sys/mman.h>
+#include <unistd.h>
+
+static void test_analysis_bindings(void) {
+    /* Data-only images at the qualified native sites exercise the actual
+     * binding gate. No instruction from these mappings is executed. */
+    static const struct {
+        uintptr_t address;
+        uint32_t words[4];
+    } expected[] = {
+        {0xdafa38, {0xa9a47bfd, 0x910003fd, 0xa90363f7, 0xf9400017}},
+        {0x2477df0, {0xa900081f, 0xb5000042, 0xd65f03c0, 0xa9bd7bfd}},
+        {0x2477e70, {0xf9400000, 0x177eb92b, 0xd503201f, 0xd503201f}},
+        {0x6f2728, {0xa9bb7bfd, 0x5289eb03, 0x91003002, 0x910003fd}},
+        {0x6f2848, {0xa9bc7bfd, 0x5289eb01, 0x72aa4861, 0x910003fd}},
+        {0x2371890, {0xa9b77bfd, 0x910003fd, 0x910203e8, 0xa90153f3}}};
+    assert(!atomic_load(&analysis_ready));
+    configure_analysis(1, 0);
+    configure_analysis(2, 0x1000);
+    assert(!atomic_load(&analysis_ready) && !analysis_ops.make);
+
+    const long page_size = sysconf(_SC_PAGESIZE);
+    assert(page_size > 0 && !(page_size & (page_size - 1)));
+    void *pages[6] = {0};
+    unsigned page_count = 0;
+    for (unsigned i = 0; i < 6; ++i) {
+        void *page = (void *) (expected[i].address & ~((uintptr_t) page_size - 1));
+        unsigned j = 0;
+        while (j < page_count && pages[j] != page) ++j;
+        if (j == page_count) {
+            /* A hint, never MAP_FIXED: refuse an occupied address safely. */
+            void *mapped = mmap(page, (size_t) page_size, PROT_READ | PROT_WRITE,
+                                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            assert(mapped == page);
+            pages[page_count++] = mapped;
+        }
+        memcpy((void *) expected[i].address, expected[i].words, sizeof expected[i].words);
+    }
+    for (unsigned i = 0; i < 6; ++i) {
+        uint32_t *word = (uint32_t *) expected[i].address;
+        *word ^= 1;
+        configure_analysis(2, 0);
+        assert(!atomic_load(&analysis_ready) && !analysis_ops.make && !analysis_ops.trash);
+        *word ^= 1;
+    }
+    configure_analysis(2, 0);
+    assert(atomic_load(&analysis_ready));
+    assert((uintptr_t) analysis_ops.make == expected[0].address);
+    assert((uintptr_t) analysis_ops.memory == expected[1].address);
+    assert((uintptr_t) analysis_ops.memory_drop == expected[2].address);
+    assert((uintptr_t) analysis_ops.grant == expected[3].address);
+    assert((uintptr_t) analysis_ops.release == expected[4].address);
+    assert((uintptr_t) analysis_ops.trash == expected[5].address);
+    for (unsigned i = 0; i < page_count; ++i) assert(!munmap(pages[i], (size_t) page_size));
+    configure_analysis(2, 0); /* Already bound: no second read of native sites. */
+    assert(atomic_load(&analysis_ready) && (uintptr_t) analysis_ops.make == expected[0].address);
+    atomic_store(&analysis_ready, false);
+    analysis_ops = (struct AnalysisOps) {0};
+    puts("PASS phrase binding: build/bias guards, every site mismatch, typed entries and one-time publication");
+}
+
 static int memory_failure = -1;
 static unsigned memory_calls, memory_live;
 static bool make_failure;
@@ -42,7 +103,7 @@ void test_trash(uintptr_t unused __attribute__((unused)), uintptr_t p) {
         }
 }
 void test_make_body(void *result, const void *argument) {
-    const struct AnalysisAtomRef *ref = argument;
+    const struct az_native_phrase_atom_ref *ref = argument;
     const struct AnalysisAtom *atom = &(*ref->value);
     assert(!ref->control && atom->header == 32 && atom->prefix == 18 && atom->stride == 24 &&
            atom->rows.size == atom->count * 24 && atom->raw.size == 32 + atom->rows.size);
@@ -107,9 +168,10 @@ static void publish_raising(void *opaque) {
 }
 int test_analysis(const struct azn_maps_api *api) {
     assert(profile == &profiles[1]);
+    test_analysis_bindings();
     struct aznm_packet initial = {0};
     assert(api->capture(0, epoch, &initial) == AZ_UNSUPPORTED);
-    analysis_ops.make = (void *) test_make;
+    analysis_ops.make = (az_native_phrase_make_fn) test_make;
     analysis_ops.memory = test_memory;
     analysis_ops.memory_drop = test_memory_drop;
     analysis_ops.grant = test_grant;

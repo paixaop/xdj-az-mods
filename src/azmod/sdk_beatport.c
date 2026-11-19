@@ -62,13 +62,13 @@ static void (*bpl_orig_delete8)(void *);
 static void (*bpl_orig_dtor48)(void *);
 static void (*bpl_orig_delete48)(void *);
 
-typedef struct {
-    const char *text;
-} bpl_string;
+#include "../common/aznative_calls.h"
+typedef struct az_native_text bpl_string;
 #ifndef BPL_TEST
 #include "../common/aznative_c.h"
 static void bpl_get_text(bpl_string *out, void *editor) {
-    az_native_result_word((void *) (uintptr_t) 0x263f4e0, out, editor);
+    *out = az_native_editor_text((az_native_editor_text_fn) (uintptr_t) 0x263f4e0,
+                                 (struct az_native_editor *) editor);
 }
 #else
 extern void bpl_get_text(bpl_string *, void *);

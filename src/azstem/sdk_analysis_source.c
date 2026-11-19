@@ -12,7 +12,7 @@
 #include "../common/azloadobserver.h"
 #include "../common/azstatus_native.h"
 #include "../azmod/azmod-mod.h"
-#include "../common/aznative_c.h"
+#include "../common/aznative_calls.h"
 #include "../common/aznative_sync.h"
 #include <stdatomic.h>
 #include <string.h>
@@ -65,10 +65,11 @@ static bool typed(const Track *track) {
 }
 static bool completed(const Track *track) {
     if (!typed(track)) return false;
-    Track state __attribute__((cleanup(az_native_owner_reset))) = {0};
     /* Firmware returns a nontrivial owner through x8, even though its two-word
      * representation would be returned in x0/x1 by an ordinary C function. */
-    az_native_result_pair((void *) (bias + 0x178d760), &state, track->object);
+    Track state __attribute__((cleanup(az_native_owner_reset))) =
+        az_native_track_state_acquire((az_native_track_state_fn) (bias + 0x178d760),
+                                      (const struct az_native_track *) track->object);
     if (!state.object) return false;
     uintptr_t p = (uintptr_t) state.object;
     return scalar(uintptr_t, p) == bias + 0x2c5b0b8 && scalar(int, p + 0xc) == 0 &&

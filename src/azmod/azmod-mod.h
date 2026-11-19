@@ -919,26 +919,25 @@ typedef struct az_library_v1 {
     int (*on_deck_status)(const char *id, const az_deck_watch_v1 *watch,
                           az_deck_status_fn fn, void *user, az_deck_subscription *out);
     int (*deck_status_release)(const char *id, az_deck_subscription subscription);
-    /* Returns AZ_NOT_FOUND when phrases are populated. Check all three members.
-     * commit accepts the bounded TA01/PQTZ/PSSI worker output documented in
-     * docs/18-track-analysis.md; it never replaces an existing nonempty map.
-     * Successful commit consumes the job. Close every unsuccessful/open job.
+    /* Legacy phrase-only open. Use analysis_open_v2 and analysis_commit_result
+     * for publication. Returns AZ_NOT_FOUND when phrases are populated.
+     * Close every unsuccessful/open job.
      * AZ_NOT_FOUND returns job=0 and flags; NEEDS_LINK asks the mod to retry
      * core->lib_spool_kick on its worker until the existing playback gate admits it. */
     int (*analysis_open)(const char *id, const az_track_ref *track, az_analysis_job_v1 *out);
-    int (*analysis_commit)(const char *id, uint64_t job, const void *data, uint32_t size);
+    void (*reserved_analysis_commit)(void); /* Retired raw commit slot; always NULL. Do not use. */
     int (*analysis_close)(const char *id, uint64_t job);
     /* Worker-only, deck 0..3 and the accepted LOAD event's load_epoch. Requires
      * a ready native grid. USB and completed Beatport downloads are supported
      * by qualified core profiles. AZ_BUSY means source/maps are still arriving.
      * The core owns source identity; streaming jobs have an empty track ref.
      * analysis_path is a read-only snapshot of the pinned current native grid.
-     * Close/commit uses the same job API. Stale loads/maps cannot be published. */
+     * Legacy phrase-only open; use analysis_open_loaded_v2 for publication. */
     int (*analysis_open_loaded)(const char *id, int deck, uint64_t load_epoch,
                                 az_analysis_job_v1 *out);
     /* Worker-only extension: independently fills missing phrases and vocals.
      * needed may contain AZ_DATA_GRID, AZ_DATA_PHRASES, AZ_ANALYSIS_VOCALS.
-     * TA02 publication; existing populated components are never replaced. */
+     * Publish through analysis_commit_result; populated components are never replaced. */
     int (*analysis_open_v2)(const char *id, const az_track_ref *track, az_analysis_job_v1 *out);
     int (*analysis_open_loaded_v2)(const char *id, int deck, uint64_t load_epoch,
                                   az_analysis_job_v1 *out);
@@ -961,7 +960,7 @@ typedef struct az_library_v1 {
      * lease's pinned grid; NULL/0 returns AZ_LIMIT and its required beat_count.
      * No partial copy on error. The lease and source must still be current.
      * commit_result accepts v2 leases, consumes only on AZ_OK, and keeps the
-     * same source/load/file fences and preserve-existing policy as commit.
+     * source/load/file fences and the preserve-existing policy.
      * Empty components have zero fields and NULL arrays. Check each member. */
     int (*analysis_grid)(const char *id, uint64_t job, az_analysis_grid_v1 *out,
                           az_beat *beats, uint32_t capacity);

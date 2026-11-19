@@ -202,7 +202,7 @@ static bool unchanged(CueVector a, CueVector b, bool changed, unsigned kind, uin
 
 struct string_release {
     azcs_native_string *text;
-    void (*destroy)(void *);
+    az_native_string_destroy_fn destroy;
 };
 static void string_release_drop(struct string_release *r) { r->destroy(r->text); }
 azcs_profile azcs_native_profile(int build, uintptr_t bias) {
@@ -280,9 +280,8 @@ static bool snapshot_player(azcs_snapshot *self, void *manager, uintptr_t *servi
         diagnostic("interfaces", 0, 0, 0);
         return false;
     }
-    azcs_native_ref owned = {0};
-    az_native_result_word((void *) word(word(player_interface) + 2 * sizeof(uintptr_t)), &owned, (void *) player_interface);
-    self->player_ = owned.value;
+    az_native_player_acquire_fn acquire = (az_native_player_acquire_fn) word(word(player_interface) + 2 * sizeof(uintptr_t));
+    self->player_ = (uintptr_t) az_native_player_acquire(acquire, (struct az_native_player_interface *) player_interface);
     if (!self->player_) {
         diagnostic("player", 0, 0, 0);
         return false;
@@ -305,9 +304,7 @@ static bool snapshot_source(azcs_snapshot *self, uintptr_t position) {
         diagnostic("source", position, self->source_, 0);
         return false;
     }
-    azcs_native_ref where = {0};
-    az_native_result_word(self->p_.where_from, &where, (const void *) self->player_);
-    self->where_from_ = where.value;
+    self->where_from_ = (uintptr_t) az_native_location_acquire(self->p_.where_from, (const struct az_native_player *) self->player_);
     if (!self->where_from_ || self->where_from_ != word(self->source_ + 0x58)) {
         diagnostic("where-from", position, self->source_, 0);
         return false;
@@ -510,7 +507,7 @@ static bool native_comment(const azcs_snapshot *self, const char *comment, azcs_
     size_t length = 0;
     while (length < 128 && comment[length]) ++length;
     if (length == 128) return false;
-    az_native_result_word(self->p_.string_allocate, text, (const void *) (uintptr_t) (length + 1));
+    *text = az_native_string_allocate(self->p_.string_allocate, length + 1);
     if (!text->data) return false;
     memcpy(text->data, comment, length + 1);
     return true;

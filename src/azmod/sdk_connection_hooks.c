@@ -36,7 +36,7 @@ bool az_sql_profile_contains(const struct az_sql_profile *p, uintptr_t address, 
 az_sql_file_control az_sql_profile_file_control(const struct az_sql_profile *p) { return p->control_; }
 uintptr_t az_sql_profile_open_entry(const struct az_sql_profile *p) { return p->base_ + 0x647b0; }
 uintptr_t az_sql_profile_close_entry(const struct az_sql_profile *p) { return p->base_ + 0x512c0; }
-static bool native_platform() {
+static bool native_platform(void) {
 #if defined(__linux__) && defined(__aarch64__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
     return sizeof(uintptr_t) == 8;
 #else
@@ -103,8 +103,8 @@ static bool profile_entry_bytes(const struct az_sql_profile *p) {
 }
 static bool profile_code_digest(const struct az_sql_profile *p, void *handle) {
     /* Hash mapped code once using the public unkeyed OpenSSL API; never a DB or key. */
-    __auto_type sha = ((const void *(*) ())(dlsym(handle, "EVP_sha256")));
-    __auto_type digest = ((int (*)(const void *, size_t, unsigned char *, unsigned *, const void *, void *))(dlsym(handle, "EVP_Digest")));
+    az_crypto_sha256_fn sha = (az_crypto_sha256_fn) dlsym(handle, "EVP_sha256");
+    az_crypto_digest_fn digest = (az_crypto_digest_fn) dlsym(handle, "EVP_Digest");
     static const unsigned char expected[32] = {
         0x24, 0x3c, 0x4e, 0x20, 0xf5, 0x52, 0xc9, 0x7e, 0xe0, 0xaa, 0x8d, 0xe4, 0x52, 0x75, 0x01, 0xd7,
         0xa3, 0xdd, 0x5a, 0x22, 0x3e, 0x8e, 0x01, 0x27, 0x35, 0x74, 0x01, 0x7f, 0x7a, 0xfc, 0x39, 0x44};
@@ -116,12 +116,14 @@ static bool profile_code_digest(const struct az_sql_profile *p, void *handle) {
 }
 static bool profile_version_matches(const struct az_sql_profile *p, void **symbols) {
     /* Invoke public getters only after the code has been checked and hashed. */
-    if (((int (*)()) symbols[1])() != 3033000) return false;
-    const char *version = ((const char *(*) ()) symbols[2])();
+    az_sql_version_number_fn number = (az_sql_version_number_fn) symbols[1];
+    az_sql_version_fn get_version = (az_sql_version_fn) symbols[2];
+    if (number() != 3033000) return false;
+    const char *version = get_version();
     return az_sql_profile_contains(p, (uintptr_t) version, 7, 4) && memcmp(version, "3.33.0", 7) == 0;
 }
 #endif
-static const struct az_sql_profile *profile_load() {
+static const struct az_sql_profile *profile_load(void) {
 #if defined(__linux__)
     if (!native_platform()) return NULL;
     void *handle = dlopen("libsqlcipher.so.0", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
@@ -160,13 +162,14 @@ const struct az_sql_profile *az_connection_prepare_profile(void) {
  * source-owned registry and must itself have process lifetime. */
 struct Binding {
     struct az_connection_state *epochs;
-    void *originals[2];
+    az_native_sql_open original_open;
+    az_native_sql_close original_close;
     _Atomic(bool) armed;
 };
 static _Atomic(struct Binding *) binding;
 static _Atomic(bool) attempted = false;
 
-static __attribute__((noreturn)) void broken_publication() {
+static __attribute__((noreturn)) void broken_publication(void) {
     /* No native result can be preserved if an installer violates the required
      * original-before-entry contract. Never fabricate a successful result. */
     abort();
@@ -194,7 +197,7 @@ static int forward_close(void *opaque) {
 static int open_entry(const char *path, struct sqlite3 **output, int flags, const char *vfs) {
     struct Binding *b = atomic_load_explicit(&(binding), memory_order_acquire);
     if (!b) broken_publication();
-    __auto_type original = ((az_native_sql_open) (__atomic_load_n(&b->originals[0], __ATOMIC_ACQUIRE)));
+    az_native_sql_open original = __atomic_load_n(&b->original_open, __ATOMIC_ACQUIRE);
     if (!original || original == &open_entry) broken_publication();
     /* Admission is captured at ENTRY. An operation that started during partial
      * installation cannot become a birth merely because installation finishes. */
@@ -205,7 +208,7 @@ static int open_entry(const char *path, struct sqlite3 **output, int flags, cons
 static int close_entry(struct sqlite3 *connection, int mode) {
     struct Binding *b = atomic_load_explicit(&(binding), memory_order_acquire);
     if (!b) broken_publication();
-    __auto_type original = ((az_native_sql_close) (__atomic_load_n(&b->originals[1], __ATOMIC_ACQUIRE)));
+    az_native_sql_close original = __atomic_load_n(&b->original_close, __ATOMIC_ACQUIRE);
     if (!original || original == &close_entry) broken_publication();
     // Close observation has no readiness/diagnostics/enable bypass.
     struct CloseCall call = {original, connection, mode};
@@ -223,17 +226,17 @@ static void install_call(void *opaque) {
     struct az_connection_installer installer = c->installer;
     uintptr_t base = c->base;
 
-    int closed = installer.call(base + 0x512c0, ((void *) (&close_entry)), &b->originals[1], installer.context);
-    void *close_original = __atomic_load_n(&b->originals[1], __ATOMIC_ACQUIRE);
-    if (closed != 1 || !close_original || close_original == ((void *) (&close_entry))) return;
-    int opened = installer.call(base + 0x647b0, ((void *) (&open_entry)), &b->originals[0], installer.context);
-    void *open_original = __atomic_load_n(&b->originals[0], __ATOMIC_ACQUIRE);
-    if (opened != 1 || !open_original || open_original == ((void *) (&open_entry)) || open_original == close_original) return;
+    int closed = installer.close(base + 0x512c0, close_entry, &b->original_close, installer.context);
+    az_native_sql_close close_original = __atomic_load_n(&b->original_close, __ATOMIC_ACQUIRE);
+    if (closed != 1 || !close_original || close_original == close_entry) return;
+    int opened = installer.open(base + 0x647b0, open_entry, &b->original_open, installer.context);
+    az_native_sql_open open_original = __atomic_load_n(&b->original_open, __ATOMIC_ACQUIRE);
+    if (opened != 1 || !open_original || open_original == open_entry || (uintptr_t) open_original == (uintptr_t) close_original) return;
     atomic_store_explicit(&(b->armed), true, memory_order_release);
     c->result = 1;
 }
 static int install_claimed(struct az_connection_state *epochs, struct az_connection_installer installer, uintptr_t base) {
-    if (!installer.call || base > UINTPTR_MAX - 0x647c0) return 0;
+    if (!installer.open || !installer.close || base > UINTPTR_MAX - 0x647c0) return 0;
     struct Binding *b = calloc(1, sizeof *b);
     if (!b) return 0;
     b->epochs = epochs;
@@ -254,7 +257,7 @@ int az_connection_install(struct az_connection_state *epochs, struct az_connecti
     const struct az_sql_profile *profile = az_connection_prepare_profile();
     return profile ? install_claimed(epochs, installer, az_sql_profile_base(profile)) : 0;
 }
-bool az_connection_ready() {
+bool az_connection_ready(void) {
     struct Binding *b = atomic_load_explicit(&(binding), memory_order_acquire);
     return b && atomic_load_explicit(&(b->armed), memory_order_acquire);
 }

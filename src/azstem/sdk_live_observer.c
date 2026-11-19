@@ -216,22 +216,22 @@ static void publish(unsigned deck, unsigned stream, uint64_t generation, const v
     atomic_store_explicit(&(v->sequence), seq + 2, memory_order_release);
 }
 struct CaptureListener {
-    const void *const *vtable;
+    struct az_native_listener base;
     unsigned deck, stream;
     uint64_t generation;
 };
-static void listener_destroy(void *opaque) { (void) opaque; }
-static void callback2(void *opaque, const void *n) {
+static void listener_destroy(struct az_native_listener *opaque) { (void) opaque; }
+static void callback2(struct az_native_listener *opaque, const struct az_native_notification *n) {
     (void) opaque;
     (void) n;
 }
-static void callback3(void *opaque, const void *n, unsigned player) {
-    const struct CaptureListener *listener = opaque;
+static void callback3(struct az_native_listener *opaque, const struct az_native_notification *n, unsigned player) {
+    const struct CaptureListener *listener = (const struct CaptureListener *) opaque;
     if (player != listener->deck) return;
     publish(listener->deck, listener->stream, listener->generation, n);
 }
-static const void *const listener_vtable[] = {
-    (void *) listener_destroy, (void *) listener_destroy, (void *) callback2, (void *) callback3};
+static const struct az_native_listener_vtable listener_vtable = {
+    listener_destroy, listener_destroy, callback2, callback3};
 static void pending_release(struct az_native_owner (*pending)[kStreams]) {
     for (unsigned s = 0; s < kStreams; ++s) az_native_owner_reset(&(*pending)[s]);
 }
@@ -326,18 +326,19 @@ static int live_binding(uintptr_t unit, uintptr_t *server, uintptr_t *table) {
     if (!*table) return 0;
     return 1;
 }
-static int live_entries(uintptr_t table, unsigned mask, uintptr_t entries[kStreams]) {
+static int live_entries(uintptr_t table, unsigned mask, az_native_listener_register_fn entries[kStreams]) {
     for (unsigned s = 0; s < kStreams; ++s) {
         if (!(mask & (1u << s))) continue;
-        entries[s] = word(table + slots[s] * 8);
-        if (!image_contains(entries[s], 4, kExecute)) return 0;
+        uintptr_t entry = word(table + slots[s] * 8);
+        if (!image_contains(entry, 4, kExecute)) return 0;
+        entries[s] = (az_native_listener_register_fn) entry;
     }
     return 1;
 }
 static int allocate_live_listeners(int deck, uint64_t generation, unsigned mask, struct az_native_owner pending[kStreams]) {
     for (unsigned s = 0; s < kStreams; ++s) {
         if (!(mask & (1u << s))) continue;
-        pending[s] = az_listener_create(sizeof(struct CaptureListener), listener_vtable);
+        pending[s] = az_listener_create(sizeof(struct CaptureListener), &listener_vtable);
         if (!pending[s].object) return 0;
         struct CaptureListener *listener = pending[s].object;
         listener->deck = (unsigned) deck;
@@ -352,7 +353,7 @@ static int register_live_listeners(int deck, uintptr_t unit, uintptr_t server, u
 #endif
     const bool passive = atomic_load_explicit(&(enabled), memory_order_acquire) == 2;
     const unsigned mask = passive ? (1u | (1u << kSync)) : (1u << kStreams) - 1;
-    uintptr_t entries[kStreams];
+    az_native_listener_register_fn entries[kStreams];
     if (!live_entries(table, mask, entries)) return 0;
     if (next_generation == UINT64_MAX) return 0;
     uint64_t generation = ++next_generation;
@@ -368,7 +369,7 @@ static int register_live_listeners(int deck, uintptr_t unit, uintptr_t server, u
     int pending_deck __attribute__((cleanup(registration_drop))) = deck;
     for (unsigned s = 0; s < kStreams; ++s) {
         if (!(mask & (1u << s))) continue;
-        az_listener_register(entries[s], server, &owners[deck][s]);
+        az_listener_register(entries[s], (struct az_native_notification_server *) server, &owners[deck][s]);
     }
     pending_deck = -1;
     (void) pending_deck; /* Successful registration disarms the cleanup rollback. */

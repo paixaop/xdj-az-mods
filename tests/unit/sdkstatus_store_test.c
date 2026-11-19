@@ -126,7 +126,7 @@ __attribute__((visibility("hidden"))) void azfile_native_refresh(unsigned deck, 
 #include "sdk_status_store.c"
 /* The host fixture gives its two simulated media synthetic mount IDs. Check
  * the actual host SQLite Unix fd against its device/inode on both ports. */
-int azsdk_sources_reader_fd(void *db, uint64_t mount, uint64_t device, uint64_t inode) {
+int azsdk_sources_reader_fd(struct sqlite3 *db, uint64_t mount, uint64_t device, uint64_t inode) {
     struct stat sb;
     int fd = libfd_fd_of(db);
     return mount && fd >= 0 && !fstat(fd, &sb) && device == (uint64_t) sb.st_dev &&

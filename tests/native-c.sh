@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 set -euo pipefail
 cd "$(dirname "$0")/.."
+bash tests/native-types.sh
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 cc=${HOST_CC:-cc}

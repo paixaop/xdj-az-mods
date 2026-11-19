@@ -4,7 +4,7 @@
 #include "../azmod/azmod-mod.h"
 #include <stdatomic.h>
 #include <string.h>
-#include "../common/aznative_c.h"
+#include "../common/aznative_calls.h"
 
 #include <time.h>
 #if defined(AZSDK_CUE_DIAGNOSTIC)
@@ -219,26 +219,23 @@ Slot *for_handler(uintptr_t handler) {
 /* Nontrivial return selects the native AArch64 hidden-X8 aggregate ABI. Native
  * allocation creates the actual counted string header; never synthesize it.
  * This local destructor is deliberately empty; the native destructor owns it. */
-typedef struct {
-    void *data;
-} NativeString;
+typedef struct az_native_string NativeString;
 struct StringRelease {
     NativeString *text;
-    uintptr_t destroy;
+    az_native_string_destroy_fn destroy;
 };
-static void string_release_drop(struct StringRelease *r) { ((void (*)(void *)) r->destroy)(r->text); }
+static void string_release_drop(struct StringRelease *r) { r->destroy(r->text); }
 static bool mutate_row(Slot *slot, uintptr_t row) {
     __auto_type profile = &(state().profile);
     if (slot->request.operation == AZ_CMD_CUE_COMMENT || creating(slot->request.operation)) {
         size_t length = 0;
         if (!utf8(slot->request.comment, &(length))) return false;
-        NativeString text = {0};
-        az_native_result_word((void *) profile->string_allocate, &text, (const void *) (uintptr_t) (length + 1));
+        NativeString text = az_native_string_allocate((az_native_string_allocate_fn) profile->string_allocate, length + 1);
         if (!text.data) return false;
-        struct StringRelease release __attribute__((cleanup(string_release_drop))) = {&text, profile->string_destroy};
+        struct StringRelease release __attribute__((cleanup(string_release_drop))) = {&text, (az_native_string_destroy_fn) profile->string_destroy};
         (void) release; /* cleanup attribute owns the scope exit */
         memcpy(text.data, slot->request.comment, length + 1);
-        ((void (*)(void *, const void *))(profile->string_assign))(((void *) (row + 0x70)), &text);
+        ((az_native_string_assign_fn) profile->string_assign)((struct az_native_string *) (row + 0x70), &text);
     }
     if (slot->request.operation == AZ_CMD_CUE_COLOR || slot->request.operation == AZ_CMD_HOT_SET || creating(slot->request.operation)) {
         unsigned rgb = slot->request.rgb;

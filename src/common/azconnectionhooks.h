@@ -6,6 +6,13 @@ struct sqlite3;
 typedef int (*az_native_sql_open)(const char *, struct sqlite3 **, int, const char *);
 typedef int (*az_native_sql_close)(struct sqlite3 *, int);
 typedef int (*az_sql_file_control)(struct sqlite3 *, const char *, int, void *);
+typedef int (*az_sql_version_number_fn)(void);
+typedef const char *(*az_sql_version_fn)(void);
+struct evp_md_st;
+struct engine_st;
+typedef const struct evp_md_st *(*az_crypto_sha256_fn)(void);
+typedef int (*az_crypto_digest_fn)(const void *, size_t, unsigned char *, unsigned *,
+                                   const struct evp_md_st *, struct engine_st *);
 struct az_sql_range {
     uintptr_t begin, end;
     unsigned flags;
@@ -52,7 +59,8 @@ struct az_connection_installer {
     /* Publish the callable original BEFORE making its replacement reachable.
      * Return exactly 1 on acceptance. Never retain or mutate the slot later.
      * Failure leaves births unavailable; an installed close keeps retiring. */
-    int (*call)(uintptr_t entry, void *replacement, void **original, void *context);
+    int (*open)(uintptr_t entry, az_native_sql_open replacement, az_native_sql_open *original, void *context);
+    int (*close)(uintptr_t entry, az_native_sql_close replacement, az_native_sql_close *original, void *context);
     void *context;
 };
 /* Opt-in startup dependency. The immutable binding borrows the existing state,

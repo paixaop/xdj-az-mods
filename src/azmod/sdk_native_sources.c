@@ -1926,7 +1926,7 @@ int azsdk_sources_descriptor_identity(int descriptor, uint64_t mount_id,
     return 0;
 #endif
 }
-int azsdk_sources_reader_fd(void *connection, uint64_t mount_id,
+int azsdk_sources_reader_fd(struct sqlite3 *connection, uint64_t mount_id,
                             uint64_t device, uint64_t inode) {
 #if defined(__linux__)
     if (!connection || !mount_id || !inode || !azsdk_sources_physical_ready()) return -1;
@@ -1942,16 +1942,15 @@ int azsdk_sources_reader_fd(void *connection, uint64_t mount_id,
 #endif
     return -1;
 }
-int azsdk_sources_install_connections(
-    azsdk_source_connection_installer installer, void *context) {
+int azsdk_sources_install_connections(struct az_connection_installer installer) {
     __auto_type state = &(source_state());
     const int build = atomic_load_explicit(&(state->bound_build), memory_order_acquire);
-    if (!installer || build < 1 || build > 2) return 0;
+    if (!installer.open || !installer.close || build < 1 || build > 2) return 0;
     /* install() prepares/reuses the sealed exact-module proof before either
      * redirect. Never hold registry_mutex across installer/native callbacks.
      * This canonical State has process lifetime; source configure/disable does
      * not reset it or turn off an already reachable close observer. */
-    return az_connection_install(&state->connection_epochs, (struct az_connection_installer) {installer, context});
+    return az_connection_install(&state->connection_epochs, installer);
 }
 
 #if defined(AZSDK_CACHE_BIRTH_TESTING)

@@ -129,7 +129,7 @@ int main() {
     fail_state = true;
     struct wait_call call = {(uintptr_t) &owner, &weak, generation};
     assert(!fixture_native_try(wait_raising, &call));
-    assert(track.control->strong == 1 && fixture_exception_deletions == 1);
+    assert(track.control->strong == 1 && state.control->strong == 2 && fixture_exception_deletions == 1);
     fail_state = false;
     put(*(struct Native *) state.object, 0x18, (unsigned char) 0);
     wait_decrypt((uintptr_t) &owner, &weak, generation);

@@ -54,8 +54,8 @@ void absent() {
 }
 void wrong(const char *path) {
     void *handle = load(path);
-    __auto_type number = ((int (*)())(dlsym(handle, "sqlite3_libversion_number")));
-    __auto_type version = ((const char *(*) ())(dlsym(handle, "sqlite3_libversion")));
+    az_sql_version_number_fn number = (az_sql_version_number_fn) dlsym(handle, "sqlite3_libversion_number");
+    az_sql_version_fn version = (az_sql_version_fn) dlsym(handle, "sqlite3_libversion");
     __auto_type calls = ((unsigned *) (dlsym(handle, "profile_forbidden_calls")));
     REQUIRE(number && version && calls && number() == 3033000 && !strcmp(version(), "3.33.0"),
             "lookalike has genuine callable getters with expected names and versions");
@@ -101,11 +101,11 @@ void valid(const char *path, bool cold_first) {
                 az_sql_profile_io_rva(profile, 3) == 0 && az_sql_profile_vfs_open_rva(profile) == 0x53968 && az_sql_profile_read_rva(profile) == 0x1513c &&
                 az_sql_profile_size_rva(profile) == 0x1bdf4 && az_sql_profile_control_rva(profile) == 0x536b0,
             "verified read-only physical adapter RVAs");
-    __auto_type number = ((int (*)())(dlsym(handle, "sqlite3_libversion_number")));
-    __auto_type version = ((const char *(*) ())(dlsym(handle, "sqlite3_libversion")));
+    az_sql_version_number_fn number = (az_sql_version_number_fn) dlsym(handle, "sqlite3_libversion_number");
+    az_sql_version_fn version = (az_sql_version_fn) dlsym(handle, "sqlite3_libversion");
     REQUIRE(number && version && number() == 3033000 && !strcmp(version(), "3.33.0"), "real native public getters execute");
-    __auto_type sha = ((const void *(*) ())(dlsym(handle, "EVP_sha256")));
-    __auto_type digest = ((int (*)(const void *, size_t, unsigned char *, unsigned *, const void *, void *))(dlsym(handle, "EVP_Digest")));
+    az_crypto_sha256_fn sha = (az_crypto_sha256_fn) dlsym(handle, "EVP_sha256");
+    az_crypto_digest_fn digest = (az_crypto_digest_fn) dlsym(handle, "EVP_Digest");
     unsigned char hash[32] = {0};
     unsigned length = 0;
     REQUIRE(sha && digest && az_sql_profile_contains(profile, az_sql_profile_base(profile) + 0xf980, 481192, 5) &&

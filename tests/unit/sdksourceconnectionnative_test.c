@@ -11,8 +11,7 @@
 #include <dlfcn.h>
 #include "../../src/azmod/sdk_native_sources.c"
 typedef struct sqlite3 sqlite3;
-typedef int (*SourceInstaller)(uintptr_t, void *, void **, void *);
-int azsdk_sources_install_connections(SourceInstaller, void *) __attribute__((weak));
+int azsdk_sources_install_connections(struct az_connection_installer) __attribute__((weak));
 int azsdk_test_connection_island(uintptr_t, void *, void **);
 #define REQUIRE(x, why)                                                  \
     do {                                                                 \
@@ -27,6 +26,12 @@ int installer(uintptr_t entry, void *replacement, void **original, void *context
     return azsdk_test_connection_island(entry, replacement, original);
 }
 
+static int install_open(uintptr_t entry, az_native_sql_open replacement, az_native_sql_open *original, void *context) {
+    return installer(entry, (void *) replacement, (void **) original, context);
+}
+static int install_close(uintptr_t entry, az_native_sql_close replacement, az_native_sql_close *original, void *context) {
+    return installer(entry, (void *) replacement, (void **) original, context);
+}
 int main(int argc, char **argv) {
     REQUIRE(argc == 3, "explicit native module and build");
     int build = atoi(argv[2]);
@@ -48,7 +53,7 @@ int main(int argc, char **argv) {
     printf("NATIVE_SOURCE_STATE_BASELINE_OK memory=1 initial_physical=%u\n", !late);
     fflush(stdout);
     __auto_type bridge = azsdk_sources_install_connections;
-    if (bridge) (void) bridge(installer, NULL);
+    if (bridge) (void) bridge((struct az_connection_installer) {install_open, install_close, NULL});
     sqlite3 *db = NULL;
     REQUIRE(open(":memory:", &db, 6, NULL) == 0 && db, "genuine native open after startup bridge");
     struct az_connection_receipt receipt = {0};

@@ -152,16 +152,16 @@ static void invalidate_slot(unsigned deck, unsigned slot) {
     atomic_compare_exchange_strong_explicit(&(s->acknowledged[deck]), &(expected), 0, memory_order_acq_rel, memory_order_acquire);
 }
 struct CueListener {
-    const void *const *vtable;
+    struct az_native_listener base;
     unsigned deck, slot, route;
 };
-static void listener_destroy(void *opaque) { (void) opaque; }
-static void callback2(void *opaque, const void *value) {
+static void listener_destroy(struct az_native_listener *opaque) { (void) opaque; }
+static void callback2(struct az_native_listener *opaque, const struct az_native_notification *value) {
     (void) opaque;
     (void) value;
 }
-static void callback3(void *opaque, const void *value, unsigned route) {
-    const struct CueListener *listener = opaque;
+static void callback3(struct az_native_listener *opaque, const struct az_native_notification *value, unsigned route) {
+    const struct CueListener *listener = (const struct CueListener *) opaque;
     struct State *s = state();
     if (route != listener->route || !atomic_load_explicit(&(s->enabled), memory_order_acquire) ||
         atomic_load_explicit(&(s->active[listener->deck]), memory_order_acquire) != listener->slot) return;
@@ -177,8 +177,8 @@ static void callback3(void *opaque, const void *value, unsigned route) {
     atomic_fetch_or_explicit(&(s->pending[listener->slot - 1].word), (uint64_t) (1u << index), memory_order_release);
     azsdk_cue_commands_collection_changed(listener->deck);
 }
-static const void *const listener_vtable[] = {
-    (void *) listener_destroy, (void *) listener_destroy, (void *) callback2, (void *) callback3};
+static const struct az_native_listener_vtable listener_vtable = {
+    listener_destroy, listener_destroy, callback2, callback3};
 static uint64_t collection_now(unsigned deck) {
 #ifdef AZSDK_CUE_TESTING
     if (atomic_load_explicit(&(state()->published[deck].clock_failure), memory_order_acquire)) return 0;
@@ -236,7 +236,8 @@ static void registration_drop(struct cue_registration *registration) {
     }
 }
 struct CueBinding {
-    uintptr_t server, entry;
+    struct az_native_notification_server *server;
+    az_native_listener_register_fn entry;
     uint32_t route;
 };
 static bool cue_binding(void *owned_unit, struct CueBinding *binding) {
@@ -255,7 +256,8 @@ static bool cue_binding(void *owned_unit, struct CueBinding *binding) {
      * caller owns the constructed chain; no later native field read.
      * Same embedded channel as registration vector+0x1508 and dispatch
      * X0. No deck namespace or global immutability is assigned to it. */
-    *binding = (struct CueBinding) {server, entry, scalar_u32(server + cue_channel + channel_route)};
+    *binding = (struct CueBinding) {(struct az_native_notification_server *) server, (az_native_listener_register_fn) entry,
+                                    scalar_u32(server + cue_channel + channel_route)};
     return true;
 }
 static bool cue_registration_available(unsigned deck) {
@@ -270,7 +272,7 @@ static unsigned create_cue_listener(unsigned deck, uint32_t route, struct az_nat
     const unsigned slot = ++s->used;
     const uint64_t generation = ++s->next_generation;
     atomic_store_explicit(&s->pending[slot - 1].word, generation << mask_bits, memory_order_release);
-    *listener = az_listener_create(sizeof(struct CueListener), listener_vtable);
+    *listener = az_listener_create(sizeof(struct CueListener), &listener_vtable);
     if (!listener->object) {
         invalidate_slot(deck, slot);
         return 0;

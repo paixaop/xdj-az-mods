@@ -292,17 +292,17 @@ static struct Bounds working_loop_bounds(const void *notification, bool engaged)
 }
 
 struct LoopListener {
-    const void *const *vtable;
+    struct az_native_listener base;
     unsigned deck;
     uint64_t generation;
 };
-static void listener_destroy(void *opaque) { (void) opaque; }
-static void callback2(void *opaque, const void *notification) {
+static void listener_destroy(struct az_native_listener *opaque) { (void) opaque; }
+static void callback2(struct az_native_listener *opaque, const struct az_native_notification *notification) {
     (void) opaque;
     (void) notification;
 }
-static void callback3(void *opaque, const void *notification, unsigned player) {
-    const struct LoopListener *listener = opaque;
+static void callback3(struct az_native_listener *opaque, const struct az_native_notification *notification, unsigned player) {
+    const struct LoopListener *listener = (const struct LoopListener *) opaque;
     const unsigned deck = listener->deck;
     const uint64_t generation = listener->generation;
     if (player != deck) return;
@@ -341,8 +341,8 @@ static void callback3(void *opaque, const void *notification, unsigned player) {
     atomic_store_explicit(&(p->revision), revision + 1, memory_order_relaxed);
     atomic_store_explicit(&(p->sequence), seq + 2, memory_order_release);
 }
-static const void *const listener_vtable[] = {
-    (void *) listener_destroy, (void *) listener_destroy, (void *) callback2, (void *) callback3};
+static const struct az_native_listener_vtable listener_vtable = {
+    listener_destroy, listener_destroy, callback2, callback3};
 static void invalidate(unsigned deck) {
     atomic_store_explicit(&(published[deck].active_generation), 0, memory_order_release);
     atomic_fetch_and_explicit(&(submitted), ~(1u << deck), memory_order_acq_rel);
@@ -381,25 +381,28 @@ static void registration_drop(int *deck) {
     az_native_owner_reset(&owners[*deck]);
 }
 struct LoopBinding {
-    uintptr_t server, entry;
+    struct az_native_notification_server *server;
+    az_native_listener_register_fn entry;
 };
 static int loop_binding(void *owned_unit, struct LoopBinding *binding) {
     uintptr_t unit = ((uintptr_t) (owned_unit));
     if (!canonical(unit)) return 0;
     uintptr_t publisher = word(unit + kUnitPublisher);
     if (!checked_vtable(publisher, "N9dj_player15UnitStateServerE", 2)) return 0;
-    binding->server = word(publisher + kPublisherServer);
-    uintptr_t table = checked_vtable(binding->server, "N9dj_player23StateNotificationServerE", 26);
+    uintptr_t server = word(publisher + kPublisherServer);
+    uintptr_t table = checked_vtable(server, "N9dj_player23StateNotificationServerE", 26);
     if (!table) return 0;
-    binding->entry = word(table + kObserverSlot * 8);
-    if (!image_contains(binding->entry, 4, kExecute)) return 0;
+    uintptr_t entry = word(table + kObserverSlot * 8);
+    if (!image_contains(entry, 4, kExecute)) return 0;
+    binding->server = (struct az_native_notification_server *) server;
+    binding->entry = (az_native_listener_register_fn) entry;
     return 1;
 }
 static int register_loop_listener(int deck, const struct LoopBinding *binding) {
     if (next_generation == UINT64_MAX) return 0;
     uint64_t generation = ++next_generation;
     struct az_native_owner listener __attribute__((cleanup(az_native_owner_reset))) =
-        az_listener_create(sizeof(struct LoopListener), listener_vtable);
+        az_listener_create(sizeof(struct LoopListener), &listener_vtable);
     if (!listener.object) return 0;
     struct LoopListener *object = listener.object;
     object->deck = (unsigned) deck;

@@ -13,28 +13,8 @@
             abort();                                                                                 \
         }                                                                                            \
     } while (0)
-#if __has_include("../../src/common/azconnectionhooks.h")
 #include "../../src/common/azconnectionhooks.h"
 #define ADAPTER_PRESENT 1
-#else
-#define ADAPTER_PRESENT 0
-struct sqlite3;
-typedef int (*az_native_sql_open)(const char *, struct sqlite3 **, int, const char *);
-typedef int (*az_native_sql_close)(struct sqlite3 *, int);
-struct az_connection_installer {
-    int (*call)(uintptr_t, void *, void **, void *);
-    void *context;
-};
-static void *originals[2];
-static int fallback_open(const char *p, struct sqlite3 **o, int f, const char *v) { return ((az_native_sql_open) __atomic_load_n(&originals[0], __ATOMIC_ACQUIRE))(p, o, f, v); }
-static int fallback_close(struct sqlite3 *p, int m) { return ((az_native_sql_close) __atomic_load_n(&originals[1], __ATOMIC_ACQUIRE))(p, m); }
-static int az_connection_test_install(struct az_connection_state *s, struct az_connection_installer i, uintptr_t b) {
-    (void) s;
-    if (i.call(b + 0x512c0, (void *) fallback_close, &originals[1], i.context) <= 0) return 0;
-    return i.call(b + 0x647b0, (void *) fallback_open, &originals[0], i.context) > 0;
-}
-static bool az_connection_ready(void) { return false; }
-#endif
 struct sqlite3 {
     unsigned fixture_id;
 };
@@ -128,7 +108,13 @@ static int install_fixture(uintptr_t target, void *thunk, void **slot, void *con
     unknown(self->epochs, &self->probe, "partial installation cannot publish a birth");
     return 1;
 }
-static struct az_connection_installer contract(struct FixtureInstaller *i) { return (struct az_connection_installer) {install_fixture, i}; }
+static int install_open(uintptr_t entry, az_native_sql_open replacement, az_native_sql_open *original, void *context) {
+    return install_fixture(entry, (void *) replacement, (void **) original, context);
+}
+static int install_close(uintptr_t entry, az_native_sql_close replacement, az_native_sql_close *original, void *context) {
+    return install_fixture(entry, (void *) replacement, (void **) original, context);
+}
+static struct az_connection_installer contract(struct FixtureInstaller *i) { return (struct az_connection_installer) {install_open, install_close, i}; }
 struct Database {
     struct sqlite3 *connection;
 };

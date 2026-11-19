@@ -541,9 +541,6 @@ static int sa_commit(int owner, uint64_t job, const void *data, uint32_t size) {
     pthread_mutex_unlock(&sa_mutex);
     return rc;
 }
-static int sdk_analysis_commit(const char *id, uint64_t job, const void *data, uint32_t size) {
-    return sa_commit(sa_owner(id, "analysis_commit", CM_RA()), job, data, size);
-}
 #include "sdk_analysis_typed.c"
 static int sdk_analysis_close(const char *id, uint64_t job) {
     int owner = sa_owner(id, "analysis_close", CM_RA());

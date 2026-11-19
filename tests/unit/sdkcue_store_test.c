@@ -142,8 +142,8 @@ void allocate_body(void *out, const void *count) {
     memcpy(out, &data, sizeof data);
 }
 extern void allocate(void);
-void destroy_string(void *p) {
-    free(((azcs_native_string *) (p))->data);
+void destroy_string(azcs_native_string *p) {
+    free(p->data);
     --strings;
 }
 void color(void *p, unsigned r, unsigned g, unsigned b) {
@@ -164,8 +164,8 @@ azcs_profile profile() {
     p.get_current_cue = get_current_cue;
     p.copy_property = copy_property;
     p.serialize_property = serialize;
-    p.where_from = (void *) capture_where;
-    p.string_allocate = (void *) allocate;
+    p.where_from = (az_native_location_acquire_fn) capture_where;
+    p.string_allocate = (az_native_string_allocate_fn) allocate;
     p.string_destroy = destroy_string;
     p.color_construct = color;
     return p;

@@ -51,10 +51,12 @@ enum az_slip_kind {
     AZ_SLIP_DISPOSE_SOURCE,
     AZ_SLIP_DISPOSE_PARENT
 };
+struct az_slip_source;
+typedef void (*az_slip_register_fn)(struct az_slip_source *, const struct az_native_owner *);
 struct az_slip_profile {
     uintptr_t construct_return, parent_returns[4];
     uintptr_t source_control_vtable, parent_control_vtable;
-    void (*registration)(void *, const struct az_native_owner *);
+    az_slip_register_fn registration;
 };
 struct az_slip_receipt {
     uint64_t generation, revision, observed_ns;

@@ -69,8 +69,8 @@ static void invoke(unsigned kind, void *object, uintptr_t caller, unsigned arg) 
     az_slip_forward(&c, original);
     assert(forwarded == 1 && errno == ERANGE && c.result[0] == 0x130200 && c.result[1] == 0x87654321);
 }
-static void registration(void *object, const struct az_native_owner *receiver) {
-    struct Source *s = object;
+static void registration(struct az_slip_source *object, const struct az_native_owner *receiver) {
+    struct Source *s = (struct Source *) object;
     assert(!pthread_mutex_lock(&s->mutex));
     if (fail_registration) {
         fail_registration = false;
@@ -108,7 +108,7 @@ static struct Model model(unsigned deck, bool publish, bool native_view, bool fa
     if (native_view) {
         m.native = fixture_make(sizeof(struct Receiver), receiver_control_vtable);
         receiver(&m)->vtable = receiver_vtable;
-        registration(source(&m), (const struct az_native_owner *) &m.native);
+        registration((struct az_slip_source *) source(&m), (const struct az_native_owner *) &m.native);
     }
     invoke(AZ_SLIP_CONSTRUCT, source(&m), profile.construct_return, deck);
     if (publish) {

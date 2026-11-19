@@ -144,6 +144,12 @@ int installer(uintptr_t entry, void *replacement, void **original, void *context
     }
     return result;
 }
+static int install_open(uintptr_t entry, az_native_sql_open replacement, az_native_sql_open *original, void *context) {
+    return installer(entry, (void *) replacement, (void **) original, context);
+}
+static int install_close(uintptr_t entry, az_native_sql_close replacement, az_native_sql_close *original, void *context) {
+    return installer(entry, (void *) replacement, (void **) original, context);
+}
 void baseline(const API *a, EpochState *state) {
     for (unsigned i = 0; i < 4; ++i) {
         sqlite3 *db = NULL;
@@ -218,7 +224,7 @@ int main(int argc, char **argv) {
     Bridge bridge;
     bridge_init(&bridge, profile, state, &native, partial);
     errno = EDOM;
-    int installed = az_connection_install(state, (struct az_connection_installer) {installer, &bridge});
+    int installed = az_connection_install(state, (struct az_connection_installer) {install_open, install_close, &bridge});
     REQUIRE(errno == EDOM && installed == (partial ? 0 : 1) && az_connection_ready() == !partial,
             "actual install preserves errno and admits births only after both entries succeed");
     REQUIRE(bridge.calls == 2 && bridge.published_entries == (partial ? 1u : 2u), "both exact distinct installation outcomes are retained");
@@ -246,7 +252,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[2], "failed")) failed_open(&(native), &((*state)));
         else held_statement(&(native), &((*state)), !strcmp(argv[2], "zombie"));
     }
-    REQUIRE(!az_connection_install(state, (struct az_connection_installer) {installer, &bridge}) && bridge.calls == 2,
+    REQUIRE(!az_connection_install(state, (struct az_connection_installer) {install_open, install_close, &bridge}) && bridge.calls == 2,
             "process-lifetime binding refuses a second native installation without repatching entries");
     REQUIRE(dlclose(handle) == 0 && az_connection_prepare_profile() == profile,
             "shared immutable proof retains patched code after releasing only the caller module reference");
