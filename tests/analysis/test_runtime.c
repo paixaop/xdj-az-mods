@@ -111,6 +111,19 @@ static void invalid_requests(az_analysis_owner owner) {
     r.phrase_threads = 1; r.reserved[2] = 1;
     assert(submit(owner, &r, &id) == AZ_INVALID);
     assert(!id);
+    r = request(1); r.source_kind = 99;
+    assert(submit(owner, &r, &id) == AZ_INVALID);
+    r.source_kind = AZ_ANALYSIS_TRACK;
+    assert(submit(owner, &r, &id) == AZ_INVALID);
+    r.track = (az_track_ref){.size = sizeof r.track, .version = AZ_DATA_VERSION,
+        .track_id = 55, .source_id = 1};
+    r.track.version++;
+    assert(submit(owner, &r, &id) == AZ_INVALID); r.track.version--;
+    r.track.source_id = 3;
+    assert(submit(owner, &r, &id) == AZ_INVALID); r.track.source_id = 1;
+    assert(submit(owner, &r, &id) == AZ_OK);
+    assert(wait_state(owner, id, AZ_ANALYSIS_COMPLETE).result == AZ_OK);
+    release_request(owner, id);
 }
 static void capacity_and_retirement(az_analysis_owner owner) {
     atomic_store(&blocked, 1); atomic_store(&entered, 0);
