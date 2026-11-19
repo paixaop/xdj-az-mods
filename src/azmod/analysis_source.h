@@ -42,6 +42,8 @@ int analysis_source_acquire(az_analysis_owner owner, const analysis_source_reque
                             analysis_source_input *input);
 int analysis_source_publish(az_analysis_owner owner, const analysis_source_input *input,
                             const az_analysis_result_v1 *result);
+int analysis_source_outcome(az_analysis_owner owner, const analysis_source_input *input);
+void analysis_source_set_wake(void (*wake)(void));
 void analysis_source_release(analysis_source_input *input);
 /* Nonblocking revocation; physical cleanup is performed by a service worker. */
 void analysis_source_retire(az_analysis_owner owner);

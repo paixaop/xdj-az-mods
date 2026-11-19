@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
-#include "azmod-timestamps.h"
+#include "../../src/common/aztimestamp.h"
 #include "internal.h"
 #include <assert.h>
 #include <sys/stat.h>

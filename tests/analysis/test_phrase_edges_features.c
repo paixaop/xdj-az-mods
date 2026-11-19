@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #include "../../src/analysis/phrase_features.c"
 #include <assert.h>
-#include "azmod-timestamps.h"
+#include "../../src/common/aztimestamp.h"
 void test_phrase_edges_features(ta_context *c)
 {
     Timing a = reference_timing(c, 120, 0.75, 1, 121);

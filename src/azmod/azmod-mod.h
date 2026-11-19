@@ -850,6 +850,66 @@ typedef struct az_analysis_grid_v1 {
     uint32_t size, version, beat_count, reserved;
 } az_analysis_grid_v1;
 
+/* Core-owned phrase/vocal computation. No decoder, model or worker is required
+ * in a consumer. Requests and execution settings are copied before acceptance.
+ * All functions are nonblocking; progress never requires polling. Results remain
+ * until release, cancellation or owner retirement. A copied result belongs to
+ * the caller and survives those operations. */
+#define AZ_ANALYSIS_ABI 1u
+#define AZ_ANALYSIS_REQUEST_VERSION 1u
+enum az_analysis_stage_mode { AZ_ANALYSIS_SEQUENTIAL, AZ_ANALYSIS_CONCURRENT };
+enum az_analysis_source_kind { AZ_ANALYSIS_TRACK, AZ_ANALYSIS_DECK };
+enum az_analysis_state {
+    AZ_ANALYSIS_QUEUED = 1, AZ_ANALYSIS_RUNNING, AZ_ANALYSIS_SAVED,
+    AZ_ANALYSIS_COMPLETE, AZ_ANALYSIS_FAILED, AZ_ANALYSIS_CANCELLED
+};
+typedef struct az_analysis_request_v1 {
+    uint32_t size, version;
+    uint32_t source_kind, components; /* PHRASES and/or VOCALS; existing data is preserved. */
+    az_track_ref track;              /* TRACK: qualified library reference. */
+    uint64_t load_epoch;             /* DECK: accepted native load identity. */
+    uint32_t deck, stage_mode;       /* logical deck 0..3; sequential/concurrent. */
+    uint32_t phrase_threads, vocal_threads; /* 1..3; concurrent combined sum <=3. */
+    uint32_t reserved[4];
+} az_analysis_request_v1;
+typedef struct az_analysis_status_v1 {
+    uint32_t size, version, state, completed_components;
+    uint64_t request_id, load_epoch;
+    az_track_ref track;
+    int32_t result;                  /* final publication error, never mere admission. */
+    uint32_t deck;
+    char diagnostic[160];
+} az_analysis_status_v1;
+typedef struct az_analysis_capabilities_v1 {
+    uint32_t size, version, components, stage_modes;
+    uint32_t max_workers, max_requests, max_owner_requests, reserved;
+} az_analysis_capabilities_v1;
+typedef struct az_analysis_v1 {
+    uint32_t abi, size;
+    int (*capabilities)(az_analysis_capabilities_v1 *out);
+    /* UI or worker, outside frame/audio callbacks. AZ_OK returns a retained id.
+     * Eight SDK requests globally, four per owner; built-in work shares one
+     * active computation and the same three-worker budget. */
+    int (*request)(const char *id, const az_analysis_request_v1 *request, uint64_t *request_id);
+    int (*status)(const char *id, uint64_t request_id, az_analysis_status_v1 *out);
+    int (*cancel)(const char *id, uint64_t request_id);
+    int (*release)(const char *id, uint64_t request_id);
+    /* Terminal successful computation only. NULL/0 arrays are sizing reads:
+     * AZ_LIMIT reports counts with NULL array pointers and copies no arrays.
+     * AZ_PENDING means the result is not complete. No partial copy on errors.
+     * Caller buffers are borrowed for this call only. */
+    int (*result)(const char *id, uint64_t request_id, az_analysis_result_v1 *out,
+                  az_analysis_phrase_v1 *phrases, uint32_t phrase_capacity,
+                  az_vocal_frame_v1 *vocals, uint32_t vocal_capacity);
+    int (*vocal_intervals)(const char *id, const az_track_ref *track,
+                           az_vocal_snapshot_v1 *out, az_vocal_interval *intervals, uint32_t capacity);
+    int (*vocal_intervals_loaded)(const char *id, int deck, uint64_t load_epoch,
+                                  az_vocal_snapshot_v1 *out, az_vocal_interval *intervals, uint32_t capacity);
+} az_analysis_v1;
+#define AZ_ANALYSIS_HAS(service, field) \
+    ((service) && (service)->abi == AZ_ANALYSIS_ABI && \
+     (service)->size >= offsetof(az_analysis_v1, field) + sizeof((service)->field) && (service)->field)
+
 /* One shared library service. All consumers use the same source identities, bounded cache,
  * snapshots, event journal and native command policy. No per-mod data backend is created. */
 #define AZ_LIBRARY_ABI 1u
@@ -1312,6 +1372,8 @@ typedef struct az_core_v1 {
      * Check AZ_HAS for both entries before use. */
     int (*button_press)(const char *id, uint32_t button, uint32_t hold_ms, uint64_t *token);
     int (*button_poll)(const char *id, uint64_t token);
+
+    const az_analysis_v1 *(*analysis_service)(uint32_t abi);
 
 } az_core_v1;
 
