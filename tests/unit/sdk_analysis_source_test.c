@@ -59,7 +59,8 @@ void fixture_get_state_body(void *out) {
     memcpy(out, &value, sizeof value);
 }
 static int native_result;
-static int wait_result(uintptr_t owner, const WeakTrack *weak, int generation) {
+struct az_native_owner;
+static int wait_result(uintptr_t owner, const struct az_native_owner *weak, int generation) {
     (void) owner;
     (void) weak;
     (void) generation;
