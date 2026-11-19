@@ -1488,6 +1488,17 @@ for v in ctl-anymove ctl-nobase ctl-closed ctl-clickyes ctl-backyes ctl-second c
     $CC "${CFLAGS[@]}" -pthread -I$T -DSDK_LOGIC_INC="\"$d/$v.h\"" -o "$d/$v" $T/sdk_test.c -lm
 done
 suite "sdk" "$d/real" 1.0
+
+d="$OUT/sdkthreads"; mkdir -p "$d"
+awk '/^static _Atomic int g_sd_threads/ {copy=1} copy {print}' guest/azmod/sdk_ui.c > "$d/real.inc"
+mutate "$d/real.inc" "$d/ctl-binding.inc" 's/    analysis_owner_thread_bind\(s.analysis_owner\);/    (void) s.analysis_owner;/'
+mutate "$d/real.inc" "$d/ctl-replaced.inc" 's/return g_cm_on_ui \? analysis_owner_get\(owner\) : analysis_owner_for_caller\(owner\);/return analysis_owner_get(owner);/'
+for v in real ctl-binding ctl-replaced; do
+    $CC "${CFLAGS[@]}" -Wno-unused-function -pthread -Iguest/azmod -DTHREAD_INC="\"$d/$v.inc\"" -o "$d/$v" $T/sdk_thread_start_test.c guest/azmod/analysis_owner.c -lm
+done
+suite "sdk thread start and owner lifetime handoff" "$d/real"
+control "sdk thread entry loses owner binding" "$d/ctl-binding"
+control "sdk worker inherits a replacement owner" "$d/ctl-replaced"
 # ---------------------------------------------------------------- drum grid through EP147's references
 d="$OUT/meowgrid"; mkdir -p "$d"
 { cat "$OUT/lifetime/ls.inc"; region $DR '^#define BG_PROV_OFF ' '^/\* Flusher: reload each deck'; } > "$d/real.inc"
@@ -3950,8 +3961,8 @@ mutate "$d/real.c" "$d/ctl-rw.c" 's/suffix\[\] = "\?immutable=1"/suffix[] = ""/;
 mutate "$d/real.c" "$d/ctl-ui.c"      's/    if \(g_cm_on_ui\)\n/    if (0)\n/'
 mutate "$d/real.c" "$d/ctl-anyport.c" 's/ \|\| sdk_port_of_sysfs\(real\) != stick \+ 1\)/)/'
 mutate "$d/real.c" "$d/ctl-guess.c"   's/    if \(hits != 1\)\n/    if (hits < 1)\n/'
-mutate "$d/real.c" "$d/ctl-kickstick.c" 's/if \(!strncmp\(source, mount, length\) && source\[length\] == .\/.\) return "from that USB";/if (0) return "from that USB";/'
-mutate "$d/real.c" "$d/ctl-kickother.c" 's/return sdk_spool_waits\(source\) \? "from a USB with a spool waiting" : NULL;/return NULL;/'
+mutate "$d/real.c" "$d/ctl-kickstick.c" 's/if \(!strncmp\(source, mount, length\) && source\[length\] == .\/.\) return "from that USB";/if ((void) length, 0) return "from that USB";/'
+mutate "$d/real.c" "$d/ctl-kickother.c" 's/return sdk_spool_waits\(source\) \? "from a USB with a spool waiting" : NULL;/(void) sdk_spool_waits; return NULL;/'
 mutate "$d/real.c" "$d/ctl-kickunknown.c" 's/if \(!source\[0\]\) return "from a USB it cannot place";/if (!source[0]) return NULL;/; s/return 1; \/\* not on a stick it knows/return 0; \/* not on a stick it knows/; s/    if \(!end\)\n        return 1;/    if (!end)\n        return 0;/'
 mutate "$d/real.c" "$d/ctl-trunc.c"   's/            rc = 1; \/\* the first k rows; the rest did not fit \*\//            rc = 0;/g'
 if [ "$(uname -s)" = Linux ]; then SDK_EXPORT=-rdynamic; else SDK_EXPORT=-Wl,-export_dynamic; fi

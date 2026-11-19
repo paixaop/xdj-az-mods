@@ -280,8 +280,8 @@ static void *acquire_during_retirement(void *opaque) {
     analysis_source_release(&input);
     return NULL;
 }
-static void nonblocking_retirement(void) {
-    struct retirement_request request = {.owner = owner_at(0)};
+static void nonblocking_retirement(int core) {
+    struct retirement_request request = {.owner = core ? analysis_owner_core_begin() : owner_at(0)};
     atomic_store(&fixture_pause_current, 1);
     atomic_store(&fixture_current_entered, 0);
     atomic_store(&fixture_resume_current, 0);
@@ -290,12 +290,35 @@ static void nonblocking_retirement(void) {
     while (!atomic_load(&fixture_current_entered)) usleep(1000);
     /* Native current() is paused while the source service holds its own lock.
      * Revocation must return before that worker is allowed to proceed. */
-    analysis_source_retire(analysis_owner_retire(0));
+    if (core) analysis_owner_core_retire();
+    else analysis_source_retire(analysis_owner_retire(0));
     assert(!analysis_owner_current(request.owner));
     atomic_store(&fixture_resume_current, 1);
     assert(!pthread_join(worker, NULL));
     assert(request.result == AZ_STALE && !fixture_published);
-    analysis_owner_thread_bind(analysis_owner_begin(0));
+    if (!core) analysis_owner_thread_bind(analysis_owner_begin(0));
+    fixture_released = 0;
+}
+static void core_source_lifetime(const az_analysis_result_v1 *result) {
+    az_analysis_owner old = analysis_owner_core_begin();
+    analysis_source_request request = {.loaded = 1, .deck = 0, .load = 44, .components = AZ_DATA_PHRASES};
+    analysis_source_input input = {0};
+    assert(analysis_source_acquire(old, &request, &input) == AZ_OK);
+    assert(input.beat_count == 2 && input.beats[1].beat_in_bar == 2);
+    analysis_owner_core_retire();
+    az_analysis_owner replacement = analysis_owner_core_begin();
+    assert(replacement.generation != old.generation);
+    assert(analysis_source_publish(old, &input, result) == AZ_STALE && !fixture_published);
+    assert(input.beats[1].beat_in_bar == 2); /* copied input remains caller-owned */
+    analysis_source_release(&input);
+    int rc = AZ_BUSY;
+    for (unsigned i = 0; i < 1000 && rc == AZ_BUSY; ++i) {
+        rc = analysis_source_acquire(replacement, &request, &input);
+        if (rc == AZ_BUSY) usleep(1000);
+    }
+    assert(rc == AZ_OK);
+    analysis_source_release(&input);
+    analysis_owner_core_retire();
     fixture_released = 0;
 }
 static int refuse_commit(void *unused) { (void) unused; return 1; }
@@ -477,7 +500,9 @@ int main(void) {
     assert(acquire_loaded(0, AZ_DATA_PHRASES, 0, 44, &job) == AZ_BUSY);
     fixture_grid_count = 2;
     fixture_released = 0;
-    nonblocking_retirement();
+    nonblocking_retirement(0);
+    nonblocking_retirement(1);
+    core_source_lifetime(&loaded_result);
     assert(acquire_loaded(-1, AZ_DATA_PHRASES, 0, 44, &job) == AZ_STALE);
     assert(acquire_loaded(0, AZ_DATA_PHRASES, 0, 43, &job) == AZ_STALE);
     assert(acquire_loaded(0, AZ_DATA_PHRASES, 0, 44, &job) == AZ_OK);
