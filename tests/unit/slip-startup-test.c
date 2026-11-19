@@ -33,6 +33,9 @@ static int detachstate(pthread_attr_t *value,int state) { return attr_error==2?E
 #define access marker
 #define pthread_attr_init fixture_attributes
 #define pthread_attr_setdetachstate detachstate
+static int az_thread_create(pthread_t *thread, const pthread_attr_t *attributes, void *(*run)(void *), void *user) {
+    return pthread_create(thread, attributes, run, user);
+}
 #include "../../src/azmod/slip_diagnostic_startup.c"
 #undef access
 #undef pthread_attr_init
