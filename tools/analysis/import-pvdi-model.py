@@ -93,6 +93,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--model', type=Path, help='Decoded raw GraphDef from the local PVDI extraction', default=Path('/Applications/rekordbox 7/rekordbox.app/Contents/Resources/vd_param_raw.pb'))
     parser.add_argument('--arm64-executable', type=Path, required=True)
-    parser.add_argument('--output', type=Path, default=Path(__file__).resolve().parents[2] / 'assets/analysis/pvdi-model.bin')
+    parser.add_argument('--output', type=Path, required=True, help='Private local destination outside repositories and release packages')
     args = parser.parse_args()
     extract(args.model, args.arm64_executable, args.output)
