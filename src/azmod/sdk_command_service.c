@@ -62,8 +62,8 @@ static void sdk_drain_fd(int fd) {
 static void sdk_command_wake(void) { sdk_signal_fd(g_sdk_command_fd); }
 static void sdk_ui_wake(void) { sdk_signal_fd(g_sdk_ui_fd); }
 /* Keep the earlier private exports available to already loaded companions. */
-void azsdk_exit_command_wake(void) { sdk_command_wake(); }
-__attribute__((weak)) void azsdk_cue_commands_drive(void) {}
+__attribute__((visibility("default"))) void azsdk_exit_command_wake(void) { sdk_command_wake(); }
+__attribute__((weak, visibility("default"))) void azsdk_cue_commands_drive(void) {}
 static int sdk_exit_has_cues(const struct azexit_service *api) {
     return api && api->size >= AZEXIT_SERVICE_CUE_SIZE && api->commands && api->submit_cue && api->target_cue;
 }

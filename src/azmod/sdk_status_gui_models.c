@@ -234,6 +234,7 @@ static void ds_model_withdraw_field(unsigned model, const struct ds_gui_record *
     int withdraw = field->info.info.provenance == AZ_PROV_NATIVE &&
                    (field->info.scope == AZ_STATUS_UNIT || (epoch && field->info.scope_id == epoch));
     if (!withdraw) {
+        field->info = (az_status_field_info_v1) {0};
         field->info.scope = model != DS_MODEL_KEY ? AZ_STATUS_UNIT : AZ_STATUS_LOAD_SCOPE;
         field->info.scope_id = model == DS_MODEL_KEY ? epoch : 0;
         field->info.info.provenance = AZ_PROV_NATIVE;
