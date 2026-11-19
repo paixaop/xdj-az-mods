@@ -213,35 +213,40 @@ static void sa_encode_vocals(const az_analysis_result_v1 *r, uint8_t *tag, uint3
     sa_put32(tag + 20, r->vocals.count);
     for (uint32_t i = 0; i < r->vocals.count; i++) tag[24 + i] = r->vocals.frames[i].activity;
 }
-static uint8_t *sa_encode_result(const az_analysis_result_v1 *r, uint32_t *size) {
-    *size = 0;
-    if (!sa_result_valid(r)) return NULL;
-    uint32_t gn = r->beat_count ? 24 + r->beat_count * 8 : 0;
-    uint32_t pn = r->phrases.count ? 32 + r->phrases.count * 24 : 0;
-    uint32_t vn = r->vocals.count ? 24 + r->vocals.count : 0;
-    uint32_t length = 28 + gn + pn + vn;
-    *size = length;
-    uint8_t *bytes = calloc(length, 1);
+/* Native tags are the persistence format. There is no inter-component packet:
+ * the typed result is validated once, then each tag is encoded directly. */
+static uint8_t *sa_encode_native(const az_analysis_result_v1 *r, struct sa_tags *tags) {
+    tags->gn = r->beat_count ? 24 + r->beat_count * 8 : 0;
+    tags->pn = r->phrases.count ? 32 + r->phrases.count * 24 : 0;
+    tags->vn = r->vocals.count ? 24 + r->vocals.count : 0;
+    tags->rate = r->source_rate;
+    tags->frames = (uint32_t)r->source_frames;
+    tags->method = r->vocals.method;
+    uint8_t *bytes = calloc(tags->gn + tags->pn + tags->vn, 1);
     if (!bytes) return NULL;
-    memcpy(bytes, "TA03", 4);
-    sa_put32(bytes + 4, gn);
-    sa_put32(bytes + 8, pn);
-    sa_put32(bytes + 12, vn);
-    sa_put32(bytes + 16, r->source_rate);
-    sa_put32(bytes + 20, (uint32_t) r->source_frames);
-    sa_put32(bytes + 24, r->vocals.method);
-    sa_encode_grid(r, bytes + 28, gn);
-    sa_encode_phrases(r, bytes + 28 + gn, pn);
-    sa_encode_vocals(r, bytes + 28 + gn + pn, vn);
+    tags->grid = bytes;
+    tags->phrase = bytes + tags->gn;
+    tags->vocal = bytes + tags->gn + tags->pn;
+    sa_encode_grid(r, bytes, tags->gn);
+    sa_encode_phrases(r, bytes + tags->gn, tags->pn);
+    sa_encode_vocals(r, bytes + tags->gn + tags->pn, tags->vn);
     return bytes;
 }
-static int sdk_analysis_commit_result(const char *id, uint64_t job, const az_analysis_result_v1 *result) {
-    int owner = sa_owner(id, "analysis_commit_result", CM_RA());
-    if (owner < 0 || !job) return AZ_INVALID;
-    uint32_t size = 0;
-    uint8_t *bytes = sa_encode_result(result, &size);
-    if (!bytes) return size ? AZ_LIMIT : AZ_INVALID;
-    int rc = sa_commit(owner, job, bytes, size);
-    free(bytes);
+static int sa_commit_typed(int owner, uint64_t job, const az_analysis_result_v1 *result) {
+    if (owner < 0 || !job || !sa_result_valid(result)) return AZ_INVALID;
+    struct sa_publication state = {.td = {.dir = -1}, .te = {.dir = -1}, .tv = {.dir = -1}};
+    uint8_t *storage = sa_encode_native(result, &state.packet);
+    if (!storage) return AZ_LIMIT;
+    int rc = AZ_BUSY;
+    if (!pthread_mutex_trylock(&sa_mutex)) {
+        state.job = sa_find_job(owner, job);
+        rc = state.job && sa_current(state.job) ? sa_publication_run(&state) : AZ_STALE;
+        sa_publication_drop(&state);
+        pthread_mutex_unlock(&sa_mutex);
+    }
+    free(storage);
     return rc;
+}
+static int sdk_analysis_commit_result(const char *id, uint64_t job, const az_analysis_result_v1 *result) {
+    return sa_commit_typed(sa_owner(id, "analysis_commit_result", CM_RA()), job, result);
 }

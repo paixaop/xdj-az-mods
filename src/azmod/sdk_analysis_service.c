@@ -347,67 +347,11 @@ static int sa_link_analysis(struct sa_job *job) {
     if (ok && !sa_link_enqueue(job, path)) { unlink(path); ok = 0; }
     return ok;
 }
-static uint32_t sdk_analysis_formats(void) {
-    return AZ_ANALYSIS_FORMAT_TA01 | AZ_ANALYSIS_FORMAT_TA02 | AZ_ANALYSIS_FORMAT_TA03;
-}
-/* Decode the bounded publication packet before taking a lease lock. */
-struct sa_packet {
-    uint32_t header, gn, pn, vn, rate, frames, method;
-    int v2, v3;
+/* Encoded native persistence tags, borrowed during one publication. */
+struct sa_tags {
+    uint32_t gn, pn, vn, rate, frames, method;
     const uint8_t *grid, *phrase, *vocal;
 };
-static int sa_packet_version(struct sa_packet *p, const uint8_t *bytes, uint32_t size) {
-    p->v3 = !memcmp(bytes, "TA03", 4);
-    p->v2 = p->v3 || !memcmp(bytes, "TA02", 4);
-    p->header = p->v3 ? 28 : p->v2 ? 24
-                                   : 16;
-    if (size < p->header || (!p->v2 && memcmp(bytes, "TA01", 4))) return 0;
-    return 1;
-}
-static void sa_packet_header(struct sa_packet *p, const uint8_t *bytes) {
-    p->gn = sa_u32(bytes + 4);
-    p->pn = sa_u32(bytes + 8);
-    p->vn = p->v2 ? sa_u32(bytes + 12) : 0;
-    p->rate = sa_u32(bytes + (p->v2 ? 16 : 12));
-    p->frames = p->v2 ? sa_u32(bytes + 20) : 0;
-    p->method = p->v3 ? sa_u32(bytes + 24) : AZ_VOCAL_SPECTRAL;
-}
-static int sa_packet_lengths_valid(const struct sa_packet *p, uint32_t size) {
-    return p->gn <= size - p->header && p->pn <= size - p->header - p->gn &&
-           p->vn == size - p->header - p->gn - p->pn && (p->pn || p->vn);
-}
-static int sa_packet_clock_valid(const struct sa_packet *p) {
-    if (p->rate != 44100 && p->rate != 48000) return 0;
-    if (p->v2 && (!p->frames || p->frames > p->rate * 1200u)) return 0;
-    return !p->v3 || (p->vn ? p->method == AZ_VOCAL_LSTM : p->method == AZ_VOCAL_PVDI);
-}
-static int sa_packet_phrase_valid(const struct sa_packet *p) {
-    if (!p->pn) return 1;
-    const uint8_t *phrase = p->phrase;
-    return p->pn >= 32 && !memcmp(phrase, "PSSI", 4) && sa_u32(phrase + 4) == 32 &&
-           sa_u32(phrase + 8) == p->pn && sa_u16(phrase + 12) == 0 &&
-           sa_u16(phrase + 14) == 24 && sa_u16(phrase + 16);
-}
-static int sa_packet_grid_valid(const struct sa_packet *p) {
-    if (!p->gn) return 1;
-    return p->gn >= 24 && !memcmp(p->grid, "PQTZ", 4) && sa_u32(p->grid + 4) == 24 && sa_u32(p->grid + 8) == p->gn;
-}
-static int sa_packet_vocal_valid(const struct sa_packet *p) {
-    if (!p->vn) return 1;
-    az_vocal_snapshot_v1 v = {0};
-    if (sv_tag(p->vocal, p->vn, &v)) return 0;
-    if (p->method == AZ_VOCAL_LSTM && (v.sample_rate != 22050 || v.hop_samples != 1024 || v.frame_count < 9)) return 0;
-    return v.frame_count == sv_expected_count(p->frames, p->rate, v.sample_rate, v.hop_samples, p->method);
-}
-static int sa_packet_decode(struct sa_packet *p, const void *data, uint32_t size) {
-    if (!sa_packet_version(p, data, size)) return 0;
-    sa_packet_header(p, data);
-    if (!sa_packet_lengths_valid(p, size) || !sa_packet_clock_valid(p)) return 0;
-    p->grid = (const uint8_t *) data + p->header;
-    p->phrase = p->grid + p->gn;
-    p->vocal = p->phrase + p->pn;
-    return sa_packet_phrase_valid(p) && sa_packet_grid_valid(p) && sa_packet_vocal_valid(p);
-}
 static struct sa_job *sa_find_job(int owner, uint64_t job) {
     struct sa_job *found = NULL;
     for (unsigned i = 0; i < 8; i++)
@@ -415,15 +359,15 @@ static struct sa_job *sa_find_job(int owner, uint64_t job) {
     return found;
 }
 struct sa_publication {
-    struct sa_packet packet;
+    struct sa_tags packet;
     struct sa_job *job;
     uint8_t *dat, *ext, *ex2, *newdat, *newext, *newex2;
     size_t dn, en, vfn, ndn, nen, nvn;
     struct sa_staged td, te, tv;
 };
 static int sa_publication_matches(const struct sa_publication *s) {
-    const struct sa_packet *p = &s->packet;
-    return p->v2 == s->job->vocals && !!p->pn == !!(s->job->needed & AZ_DATA_PHRASES) &&
+    const struct sa_tags *p = &s->packet;
+    return !!p->pn == !!(s->job->needed & AZ_DATA_PHRASES) &&
            !!p->vn == !!(s->job->needed & AZ_ANALYSIS_VOCALS) && (!p->gn || (s->job->needed & AZ_DATA_GRID));
 }
 static int sa_publication_read(struct sa_publication *s) {
@@ -434,7 +378,7 @@ static int sa_publication_read(struct sa_publication *s) {
     return failed ? AZ_FAILED : AZ_OK;
 }
 static int sa_publication_loaded_grid(struct sa_publication *s, int existing) {
-    struct sa_packet *p = &s->packet;
+    struct sa_tags *p = &s->packet;
     const struct sa_job *j = s->job;
     if (p->gn || !j->native_grid || !j->native_grid_bytes) return AZ_INVALID;
     if (!existing) {
@@ -462,7 +406,7 @@ static int sa_publication_parse_grid(const struct sa_publication *s, struct st_d
     const uint8_t *saved = sa_find_tag(s->dat, s->dn, "PQTZ", &saved_size);
     return saved ? st_section(parsed, saved, sa_u32(saved + 4), saved_size, AZ_DATA_GRID) : AZ_FAILED;
 }
-static int sa_publication_dimensions_valid(const struct sa_packet *p, const struct st_data *parsed) {
+static int sa_publication_dimensions_valid(const struct sa_tags *p, const struct st_data *parsed) {
     return parsed->view.beat_count && parsed->view.phrase_count &&
            sa_u16(p->phrase + 26) <= parsed->view.beat_count && p->pn == 32 + parsed->view.phrase_count * 24 &&
            (!p->gn || p->gn == 24 + parsed->view.beat_count * 8);
@@ -484,7 +428,7 @@ static int sa_publication_parse_phrases(const struct sa_publication *s) {
     return rc;
 }
 static int sa_publication_phrases(struct sa_publication *s) {
-    struct sa_packet *p = &s->packet;
+    struct sa_tags *p = &s->packet;
     if (!p->pn) return p->gn ? AZ_INVALID : AZ_OK;
     int rc = sa_publication_grid(s);
     if (rc != AZ_OK) return rc;
@@ -495,7 +439,7 @@ static int sa_publication_phrases(struct sa_publication *s) {
     return s->newext && (!p->gn || s->newdat) ? AZ_OK : AZ_FAILED;
 }
 static int sa_publication_vocals(struct sa_publication *s) {
-    const struct sa_packet *p = &s->packet;
+    const struct sa_tags *p = &s->packet;
     if (!p->vn) return AZ_OK;
     if (sa_tag_count(s->ex2, s->vfn, "PVDI") != 0) return AZ_STALE;
     s->newex2 = sa_merge(s->ex2, s->vfn, p->vocal, p->vn, &s->nvn);
@@ -563,22 +507,6 @@ static void sa_publication_drop(struct sa_publication *s) {
     free(s->newdat);
     free(s->newext);
     free(s->newex2);
-}
-static int sa_commit_request_valid(int owner, uint64_t job, const void *data, uint32_t size) {
-    return owner >= 0 && job && data && size >= 16 &&
-           size <= 28 + 24 + 32768 * 8 + 32 + 1024 * 24 + 24 + SV_FRAMES_MAX;
-}
-static int sa_commit(int owner, uint64_t job, const void *data, uint32_t size) {
-    if (!sa_commit_request_valid(owner, job, data, size)) return AZ_INVALID;
-    struct sa_publication state = {.td = {.dir = -1}, .te = {.dir = -1}, .tv = {.dir = -1}};
-    if (!sa_packet_decode(&state.packet, data, size)) return AZ_INVALID;
-    if (pthread_mutex_trylock(&sa_mutex)) return AZ_BUSY;
-    state.job = sa_find_job(owner, job);
-    int rc = AZ_STALE;
-    if (state.job && sa_current(state.job)) rc = sa_publication_run(&state);
-    sa_publication_drop(&state);
-    pthread_mutex_unlock(&sa_mutex);
-    return rc;
 }
 #include "sdk_analysis_typed.c"
 static int sdk_analysis_close(const char *id, uint64_t job) {

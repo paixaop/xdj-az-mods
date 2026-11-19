@@ -112,8 +112,9 @@ int analysis_source_acquire(az_analysis_owner owner, const analysis_source_reque
     if (!analysis_owner_current(owner)) return AZ_STALE;
     int index = sa_source_owner_index(owner);
     az_analysis_job_v1 lease = {.size = sizeof lease};
-    int rc = request->loaded ? sa_open_loaded(index, request->deck, request->load, &lease, 1) :
-                              sa_open(index, &request->track, &lease, 0, 1);
+    int vocals = !!(request->components & AZ_ANALYSIS_VOCALS);
+    int rc = request->loaded ? sa_open_loaded(index, request->deck, request->load, &lease, vocals) :
+                              sa_open(index, &request->track, &lease, 0, vocals);
     if (rc != AZ_OK && rc != AZ_PENDING) return rc;
     *input = (analysis_source_input) {.lease = lease.job, .owner = owner, .bpm = lease.original_bpm,
                                       .track = lease.track, .deck = (unsigned) request->deck};
@@ -127,12 +128,7 @@ int analysis_source_publish(az_analysis_owner owner, const analysis_source_input
                              const az_analysis_result_v1 *result) {
     if (!input || !input->lease) return AZ_INVALID;
     if (!analysis_owner_current(owner) || owner.generation != input->owner.generation) return AZ_STALE;
-    uint32_t size = 0;
-    uint8_t *bytes = sa_encode_result(result, &size);
-    if (!bytes) return size ? AZ_LIMIT : AZ_INVALID;
-    int rc = sa_commit(sa_source_owner_index(owner), input->lease, bytes, size);
-    free(bytes);
-    return rc;
+    return sa_commit_typed(sa_source_owner_index(owner), input->lease, result);
 }
 void analysis_source_release(analysis_source_input *input) {
     if (!input) return;
