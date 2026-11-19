@@ -11,6 +11,8 @@ static unsigned shared_count;
 #include "sdktrack_fixture.h"
 #include "sdk_status_layout.h"
 #include "sdk_status_proof.h"
+_Thread_local struct ds_proof_context ds_proof_context;
+_Atomic unsigned ds_proof_enabled;
 static unsigned proof_database, proof_other, proof_baselines;
 static unsigned publications[4], loss[4], retired[4];
 static unsigned ready[4][AZ_STATUS_TOPIC_COUNT][8], sent[4][AZ_STATUS_TOPIC_COUNT];

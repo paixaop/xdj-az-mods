@@ -1181,8 +1181,8 @@ static void community_init(void);
 static void community_tick(void);
 static int ds_event_fd, ds_timer_fd;
 static void sdk_status_ui_drain(void);
-static int sdk_command_ui_fd(void);
-static unsigned sdk_command_ui_drain(unsigned budget);
+int sdk_command_ui_fd(void);
+unsigned sdk_command_ui_drain(unsigned budget);
 static void ssh_approve_tick(void); /* ssh_approve.c */
 static int community_redraw_wanted(void);
 static int community_frame(int bus, unsigned char *f, int len);
@@ -1213,3 +1213,5 @@ static int g_sdk_reload_req;                       /* __atomic: a mod asked for 
 static int sdk_proc_owns(const char *id, int pid); /* pid was launched by mod id and runs (sdk_proc.c) */
 
 #endif /* AZMOD_INTERNAL_H */
+
+static void core_services_init(void);

@@ -2,31 +2,7 @@
 /* Included by sdk_track.c. The one core-owned command store is shared by every
  * authenticated mod. The EXIT/RELOOP bridge queues copied scalars for the native
  * owner-thread adapter; unsupported operations create no retained request. */
-#include "sdk_command_engine.h"
-static struct scmd_engine g_sdk_commands = SCMD_ENGINE_INIT;
-static int sdk_command_has_pending_notification(void);
-#include "sdk_exit_bridge.c"
-
-static int sdk_command_terminal_pending(const struct scmd_record *r) {
-    return r->asynchronous && r->phase == SCMD_FINAL && r->callback && !r->retired &&
-           !r->terminal_delivered && scmd_owner_deliverable(&g_sdk_commands, r->owner, r->owner_lifetime);
-}
-static int sdk_command_pending_locked(void) {
-    for (unsigned i = 0; i < SCMD_SLOTS; ++i)
-        if (sdk_command_terminal_pending(&g_sdk_commands.records[i])) return 1;
-    for (unsigned i = 0; i < SCMD_SLOTS; ++i) {
-        struct scmd_pending_delivery *p = &g_sdk_commands.pending[i];
-        if (p->occupied && !p->released_delivered &&
-            scmd_owner_deliverable(&g_sdk_commands, p->owner, p->owner_lifetime)) return 1;
-    }
-    return 0;
-}
-static int sdk_command_has_pending_notification(void) {
-    pthread_mutex_lock(&g_sdk_commands.mu);
-    int pending = sdk_command_pending_locked();
-    pthread_mutex_unlock(&g_sdk_commands.mu);
-    return pending;
-}
+#include "sdk_command_service.h"
 #ifdef CM_MAX
 static int sdk_command_async_authorized(cm_mod *mod, const az_command_request *request,
                                         az_command_completion_fn callback, az_command_result *output) {
@@ -37,7 +13,7 @@ static int sdk_command_async_authorized(cm_mod *mod, const az_command_request *r
 
 static int sdk_command_poll(const char *id, uint64_t request_id, az_command_result *out) {
     int owner = st_mod_owner(id, CM_RA(), "command_poll");
-    return owner < 0 ? AZ_INVALID : scmd_poll(&g_sdk_commands, owner, request_id, out);
+    return owner < 0 ? AZ_INVALID : sdk_command_read(owner, request_id, out);
 }
 static int sdk_command_cancel(const char *id, uint64_t request_id, az_command_result *out) {
     int owner = st_mod_owner(id, CM_RA(), "command_cancel");
@@ -46,7 +22,7 @@ static int sdk_command_cancel(const char *id, uint64_t request_id, az_command_re
 }
 static int sdk_command_release(const char *id, uint64_t request_id) {
     int owner = st_mod_owner(id, CM_RA(), "command_release");
-    return owner < 0 ? AZ_INVALID : scmd_release(&g_sdk_commands, owner, request_id);
+    return owner < 0 ? AZ_INVALID : sdk_command_drop(owner, request_id);
 }
 static __attribute__((unused)) int sdk_command_submit_async(const char *id, const az_command_request *r,
                                                             az_command_completion_fn callback, void *user,
@@ -71,8 +47,7 @@ static __attribute__((unused)) int sdk_command_acknowledge(const char *id, uint6
     int owner = st_mod_owner(id, CM_RA(), "command_acknowledge");
     if (!g_cm_on_ui || owner < 0 ||
         (g_cm[owner].state != AZCM_LOADED && (!g_sdk_in_init || g_cm_loading != owner))) return AZ_INVALID;
-    int rc = scmd_acknowledge(&g_sdk_commands, owner, request_id);
-    if (rc == AZ_OK) sdk_command_wake();
+    int rc = sdk_command_ack(owner, request_id);
     return rc;
 #else
     (void) id;

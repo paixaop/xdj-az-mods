@@ -1,3 +1,9 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE
+#endif
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* Public cue snapshot/tick routing against the actual core command bridge. */
 #define _GNU_SOURCE
@@ -12,6 +18,7 @@ static int st_mod_owner(const char *id, uintptr_t caller, const char *service) {
     (void) service;
     return -1;
 }
+#include "sdk_command_service.c"
 #include "sdk_command.c"
 
 static unsigned ticks, snapshots, expected_deck;

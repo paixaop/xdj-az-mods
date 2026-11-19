@@ -1,3 +1,9 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE
+#endif
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* Actual authenticated public wrappers and portable engine; native service is
  * the production C mailbox, driven separately by genuine fixture owner calls. */
@@ -20,6 +26,7 @@ static cm_mod *cm_self(const char *id, uintptr_t caller, const char *service) {
     return NULL;
 }
 #include SDK_EXIT_OWNER_INC
+#include "sdk_command_service.c"
 #include "sdk_command.c"
 #include SDK_EXIT_SUBMIT_INC
 void sdk_exit_public_bind(const struct azexit_service *api) {

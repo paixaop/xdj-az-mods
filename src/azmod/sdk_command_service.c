@@ -1,18 +1,19 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+/* One core command store. Host authentication passes a validated owner; native
+ * execution uses its existing scalar mailbox and owner-thread adapter. */
+#include "sdk_command_service.h"
+static struct scmd_engine g_sdk_commands = SCMD_ENGINE_INIT;
+static int sdk_command_has_pending_notification(void);
+/* SPDX-License-Identifier: GPL-3.0-only */
 /* Included by sdk_command.c. Native execution uses a scalar mailbox, so neither
  * the engine mutex nor a mod callback ever runs inside the native owner hook. */
 #include "../common/azexit.h"
 #include "../common/azcuecommands.h"
-#if !defined(AZALTSTACK_H) && !defined(az_thread_create)
-/* sdk_command.c is also extracted into host fixtures without azmod.c's
- * unity-build prologue. Production includes azaltstack.h before this file. */
-#define AZSDK_THREAD_START_(base, name) base##name
-#define AZSDK_THREAD_START(base, name) AZSDK_THREAD_START_(base, name)
-static int az_thread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*fn)(void *), void *arg) {
-    return AZSDK_THREAD_START(pthread_, create)(thread, attr, fn, arg);
-}
-#undef AZSDK_THREAD_START
-#undef AZSDK_THREAD_START_
+#ifndef az_thread_create
+#include "../common/azaltstack.h"
 #endif
 #include <stdatomic.h>
 #include <errno.h>
@@ -95,7 +96,7 @@ static uint64_t sdk_exit_operations(const struct azexit_service *api) {
     if (api->size >= AZEXIT_SERVICE_COMMAND_SIZE && api->commands) return sdk_exit_supported_operations(api);
     return api->mask && api->submit && api->mask() ? UINT64_C(1) << AZ_CMD_LOOP_EXIT : 0;
 }
-static uint64_t sdk_command_capabilities(void) {
+uint64_t sdk_command_capabilities(void) {
     return sdk_exit_operations(atomic_load_explicit(&g_sdk_exit_service, memory_order_acquire));
 }
 static int sdk_exit_loop_metadata(const az_command_request *request) {
@@ -388,7 +389,7 @@ static void sdk_command_drive(void) {
     for (unsigned d = 0; d < SCMD_DECKS; ++d) sdk_exit_step(d, &adapter);
     if (sdk_command_has_pending_notification()) sdk_ui_wake();
 }
-static uint64_t sdk_command_nearest_deadline(void) {
+static __attribute__((unused)) uint64_t sdk_command_nearest_deadline(void) {
     uint64_t nearest = 0;
     for (unsigned i = 0; i < SCMD_SLOTS; ++i) {
         const struct scmd_record *record = &g_sdk_commands.records[i];
@@ -463,7 +464,7 @@ static int sdk_command_create_signals(void) {
     g_sdk_timer_fd = sdk_timerfd_create();
     return g_sdk_command_fd >= 0 && g_sdk_ui_fd >= 0 && g_sdk_timer_fd >= 0;
 }
-static __attribute__((unused)) int sdk_command_start(const struct azexit_service *api) {
+int sdk_command_start(const struct azexit_service *api) {
     const struct azexit_delivery_v2 *delivery = sdk_exit_delivery(api);
     if (!delivery || !api->target) return AZ_UNSUPPORTED;
     const struct azexit_delivery_v2 *bound = atomic_load_explicit(&g_sdk_exit_bound, memory_order_acquire);
@@ -474,10 +475,10 @@ static __attribute__((unused)) int sdk_command_start(const struct azexit_service
     sdk_command_close_signals();
     return AZ_FAILED;
 }
-static __attribute__((unused)) int sdk_command_ui_fd(void) { return g_sdk_ui_fd; }
+int sdk_command_ui_fd(void) { return g_sdk_ui_fd; }
 static __attribute__((unused)) void sdk_command_ui_clear(void) { sdk_drain_fd(g_sdk_ui_fd); }
 
-static __attribute__((unused)) void sdk_command_owner_init(int owner) {
+void sdk_command_owner_init(int owner) {
     if (!scmd_owner_ok(owner)) return;
     pthread_mutex_lock(&g_sdk_commands.mu);
     g_sdk_commands.owner_lifetime[owner]++;
@@ -486,7 +487,7 @@ static __attribute__((unused)) void sdk_command_owner_init(int owner) {
     g_sdk_commands.owner_initializing[owner] = 1;
     pthread_mutex_unlock(&g_sdk_commands.mu);
 }
-static __attribute__((unused)) void sdk_command_owner_ready(int owner) {
+void sdk_command_owner_ready(int owner) {
     if (!scmd_owner_ok(owner)) return;
     pthread_mutex_lock(&g_sdk_commands.mu);
     g_sdk_commands.owner_initializing[owner] = 0;
@@ -508,7 +509,7 @@ static void sdk_exit_retire_notification(struct scmd_engine *engine, struct scmd
     if (pending->occupied && pending->owner == owner && pending->owner_lifetime == engine->owner_lifetime[owner] && !pending->callback_active)
         memset(pending, 0, sizeof *pending);
 }
-static void sdk_command_retire_owner(int owner) {
+void sdk_command_retire_owner(int owner) {
     if (!scmd_owner_ok(owner)) return;
     pthread_mutex_lock(&g_sdk_commands.mu);
     struct scmd_engine *e = &g_sdk_commands;
@@ -548,7 +549,7 @@ static int sdk_exit_cancel_locked(struct scmd_engine *engine, int owner, uint64_
     }
     return sdk_exit_cancel_result(record, result, out);
 }
-static int sdk_exit_cancel_request(int owner, uint64_t request_id, az_command_result *out) {
+int sdk_exit_cancel_request(int owner, uint64_t request_id, az_command_result *out) {
     struct scmd_engine *engine = &g_sdk_commands;
     if (!scmd_owner_ok(owner) || !request_id || !scmd_output_ok(out)) return AZ_INVALID;
     if (!atomic_load_explicit(&g_sdk_exit_bound, memory_order_acquire)) return scmd_cancel(engine, owner, request_id, out);
@@ -570,23 +571,110 @@ static int sdk_exit_submit_common(int owner, const az_command_request *r,
     if (rc == AZ_OK) sdk_command_wake();
     return rc;
 }
-static int sdk_exit_submit(int owner, const az_command_request *r, az_command_result *out) {
+int sdk_exit_submit(int owner, const az_command_request *r, az_command_result *out) {
     return sdk_exit_submit_common(owner, r, NULL, NULL, out);
 }
-static __attribute__((unused)) int sdk_exit_submit_async(int owner, const az_command_request *r,
+int sdk_exit_submit_async(int owner, const az_command_request *r,
                                                          az_command_completion_fn callback, void *user,
                                                          az_command_result *out) {
     return sdk_exit_submit_common(owner, r, callback, user, out);
 }
 
-static __attribute__((unused)) void sdk_cue_tick(void) {
+void sdk_cue_tick(void) {
     const struct azexit_service *api = atomic_load_explicit(&g_sdk_exit_service, memory_order_acquire);
     if (api && api->size >= AZEXIT_SERVICE_CUE_SIZE && api->cue_tick) api->cue_tick();
 }
-static __attribute__((unused)) int sdk_native_cues(int deck, az_native_cue_snapshot *out) {
+int sdk_native_cues(int deck, az_native_cue_snapshot *out) {
     if (deck < 0 || deck >= 4 || !out || out->size < AZ_NATIVE_CUE_SNAPSHOT_V1_SIZE) return AZ_INVALID;
     const struct azexit_service *api = atomic_load_explicit(&g_sdk_exit_service, memory_order_acquire);
     return api && api->size >= AZEXIT_SERVICE_CUE_SNAPSHOT_SIZE && api->native_cues
                ? api->native_cues((unsigned) deck, out)
                : AZ_UNSUPPORTED;
+}
+
+
+static int sdk_command_terminal_pending(const struct scmd_record *r) {
+    return r->asynchronous && r->phase == SCMD_FINAL && r->callback && !r->retired &&
+           !r->terminal_delivered && scmd_owner_deliverable(&g_sdk_commands, r->owner, r->owner_lifetime);
+}
+static int sdk_command_pending_locked(void) {
+    for (unsigned i = 0; i < SCMD_SLOTS; ++i)
+        if (sdk_command_terminal_pending(&g_sdk_commands.records[i])) return 1;
+    for (unsigned i = 0; i < SCMD_SLOTS; ++i) {
+        struct scmd_pending_delivery *p = &g_sdk_commands.pending[i];
+        if (p->occupied && !p->released_delivered &&
+            scmd_owner_deliverable(&g_sdk_commands, p->owner, p->owner_lifetime)) return 1;
+    }
+    return 0;
+}
+static int sdk_command_has_pending_notification(void) {
+    pthread_mutex_lock(&g_sdk_commands.mu);
+    int pending = sdk_command_pending_locked();
+    pthread_mutex_unlock(&g_sdk_commands.mu);
+    return pending;
+}
+
+static uint64_t g_sdk_command_notified[SCMD_SLOTS];
+static int sdk_command_callback_ready(const struct scmd_record *record, int slot) {
+    return record->phase == SCMD_FINAL && !record->retired && !record->asynchronous && !record->pinned &&
+           !record->awaiting && record->token != g_sdk_command_notified[slot];
+}
+static int sdk_command_callback_owner(const struct scmd_record *record, int (*ready)(int)) {
+    int owner = record->owner;
+    return owner >= 0 && owner < SCMD_OWNERS && record->owner_lifetime == g_sdk_commands.owner_lifetime[owner] &&
+           ready(owner);
+}
+/* Retained records provide exactly-once completion despite journal overruns.
+ * Copy under the lock, then release it before entering mod code. */
+int sdk_command_record_callback(int slot, int (*ready)(int), void (*deliver_result)(int, const az_command_result *)) {
+    if (pthread_mutex_trylock(&g_sdk_commands.mu)) return 0;
+    const struct scmd_record *record = &g_sdk_commands.records[slot];
+    int owner = record->owner;
+    int deliver = sdk_command_callback_ready(record, slot) && sdk_command_callback_owner(record, ready);
+    az_command_result result;
+    if (deliver) {
+        result = record->result;
+        g_sdk_command_notified[slot] = record->token;
+    }
+    pthread_mutex_unlock(&g_sdk_commands.mu);
+    if (deliver) deliver_result(owner, &result);
+    return 1;
+}
+
+/* Autonomous command delivery is drained by the overlay loop, not by
+ * community_tick.  At most eight callbacks are reserved per pass; the caller
+ * leaves the UI descriptor readable when more remain. */
+unsigned sdk_command_ui_drain(unsigned budget) {
+    sdk_command_ui_clear();
+    unsigned delivered = 0;
+    while (delivered < budget) {
+        struct scmd_notification notification;
+        int rc = scmd_next_notification(&g_sdk_commands, &notification);
+        if (rc != AZ_OK) break;
+        if (notification.callback) notification.callback(&notification.completion, notification.user);
+        scmd_notification_done(&g_sdk_commands, &notification);
+        sdk_command_wake();
+        delivered++;
+    }
+    if (sdk_command_has_pending_notification()) sdk_ui_wake();
+    return delivered;
+}
+
+int sdk_command_read(int owner, uint64_t request, az_command_result *out) {
+    return scmd_poll(&g_sdk_commands, owner, request, out);
+}
+int sdk_command_drop(int owner, uint64_t request) {
+    return scmd_release(&g_sdk_commands, owner, request);
+}
+int sdk_command_ack(int owner, uint64_t request) {
+    int rc = scmd_acknowledge(&g_sdk_commands, owner, request);
+    if (rc == AZ_OK) sdk_command_wake();
+    return rc;
+}
+
+void sdk_command_observe_native(const struct azexit_service *api) {
+    atomic_store_explicit(&g_sdk_exit_service, api, memory_order_release);
+}
+int sdk_command_native_bound(void) {
+    return atomic_load_explicit(&g_sdk_exit_bound, memory_order_acquire) != NULL;
 }

@@ -1,3 +1,9 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE
+#endif
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* Real provider engines and callback dispatcher with a synthetic UI/mod host. */
 #define _POSIX_C_SOURCE 200809L
@@ -30,6 +36,7 @@ static int st_mod_owner(const char *id, uintptr_t caller, const char *service) {
 static int cm_command_code(cm_mod *mod, uintptr_t address) {
     return mod->lo <= address && address < mod->hi;
 }
+#include "sdk_command_service.c"
 #include "sdk_command.c"
 #include "sdk_data_callbacks.c"
 static int counts[CM_MAX], commands[CM_MAX], saw_missed, last_status;

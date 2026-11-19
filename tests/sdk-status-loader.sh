@@ -10,7 +10,7 @@ sdk_include=${AZ_SDK_INCLUDE:-$src}
 stage=$work/root/az-usbload/community
 mkdir -p "$stage/status-watch" "$work/root/azmod-community"
 cc -O2 -no-pie -I"$src" "-DCM_ROOT=\"$work/root\"" "-DCM_LOGDIR=\"$work/log\"" \
-  "$src/test/community/harness.c" "$src/sdk_command_engine.c" -pthread -ldl -lm -rdynamic -o "$work/host"
+  "$src/test/community/harness.c" "$src/sdk_command_engine.c" "$src/sdk_command_service.c" "$src/sdk_status_engine.c" -pthread -ldl -lm -rdynamic -o "$work/host"
 cc -O2 -fPIC -shared -fvisibility=hidden -I"$sdk_include" "$src/test/community/status_mod.c" \
   -o "$stage/status-watch/status-watch.so"
 printf '%s\n' '{"azmod":1,"id":"status-watch","name":"Status watch","version":"1.0.0","author":"t","summary":"status test","source":"https://example.com/x","api":2,"firmware":["any"],"hooks":false}' > "$stage/status-watch/azmod.json"

@@ -21,8 +21,7 @@ const char *az_storage_mountinfo(void) { return ST_MOUNTINFO; }
 static struct st_resolution g_st_resolutions[2];
 static int sd_deck_snapshot_v1(int deck, az_deck_snapshot *out);
 static uint32_t sd_live_fields(void);
-static uint64_t sdk_command_capabilities(void);
-static void sdk_command_retire_owner(int owner);
+#include "sdk_command_service.h"
 static void st_resolution_retire(const az_track_ref *ref, const char *database) {
     if (ref->source_id < 1 || ref->source_id > 2) return;
     struct st_resolution *cached = &g_st_resolutions[ref->source_id - 1];

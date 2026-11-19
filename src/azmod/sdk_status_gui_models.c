@@ -229,15 +229,13 @@ static struct ds_model_output ds_model_output(unsigned model, uint64_t epoch) {
         .topic = AZ_STATUS_TOPIC(profile->topic),
         .epoch = epoch};
 }
-static void ds_model_withdraw_field(unsigned model, const struct ds_gui_record *record, const struct ds_image *image,
+static void ds_model_withdraw_field(unsigned model, const struct ds_gui_record *record, uint64_t epoch,
                                     struct ds_field *field) {
-    const struct ds_cell *old = image->field[field->topic][field->field];
-    int withdraw = old && old->info.info.provenance == AZ_PROV_NATIVE &&
-                   (old->info.scope == AZ_STATUS_UNIT || (image->epoch && old->info.scope_id == image->epoch));
-    if (withdraw) field->info = old->info;
-    else {
+    int withdraw = field->info.info.provenance == AZ_PROV_NATIVE &&
+                   (field->info.scope == AZ_STATUS_UNIT || (epoch && field->info.scope_id == epoch));
+    if (!withdraw) {
         field->info.scope = model != DS_MODEL_KEY ? AZ_STATUS_UNIT : AZ_STATUS_LOAD_SCOPE;
-        field->info.scope_id = model == DS_MODEL_KEY ? image->epoch : 0;
+        field->info.scope_id = model == DS_MODEL_KEY ? epoch : 0;
         field->info.info.provenance = AZ_PROV_NATIVE;
     }
     field->info.info.availability = AZ_AVAIL_STALE;
@@ -246,11 +244,8 @@ static void ds_model_withdraw_field(unsigned model, const struct ds_gui_record *
     field->info.count = 0;
 }
 static void ds_model_withdraw(unsigned model, const struct ds_gui_record *record, struct ds_model_output *output) {
-    pthread_mutex_lock(&ds.mu);
-    const struct ds_image *image = &ds.deck[record->deck].current;
-    output->epoch = image->epoch;
-    for (unsigned i = 0; i < output->count; i++) ds_model_withdraw_field(model, record, image, &output->fields[i]);
-    pthread_mutex_unlock(&ds.mu);
+    ds_read_receipts(record->deck, output->fields, output->count, &output->epoch);
+    for (unsigned i = 0; i < output->count; i++) ds_model_withdraw_field(model, record, output->epoch, &output->fields[i]);
     output->flags = model == DS_MODEL_KEY ? DS_FIELD_LOSS | DS_NATIVE_INPUT : DS_UNIT_INPUT;
 }
 static const void *ds_model_value(unsigned model, const struct ds_gui_record *record) {

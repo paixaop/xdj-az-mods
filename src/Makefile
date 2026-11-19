@@ -91,6 +91,9 @@ $(AZMOD): $(AZMOD_SRCS) $(AZMOD_HDRS) | $(OUT)
 	$(CC) $(AZSDK_NATIVE_CFLAGS) -Iazmod -c -o $(OUT)/analysis_host.o azmod/analysis_host.c
 	$(CC) $(AZSDK_NATIVE_CFLAGS) -Iazmod -c -o $(OUT)/analysis_settings.o azmod/analysis_settings.c
 	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/beatport_service.o azmod/beatport_service.c
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/sdk_status_engine.o azmod/sdk_status_engine.c
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/sdk_status_metrics.o azmod/sdk_status_metrics.c
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/sdk_command_service.o azmod/sdk_command_service.c
 	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/sdk_command_engine.o azmod/sdk_command_engine.c
 	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/track_storage.o azmod/track_storage.c
 	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/azcache_scopes.o common/azcache_scopes.c
@@ -108,7 +111,7 @@ $(AZMOD): $(AZMOD_SRCS) $(AZMOD_HDRS) | $(OUT)
 	$(CC) $(AZ_UNWIND) -fPIC -c -o $(OUT)/sdk_cache_entry_asm.o azmod/sdk_cache_entry.S
 	$(CC) $(AZ_UNWIND) -fPIC -c -o $(OUT)/sdk_slip_entry_asm.o azmod/sdk_slip_entry.S
 	$(CC) $(AZ_UNWIND) -fPIC -c -o $(OUT)/sdk_slip_getter_entry.o azmod/sdk_slip_getter_entry.S
-	$(CC) $(AZMOD_CFLAGS) -Wl,--version-script=azstem/sdk_native.map -o $@.full $(AZMOD_SRCS) $(OUT)/beatport_service.o $(OUT)/analysis_runtime.o $(OUT)/analysis_owner.o $(OUT)/analysis_source.o $(OUT)/analysis_encoding.o $(OUT)/analysis_host.o $(OUT)/analysis_settings.o $(AZANALYSIS_ARCHIVE) -Wl,--exclude-libs,libanalysis.a $(OUT)/track_storage.o $(OUT)/sdk_command_engine.o $(OUT)/slip_diagnostic.o $(OUT)/slip_capture.o $(OUT)/slip_diagnostic_entry.o $(OUT)/sdk_command_target.o $(OUT)/azcache_scopes.o $(OUT)/sdk_native_sources.o $(OUT)/sdk_connection_hooks.o $(OUT)/sdk_cache_message.o $(OUT)/sdk_native_slip.o $(OUT)/sdk_slip_hooks.o $(OUT)/sdk_cache_entry.o $(OUT)/sdk_cache_entry_asm.o $(OUT)/sdk_slip_entry_asm.o $(OUT)/sdk_slip_getters.o $(OUT)/sdk_slip_getter_entry.o -ldl -lpthread -Wl,-Bstatic -lXtst -Wl,-Bdynamic -Wl,--exclude-libs,libXtst.a -lX11 -lXext -lfreetype -lm
+	$(CC) $(AZMOD_CFLAGS) -Wl,--version-script=azstem/sdk_native.map -o $@.full $(AZMOD_SRCS) $(OUT)/beatport_service.o $(OUT)/analysis_runtime.o $(OUT)/analysis_owner.o $(OUT)/analysis_source.o $(OUT)/analysis_encoding.o $(OUT)/analysis_host.o $(OUT)/analysis_settings.o $(AZANALYSIS_ARCHIVE) -Wl,--exclude-libs,libanalysis.a $(OUT)/track_storage.o $(OUT)/sdk_command_engine.o $(OUT)/sdk_command_service.o $(OUT)/sdk_status_engine.o $(OUT)/sdk_status_metrics.o $(OUT)/slip_diagnostic.o $(OUT)/slip_capture.o $(OUT)/slip_diagnostic_entry.o $(OUT)/sdk_command_target.o $(OUT)/azcache_scopes.o $(OUT)/sdk_native_sources.o $(OUT)/sdk_connection_hooks.o $(OUT)/sdk_cache_message.o $(OUT)/sdk_native_slip.o $(OUT)/sdk_slip_hooks.o $(OUT)/sdk_cache_entry.o $(OUT)/sdk_cache_entry_asm.o $(OUT)/sdk_slip_entry_asm.o $(OUT)/sdk_slip_getters.o $(OUT)/sdk_slip_getter_entry.o -ldl -lpthread -Wl,-Bstatic -lXtst -Wl,-Bdynamic -Wl,--exclude-libs,libXtst.a -lX11 -lXext -lfreetype -lm
 	$(call az_strip_keep_assets,$@)
 	@echo "Built: $@"
 

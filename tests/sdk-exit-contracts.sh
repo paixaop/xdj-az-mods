@@ -7,7 +7,7 @@ trap 'rm -rf "$task_tmp"' EXIT
 python3 - "$task_tmp/exit_contracts.inc" <<'PY'
 from pathlib import Path
 import sys
-path = Path('src/azmod/sdk_exit_bridge.c').resolve()
+path = Path('src/azmod/sdk_command_service.c').resolve()
 source = path.read_text()
 parts = []
 for begin, end in [('static int sdk_exit_delivery_receipts(', 'static uint64_t sdk_exit_supported_operations('),

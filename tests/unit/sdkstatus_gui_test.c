@@ -16,24 +16,24 @@
 #include "sdk_status_engine.c"
 #include "../common/azstatus_native.h"
 static int ui;
-static void ds_wake(void) {
+void az_status_host_wake(void) {
     uint64_t one = 1;
     ssize_t n = write(ui, &one, sizeof one);
     assert(n == (ssize_t) sizeof one || errno == EAGAIN);
 }
-static void ds_deadline(uint64_t ns) { (void) ns; }
-static int ds_live(int owner) { return owner == 1; }
-static void ds_native_interest(unsigned d, uint64_t t) {
+void az_status_host_deadline(uint64_t ns) { (void) ns; }
+int az_status_host_live(int owner) { return owner == 1; }
+void az_status_host_native_interest(unsigned d, uint64_t t) {
     (void) d;
     (void) t;
 }
-static void sdk_status_store_binding(unsigned d, uint64_t e, const az_track_ref *r, uint64_t c) {
+void az_status_host_store_binding(unsigned d, uint64_t e, const az_track_ref *r, uint64_t c) {
     (void) d;
     (void) e;
     (void) r;
     (void) c;
 }
-static void sdk_status_store_interest(unsigned d, uint64_t t) {
+void az_status_host_store_interest(unsigned d, uint64_t t) {
     (void) d;
     (void) t;
 }
@@ -929,3 +929,5 @@ int main(int argc, char **argv) {
     puts("status GUI: fractional BpmState commits, master handoff, racing load and disposal passed");
     return 0;
 }
+
+void az_status_host_gui_interest(uint64_t topics) { ds_gui_interest(topics); }

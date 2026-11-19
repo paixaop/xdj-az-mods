@@ -1,3 +1,9 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE
+#endif
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* Exercise the actual disk provider with the existing library suite's fake USB/sysfs and
  * read-only SQLite fixtures. No firmware key, native objects or physical deck required. */
@@ -46,6 +52,7 @@ static int st_test_thread_name(pthread_t thread, const char *name) {
 #define az_thread_create pthread_create
 #define open st_test_open
 #define pread st_test_pread
+#include "sdk_command_service.c"
 #include "sdk_track.c"
 #undef pread
 #undef open

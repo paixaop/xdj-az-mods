@@ -115,9 +115,9 @@ static void ds_gui_flush(unsigned deck, struct ds_gui_cursor *cursor) {
         const struct ds_gui_record *r = &q->entries[0].record;
         int obsolete = 0;
         if (r->owner && r->epoch) {
-            pthread_mutex_lock(&ds.mu);
-            uint64_t epoch = ds.deck[deck].current.epoch, last = ds.deck[deck].last_epoch;
-            pthread_mutex_unlock(&ds.mu);
+            struct ds_deck_stamp stamp;
+            ds_read_stamp(deck, &stamp);
+            uint64_t epoch = stamp.epoch, last = stamp.last_epoch;
             if (r->epoch != epoch) {
                 if (r->epoch > last) return;
                 obsolete = 1;

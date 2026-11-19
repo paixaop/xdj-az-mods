@@ -8,17 +8,17 @@
 #include <unistd.h>
 #include "../../src/common/azaltstack.h"
 #include "sdk_status_engine.c"
-static void ds_gui_interest(uint64_t topics) { (void) topics; }
+void az_status_host_gui_interest(uint64_t topics) { (void) topics; }
 static void ds_gui_load(unsigned deck) { (void) deck; }
-static void ds_wake(void) {}
-static void ds_deadline(uint64_t ns) { (void) ns; }
-static void sdk_status_store_binding(unsigned d, uint64_t e, const az_track_ref *r, uint64_t cut) {
+void az_status_host_wake(void) {}
+void az_status_host_deadline(uint64_t ns) { (void) ns; }
+void az_status_host_store_binding(unsigned d, uint64_t e, const az_track_ref *r, uint64_t cut) {
     (void) d;
     (void) e;
     (void) r;
     (void) cut;
 }
-static void sdk_status_store_interest(unsigned d, uint64_t topics) {
+void az_status_host_store_interest(unsigned d, uint64_t topics) {
     (void) d;
     (void) topics;
 }
@@ -27,7 +27,7 @@ static void sdk_status_store_reseed(unsigned d, uint64_t e, uint64_t t) {
     (void) e;
     (void) t;
 }
-static int ds_live(int owner) { return owner >= 0; }
+int az_status_host_live(int owner) { return owner >= 0; }
 #include "../../src/common/azstatus_source.h"
 static uint64_t last_source_pin;
 static void ss_native_load(unsigned deck, uint64_t epoch, uint64_t token) {
@@ -1351,3 +1351,5 @@ int main(int argc, char **argv) {
     test_terminal_window_refinement();
     puts("PASS native reducer scope, fenced metadata, installed-field readiness, duplicate suppression and independent loop revisions");
 }
+
+void az_status_host_native_interest(unsigned d, uint64_t topics) { ds_native_interest(d, topics); }

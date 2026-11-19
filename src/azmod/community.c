@@ -2151,13 +2151,13 @@ static void cm_services_start(void) {
     /* Resolve the shared SQL table before any community worker can read it. */
     /* Public SDK data and command services are available on a normal install. */
     g_st_enabled = access("/home/root/settings/azmod.track-data.off", F_OK) != 0;
-    if (g_st_enabled || ds.enabled) sdk_sq_resolve();
+    if (g_st_enabled || ds_enabled()) sdk_sq_resolve();
     if (g_st_enabled) {
         azexit_service_fn get_exit;
         *(void **) &get_exit = dlsym(RTLD_DEFAULT, "azstem_exit_service_v1");
         const struct azexit_service *api = get_exit ? get_exit() : NULL;
         if (api && api->size >= AZEXIT_SERVICE_V1_SIZE && api->version == 1) {
-            atomic_store_explicit(&g_sdk_exit_service, api, memory_order_release);
+            sdk_command_observe_native(api);
             (void) sdk_command_start(api);
         }
     }
@@ -2462,7 +2462,7 @@ static void community_tick(void) {
 #ifndef SDK_PROC_IMPL
     /* Keep older companions' independent cue observations available. The
      * unbound core admits no native commands. */
-    if (!atomic_load_explicit(&g_sdk_exit_bound, memory_order_acquire)) sdk_cue_tick();
+    if (!sdk_command_native_bound()) sdk_cue_tick();
     sdk_data_callbacks_tick();                  /* works for mods with no tick callback */
 #endif
     cm_tick_callbacks(now);
