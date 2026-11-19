@@ -1,0 +1,123 @@
+{
+  "generator": "ffmpeg native AAC encoder, ffmpeg version 9.0.1 Copyright (c) 2000-2026 the FFmpeg developers",
+  "cases": [
+    {
+      "file": "lc-44100-2.m4a",
+      "sampleRate": 44100,
+      "channels": 2,
+      "packetCount": 45,
+      "editStart": 1024,
+      "presentationFrames": 44100,
+      "pulseFrames": [
+        11025,
+        33075
+      ],
+      "referencePeakFrames": [
+        12056,
+        34106
+      ],
+      "sha256": "424a510e014e277c80c788e8ee561dee7008c260bc7b3a58e46215d763c03641",
+      "sourceDelayFrames": 1024
+    },
+    {
+      "file": "lc-44100-2.aac",
+      "sampleRate": 44100,
+      "channels": 2,
+      "packetCount": 45,
+      "editStart": null,
+      "presentationFrames": null,
+      "pulseFrames": [
+        11025,
+        33075
+      ],
+      "referencePeakFrames": [
+        12056,
+        34106
+      ],
+      "sha256": "cd42dd51f1c7782efa299e90ae1208d17d9c89c1caf16ee76e0a3aa8da64cf17",
+      "sourceDelayFrames": 1024
+    },
+    {
+      "file": "lc-48000-1.m4a",
+      "sampleRate": 48000,
+      "channels": 1,
+      "packetCount": 48,
+      "editStart": 1024,
+      "presentationFrames": 48000,
+      "pulseFrames": [
+        12000,
+        36000
+      ],
+      "referencePeakFrames": [
+        13031,
+        37031
+      ],
+      "sha256": "f2e53a2ab67edc1bac084f45e6669b9c5aead03549a4eb1e4a6f2dbe2948c046",
+      "sourceDelayFrames": 1024
+    },
+    {
+      "file": "lc-48000-1.aac",
+      "sampleRate": 48000,
+      "channels": 1,
+      "packetCount": 48,
+      "editStart": null,
+      "presentationFrames": null,
+      "pulseFrames": [
+        12000,
+        36000
+      ],
+      "referencePeakFrames": [
+        13031,
+        37031
+      ],
+      "sha256": "8dbffaf23d32ea2e69d9a88a77d329367034b11c497ecfde5ed1fd4730bd476c",
+      "sourceDelayFrames": 1024
+    },
+    {
+      "file": "apple-lc-44100-2.m4a",
+      "sampleRate": 44100,
+      "channels": 2,
+      "packetCount": 47,
+      "editStart": 2112,
+      "presentationFrames": 45056,
+      "pulseFrames": [
+        11025,
+        33075
+      ],
+      "referencePeakFrames": [
+        13144,
+        35194
+      ],
+      "sourceDelayFrames": 2112,
+      "sha256": "33f0a42e3d74bf7a861c8dc38c927bf56389aded9335a1f699e5933fd4c630f8",
+      "generator": "ffmpeg 9.0.1 macOS AudioToolbox -c:a aac_at -profile:a 1 -b:a 128k -movflags +faststart"
+    },
+    {
+      "file": "apple-lc-44100-2.aac",
+      "sampleRate": 44100,
+      "channels": 2,
+      "packetCount": 47,
+      "editStart": null,
+      "presentationFrames": null,
+      "pulseFrames": [
+        11025,
+        33075
+      ],
+      "referencePeakFrames": [
+        13144,
+        35194
+      ],
+      "sourceDelayFrames": 2112,
+      "sha256": "60c8294293fd01e6079031268811f7a37af528f9b3c23177d13514776bd7902d",
+      "generator": "ffmpeg 9.0.1 macOS AudioToolbox -c:a aac_at -profile:a 1 -b:a 128k -movflags +faststart"
+    }
+  ],
+  "rejected": [
+    {
+      "file": "unsupported-he-aac.m4a",
+      "generator": "ffmpeg 9.0.1, macOS AudioToolbox, -c:a aac_at -profile:a 4 -b:a 48k, same 48 kHz mono pulse source",
+      "profile": "HE-AAC",
+      "sha256": "01a41c4e53522281629d19ac1fcd862efdb27b2a8eff33afa015c39db651d3b1"
+    }
+  ]
+}

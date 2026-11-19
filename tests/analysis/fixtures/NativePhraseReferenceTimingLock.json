@@ -1,0 +1,5 @@
+{
+  "schemaVersion": 1,
+  "sha256": "4502f988ab0dd795343d859efdd9eff3a17e6bc111999f751fdb5396d1219ba0",
+  "purpose": "Pins recovered reference input metadata separately from frozen ANLZ expectations."
+}

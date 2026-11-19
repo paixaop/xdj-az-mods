@@ -1,0 +1,66 @@
+{
+  "referenceSHA256": "2dfa9738b50e6c5ab3a6ca556dd7967c31ae4a6b06b52d0925f61fad8046f907",
+  "referenceDecoderSHA256": "ccb3ac0b147a469beda79264a9f859ec1388eb72368d734d6ae276ad2ff5e13c",
+  "cases": [
+    {
+      "file": "cbr-info-44100-2.mp3",
+      "sampleRate": 44100,
+      "channels": 2,
+      "sampleCount": 89856,
+      "headerFrames": 0,
+      "prefix": "cbr-info-44100-2.native-prefix.s16le",
+      "sourceSHA256": "b5fbef1e67d7283209feefe3de536b2a44cde083c21f914916ecd5184d8ecadd",
+      "prefixSHA256": "f766859fa45751e90bff7457dbcbe41a84b3461a72974d3326f526c7df3fadd2"
+    },
+    {
+      "file": "cbr-info-48000-1.mp3",
+      "sampleRate": 48000,
+      "channels": 1,
+      "sampleCount": 99072,
+      "headerFrames": 1152,
+      "prefix": "cbr-info-48000-1.native-prefix.s16le",
+      "sourceSHA256": "597565f70be1860f72c406847ecc47edcb9295cdbea603e88b74fcd23138d465",
+      "prefixSHA256": "b0b0d9e603e248f70e839b42745798c43242dee28feed735a03ea15244b435e1"
+    },
+    {
+      "file": "no-info-44100-2.mp3",
+      "sampleRate": 44100,
+      "channels": 2,
+      "sampleCount": 89856,
+      "headerFrames": 0,
+      "prefix": "no-info-44100-2.native-prefix.s16le",
+      "sourceSHA256": "018a96f4e9b56fcc3ff5505301c0bd366764e413dc35098849fcf0508cadad87",
+      "prefixSHA256": "f766859fa45751e90bff7457dbcbe41a84b3461a72974d3326f526c7df3fadd2"
+    },
+    {
+      "file": "no-info-48000-1.mp3",
+      "sampleRate": 48000,
+      "channels": 1,
+      "sampleCount": 97920,
+      "headerFrames": 0,
+      "prefix": "no-info-48000-1.native-prefix.s16le",
+      "sourceSHA256": "f4126792c3079aa5b3fef81c00c613dcdc05b680af12ac4b2d78b144ee351ba6",
+      "prefixSHA256": "7b05f6e4f12fb633b0b5ab29757916d98babbac0b2769f0bcd6229c9ab0ca7b6"
+    },
+    {
+      "file": "vbr-xing-44100-2.mp3",
+      "sampleRate": 44100,
+      "channels": 2,
+      "sampleCount": 89856,
+      "headerFrames": 0,
+      "prefix": "vbr-xing-44100-2.native-prefix.s16le",
+      "sourceSHA256": "c2ccf97c7aa145ecfd4991a143daf995339218a03c963030f707823138349fd5",
+      "prefixSHA256": "aa5e372c23802b543e330bb2b905d9f6f654c0bb7ab8a8e28c1efb6e6a1ba0aa"
+    },
+    {
+      "file": "vbr-xing-48000-1.mp3",
+      "sampleRate": 48000,
+      "channels": 1,
+      "sampleCount": 99072,
+      "headerFrames": 1152,
+      "prefix": "vbr-xing-48000-1.native-prefix.s16le",
+      "sourceSHA256": "8e4e4bb474e098835a0df760a21456fbee22a8bcc8e210f2fbba573c1f214d46",
+      "prefixSHA256": "f3ea4708e5582180cd28c7d9aa400626e8c5ffa8b8f40f240dc5b09fbb68a3db"
+    }
+  ]
+}

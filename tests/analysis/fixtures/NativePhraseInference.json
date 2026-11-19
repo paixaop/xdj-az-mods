@@ -1,0 +1,132 @@
+[
+  {
+    "name": "arrangement",
+    "mood": "mid",
+    "endBeat": 145,
+    "entries": [
+      {
+        "index": 1,
+        "startBeat": 1,
+        "code": {
+          "kind": 1,
+          "k1": 0,
+          "k2": 0,
+          "k3": 0
+        },
+        "b": 0,
+        "beat2": 0,
+        "beat3": 0,
+        "beat4": 0,
+        "fill": 0,
+        "fillStartBeat": 0
+      },
+      {
+        "index": 2,
+        "startBeat": 21,
+        "code": {
+          "kind": 1,
+          "k1": 0,
+          "k2": 0,
+          "k3": 0
+        },
+        "b": 0,
+        "beat2": 0,
+        "beat3": 0,
+        "beat4": 0,
+        "fill": 0,
+        "fillStartBeat": 0
+      },
+      {
+        "index": 3,
+        "startBeat": 45,
+        "code": {
+          "kind": 9,
+          "k1": 0,
+          "k2": 0,
+          "k3": 0
+        },
+        "b": 0,
+        "beat2": 0,
+        "beat3": 0,
+        "beat4": 0,
+        "fill": 0,
+        "fillStartBeat": 0
+      },
+      {
+        "index": 4,
+        "startBeat": 81,
+        "code": {
+          "kind": 8,
+          "k1": 0,
+          "k2": 0,
+          "k3": 0
+        },
+        "b": 0,
+        "beat2": 0,
+        "beat3": 0,
+        "beat4": 0,
+        "fill": 0,
+        "fillStartBeat": 0
+      },
+      {
+        "index": 5,
+        "startBeat": 97,
+        "code": {
+          "kind": 9,
+          "k1": 0,
+          "k2": 0,
+          "k3": 0
+        },
+        "b": 0,
+        "beat2": 0,
+        "beat3": 0,
+        "beat4": 0,
+        "fill": 0,
+        "fillStartBeat": 0
+      }
+    ],
+    "provenance": {
+      "originalImageSHA256": "2dfa9738b50e6c5ab3a6ca556dd7967c31ae4a6b06b52d0925f61fad8046f907",
+      "inputFloat32SHA256": "6248a121c4b5cd6272c5775337aa491df45e7f684e596197c65a1ad68fc6edf7",
+      "inputSampleRate": 11025,
+      "analysisSampleRate": 44100,
+      "bpm": 120,
+      "offsetMilliseconds": 230,
+      "phase": 1,
+      "derivation": "Original timing, band, spectral and phrase routines on deterministic synthetic PCM."
+    }
+  },
+  {
+    "name": "noise",
+    "mood": "low",
+    "endBeat": 81,
+    "entries": [
+      {
+        "index": 1,
+        "startBeat": 1,
+        "code": {
+          "kind": 1,
+          "k1": 0,
+          "k2": 0,
+          "k3": 0
+        },
+        "b": 0,
+        "beat2": 0,
+        "beat3": 0,
+        "beat4": 0,
+        "fill": 0,
+        "fillStartBeat": 0
+      }
+    ],
+    "provenance": {
+      "originalImageSHA256": "2dfa9738b50e6c5ab3a6ca556dd7967c31ae4a6b06b52d0925f61fad8046f907",
+      "inputFloat32SHA256": "c52d934354e7bd6573dfdab32f1c6e9061bda40b17406f473990b5885a3e267d",
+      "inputSampleRate": 11025,
+      "analysisSampleRate": 44100,
+      "bpm": 120,
+      "offsetMilliseconds": 0,
+      "phase": 1,
+      "derivation": "Original timing, band, spectral and phrase routines on deterministic synthetic PCM."
+    }
+  }
+]
