@@ -432,7 +432,10 @@ class RuntimeSDKTests(unittest.TestCase):
         self.assertIn('AZSDK_LOOP_PROBE=1',value)
         preloads=[line[len('export LD_PRELOAD='):] for line in value.splitlines()
                   if line.startswith('export LD_PRELOAD=')]
-        self.assertEqual(preloads,[':'.join(stage+'/'+name for name in runtime.FILES)+':/home/root/ep122_shim.so'])
+        self.assertEqual(len(preloads),1)
+        self.assertEqual(preloads[0].split(':'),[
+            stage+'/azmod.so',stage+'/azstem.so',stage+'/loop-probe.so',
+            stage+'/source-probe.so','/home/root/ep122_shim.so'])
         self.assertEqual([line for line in value.splitlines()
                           if not line.startswith(('export LD_PRELOAD=','export AZSDK_'))],
                          [line for line in baseline.splitlines() if not line.startswith('export LD_PRELOAD=')])
