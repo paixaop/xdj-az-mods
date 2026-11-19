@@ -10,6 +10,7 @@
 #define _GNU_SOURCE
 #include "sdk_data_engine.h"
 #include "sdk_command_engine.h"
+#include "track_service.h"
 #include <assert.h>
 #include <stdio.h>
 
@@ -39,6 +40,20 @@ static struct st_engine g_st = ST_ENGINE_INIT;
 #include "sdk_command_service.c"
 #include "sdk_command.c"
 #include SDK_SUBMIT_INC
+/* The command descriptor fixture supplies its independent track-event owner
+ * through the typed service boundary and the actual provider engine primitives.
+ * Track storage and worker behavior have their own linked service tests. */
+int track_service_event_head(uint64_t *sequence) {
+    if (pthread_mutex_trylock(&g_st.mu)) return AZ_BUSY;
+    int rc = g_st.events_exhausted ? AZ_LIMIT : AZ_OK;
+    if (!rc) *sequence = g_st.sequence;
+    pthread_mutex_unlock(&g_st.mu);
+    return rc;
+}
+int track_service_owner_retired(int owner) { return st_owner_retired(&g_st, owner); }
+int track_service_event(int owner, uint64_t after, az_data_change *out) {
+    return st_event_read(&g_st, owner, after, out);
+}
 #include "sdk_data_callbacks.c"
 #include SDK_LIBRARY_INC
 
