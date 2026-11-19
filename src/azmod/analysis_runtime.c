@@ -28,7 +28,7 @@ struct ar_job {
     struct timespec started;
 };
 struct ar_load {
-    uint64_t epoch, attempted;
+    uint64_t epoch, attempted, order;
     int loaded;
     az_track_ref track;
     az_analysis_status_v1 status;
@@ -177,7 +177,10 @@ static int ar_compute(struct ar_job *job, char error[160]) {
 static void ar_finish(struct ar_job *job, int rc) {
     job->status.result = rc;
     job->status.state = rc == AZ_OK || rc == AZ_NOT_FOUND ? AZ_ANALYSIS_COMPLETE : AZ_ANALYSIS_FAILED;
-    if (atomic_load(&job->cancelled)) job->status.state = AZ_ANALYSIS_CANCELLED;
+    if (atomic_load(&job->cancelled)) {
+        job->status.state = AZ_ANALYSIS_CANCELLED;
+        job->status.result = AZ_STALE;
+    }
     if (rc == AZ_OK) job->status.completed_components = job->request.components;
     if (!job->status.diagnostic[0] && rc)
         snprintf(job->status.diagnostic, sizeof job->status.diagnostic, "analysis result %d", rc);
@@ -405,10 +408,12 @@ void analysis_runtime_enable(az_analysis_owner owner, int enabled) {
     pthread_cond_signal(&ar.wake);
     pthread_mutex_unlock(&ar.mutex);
 }
-void analysis_runtime_load(unsigned deck, uint64_t epoch, int loaded, const az_track_ref *track) {
+void analysis_runtime_load(unsigned deck, uint64_t order, uint64_t epoch, int loaded, const az_track_ref *track) {
     if (deck >= 4) return;
     pthread_mutex_lock(&ar.mutex);
     struct ar_load *load = &ar.decks[deck];
+    if (!order || order <= load->order) { pthread_mutex_unlock(&ar.mutex); return; }
+    load->order = order;
     if (load->epoch != epoch || !loaded) {
         load->attempted = 0;
         struct ar_job *job = &ar.jobs[ANALYSIS_PUBLIC_SLOTS + deck];

@@ -21,6 +21,6 @@ int analysis_runtime_capabilities(az_analysis_capabilities_v1 *out);
  * Core enablement affects automatic requests only. Explicit SDK requests remain
  * admitted until their own owner retires or the service shuts down. */
 void analysis_runtime_enable(az_analysis_owner owner, int enabled);
-void analysis_runtime_load(unsigned deck, uint64_t epoch, int loaded, const az_track_ref *track);
+void analysis_runtime_load(unsigned deck, uint64_t order, uint64_t epoch, int loaded, const az_track_ref *track);
 int analysis_runtime_deck_status(unsigned deck, az_analysis_status_v1 *out);
 #endif

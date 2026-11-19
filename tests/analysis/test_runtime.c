@@ -11,6 +11,7 @@
 static const char *audio;
 static atomic_int acquisitions, publications, releases, blocked, entered, pending, link_result;
 static void (*source_wake)(void);
+static atomic_uint_fast64_t cancel_after_publish;
 static void pause_ms(void) { struct timespec t = {0, 1000000}; nanosleep(&t, NULL); }
 void analysis_source_set_wake(void (*wake)(void)) { source_wake = wake; }
 int analysis_source_acquire(az_analysis_owner owner, const analysis_source_request *request,
@@ -30,6 +31,8 @@ int analysis_source_publish(az_analysis_owner owner, const analysis_source_input
     assert(input->lease && result->vocals.count);
     if (!analysis_owner_current(owner)) return AZ_STALE;
     atomic_fetch_add(&publications, 1);
+    uint64_t cancel_id = atomic_load(&cancel_after_publish);
+    if (cancel_id) assert(analysis_runtime_cancel(owner, cancel_id) == AZ_OK);
     return atomic_load(&pending) ? AZ_PENDING : AZ_OK;
 }
 int analysis_source_outcome(az_analysis_owner owner, const analysis_source_input *input) {
@@ -126,6 +129,19 @@ static void capacity_and_retirement(az_analysis_owner owner) {
     assert(analysis_runtime_release(owner, ids[0]) == AZ_STALE);
     release_request(second, other); release_request(replacement, rejected);
 }
+static void cancel_publication_collection(az_analysis_owner owner) {
+    atomic_store(&blocked, 1); atomic_store(&entered, 0);
+    az_analysis_request_v1 r = request(1);
+    uint64_t id;
+    assert(submit(owner, &r, &id) == AZ_OK);
+    while (!atomic_load(&entered)) pause_ms();
+    atomic_store(&cancel_after_publish, id);
+    atomic_store(&blocked, 0);
+    az_analysis_status_v1 result = wait_state(owner, id, AZ_ANALYSIS_CANCELLED);
+    assert(result.result == AZ_STALE && result.completed_components == AZ_ANALYSIS_VOCALS);
+    atomic_store(&cancel_after_publish, 0);
+    release_request(owner, id);
+}
 static void pending_link(az_analysis_owner owner) {
     atomic_store(&pending, 1); atomic_store(&link_result, AZ_PENDING);
     az_analysis_request_v1 r = request(1);
@@ -146,7 +162,8 @@ static void automatic_operation(void) {
     int count = atomic_load(&acquisitions);
     /* Missing native grid gives a visible failure; it must run without a mod. */
     analysis_runtime_enable(core, 1);
-    analysis_runtime_load(0, 17, 1, NULL);
+    analysis_runtime_load(0, 2, 17, 1, NULL);
+    analysis_runtime_load(0, 1, 17, 0, NULL); /* delayed old reduction cannot unload the new cut */
     az_analysis_status_v1 status = {.size = sizeof status};
     for (int i = 0; i < 10000; i++) {
         analysis_runtime_deck_status(0, &status);
@@ -165,7 +182,7 @@ int main(int argc, char **argv) {
     assert(analysis_runtime_capabilities(&caps) == AZ_OK && caps.max_workers == 3);
     assert(analysis_runtime_start(argv[2]) == AZ_OK);
     az_analysis_owner owner = analysis_owner_begin(0);
-    invalid_requests(owner); computation(owner); pending_link(owner);
+    invalid_requests(owner); computation(owner); pending_link(owner); cancel_publication_collection(owner);
     capacity_and_retirement(owner); automatic_operation();
     analysis_runtime_shutdown();
     assert(atomic_load(&releases) <= atomic_load(&acquisitions));
