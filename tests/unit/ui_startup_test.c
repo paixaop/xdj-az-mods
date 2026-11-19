@@ -28,6 +28,7 @@ STEP(ep_img_init)
 STEP(sdk_connections_at_start)
 STEP(sdk_cache_at_start)
 STEP(sdk_slip_at_start)
+STEP(slip_diagnostic_at_start)
 STEP(msg_thread_note)
 STEP(bt_uart_recover)
 STEP(install_browse_columns)
@@ -201,7 +202,8 @@ static void constructor_paths(void) {
         assert((strstr(calls, "save ") != NULL) == !status_off);
         before("ep147_late_init ", "ep_img_init ");
         before("sdk_connections_at_start ", "sdk_cache_at_start ");
-        before("sdk_slip_at_start ", "msg_thread_note ");
+        before("sdk_slip_at_start ", "slip_diagnostic_at_start ");
+        before("slip_diagnostic_at_start ", "msg_thread_note ");
         before("msg_thread_note ", "bt_uart_recover ");
         before("install_browse_columns ", "install_browse_edit ");
         before("altstack ", "install_crash_reporter ");
