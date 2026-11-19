@@ -9,7 +9,7 @@ struct sa_grid_view {
     uint8_t *file;
     uint32_t size, header, count;
 };
-static int sa_grid_request_valid(int owner, uint64_t job, const az_analysis_grid_v1 *out,
+static int sa_grid_request_valid(int owner, uint64_t job, const analysis_grid_shape *out,
                                  const az_beat *beats, uint32_t capacity) {
     return owner >= 0 && job && out && st_record_size(out) >= sizeof *out &&
            capacity <= 32768 && (!capacity || beats);
@@ -42,9 +42,9 @@ static int sa_grid_read(const struct sa_job *job, struct sa_grid_view *grid) {
     if (!sa_grid_header_valid(grid) || !sa_grid_rows_valid(grid)) return AZ_FAILED;
     return AZ_OK;
 }
-static int sa_grid_copy(const struct sa_grid_view *grid, az_analysis_grid_v1 *out,
+static int sa_grid_copy(const struct sa_grid_view *grid, analysis_grid_shape *out,
                         az_beat *beats, uint32_t capacity) {
-    az_analysis_grid_v1 result = {.size = out->size, .version = AZ_DATA_VERSION, .beat_count = grid->count};
+    analysis_grid_shape result = {.size = out->size, .version = AZ_DATA_VERSION, .beat_count = grid->count};
     if (capacity < grid->count) {
         *out = result;
         return AZ_LIMIT;
@@ -58,7 +58,7 @@ static int sa_grid_copy(const struct sa_grid_view *grid, az_analysis_grid_v1 *ou
     *out = result;
     return AZ_OK;
 }
-static int sdk_analysis_grid(const char *id, uint64_t job, az_analysis_grid_v1 *out,
+static int sdk_analysis_grid(const char *id, uint64_t job, analysis_grid_shape *out,
                              az_beat *beats, uint32_t capacity) {
     int owner = sa_owner(id, "analysis_grid", CM_RA());
     if (!sa_grid_request_valid(owner, job, out, beats, capacity)) return AZ_INVALID;

@@ -3,6 +3,20 @@
 #define AZ_ANALYSIS_SOURCE_H
 #include "azmod-mod.h"
 #include <stdint.h>
+typedef struct analysis_source_lease {
+    uint32_t size, version, needed, flags;
+    uint64_t job;
+    az_track_ref track;
+    double original_bpm;
+    char audio_path[1024], analysis_path[1024];
+} analysis_source_lease;
+#define AZ_ANALYSIS_NEEDS_LINK 1u /* new ANLZ locator needs native spool application */
+#define AZ_ANALYSIS_LOADED 2u /* lease pins this native load and grid; commit refreshes native phrases */
+#define AZ_ANALYSIS_STREAMING 4u /* completed Beatport download; track ref is intentionally empty */
+typedef struct analysis_grid_shape {
+    uint32_t size, version, beat_count, reserved;
+} analysis_grid_shape;
+
 /* A core feature and a community initialization have separate lifetimes. */
 enum { AZ_ANALYSIS_OWNER_CORE = 1, AZ_ANALYSIS_OWNER_MOD = 2 };
 typedef struct az_analysis_owner {

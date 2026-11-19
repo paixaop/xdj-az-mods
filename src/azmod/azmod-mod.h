@@ -790,26 +790,10 @@ typedef void (*az_deck_status_fn)(const az_deck_status_event_v1 *event, void *us
  * act on a guessed deck. Services that take an `id` take your mod id, and the core checks
  * that the call comes from your library's code; a call made with another mod's id is
  * refused. */
-/* Background phrase analysis. Paths are read-only locators, valid until close.
- * Only core publication may edit ANLZ. Jobs pin source/file fingerprints, never
- * native pointers. All three entries are worker-only and may do I/O. */
-typedef struct az_analysis_job_v1 {
-    uint32_t size, version, needed, flags;
-    uint64_t job;
-    az_track_ref track;
-    double original_bpm;
-    char audio_path[1024], analysis_path[1024];
-} az_analysis_job_v1;
-#define AZ_ANALYSIS_NEEDS_LINK 1u /* new ANLZ locator needs native spool application */
-#define AZ_ANALYSIS_LOADED 2u /* lease pins this native load and grid; commit refreshes native phrases */
-#define AZ_ANALYSIS_STREAMING 4u /* completed Beatport download; track ref is intentionally empty */
 #define AZ_ANALYSIS_VOCALS 32u /* analysis job needed bit; use vocal_intervals to read */
 /* Half-open intervals in original-track seconds, independent of tempo/playback rate. */
 typedef struct az_vocal_interval { double start_s, stop_s; } az_vocal_interval;
 enum { AZ_VOCAL_PVDI = 0, AZ_VOCAL_SPECTRAL = 1, AZ_VOCAL_LSTM = 2 };
-#define AZ_ANALYSIS_FORMAT_TA01 1u
-#define AZ_ANALYSIS_FORMAT_TA02 2u
-#define AZ_ANALYSIS_FORMAT_TA03 4u
 typedef struct az_vocal_snapshot_v1 {
     uint32_t size, version;
     az_component_info info;
@@ -818,8 +802,8 @@ typedef struct az_vocal_snapshot_v1 {
     double analyzed_s; /* coverage, not library duration rounded to seconds */
 } az_vocal_snapshot_v1;
 
-/* Typed analysis publication. Arrays are borrowed only until the call returns;
- * the core validates and serializes them. No ANLZ or TAxx buffers cross this API.
+/* Copied typed analysis results. Caller-provided output arrays remain owned
+ * by the caller. No native file encoding crosses this API.
  * Phrase beat numbers are one-based native grid ordinals; zero means absent
  * for optional subphrase/fill positions. Values are never timestamps. */
 typedef struct az_analysis_phrase_v1 {
@@ -842,14 +826,10 @@ typedef struct az_analysis_result_v1 {
     uint32_t size, version, source_rate, reserved;
     uint64_t source_frames;
     uint32_t beat_count, reserved2;
-    const az_beat *beats; /* omitted for loaded jobs; the lease owns their grid */
+    const az_beat *beats; /* native grid rows, when included by a result producer */
     az_analysis_phrase_map_v1 phrases;
     az_analysis_vocal_map_v1 vocals;
 } az_analysis_result_v1;
-typedef struct az_analysis_grid_v1 {
-    uint32_t size, version, beat_count, reserved;
-} az_analysis_grid_v1;
-
 /* Core-owned phrase/vocal computation. No decoder, model or worker is required
  * in a consumer. Requests and execution settings are copied before acceptance.
  * All functions are nonblocking; progress never requires polling. Results remain
@@ -1005,53 +985,6 @@ typedef struct az_library_v1 {
      * Releasing before collection suppresses completion. Failed init/retired owners
      * receive no callbacks. Registrations last until the core restarts. */
     int (*on_data_event)(const char *id, void (*fn)(const az_data_change *, void *), void *user);
-    /* Legacy phrase-only open. Use analysis_open_v2 and analysis_commit_result
-     * for publication. Returns AZ_NOT_FOUND when phrases are populated.
-     * Close every unsuccessful/open job.
-     * AZ_NOT_FOUND returns job=0 and flags; NEEDS_LINK asks the mod to retry
-     * core->lib_spool_kick on its worker until the existing playback gate admits it. */
-    int (*analysis_open)(const char *id, const az_track_ref *track, az_analysis_job_v1 *out);
-    void (*reserved_analysis_commit)(void); /* Retired raw commit slot; always NULL. Do not use. */
-    int (*analysis_close)(const char *id, uint64_t job);
-    /* Worker-only, deck 0..3 and the accepted LOAD event's load_epoch. Requires
-     * a ready native grid. USB and completed Beatport downloads are supported
-     * by qualified core profiles. AZ_BUSY means source/maps are still arriving.
-     * The core owns source identity; streaming jobs have an empty track ref.
-     * analysis_path is a read-only snapshot of the pinned current native grid.
-     * Legacy phrase-only open; use analysis_open_loaded_v2 for publication. */
-    int (*analysis_open_loaded)(const char *id, int deck, uint64_t load_epoch,
-                                az_analysis_job_v1 *out);
-    /* Worker-only extension: independently fills missing phrases and vocals.
-     * needed may contain AZ_DATA_GRID, AZ_DATA_PHRASES, AZ_ANALYSIS_VOCALS.
-     * Publish through analysis_commit_result; populated components are never replaced. */
-    int (*analysis_open_v2)(const char *id, const az_track_ref *track, az_analysis_job_v1 *out);
-    int (*analysis_open_loaded_v2)(const char *id, int deck, uint64_t load_epoch,
-                                  az_analysis_job_v1 *out);
-    /* Worker-only copied reads; no ticket or native pointer. Initialize out->size.
-     * AZ_OK includes a valid instrumental analysis (interval_count=0).
-     * AZ_NOT_FOUND means no populated PVDI. AZ_LIMIT fills out with the required
-     * interval_count and copies no intervals; NULL/0 is a valid sizing request.
-     * Retry a sizing read if the revision changes. Unknown PVDI versions return
-     * AZ_UNSUPPORTED, malformed data AZ_FAILED. No partial output on other errors.
-     * Loaded reads support qualified USB and completed Beatport resources. */
-    int (*vocal_intervals)(const char *id, const az_track_ref *track,
-                           az_vocal_snapshot_v1 *out, az_vocal_interval *intervals, uint32_t capacity);
-    int (*vocal_intervals_loaded)(const char *id, int deck, uint64_t load_epoch,
-                                  az_vocal_snapshot_v1 *out, az_vocal_interval *intervals, uint32_t capacity);
-    /* Pure capability query. TA03 adds a u32 vocal method at offset 24; tags
-     * start at 28. AZ_VOCAL_LSTM uses ceil(floor(frames*22050/rate)/1024).
-     * Check AZ_LIB_HAS before calling; older cores only accept TA01/TA02. */
-    uint32_t (*analysis_formats)(void);
-    /* Worker-only typed interfaces. Initialize out->size. grid copies the
-     * lease's pinned grid; NULL/0 returns AZ_LIMIT and its required beat_count.
-     * No partial copy on error. The lease and source must still be current.
-     * commit_result accepts v2 leases, consumes only on AZ_OK, and keeps the
-     * source/load/file fences and the preserve-existing policy.
-     * Empty components have zero fields and NULL arrays. Check each member. */
-    int (*analysis_grid)(const char *id, uint64_t job, az_analysis_grid_v1 *out,
-                          az_beat *beats, uint32_t capacity);
-    int (*analysis_commit_result)(const char *id, uint64_t job,
-                                  const az_analysis_result_v1 *result);
 } az_library_v1;
 #define AZ_LIB_HAS(service, field) \
     ((service) && (service)->abi == AZ_LIBRARY_ABI && \

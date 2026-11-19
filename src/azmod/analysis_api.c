@@ -5,7 +5,8 @@
 static az_analysis_owner sdk_analysis_caller(const char *id, uintptr_t caller) {
     if (g_sdk_on_tap_thread) return (az_analysis_owner){0};
     int slot = st_mod_owner(id, caller, "analysis");
-    return slot < 0 ? (az_analysis_owner){0} : analysis_owner_for_caller((unsigned)slot);
+    if (slot < 0) return (az_analysis_owner){0};
+    return g_cm_on_ui ? analysis_owner_get((unsigned)slot) : analysis_owner_for_caller((unsigned)slot);
 }
 static int sdk_analysis_request(const char *id, const az_analysis_request_v1 *request, uint64_t *out) {
     return analysis_runtime_request(sdk_analysis_caller(id, CM_RA()), request, out);

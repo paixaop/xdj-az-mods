@@ -100,7 +100,7 @@ static uint8_t *sa_read(const char *path, size_t *size, int *failed) {
     }
     return bytes;
 }
-static int sa_open_request_valid(int owner, const az_track_ref *track, const az_analysis_job_v1 *out) {
+static int sa_open_request_valid(int owner, const az_track_ref *track, const analysis_source_lease *out) {
     return owner >= 0 && track && out && st_record_size(out) >= sizeof *out &&
            st_record_size(track) >= sizeof *track && track->version == AZ_DATA_VERSION &&
            track->track_id && track->source_id >= 1 && track->source_id <= 2;
@@ -169,9 +169,9 @@ static int sa_open_needed(struct sa_job *j) {
     if ((j->needed & AZ_DATA_PHRASES) && !beats) j->needed |= AZ_DATA_GRID;
     return AZ_OK;
 }
-static int sa_open_link_existing(struct sa_job *j, const az_track_ref *track, az_analysis_job_v1 *out) {
+static int sa_open_link_existing(struct sa_job *j, const az_track_ref *track, analysis_source_lease *out) {
     if (j->needs_link && (!sa_current(j) || !sa_link_analysis(j))) return AZ_FAILED;
-    az_analysis_job_v1 linked = {.size = out->size, .version = AZ_DATA_VERSION, .flags = j->needs_link ? AZ_ANALYSIS_NEEDS_LINK : 0, .job = j->id, .track = *track};
+    analysis_source_lease linked = {.size = out->size, .version = AZ_DATA_VERSION, .flags = j->needs_link ? AZ_ANALYSIS_NEEDS_LINK : 0, .job = j->id, .track = *track};
     memcpy(out, &linked, sizeof linked);
     return j->needs_link ? AZ_PENDING : AZ_NOT_FOUND;
 }
@@ -181,11 +181,11 @@ static int sa_reader_open(struct sa_job *j) {
     snprintf(j->reader_path, sizeof j->reader_path, "/proc/%ld/fd/%d", (long) getpid(), j->reader_fd);
     return AZ_OK;
 }
-static void sa_open_publish(struct sa_job *j, const az_track_ref *track, az_analysis_job_v1 *out,
+static void sa_open_publish(struct sa_job *j, const az_track_ref *track, analysis_source_lease *out,
                             unsigned slot, double bpm) {
     j->id = ++sa_serial;
     sa_jobs[slot] = *j;
-    az_analysis_job_v1 result = {.size = out->size, .version = AZ_DATA_VERSION, .needed = j->needed, .job = j->id, .flags = j->needs_link ? AZ_ANALYSIS_NEEDS_LINK : 0, .track = *track, .original_bpm = bpm};
+    analysis_source_lease result = {.size = out->size, .version = AZ_DATA_VERSION, .needed = j->needed, .job = j->id, .flags = j->needs_link ? AZ_ANALYSIS_NEEDS_LINK : 0, .track = *track, .original_bpm = bpm};
     memcpy(result.audio_path, j->reader_path, sizeof result.audio_path);
     memcpy(result.analysis_path, j->dat, sizeof result.analysis_path);
     memcpy(out, &result, sizeof result);
@@ -197,7 +197,7 @@ static int sa_open_prepare(const az_track_ref *track, struct sa_job *job, struct
     if (!job->signatures[0] || !job->signatures[1]) return AZ_STALE;
     return sa_open_needed(job);
 }
-static int sa_open_reserved(int owner, const az_track_ref *track, az_analysis_job_v1 *out,
+static int sa_open_reserved(int owner, const az_track_ref *track, analysis_source_lease *out,
                             int loaded, int vocals, unsigned slot) {
     struct sa_job j = {.owner = owner, .lifetime = sa_lifetime(owner), .reader_fd = -1, .vocals = vocals};
     struct st_resolution row = {0};
@@ -210,7 +210,7 @@ static int sa_open_reserved(int owner, const az_track_ref *track, az_analysis_jo
     sa_open_publish(&j, track, out, slot, row.metadata.original_bpm);
     return AZ_OK;
 }
-static int sa_open(int owner, const az_track_ref *track, az_analysis_job_v1 *out, int loaded, int vocals) {
+static int sa_open(int owner, const az_track_ref *track, analysis_source_lease *out, int loaded, int vocals) {
     if (!sa_open_request_valid(owner, track, out)) return AZ_INVALID;
     if (!analysis_owner_current(sa_lifetime(owner))) return AZ_STALE;
     if (sa_cleaner_start()) return AZ_FAILED;
@@ -222,10 +222,10 @@ static int sa_open(int owner, const az_track_ref *track, az_analysis_job_v1 *out
     pthread_mutex_unlock(&sa_mutex);
     return rc;
 }
-static int sdk_analysis_open(const char *id, const az_track_ref *track, az_analysis_job_v1 *out) {
+static int sdk_analysis_open(const char *id, const az_track_ref *track, analysis_source_lease *out) {
     return sa_open(sa_owner(id, "analysis_open", CM_RA()), track, out, 0, 0);
 }
-static int sdk_analysis_open_v2(const char *id, const az_track_ref *track, az_analysis_job_v1 *out) {
+static int sdk_analysis_open_v2(const char *id, const az_track_ref *track, analysis_source_lease *out) {
     return sa_open(sa_owner(id, "analysis_open_v2", CM_RA()), track, out, 0, 1);
 }
 /* Directory descriptors bind staging/publication to the validated USB tree.

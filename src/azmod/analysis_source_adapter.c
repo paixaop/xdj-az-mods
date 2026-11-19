@@ -78,7 +78,7 @@ static int sa_input_grid(const struct sa_job *job, analysis_source_input *input)
         input->beats = calloc(grid.count, sizeof *input->beats);
         if (!input->beats) rc = AZ_FAILED;
         else {
-            az_analysis_grid_v1 result = {.size = sizeof result};
+            analysis_grid_shape result = {.size = sizeof result};
             rc = sa_grid_copy(&grid, &result, input->beats, grid.count);
             input->beat_count = result.beat_count;
         }
@@ -88,7 +88,7 @@ static int sa_input_grid(const struct sa_job *job, analysis_source_input *input)
     return rc == AZ_NOT_FOUND && !job->loaded ? AZ_OK : rc;
 }
 static int sa_input_copy(az_analysis_owner owner, const analysis_source_request *request,
-                          const az_analysis_job_v1 *lease, analysis_source_input *input) {
+                          const analysis_source_lease *lease, analysis_source_input *input) {
     pthread_mutex_lock(&sa_mutex);
     struct sa_job *job = sa_find_job(sa_source_owner_index(owner), lease->job);
     int rc = AZ_STALE;
@@ -111,7 +111,7 @@ int analysis_source_acquire(az_analysis_owner owner, const analysis_source_reque
     if (!sa_input_request_valid(request, input)) return AZ_INVALID;
     if (!analysis_owner_current(owner)) return AZ_STALE;
     int index = sa_source_owner_index(owner);
-    az_analysis_job_v1 lease = {.size = sizeof lease};
+    analysis_source_lease lease = {.size = sizeof lease};
     int vocals = !!(request->components & AZ_ANALYSIS_VOCALS);
     int rc = request->loaded ? sa_open_loaded(index, request->deck, request->load, &lease, vocals) :
                               sa_open(index, &request->track, &lease, 0, vocals);

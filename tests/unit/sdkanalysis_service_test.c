@@ -177,14 +177,14 @@ static void await_retirement(int owner) {
 }
 static void owner_lifecycle(const az_track_ref *track) {
     az_analysis_owner before = analysis_owner_get(0);
-    az_analysis_job_v1 jobs[8];
+    analysis_source_lease jobs[8];
     memset(jobs, 0, sizeof jobs);
     analysis_owner_begin(1);
     for (unsigned i = 0; i < 8; ++i) {
         jobs[i].size = sizeof jobs[i];
         assert(sa_open((int) (i / 4), track, &jobs[i], 0, 1) == AZ_OK);
     }
-    az_analysis_job_v1 overflow = {.size = sizeof overflow};
+    analysis_source_lease overflow = {.size = sizeof overflow};
     assert(sa_open(0, track, &overflow, 0, 1) == AZ_LIMIT);
     int reader = open(jobs[0].audio_path, O_RDONLY);
     assert(reader >= 0);
@@ -272,7 +272,7 @@ int main(void) {
     ref = source.ref;
     ref.track_id = 10;
     owner_lifecycle(&ref);
-    az_analysis_job_v1 job = {.size = sizeof job};
+    analysis_source_lease job = {.size = sizeof job};
     assert(sdk_analysis_open("mod-b", &ref, &job) == AZ_INVALID);
     g_cm_on_ui = 1;
     assert(sdk_analysis_open("mod-a", &ref, &job) == AZ_INVALID);
@@ -341,7 +341,7 @@ int main(void) {
     assert(!sqlite3_close(db));
     snprintf(path, sizeof path, "%s/sdb1/quote'track.wav", g_media);
     analysis_write(path, "audio-placeholder", 17);
-    job = (az_analysis_job_v1) {.size = sizeof job};
+    job = (analysis_source_lease) {.size = sizeof job};
     assert(sdk_analysis_open("mod-a", &ref, &job) == AZ_OK && (job.flags & AZ_ANALYSIS_NEEDS_LINK));
     assert(strstr(job.analysis_path, "/PIONEER/USBANLZ/AZMODS/"));
     assert(sa_commit_typed(0, job.job, &baseline_result) == AZ_PENDING);
@@ -382,7 +382,7 @@ int main(void) {
     assert(sdk_analysis_open_loaded("mod-a", 0, 44, &job) == AZ_OK);
     assert(job.flags & AZ_ANALYSIS_LOADED);
     assert(job.needed == AZ_DATA_PHRASES && strstr(job.analysis_path, "/tmp/az-analysis-grid-"));
-    az_analysis_grid_v1 typed_grid = {.size = sizeof typed_grid};
+    analysis_grid_shape typed_grid = {.size = sizeof typed_grid};
     az_beat typed_beats[2] = {{.reserved = 99}, {.reserved = 99}};
     assert(sdk_analysis_grid("mod-b", job.job, &typed_grid, typed_beats, 2) == AZ_INVALID);
     assert(sdk_analysis_grid("mod-a", job.job, &typed_grid, NULL, 0) == AZ_LIMIT);
