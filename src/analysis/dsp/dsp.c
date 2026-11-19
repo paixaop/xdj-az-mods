@@ -23,8 +23,8 @@ void ta_fft_f(float *r, float *im, size_t n) {
             double wr = 1, wi = 0;
             for (size_t j = 0; j < len / 2; j++) {
                 size_t a = start + j, b = a + len / 2;
-                float vr = r[b] * wr - im[b] * wi;
-                float vi = r[b] * wi + im[b] * wr;
+                float vr = (float) (r[b] * wr - im[b] * wi);
+                float vi = (float) (r[b] * wi + im[b] * wr);
                 r[b] = r[a] - vr;
                 im[b] = im[a] - vi;
                 r[a] += vr;
