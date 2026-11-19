@@ -661,6 +661,11 @@ Message-thread and menu presentation consume copied observations and do not
 advance analysis or library linking. Accepted commands retain descriptor-driven
 progress even when a mod does not poll or tick.
 
+Native map writer events maintain retained identities and revision brackets for
+loaded packs independently of status subscriptions. Optional status packet copies
+and delivery remain gated by interest. Built-in and SDK-requested analysis can
+therefore refresh loaded phrases without an incidental status observer.
+
 Restricted analysis assets are provisioned explicitly into
 `<MODS>/analysis/assets`; the release carries license material and tooling, not
 the private model. No retired Track Analysis package is needed or loaded, and
