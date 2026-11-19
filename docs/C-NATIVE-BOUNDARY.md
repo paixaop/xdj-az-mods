@@ -90,8 +90,8 @@ unchanged by these local interface types.
 | Inline entries in `waveform.c`, `sdk_status_file_cues.inc`, `sdk_status_file_maps.inc`, and `sdk_status_memory_recall.inc` | Preserve hook caller/stack identity, native result destinations or captured firmware registers. |
 
 The corresponding cache-entry, cache-birth, status-memory, Slip-getter and waveform
-hook fixtures retain assembly to exercise those actual contracts. The SDK's Slip
-probe retains its cache entry shim and hook fixture. Existing upstream assembly
+hook fixtures retain assembly to exercise those actual contracts. Core-owned Slip diagnostics retain their entry shim and hook fixture. The SDK
+Slip example consumes only public status observations. Existing upstream assembly
 is unchanged. Ordinary result fixtures, the error boundary, compiler fences and
 wave-report probe labels are C.
 
@@ -108,3 +108,20 @@ incorrect callable signatures or object types are rejected by the compiler.
 
 The existing service and hook suites remain required. Host and compiler tests do
 not replace physical-deck acceptance of the resulting libraries.
+
+
+## Independent core services
+
+Analysis computation/runtime/source publication, stored track data, status
+reduction/storage/native/GUI projection, command ownership, and Beatport login
+compile as private production objects. Their headers specify typed operations;
+they do not import the upstream host's internal header or mutable global state.
+The complete ownership and startup map is in
+[ARCHITECTURE.md](../ARCHITECTURE.md#10-core-service-ownership).
+
+Native adapters preserve the existing firmware receiver, source identity,
+exception forwarding and reference lifetime. A copied status projection cannot
+replace a native ownership proof. Host bridges reuse the existing master mutex,
+BpmState weak registry, descriptor registry and hook installer rather than
+creating a second registry or installing duplicate hooks. All analysis workers,
+including phrase/vocal child threads, use the existing signal-stack trampoline.
