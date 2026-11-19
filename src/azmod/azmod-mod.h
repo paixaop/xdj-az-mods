@@ -25,7 +25,7 @@
 
 
 /* clang-format off */
-#define AZ_MOD_ABI 1
+#define AZ_MOD_ABI 2
 /* The AZ-MODS release this core ships in, as MAJOR.MINOR.PATCH: it equals the AZ-MODS
  * version and is bumped with every release, whether or not the mod interface changed. A mod
  * whose azmod.json "min_core" is above it is refused with "Needs AZ-MODS <min_core> or newer",
@@ -909,10 +909,63 @@ typedef struct az_analysis_v1 {
 #define AZ_ANALYSIS_HAS(service, field) \
     ((service) && (service)->abi == AZ_ANALYSIS_ABI && \
      (service)->size >= offsetof(az_analysis_v1, field) + sizeof((service)->field) && (service)->field)
+/* A coherent copied native command target. expected_load_epoch is the caller's
+ * accepted LOAD epoch. AZ_STALE means replacement/revision/clock changed during
+ * collection; AZ_PENDING means no qualified loaded state. No partial output on
+ * errors. Commands must still submit the returned generation and cue revision:
+ * collection does not bypass execution-time freshness or capability checks. */
+typedef struct az_command_target_v1 {
+    uint32_t size, version;
+    uint64_t commands;
+    az_deck_snapshot deck;
+    az_native_cue_snapshot cues;
+} az_command_target_v1;
+
+#define AZ_OBSERVATION_ABI 1u
+typedef struct az_observation_v1 {
+    uint32_t abi, size;
+    int (*data_capabilities)(az_data_capabilities *out);
+    int (*deck_snapshot)(int deck, az_deck_snapshot *out);
+    int (*native_cues)(int deck, az_native_cue_snapshot *out);
+    int (*command_target)(int deck, uint64_t expected_load_epoch, az_command_target_v1 *out);
+    /* UI-only registration/release; callbacks are bounded and run outside locks.
+     * Failed initialization and retired owners receive no callbacks. */
+    int (*on_deck_status)(const char *id, const az_deck_watch_v1 *watch,
+                          az_deck_status_fn fn, void *user, az_deck_subscription *out);
+    int (*deck_status_release)(const char *id, az_deck_subscription subscription);
+} az_observation_v1;
+#define AZ_OBSERVATION_HAS(service, field) \
+    ((service) && (service)->abi == AZ_OBSERVATION_ABI && \
+     (service)->size >= offsetof(az_observation_v1, field) + sizeof((service)->field) && (service)->field)
+
+/* One command store, shared by all service consumers. Accepted IDs increase per
+ * owner and are never reused. Retained exact retries preserve the original
+ * request and delivery mode. Polling clients release terminal results; completion
+ * listeners also release results after delivery. Async clients acknowledge one
+ * validated terminal and retain ownership until the RELEASED callback. Async
+ * submit/acknowledge and listener registration are init/UI-only. No progress
+ * depends on polling, ticks, painting or best-effort post_ui delivery. */
+#define AZ_COMMANDS_ABI 1u
+typedef struct az_commands_v1 {
+    uint32_t abi, size;
+    int (*command_submit)(const char *id, const az_command_request *request,
+                          az_command_result *out);
+    int (*command_poll)(const char *id, uint64_t request_id, az_command_result *out);
+    int (*command_cancel)(const char *id, uint64_t request_id, az_command_result *out);
+    int (*command_release)(const char *id, uint64_t request_id);
+    int (*on_command_complete)(const char *id, void (*fn)(const az_command_result *, void *), void *user);
+    int (*command_submit_async)(const char *id, const az_command_request *request,
+                                az_command_completion_fn callback, void *user,
+                                az_command_result *out);
+    int (*command_acknowledge)(const char *id, uint64_t request_id);
+} az_commands_v1;
+#define AZ_COMMANDS_HAS(service, field) \
+    ((service) && (service)->abi == AZ_COMMANDS_ABI && \
+     (service)->size >= offsetof(az_commands_v1, field) + sizeof((service)->field) && (service)->field)
 
 /* One shared library service. All consumers use the same source identities, bounded cache,
  * snapshots, event journal and native command policy. No per-mod data backend is created. */
-#define AZ_LIBRARY_ABI 1u
+#define AZ_LIBRARY_ABI 2u
 typedef struct az_library_v1 {
     uint32_t abi, size;
     int  (*lib_playlists)(const char *id, int stick,
@@ -920,7 +973,6 @@ typedef struct az_library_v1 {
                                     void *user), void *user);
     int  (*lib_tracks)(const char *id, int stick, int playlist_id,
                        int (*fn)(const az_track *t, void *user), void *user);
-    int (*data_capabilities)(az_data_capabilities *out);
     int (*track_resolve)(const char *id, int stick, uint32_t track_id, az_track_ref *out);
     int (*track_request)(const char *id, const az_track_ref *track, uint32_t components,
                          uint64_t *ticket);
@@ -928,24 +980,13 @@ typedef struct az_library_v1 {
     int (*track_release)(const char *id, uint64_t ticket);
     int (*track_cancel)(const char *id, uint64_t ticket);
     int (*data_event)(const char *id, uint64_t after_sequence, az_data_change *out);
-    int (*deck_snapshot)(int deck, az_deck_snapshot *out);
     int (*time_to_beat)(const az_track_snapshot *snapshot, double time_s, double *beat);
     int (*beat_to_time)(const az_track_snapshot *snapshot, double beat, double *time_s);
     int (*time_interval)(const az_track_snapshot *snapshot, double start_s, double end_s,
                          double playback_rate, az_time_interval *out);
-    int (*command_submit)(const char *id, const az_command_request *request,
-                          az_command_result *out);
     int (*waveform_request)(const char *id, const az_track_ref *track,
                             const az_wave_query *query, uint64_t *ticket);
     int (*waveform_acquire)(const char *id, uint64_t ticket, const az_wave_snapshot **out);
-    /* Accepted request IDs increase per mod and are never reused, including after
-     * release. Retained exact retries return the current immutable result. */
-    int (*command_poll)(const char *id, uint64_t request_id, az_command_result *out);
-    int (*command_cancel)(const char *id, uint64_t request_id, az_command_result *out);
-    int (*command_release)(const char *id, uint64_t request_id);
-    /* Copied native saved cues; nonblocking. Memory IDs belong only to this revision. */
-    int (*native_cues)(int deck, az_native_cue_snapshot *out);
-
     /* Optional push delivery; append-only ABI extension, check AZ_LIB_HAS.
      * Register once per kind from init(), before starting workers. AZ_OK on success,
      * AZ_INVALID for a bad owner/context/function, AZ_LIMIT for a duplicate.
@@ -964,21 +1005,6 @@ typedef struct az_library_v1 {
      * Releasing before collection suppresses completion. Failed init/retired owners
      * receive no callbacks. Registrations last until the core restarts. */
     int (*on_data_event)(const char *id, void (*fn)(const az_data_change *, void *), void *user);
-    int (*on_command_complete)(const char *id, void (*fn)(const az_command_result *, void *), void *user);
-    /* Optional asynchronous command tail, ABI v1. Both members and the operation
-     * capability are required. Init/UI calls only; callbacks are deferred on UI.
-     * AZ_OK establishes ownership even if the synchronous reply is malformed.
-     * Equal retries preserve the original callback/user and delivery phase.
-     * Acknowledge a validated terminal once; no status polling or release retry.
-     * post_ui is best effort and does not establish command admission. */
-    int (*command_submit_async)(const char *id, const az_command_request *request,
-                                az_command_completion_fn callback, void *user,
-                                az_command_result *out);
-    int (*command_acknowledge)(const char *id, uint64_t request_id);
-    /* Read-only listeners. Size-check each member. Registration and release run on UI. */
-    int (*on_deck_status)(const char *id, const az_deck_watch_v1 *watch,
-                          az_deck_status_fn fn, void *user, az_deck_subscription *out);
-    int (*deck_status_release)(const char *id, az_deck_subscription subscription);
     /* Legacy phrase-only open. Use analysis_open_v2 and analysis_commit_result
      * for publication. Returns AZ_NOT_FOUND when phrases are populated.
      * Close every unsuccessful/open job.
@@ -1332,29 +1358,12 @@ typedef struct az_core_v1 {
      * track_acquire returns AZ_PENDING until published. A released ticket is always stale.
      * data_event polls an ordered, bounded journal; missed=1 requires reacquiring state.
      * track_cancel only cancels this consumer, never another consumer's shared load. */
-    int (*data_capabilities)(az_data_capabilities *out);
-    int (*deck_snapshot)(int deck, az_deck_snapshot *out);
-    int (*track_resolve)(const char *id, int stick, uint32_t track_id, az_track_ref *out);
-    int (*track_request)(const char *id, const az_track_ref *track, uint32_t components,
-                         uint64_t *ticket);
-    int (*track_acquire)(const char *id, uint64_t ticket, const az_track_snapshot **out);
-    int (*track_release)(const char *id, uint64_t ticket);
-    int (*track_cancel)(const char *id, uint64_t ticket);
-    int (*data_event)(const char *id, uint64_t after_sequence, az_data_change *out);
-    int (*time_to_beat)(const az_track_snapshot *snapshot, double time_s, double *beat);
-    int (*beat_to_time)(const az_track_snapshot *snapshot, double beat, double *time_s);
-    int (*time_interval)(const az_track_snapshot *snapshot, double start_s, double end_s,
-                         double playback_rate, az_time_interval *out);
-    int (*command_submit)(const char *id, const az_command_request *request,
-                          az_command_result *out);
     /* Shares track tickets, quotas, cancellation and data_event. Request on a mod worker;
      * acquire/release are nonblocking. Unknown encodings return AZ_UNSUPPORTED. */
-    int (*waveform_request)(const char *id, const az_track_ref *track,
-                            const az_wave_query *query, uint64_t *ticket);
-    int (*waveform_acquire)(const char *id, uint64_t ticket, const az_wave_snapshot **out);
-    /* Preferred entry point for the shared data/read/control service. Unsupported ABI -> NULL.
-     * The individual development data entries above remain compatibility aliases. */
+    /* Focused services share the same underlying identities and stores. Unsupported ABI -> NULL. */
     const az_library_v1 *(*library_service)(uint32_t abi);
+    const az_observation_v1 *(*observation_service)(uint32_t abi);
+    const az_commands_v1 *(*command_service)(uint32_t abi);
 
     /* Core-owned Beatport login, core 1.2.8+. Unsupported ABI or firmware -> NULL.
      * Initially supports EP147 2.00 (ep147-9e9454e357389ece). Check AZ_HAS first,

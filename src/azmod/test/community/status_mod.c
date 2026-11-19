@@ -4,7 +4,7 @@
 #include "azmod-mod.h"
 #include <stdio.h>
 #define ID "status-watch"
-static const az_library_v1 *lib;
+static const az_observation_v1 *lib;
 static az_deck_subscription handle;
 static void changed(const az_deck_status_event_v1 *e, void *user) {
     const az_status_loop_v1 *l = e->view->loop;
@@ -18,9 +18,9 @@ static void changed(const az_deck_status_event_v1 *e, void *user) {
     }
 }
 static int init(const az_core_v1 *core) {
-    if (!AZ_HAS(core, library_service)) return -1;
-    lib = core->library_service(AZ_LIBRARY_ABI);
-    if (!AZ_LIB_HAS(lib, on_deck_status) || !AZ_LIB_HAS(lib, deck_status_release)) return -1;
+    if (!AZ_HAS(core, observation_service)) return -1;
+    lib = core->observation_service(AZ_OBSERVATION_ABI);
+    if (!AZ_OBSERVATION_HAS(lib, on_deck_status) || !AZ_OBSERVATION_HAS(lib, deck_status_release)) return -1;
     const az_deck_watch_v1 watch = {sizeof watch, AZ_DATA_VERSION, 2, 0, AZ_STATUS_TOPIC(AZ_STATUS_LOOP)};
     az_deck_subscription untouched = 123;
     if (lib->on_deck_status(ID, &watch, (az_deck_status_fn) (uintptr_t) &handle, NULL, &untouched) != AZ_INVALID ||

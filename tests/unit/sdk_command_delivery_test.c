@@ -74,7 +74,7 @@ struct client {
 };
 static pthread_t ui;
 static struct overlay_ctx overlay;
-static const az_library_v1 *library;
+static const az_commands_v1 *library;
 
 static void completed(const az_command_completion *value, void *user) {
     struct client *client = user;
@@ -196,7 +196,7 @@ static void mixed_versions(const struct azexit_service *good) {
         az_command_result out = {.size = sizeof out};
         assert(library->command_submit("one", &c.request, &out) == AZ_UNSUPPORTED &&
                out.outcome == AZ_COMMAND_REJECTED && out.request_id == 1 && out.reason == AZ_UNSUPPORTED);
-        assert(g_cm_core.command_submit("one", &c.request, &out) == AZ_UNSUPPORTED);
+        assert(g_cm_core.command_service(AZ_COMMANDS_ABI)->command_submit("one", &c.request, &out) == AZ_UNSUPPORTED);
         out.request_id = 100;
         c.request.reserved = 1;
         assert(library->command_submit_async("one", &c.request, completed, &c, &out) == AZ_INVALID &&
@@ -219,10 +219,10 @@ int main(void) {
     g_cm_on_ui = 1;
     for (int i = 0; i < CM_MAX; ++i) g_cm[i] = (cm_mod) {1, UINTPTR_MAX, AZCM_LOADED};
     const az_core_v1 *core = &g_cm_core;
-    assert(AZ_HAS(core, library_service));
-    library = g_cm_core.library_service(AZ_LIBRARY_ABI);
-    assert(!sdk_library_service(AZ_LIBRARY_ABI + 1) && AZ_LIB_HAS(library, command_submit_async) &&
-           AZ_LIB_HAS(library, command_acknowledge) && library->command_submit == g_cm_core.command_submit);
+    assert(AZ_HAS(core, command_service));
+    library = g_cm_core.command_service(AZ_COMMANDS_ABI);
+    assert(!sdk_command_service(AZ_COMMANDS_ABI + 1) && AZ_COMMANDS_HAS(library, command_submit_async) &&
+           AZ_COMMANDS_HAS(library, command_acknowledge) && library == g_cm_core.command_service(AZ_COMMANDS_ABI));
     const struct azexit_service *peer = fixture_service();
     assert(!peer->mask());
     native_adapter_contracts(peer);

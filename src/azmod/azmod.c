@@ -2968,6 +2968,7 @@ static int sdk_passive_sources;
 #include "sdk_connections.c"
 #include "sdk_cache_startup.c"
 #include "sdk_slip_startup.c"
+#include "slip_diagnostic_startup.c"
 static void sdk_sources_configure_at_start(int b) {
     if (sdk_passive_sources || (access("/home/root/settings/azmod.track-data.on", F_OK) == 0 &&
                                 access("/home/root/settings/azmod.native-sources.on", F_OK) == 0)) {
@@ -3019,6 +3020,7 @@ static void azmod_bind_sources(void) {
     sdk_cache_at_start();
     sdk_source_capture_at_start(b);
     sdk_slip_at_start();
+    slip_diagnostic_at_start();
     msg_thread_note(); /* Constructor is EP147's main/JUCE message thread. */
     g_azm_inert = 0;
 }

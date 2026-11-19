@@ -146,7 +146,8 @@ static int release(const char *id, uint64_t request) {
 }
 static void reset(void) {
     static az_core_v1 c;
-    static az_library_v1 l;
+    static az_observation_v1 l;
+    static az_commands_v1 commands;
     memset(&cue, 0, sizeof cue);
     memset(&l, 0, sizeof l);
     c.data_dir = data_dir;
@@ -155,15 +156,18 @@ static void reset(void) {
     l.data_capabilities = caps;
     l.deck_snapshot = snapshot;
     l.native_cues = cues;
-    l.command_submit_async = submit;
-    l.command_acknowledge = acknowledge;
+    commands.command_submit_async = submit;
+    commands.command_acknowledge = acknowledge;
     l.size = sizeof l;
-    l.abi = AZ_LIBRARY_ABI;
-    l.command_poll = poll;
-    l.command_cancel = cancel_command;
-    l.command_release = release;
+    l.abi = AZ_OBSERVATION_ABI;
+    commands.abi = AZ_COMMANDS_ABI;
+    commands.size = sizeof commands;
+    commands.command_poll = poll;
+    commands.command_cancel = cancel_command;
+    commands.command_release = release;
     cue.core = &c;
     cue.lib = &l;
+    cue.control = &commands;
     submits = polls = releases = cancels = acknowledgements = 0;
     atomic_init(&cue.io_failed, 0);
     atomic_init(&cue.ui_ready, 0);

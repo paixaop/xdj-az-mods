@@ -155,10 +155,10 @@ static int init(const az_core_v1 *core) {
 #ifdef MOD_LIVE
     __atomic_add_fetch(&az_test_inits, 1, __ATOMIC_RELAXED);
     if (C->frame_filter(MOD_ID, 1u << AZ_BUS_ERP_LED, live_filter, NULL) != 0) return 7;
-    const az_library_v1 *lib = C->library_service(AZ_LIBRARY_ABI);
+    const az_observation_v1 *lib = C->observation_service(AZ_OBSERVATION_ABI);
     az_deck_watch_v1 watch = {sizeof watch, AZ_DATA_VERSION, 1, 0, AZ_STATUS_TOPIC(AZ_STATUS_LOOP)};
     az_deck_subscription subscription;
-    if (!AZ_LIB_HAS(lib, on_deck_status) || lib->on_deck_status(MOD_ID, &watch, live_status, NULL, &subscription) != AZ_OK) return 8;
+    if (!AZ_OBSERVATION_HAS(lib, on_deck_status) || lib->on_deck_status(MOD_ID, &watch, live_status, NULL, &subscription) != AZ_OK) return 8;
     __atomic_store_n(&live_alive, 1, __ATOMIC_SEQ_CST);
 #endif
     C->log(MOD_ID, "init on %s", C->fw_tag());

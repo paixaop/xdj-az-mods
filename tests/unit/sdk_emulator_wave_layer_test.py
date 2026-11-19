@@ -174,7 +174,7 @@ class Wave(unittest.TestCase):
 
 class Archive(unittest.TestCase):
  def package(self,metadata=None,binary=b'fixture-elf',extra=None):
-  stream=io.BytesIO();meta={'azmod':1,'id':'sdk-wave-layer-probe','version':'0.1.0','api':1,'hooks':False,'firmware':['any']}
+  stream=io.BytesIO();meta={'azmod':1,'id':'sdk-wave-layer-probe','version':'0.1.0','api':2,'hooks':False,'firmware':['any']}
   if metadata:meta.update(metadata)
   with zipfile.ZipFile(stream,'w') as z:
    for name,data in [('azmod.json',json.dumps(meta).encode()),('sdk-wave-layer-probe.so',binary),('LICENSE',b'fixture'),('icon.png',b'fixture')]:z.writestr(name,data)

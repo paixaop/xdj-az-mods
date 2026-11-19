@@ -1576,34 +1576,66 @@ static void sdk_ui_tick(void);
 #include "sdk_beatport.c"
 #endif
 
+#include "sdk_command_target.h"
+#ifndef SDK_PROC_IMPL
+static int sdk_command_target(int deck, uint64_t load, az_command_target_v1 *out) {
+    static const struct az_command_target_source source = {
+        sd_deck_snapshot_v1, sdk_native_cues, sdk_data_capabilities
+    };
+    struct timespec time;
+    if (clock_gettime(CLOCK_MONOTONIC, &time)) return AZ_FAILED;
+    uint64_t now = (uint64_t)time.tv_sec * UINT64_C(1000000000) + time.tv_nsec;
+    return az_command_target_read(&source, deck, load, now, out);
+}
+#endif
+static const az_observation_v1 g_sdk_observation = {
+    .abi = AZ_OBSERVATION_ABI, .size = sizeof(az_observation_v1),
+#ifndef SDK_PROC_IMPL
+    .data_capabilities = sdk_data_capabilities,
+    .deck_snapshot = sd_deck_snapshot_v1,
+    .native_cues = sdk_native_cues,
+    .command_target = sdk_command_target,
+#endif
+    .on_deck_status = sdk_on_deck_status,
+    .deck_status_release = sdk_deck_status_release,
+};
+static const az_commands_v1 g_sdk_command_service = {
+    .abi = AZ_COMMANDS_ABI, .size = sizeof(az_commands_v1),
+#ifndef SDK_PROC_IMPL
+    .command_submit = sdk_command_submit,
+    .command_poll = sdk_command_poll,
+    .command_cancel = sdk_command_cancel,
+    .command_release = sdk_command_release,
+    .on_command_complete = sdk_on_command_complete,
+    .command_submit_async = sdk_command_submit_async,
+    .command_acknowledge = sdk_command_acknowledge,
+#endif
+};
+static const az_observation_v1 *sdk_observation_service(uint32_t abi) {
+    return abi == AZ_OBSERVATION_ABI ? &g_sdk_observation : NULL;
+}
+static const az_commands_v1 *sdk_command_service(uint32_t abi) {
+    return abi == AZ_COMMANDS_ABI ? &g_sdk_command_service : NULL;
+}
+
 static const az_library_v1 g_sdk_library = {
     .abi = AZ_LIBRARY_ABI,
     .size = sizeof(az_library_v1),
     .lib_playlists = sdk_lib_playlists,
     .lib_tracks = sdk_lib_tracks,
 #ifndef SDK_PROC_IMPL
-    .data_capabilities = sdk_data_capabilities,
     .track_resolve = sdk_track_resolve,
     .track_request = sdk_track_request,
     .track_acquire = sdk_track_acquire,
     .track_release = sdk_track_release,
     .track_cancel = sdk_track_cancel,
     .data_event = sdk_data_event,
-    .deck_snapshot = sd_deck_snapshot_v1,
     .time_to_beat = st_time_to_beat,
     .beat_to_time = st_beat_to_time,
     .time_interval = st_interval,
-    .command_submit = sdk_command_submit,
     .waveform_request = sdk_waveform_request,
     .waveform_acquire = sdk_waveform_acquire,
-    .command_poll = sdk_command_poll,
-    .command_cancel = sdk_command_cancel,
-    .command_release = sdk_command_release,
-    .native_cues = sdk_native_cues,
     .on_data_event = sdk_on_data_event,
-    .on_command_complete = sdk_on_command_complete,
-    .command_submit_async = sdk_command_submit_async,
-    .command_acknowledge = sdk_command_acknowledge,
     .analysis_open = sdk_analysis_open,
     .analysis_close = sdk_analysis_close,
     .analysis_open_loaded = sdk_analysis_open_loaded,
@@ -1615,8 +1647,6 @@ static const az_library_v1 g_sdk_library = {
     .analysis_grid = sdk_analysis_grid,
     .analysis_commit_result = sdk_analysis_commit_result,
 #endif
-    .on_deck_status = sdk_on_deck_status,
-    .deck_status_release = sdk_deck_status_release,
 };
 static const az_library_v1 *sdk_library_service(uint32_t abi) {
     return abi == AZ_LIBRARY_ABI ? &g_sdk_library : NULL;
@@ -1695,22 +1725,10 @@ static const az_core_v1 g_cm_core = {
     .claim_vslot = sdk_claim_vslot,
     .lib_spool_kick = sdk_lib_spool_kick,
 #ifndef SDK_PROC_IMPL
-    .data_capabilities = sdk_data_capabilities,
-    .deck_snapshot = sd_deck_snapshot_v1,
-    .track_resolve = sdk_track_resolve,
-    .track_request = sdk_track_request,
-    .track_acquire = sdk_track_acquire,
-    .track_release = sdk_track_release,
-    .track_cancel = sdk_track_cancel,
-    .data_event = sdk_data_event,
-    .time_to_beat = st_time_to_beat,
-    .beat_to_time = st_beat_to_time,
-    .time_interval = st_interval,
-    .command_submit = sdk_command_submit,
-    .waveform_request = sdk_waveform_request,
-    .waveform_acquire = sdk_waveform_acquire,
 #endif
     .library_service = sdk_library_service,
+    .observation_service = sdk_observation_service,
+    .command_service = sdk_command_service,
 #ifndef SDK_PROC_IMPL
     .beatport_login_service = sdk_beatport_login_service,
     .button_press = cm_button_press,
