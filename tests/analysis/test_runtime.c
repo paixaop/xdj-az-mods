@@ -3,6 +3,7 @@
 #include "../../src/azmod/analysis_runtime.h"
 #include <assert.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,6 +31,8 @@ static void pause_ms(void) { struct timespec t = {0, 1000000}; nanosleep(&t, NUL
 void analysis_source_set_wake(void (*wake)(void)) { source_wake = wake; }
 int analysis_source_acquire(az_analysis_owner owner, const analysis_source_request *request,
                             analysis_source_input *input) {
+    stack_t signal_stack;
+    assert(!sigaltstack(NULL, &signal_stack) && !(signal_stack.ss_flags & SS_DISABLE));
     atomic_fetch_add(&acquisitions, 1);
     atomic_store(&entered, 1);
     while (atomic_load(&blocked)) pause_ms();

@@ -30,9 +30,9 @@ static int test_create(pthread_t *thread, const pthread_attr_t *attr, void *(*fn
     if (status) free(start);
     return status;
 }
-#define pthread_create test_create
+#define az_analysis_thread_create test_create
 #include "../../src/analysis/execution.c"
-#undef pthread_create
+#undef az_analysis_thread_create
 void ta_decode_close(ta_decoder *decoder)
 {
     (void)decoder;

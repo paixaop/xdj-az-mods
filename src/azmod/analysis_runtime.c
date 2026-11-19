@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #include "analysis_runtime.h"
+#include "analysis_native_adapter.h"
 #include "../analysis/analysis.h"
 #include <errno.h>
 #include <pthread.h>
@@ -361,7 +362,7 @@ int analysis_runtime_start(const char *assets) {
     snprintf(ar.assets, sizeof ar.assets, "%s", assets);
     ar.stopping = 0;
     analysis_source_set_wake(analysis_runtime_wake);
-    int rc = pthread_create(&ar.worker, NULL, ar_worker, NULL);
+    int rc = az_analysis_thread_create(&ar.worker, NULL, ar_worker, NULL);
     if (!rc) ar.started = 1;
     pthread_mutex_unlock(&ar.mutex);
     return rc ? AZ_FAILED : AZ_OK;
