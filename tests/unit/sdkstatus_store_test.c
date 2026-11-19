@@ -22,7 +22,7 @@ static uint8_t preview[4];
 static az_status_grid_ref_v1 saved_map[4];
 static pthread_mutex_t test_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t test_cv = PTHREAD_COND_INITIALIZER;
-static int ds_publish_file(unsigned deck, uint64_t epoch, const az_track_ref *ref, uint64_t observed,
+int ds_publish_file(unsigned deck, uint64_t epoch, const az_track_ref *ref, uint64_t observed,
                            const struct ds_field *fields, size_t count, uint64_t lost, unsigned reason) {
     assert(ref->source_id && observed);
     pthread_mutex_lock(&test_mu);
@@ -105,14 +105,14 @@ static int ds_publish_file(unsigned deck, uint64_t epoch, const az_track_ref *re
     pthread_mutex_unlock(&test_mu);
     return AZ_OK;
 }
-static int ds_retire_file_binding(unsigned deck, uint64_t epoch, const az_track_ref *ref) {
+int ds_retire_file_binding(unsigned deck, uint64_t epoch, const az_track_ref *ref) {
     assert(epoch && ref->source_id);
     retired[deck]++;
     return AZ_OK;
 }
 static unsigned bindings;
 static az_track_ref bound_ref;
-static int ds_publish(unsigned deck, uint64_t epoch, unsigned flags, uint64_t now, const struct ds_field *fields, size_t count,
+int ds_publish(unsigned deck, uint64_t epoch, unsigned flags, uint64_t now, const struct ds_field *fields, size_t count,
                       const az_status_occurrence_v1 *occ, const az_status_phrase_transition_v1 *phrase, uint64_t lost, unsigned reason) {
     assert(deck < 4 && epoch && !flags && now && count == 2 && !occ && !phrase && !lost && !reason);
     assert(fields[0].topic == AZ_STATUS_LOAD && fields[0].field == AZ_STATUS_LOAD_TRACK);
@@ -125,6 +125,9 @@ __attribute__((visibility("hidden"))) void azfile_native_refresh(unsigned deck, 
     assert(deck < 4 && epoch);
     ++origin_refresh[deck];
 }
+#include "libfd.h"
+int az_status_host_reader_register(int descriptor) { return libfd_add(descriptor, LIBFD_STATUS); }
+void az_status_host_reader_release(int descriptor) { libfd_del(descriptor); }
 #include "sdk_status_store.c"
 /* The host fixture gives its two simulated media synthetic mount IDs. Check
  * the actual host SQLite Unix fd against its device/inode on both ports. */
@@ -141,7 +144,7 @@ int azsdk_sources_descriptor_identity(int fd, uint64_t mount, uint64_t device, u
     return mount && fd >= 0 && !fstat(fd, &sb) && device == (uint64_t) sb.st_dev && inode == (uint64_t) sb.st_ino;
 }
 static uintptr_t sm_ptr(uintptr_t p, unsigned n) { return *(uintptr_t *) (p + n); }
-#include "sdk_status_save.c"
+
 static struct azsdk_source_sample fake_native;
 static int fake_owner_rc = AZS_OK;
 static unsigned fake_busy_reads;

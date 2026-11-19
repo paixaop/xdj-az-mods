@@ -17,5 +17,6 @@ struct az_library_sql {
 const struct az_library_sql *az_storage_sql(void);
 int az_storage_sql_ready(void);
 void *sdk_db_open(const char *database);
+int az_storage_key_database(void *);
 #pragma GCC visibility pop
 #endif

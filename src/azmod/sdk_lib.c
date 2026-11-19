@@ -485,3 +485,7 @@ static int sdk_lib_spool_kick(const char *id, int stick) {
 }
 
 int az_storage_sql_ready(void) { return sdk_sq_resolve(); }
+
+int az_storage_key_database(void *database) {
+    return g_sdk_sq.key(database, ONELIBRARY_KEY_SM, (int) sizeof ONELIBRARY_KEY_SM - 1);
+}

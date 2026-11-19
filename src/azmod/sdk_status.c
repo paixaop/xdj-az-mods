@@ -36,7 +36,7 @@ static void sdk_status_ui_drain(void) {
     ds_drain(8);
 }
 #ifndef SDK_PROC_IMPL
-#include "sdk_status_store.c"
+#include "sdk_status_store.h"
 #include "sdk_status_native.c"
 #include "sdk_status_gui.c"
 #else
@@ -120,3 +120,8 @@ void az_status_host_store_interest(unsigned d, uint64_t t) { sdk_status_store_in
 void az_status_host_native_interest(unsigned d, uint64_t t) { ds_native_interest(d, t); }
 
 void az_status_host_gui_interest(uint64_t t) { ds_gui_interest(t); }
+
+#ifndef SDK_PROC_IMPL
+int az_status_host_reader_register(int descriptor) { return libfd_add(descriptor, LIBFD_STATUS); }
+void az_status_host_reader_release(int descriptor) { libfd_del(descriptor); }
+#endif
