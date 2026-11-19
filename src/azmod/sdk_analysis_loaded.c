@@ -315,6 +315,7 @@ static int sa_usb_register(struct sa_job *j, uint32_t phrases, az_analysis_job_v
     sa_usb_attach(found, j);
     int rc = sa_loaded_current(found) ? sa_loaded_needs(found, phrases) : AZ_STALE;
     result->needed = found->needed;
+    if (rc == AZ_NOT_FOUND && found->needs_link) rc = AZ_PENDING;
     if (rc) sa_job_drop(found);
     else memcpy(result->analysis_path, found->grid_snapshot, sizeof result->analysis_path);
     pthread_mutex_unlock(&sa_mutex);
@@ -406,6 +407,8 @@ static void sa_loaded_result(az_analysis_job_v1 *result, az_analysis_job_v1 *out
     if (!rc) {
         result->flags |= AZ_ANALYSIS_LOADED;
         memcpy(out, result, sizeof *result);
+    } else if (rc == AZ_PENDING) {
+        memcpy(out, result, sizeof *result);
     } else if (rc == AZ_NOT_FOUND) {
         result->job = 0;
         memcpy(out, result, sizeof *result);
@@ -442,8 +445,11 @@ static int sa_loaded_lease(struct sa_job *j, const struct azstatus_native_v1 *ap
     }
     return sa_loaded_open_source(j, api, receipt, phrases, out);
 }
+static int sa_loaded_request_valid(int owner, int deck, uint64_t load, const az_analysis_job_v1 *out) {
+    return owner >= 0 && deck >= 0 && deck < 4 && load && out && st_record_size(out) >= sizeof *out;
+}
 static int sa_open_loaded(int owner, int deck, uint64_t load, az_analysis_job_v1 *out, int vocals) {
-    if (owner < 0 || deck < 0 || deck >= 4 || !load || !out || st_record_size(out) < sizeof *out) return AZ_INVALID;
+    if (!sa_loaded_request_valid(owner, deck, load, out)) return AZ_INVALID;
     if (!analysis_owner_current(sa_lifetime(owner))) return AZ_STALE;
     if (sa_cleaner_start()) return AZ_FAILED;
     const struct azstatus_native_v1 *api = sa_native();

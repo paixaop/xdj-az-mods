@@ -122,6 +122,7 @@ const struct azstatus_native_v1 *azstem_status_service_v1(void) {
 #define CM_STATE st_test_state
 #endif
 #include "sdk_analysis_service.c"
+#include "analysis_spool_fixture.h"
 static void analysis_write(const char *path, const void *bytes, size_t n) {
     FILE *f = fopen(path, "wb");
     assert(f && fwrite(bytes, 1, n, f) == n && !fclose(f));
@@ -360,19 +361,27 @@ int main(void) {
     job = (az_analysis_job_v1) {.size = sizeof job};
     assert(sdk_analysis_open("mod-a", &ref, &job) == AZ_OK && (job.flags & AZ_ANALYSIS_NEEDS_LINK));
     assert(strstr(job.analysis_path, "/PIONEER/USBANLZ/AZMODS/"));
-    assert(sa_commit(0, job.job, bundle, sizeof bundle) == AZ_OK);
-    assert(sdk_analysis_open("mod-a", &ref, &job) == AZ_NOT_FOUND && job.job == 0 && (job.flags & AZ_ANALYSIS_NEEDS_LINK));
-    snprintf(path, sizeof path, "%s/sdb1/PIONEER/azspool/track-analysis-0000000a.sql", g_media);
+    assert(sa_commit(0, job.job, bundle, sizeof bundle) == AZ_PENDING);
+    analysis_source_input saved_link = {.lease = job.job, .owner = analysis_owner_get(0)};
+    assert(sdk_analysis_open("mod-a", &ref, &job) == AZ_PENDING && job.job && (job.flags & AZ_ANALYSIS_NEEDS_LINK));
+    analysis_source_input reused_link = {.lease = job.job, .owner = analysis_owner_get(0)};
+    snprintf(path, sizeof path, "%s/sdb1/PIONEER/azspool/track-analysis-0000000a-%llu.sql", g_media, (unsigned long long) job.job);
     FILE *spool = fopen(path, "r");
     char statement[6500];
-    assert(spool && fgets(statement, sizeof statement, spool) && !fclose(spool));
+    assert(spool && fgets(statement, sizeof statement, spool) && fgets(statement, sizeof statement, spool) && !fclose(spool));
     assert(strstr(statement, "path=CAST(X'2f71756f746527747261636b2e776176' AS TEXT)") &&
            strstr(statement, "analysisDataFilePath IS NULL"));
     assert(strchr(statement, ';') == strrchr(statement, ';') && !strchr(statement, 0x01));
+    char link_path[PATH_MAX];
+    snprintf(link_path, sizeof link_path, "%s", path);
     snprintf(path, sizeof path, "%s/sdb1/PIONEER/rekordbox/exportLibrary.db", g_media);
     assert(!sqlite3_open(path, &db));
-    sql(db, statement);
+    assert(apply_analysis_spool(db, link_path) == 0);
     assert(!sqlite3_close(db));
+    await_link(&saved_link, AZ_OK);
+    await_link(&reused_link, AZ_OK);
+    analysis_source_release(&saved_link);
+    analysis_source_release(&reused_link);
     assert(sdk_analysis_open("mod-a", &ref, &job) == AZ_NOT_FOUND && !job.flags && !job.job);
     assert(!sqlite3_open(path, &db));
     sql(db, "UPDATE content SET analysisDataFilePath='/DJ.DAT' WHERE content_id=10");

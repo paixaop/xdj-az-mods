@@ -445,46 +445,47 @@ static int sdk_spool_waits(const char *path) {
  * No new write path. The service applies every stick's spool once it runs, so this is refused
  * while a deck plays a track from the asked stick, from any stick with a spool waiting, or from
  * a stick it cannot place: applying changes the library under it. */
+static const char *sdk_spool_block_reason(const char *source, const char *mount) {
+    if (!source[0]) return "from a USB it cannot place";
+    size_t length = strlen(mount);
+    if (!strncmp(source, mount, length) && source[length] == '/') return "from that USB";
+    return sdk_spool_waits(source) ? "from a USB with a spool waiting" : NULL;
+}
+static int sdk_spool_playback_busy(long long (*obs)(int), const char *mount, char reason[128]) {
+    long long before[SDK_LIB_DECKS];
+    for (int d = 0; d < SDK_LIB_DECKS; ++d) before[d] = obs(d);
+    usleep(250000);
+    for (int d = 0; d < SDK_LIB_DECKS; ++d) {
+        if (before[d] < 0 || obs(d) == before[d]) continue;
+        char source[PATH_MAX];
+        sdk_deck_source(d, source, sizeof source);
+        const char *why = sdk_spool_block_reason(source, mount);
+        if (!why) continue;
+        snprintf(reason, 128, "deck %d is playing a track %s", d + 1, why);
+        return 1;
+    }
+    return 0;
+}
+/* Worker-only admission shared by analysis and explicit library editing. */
+static int sdk_lib_spool_admit_detail(int stick, char reason[128]) {
+    if (g_cm_on_ui || stick < 0 || stick > 1) return AZ_INVALID;
+    long long (*obs)(int) = (long long (*)(int)) dlsym(RTLD_DEFAULT, "azstem_play_obs");
+    if (!obs) return AZ_UNSUPPORTED;
+    char mount[PATH_MAX];
+    if (!sdk_stick_mount(stick, mount, sizeof mount)) return AZ_STALE;
+    if (sdk_spool_playback_busy(obs, mount, reason)) return AZ_BUSY;
+    __atomic_store_n(&g_ls_leftover, 1, __ATOMIC_RELEASE);
+    return AZ_OK;
+}
+static int sdk_lib_spool_admit(int stick) {
+    char reason[128];
+    return sdk_lib_spool_admit_detail(stick, reason);
+}
 static int sdk_lib_spool_kick(const char *id, int stick) {
     cm_mod *c = cm_self(id, CM_RA(), "lib_spool_kick");
-    if (!c)
-        return -1;
-    static long long (*obs)(int);
-    if (!obs)
-        *(void **) &obs = dlsym(RTLD_DEFAULT, "azstem_play_obs");
-    char mount[PATH_MAX];
-    const char *why = NULL;
-    if (g_cm_on_ui)
-        why = "called on the UI thread (init, tick, a screen or surface); call it from your own thread";
-    else if (stick < 0 || stick > 1)
-        why = "stick is 0 (USB 1) or 1 (USB 2)";
-    else if (!obs)
-        why = "the decks' playback state is not available";
-    else if (!sdk_stick_mount(stick, mount, sizeof mount))
-        why = "no rekordbox library in that USB port";
-    if (why) {
-        cm_logf(c, 1, "lib_spool_kick refused: %s", why);
-        return -1;
-    }
-    long long before[SDK_LIB_DECKS];
-    for (int d = 0; d < SDK_LIB_DECKS; d++)
-        before[d] = obs(d);
-    usleep(250000);
-    size_t ml = strlen(mount);
-    for (int d = 0; d < SDK_LIB_DECKS; d++) {
-        if (before[d] < 0 || obs(d) == before[d])
-            continue; /* not playing */
-        char src[PATH_MAX];
-        sdk_deck_source(d, src, sizeof src);
-        if (!src[0] || (strncmp(src, mount, ml) == 0 && src[ml] == '/') || sdk_spool_waits(src)) {
-            cm_logf(c, 1, "lib_spool_kick refused: deck %d is playing a track %s", d + 1,
-                    !src[0]                        ? "from a USB it cannot place"
-                    : strncmp(src, mount, ml) == 0 ? "from that USB"
-                                                   : "from a USB with a spool waiting");
-            return -1;
-        }
-    }
-    __atomic_store_n(&g_ls_leftover, 1, __ATOMIC_RELEASE);
-    cm_logf(c, 0, "lib_spool_kick: USB %d's library spool will be applied", stick + 1);
-    return 0;
+    if (!c) return -1;
+    char reason[128] = {0};
+    int rc = sdk_lib_spool_admit_detail(stick, reason);
+    cm_logf(c, !!rc, "lib_spool_kick: USB %d admission result %d %s", stick + 1, rc, reason);
+    return rc ? -1 : 0;
 }

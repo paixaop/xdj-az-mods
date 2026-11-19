@@ -2123,11 +2123,10 @@ extract_lsapply() { # $1 = library_edits.c variant
     extract guest/azmod/library_db.c '^static int lp_exec\(void \*conn, const char \*sql, FILE \*lg\) \{'
     extract "$1" '^static const char \*const LS_TABLES\[\]'
     extract "$1" '^static void ls_source_hint\('
-    grep -E '^#define LS_SPOOL_CAP ' "$1"
-    extract "$1" '^static int ls_apply_buf\('
+    sed -n '/^#define LS_SPOOL_CAP /,/^static int ls_apply_file/{ /^static int ls_apply_file/!p; }' "$1"
 }
 extract_lsapply guest/azmod/library_edits.c > "$d/real.inc"
-grep -q 'static int ls_allowed' "$d/real.inc" && grep -q 'ls_pdb_sync(conn, path, hint, lg);' "$d/real.inc" &&
+grep -q 'static int ls_allowed' "$d/real.inc" && grep -q 'ls_pdb_sync(s->conn, s->path, s->hint, s->log);' "$d/real.inc" &&
     grep -q 'static int lp_exec' "$d/real.inc" || { echo "extraction of ls_apply_buf failed"; exit 2; }
 # control: any statement allowed
 mutate "$d/real.inc" "$d/ctl-anystmt.inc" 's/if \(!ls_allowed\(l\) \|\| /if (/'
@@ -2136,15 +2135,15 @@ mutate "$d/real.inc" "$d/ctl-prefix.inc" 's/ && \(t\[n\] == . . \|\| t\[n\] == .
 # control: a second statement after ';' on the line allowed
 mutate "$d/real.inc" "$d/ctl-inner.inc" 's/ \|\| memchr\(l, .;., k - 1\)//'
 # control: a failed statement committed what ran before it
-mutate "$d/real.inc" "$d/ctl-commit.inc" 's/lp_exec\(conn, rc \? "ROLLBACK" : "COMMIT", 0\);/lp_exec(conn, "COMMIT", 0);/'
+mutate "$d/real.inc" "$d/ctl-commit.inc" 's/int rollback = lp_exec\(s->conn, "ROLLBACK", 0\);/int rollback = lp_exec(s->conn, "COMMIT", 0);/'
 # control: applied without a backup of the library
-mutate "$d/real.inc" "$d/ctl-nobackup.inc" 's/if \(lib_backup\(conn, lg\)\) \{/if (0) {/'
+mutate "$d/real.inc" "$d/ctl-nobackup.inc" 's/if \(lib_backup\(s->conn, s->log\)\)/if (0)/'
 # control: the trailing-blank trim written into the buffer (pass 2 then stops at that line)
-mutate "$d/real.inc" "$d/ctl-trimnul.inc" 's/            k--; \/\* measured only[^\n]*/            l[--k] = 0;/'
+mutate "$d/real.inc" "$d/ctl-trimnul.inc" 's/        k--; \/\* measured only[^\n]*/        l[--k] = 0;/'
 # control: a 0x01 inside a line allowed (pass 2 splits there and runs the rest unchecked)
 mutate "$d/real.inc" "$d/ctl-mark.inc" 's/ \|\|\n\s*memchr\(l, 0x01, k\)\)/)/'
 # control: a NUL byte accepted (the statements after it are dropped, the spool reported applied)
-mutate "$d/real.inc" "$d/ctl-nul.inc" 's/    if \(memchr\(buf, 0, n\)\) \{/    if (0) {/'
+mutate "$d/real.inc" "$d/ctl-nul.inc" 's/if \(memchr\(s->buf, 0, s->size\)\)/if (0)/'
 for v in real ctl-anystmt ctl-prefix ctl-inner ctl-commit ctl-nobackup ctl-trimnul ctl-mark ctl-nul; do
     $CC "${CFLAGS[@]}" -I$T -DLSAPPLY_INC="\"$d/$v.inc\"" -o "$d/$v" $T/lsapply_test.c -lsqlite3
 done
@@ -4018,7 +4017,7 @@ control "sdk track data: duplicate IDs merged across sources" "$d/control"
 if [ "$(uname -s)" = Linux ]; then
     $CC "${CFLAGS[@]}" $SDK_EXPORT -pthread -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$OUT/sdkdata/provider" $T/sdktrack_test.c guest/azmod/sdk_command_engine.c -lsqlite3 -ldl -lm
     suite "sdk stored track disk provider" "$OUT/sdkdata/provider"
-    $CC "${CFLAGS[@]}" $SDK_EXPORT -Wno-unused-function -Wno-missing-field-initializers -pthread -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$d/analysis-service" $T/sdkanalysis_service_test.c guest/azmod/sdk_command_engine.c guest/azmod/analysis_owner.c -lsqlite3 -ldl -lm
+    $CC "${CFLAGS[@]}" $SDK_EXPORT -Wno-unused-function -Wno-missing-field-initializers -pthread -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -DLSAPPLY_INC="\"$OUT/lsapply/real.inc\"" -o "$d/analysis-service" $T/sdkanalysis_service_test.c guest/azmod/sdk_command_engine.c guest/azmod/analysis_owner.c -lsqlite3 -ldl -lm
     suite "sdk analysis source leases and USB persistence" "$d/analysis-service"
     for v in database-alias database-uri missing-parent wave-errors analysis-binding track-fifo wave-fifo analysis-path-limit preview-extension; do
         $CC "${CFLAGS[@]}" $SDK_EXPORT -pthread -I"$d/review/$v" -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$d/$v" $T/sdktrack_test.c guest/azmod/sdk_command_engine.c -lsqlite3 -ldl -lm
