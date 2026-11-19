@@ -2475,14 +2475,14 @@ fi
 WERRCTL="$ROOT/guest/out/unit-werrorctl"; mkdir -p "$WERRCTL"
 mutate guest/Makefile "$WERRCTL/Makefile" 's/^AZ_WARN := -Wall -Wextra -Werror$/AZ_WARN := -Wall -Wextra/m'
 if [ "$PUBLIC" = 1 ]; then
-    werrortest() { docker run --rm --platform=linux/arm64 -v "$ROOT/guest":/g:ro -v "$ROOT/$T":/t:ro \
-        azmod-build:18.04 bash /t/werror-check.sh /g "$@"; }
+    werrortest() { docker run --rm --platform=linux/arm64 -v "$ROOT":/work:ro -v "$ROOT/$T":/t:ro \
+        azmod-build:18.04 bash /t/werror-check.sh /work/guest "$@"; }
     suite "build warnings are errors (release)" werrortest
     skip "build warnings are errors (development): the published tree has no development build"
     skip "build warnings are errors (Makefile.public): the published tree's Makefile is the one above"
 elif plain_only "werror-check.sh (release compile lines)"; then
-    werrortest() { docker run --rm --platform=linux/arm64 -v "$ROOT/guest":/g:ro -v "$ROOT/$T":/t:ro \
-        -v "$ROOT/tools/public-source":/p:ro azmod-build:18.04 bash /t/werror-check.sh /g "$@"; }
+    werrortest() { docker run --rm --platform=linux/arm64 -v "$ROOT":/work:ro -v "$ROOT/$T":/t:ro \
+        -v "$ROOT/tools/public-source":/p:ro azmod-build:18.04 bash /t/werror-check.sh /work/guest "$@"; }
     suite "build warnings are errors (release)" werrortest
     suite "build warnings are errors (development)" werrortest AZMOD_RELEASE=0
     suite "build warnings are errors (Makefile.public)" werrortest -f /p/Makefile.public

@@ -4,7 +4,6 @@
 #include "azmod-mod.h"
 #include <stdint.h>
 /* A core feature and a community initialization have separate lifetimes. */
-enum { ANALYSIS_SOURCE_COMPLETE = 100 };
 enum { AZ_ANALYSIS_OWNER_CORE = 1, AZ_ANALYSIS_OWNER_MOD = 2 };
 enum { ANALYSIS_SOURCE_COMPLETE = 100 }; /* Validated source already has requested components. */
 
