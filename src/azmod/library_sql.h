@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #ifndef AZ_LIBRARY_SQL_H
 #define AZ_LIBRARY_SQL_H
+#pragma GCC visibility push(hidden)
 struct az_library_sql {
     int (*open_v2)(const char *, void **, int, const char *);
     int (*key)(void *, const void *, int);
@@ -16,4 +17,5 @@ struct az_library_sql {
 const struct az_library_sql *az_storage_sql(void);
 int az_storage_sql_ready(void);
 void *sdk_db_open(const char *database);
+#pragma GCC visibility pop
 #endif
