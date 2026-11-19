@@ -63,6 +63,7 @@ static const struct azn_analysis_source_api *fixture_source(void) {
     return &api;
 }
 static int fixture_current = 1, fixture_published, fixture_native_phrases;
+static int fixture_publish_busy, fixture_publish_calls;
 static _Atomic int fixture_released;
 static uint32_t fixture_grid_count = 2;
 static _Atomic int fixture_pause_current, fixture_current_entered, fixture_resume_current;
@@ -131,6 +132,8 @@ static void fixture_release(const struct aznm_packet *map) {
 static int fixture_publish(unsigned deck, uint64_t load, const struct aznm_packet *map, const void *bytes, uint32_t n) {
     if (fixture_valid(deck, load, map)) return AZ_STALE;
     assert(n == 56 && !memcmp(bytes, "PSSI", 4));
+    fixture_publish_calls++;
+    if (fixture_publish_busy) return AZ_BUSY;
     fixture_published++;
     return AZ_OK;
 }
@@ -493,6 +496,83 @@ static void nonblocking_publication_retirement(const az_analysis_result_v1 *resu
     fixture_released = 0;
     puts(core ? "Core publication: retirement during native validation prevents file/native writes" : "Mod publication: retirement during native validation prevents file/native writes");
 }
+static void busy_publication(const az_analysis_result_v1 *phrases, int scenario) {
+    az_analysis_owner owner = scenario == 3 ? analysis_owner_core_begin() : owner_at(0);
+    az_vocal_frame_v1 frames[22] = {0};
+    az_analysis_result_v1 result = *phrases;
+    result.vocals = (az_analysis_vocal_map_v1) {.sample_rate = 22050, .hop_samples = 1024, .method = AZ_VOCAL_LSTM, .count = 22, .frames = frames};
+    analysis_source_request request = {.loaded = 1, .deck = 0, .load = 44, .components = AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS};
+    analysis_source_input input = {0};
+    assert(analysis_source_acquire(owner, &request, &input) == AZ_OK);
+    uint64_t lease = input.lease;
+    char paths[3][PATH_MAX];
+    const char *suffix[3] = {"DAT", "EXT", "2EX"};
+    for (unsigned i = 0; i < 3; i++) snprintf(paths[i], sizeof paths[i], "%s/sdb1/DJ.%s", g_media, suffix[i]);
+    fixture_publish_busy = 1;
+    fixture_publish_calls = 0;
+    assert(analysis_source_publish(owner, &input, &result) == AZ_BUSY);
+    assert(input.lease == lease && fixture_publish_calls == 1 && !fixture_published);
+    uint64_t saved[3];
+    for (unsigned i = 0; i < 3; i++) assert((saved[i] = st_disk_sig(paths[i])) != 0);
+    if (scenario == 0) {
+        /* Encoding identity includes all components and source provenance. */
+        az_analysis_result_v1 changed = result;
+        changed.source_frames++;
+        assert(analysis_source_publish(owner, &input, &changed) == AZ_STALE);
+        az_analysis_phrase_v1 phrase = *result.phrases.entries;
+        phrase.kind = 2;
+        changed = result;
+        changed.phrases.entries = &phrase;
+        assert(analysis_source_publish(owner, &input, &changed) == AZ_STALE);
+        frames[0].activity = 4;
+        assert(analysis_source_publish(owner, &input, &result) == AZ_STALE);
+        frames[0].activity = 0;
+        assert(fixture_publish_calls == 1);
+        assert(analysis_source_publish(owner, &input, &result) == AZ_BUSY);
+        assert(input.lease == lease && fixture_publish_calls == 2 && !fixture_published);
+        fixture_publish_busy = 0;
+        assert(analysis_source_publish(owner, &input, &result) == AZ_OK);
+        assert(fixture_publish_calls == 3 && fixture_published == 1);
+    } else {
+        if (scenario == 1) {
+            size_t size = 0;
+            int failed = 0;
+            uint8_t *file = read_analysis(paths[1], &size, &failed);
+            uint8_t tag[12] = {'E', 'D', 'I', 'T', 0, 0, 0, 12, 0, 0, 0, 12};
+            size_t updated_size = size + sizeof tag;
+            uint8_t *updated = malloc(updated_size);
+            assert(file && !failed && updated);
+            memcpy(updated, file, size);
+            memcpy(updated + size, tag, sizeof tag);
+            sa_put32(updated + 8, (uint32_t) updated_size);
+            analysis_write(paths[1], updated, updated_size);
+            free(updated);
+            free(file);
+            saved[1] = st_disk_sig(paths[1]);
+        } else if (scenario == 2) {
+            fixture_current = 0;
+        } else {
+            if (scenario == 3) analysis_owner_core_retire();
+            else analysis_owner_retire(0);
+            analysis_source_retire(owner);
+        }
+        fixture_publish_busy = 0;
+        assert(analysis_source_publish(owner, &input, &result) == AZ_STALE);
+        assert(fixture_publish_calls == 1 && !fixture_published);
+    }
+    for (unsigned i = 0; i < 3; i++) assert(st_disk_sig(paths[i]) == saved[i]);
+    int fd = open(input.audio_path, O_RDONLY);
+    char audio[17];
+    assert(fd >= 0 && read(fd, audio, sizeof audio) == sizeof audio);
+    assert(!memcmp(audio, "audio-placeholder", sizeof audio));
+    close(fd);
+    analysis_source_release(&input);
+    assert(!input.lease);
+    if (scenario == 4) analysis_owner_thread_bind(analysis_owner_begin(0));
+    fixture_current = 1;
+    for (unsigned i = 0; i < 3; i++) assert(!unlink(paths[i]));
+    fixture_released = fixture_published = 0;
+}
 static int refuse_commit(void *unused) {
     (void) unused;
     return 1;
@@ -688,6 +768,8 @@ int main(void) {
     core_source_lifetime(&loaded_result);
     nonblocking_publication_retirement(&loaded_result, 0);
     nonblocking_publication_retirement(&loaded_result, 1);
+    for (int scenario = 0; scenario < 5; scenario++) busy_publication(&loaded_result, scenario);
+    puts("Native publication continuation: durable files retained through BUSY; same lease completes without rewrites; changed result, files, load and owners refused");
     assert(acquire_loaded(-1, AZ_DATA_PHRASES, 0, 44, &job) == AZ_STALE);
     assert(acquire_loaded(0, AZ_DATA_PHRASES, 0, 43, &job) == AZ_STALE);
     assert(acquire_loaded(0, AZ_DATA_PHRASES, 0, 44, &job) == AZ_OK);

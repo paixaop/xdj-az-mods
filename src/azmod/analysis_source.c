@@ -51,6 +51,10 @@ struct sa_job {
     struct aznm_packet native_map;
     uint8_t *native_grid;
     size_t native_grid_bytes;
+    /* An admitted publication may have durable files while native refresh is busy.
+     * Keep its exact original encoding so only that publication can resume. */
+    uint8_t *published;
+    struct sa_tags published_tags;
 };
 static struct sa_job sa_jobs[8];
 static uint64_t sa_serial;
@@ -378,6 +382,7 @@ struct sa_publication {
     uint8_t *dat, *ext, *ex2, *newdat, *newext, *newex2;
     size_t dn, en, vfn, ndn, nen, nvn;
     struct sa_staged td, te, tv;
+    int files_saved;
 };
 static int sa_publication_matches(const struct sa_publication *s) {
     const struct sa_tags *p = &s->packet;
@@ -510,7 +515,36 @@ static int sa_publication_run(struct sa_publication *s) {
     if (!sa_publication_stage(s)) return AZ_FAILED;
     if (!sa_current(s->job)) return AZ_STALE;
     if (!sa_publication_publish(s)) return AZ_FAILED;
+    s->files_saved = 1;
     return sa_publication_notify(s);
+}
+static int sa_publication_shape_same(const struct sa_tags *a, const struct sa_tags *b) {
+    return a->gn == b->gn && a->pn == b->pn && a->vn == b->vn &&
+           a->rate == b->rate && a->frames == b->frames && a->method == b->method;
+}
+static int sa_publication_bytes_same(const struct sa_tags *a, const struct sa_tags *b) {
+    return !memcmp(a->grid, b->grid, a->gn) && !memcmp(a->phrase, b->phrase, a->pn) &&
+           !memcmp(a->vocal, b->vocal, a->vn);
+}
+static int sa_publication_resume(struct sa_publication *s) {
+    const struct sa_tags *saved = &s->job->published_tags;
+    if (!sa_publication_shape_same(&s->packet, saved) || !sa_publication_bytes_same(&s->packet, saved)) return AZ_STALE;
+    return sa_publication_notify(s);
+}
+static int sa_publication_commit(int owner, uint64_t job, struct sa_publication *s, uint8_t **storage) {
+    s->job = sa_find_job(owner, job);
+    if (!s->job || !sa_current(s->job)) return AZ_STALE;
+    if (s->job->published) return sa_publication_resume(s);
+    /* Loaded grid insertion may substitute the captured grid into packet during
+     * persistence. Retain the caller's original encoding for retry comparison. */
+    struct sa_tags original = s->packet;
+    int rc = sa_publication_run(s);
+    if (rc == AZ_BUSY && s->files_saved) {
+        s->job->published = *storage;
+        s->job->published_tags = original;
+        *storage = NULL;
+    }
+    return rc;
 }
 static void sa_publication_drop(struct sa_publication *s) {
     sa_stage_drop(&s->td);
@@ -573,8 +607,7 @@ static int sa_commit_typed(int owner, uint64_t job, const az_analysis_result_v1 
     if (!storage) return AZ_LIMIT;
     int rc = AZ_BUSY;
     if (!pthread_mutex_trylock(&sa_mutex)) {
-        state.job = sa_find_job(owner, job);
-        rc = state.job && sa_current(state.job) ? sa_publication_run(&state) : AZ_STALE;
+        rc = sa_publication_commit(owner, job, &state, &storage);
         sa_publication_drop(&state);
         pthread_mutex_unlock(&sa_mutex);
     }
@@ -598,6 +631,7 @@ static void sa_job_drop(struct sa_job *j) {
     if (j->maps) j->maps->release(&j->native_map);
     if (j->audio_token && j->audio_api) j->audio_api->close(j->audio_token);
     free(j->native_grid);
+    free(j->published);
     memset(j, 0, sizeof *j);
     j->reader_fd = -1;
 }
