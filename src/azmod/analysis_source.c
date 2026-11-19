@@ -61,9 +61,6 @@ static int sa_link_analysis(struct sa_job *job);
 static int sa_link_enqueue(struct sa_job *job, const char *path);
 static void sa_link_wake(void);
 static int sa_cleaner_start(void);
-static az_analysis_owner sa_lifetime(int owner) {
-    return owner == 32 ? analysis_owner_core() : analysis_owner_get((unsigned) owner);
-}
 static int sa_owner_live(const struct sa_job *job) {
     return analysis_owner_current(job->lifetime);
 }
@@ -217,28 +214,30 @@ static int sa_open_prepare(const az_track_ref *track, struct sa_job *job, struct
     if (!job->signatures[0] || !job->signatures[1]) return AZ_STALE;
     return sa_open_needed(job);
 }
-static int sa_open_reserved(int owner, const az_track_ref *track, struct sa_open_result *out,
+static int sa_open_reserved(az_analysis_owner lifetime, const az_track_ref *track, struct sa_open_result *out,
                             int loaded, int vocals, unsigned slot) {
-    struct sa_job j = {.owner = owner, .lifetime = sa_lifetime(owner), .reader_fd = -1, .vocals = vocals};
+    struct sa_job j = {.owner = sa_source_owner_index(lifetime), .lifetime = lifetime, .reader_fd = -1, .vocals = vocals};
     struct st_resolution row = {0};
     int rc = sa_open_prepare(track, &j, &row);
     if (rc != AZ_OK) return rc;
-    if (!loaded && !j.needed) return sa_open_link_existing(&j, track, out);
     if (!sa_current(&j)) return AZ_STALE;
+    if (!loaded && !j.needed) return sa_open_link_existing(&j, track, out);
     rc = sa_reader_open(&j);
     if (rc) return rc;
     sa_open_publish(&j, track, out, slot, row.metadata.original_bpm);
     return AZ_OK;
 }
-static int sa_open(int owner, const az_track_ref *track, struct sa_open_result *out, int loaded, int vocals) {
+static int sa_open(az_analysis_owner lifetime, const az_track_ref *track, struct sa_open_result *out, int loaded, int vocals) {
+    int owner = sa_source_owner_index(lifetime);
     if (!sa_open_request_valid(owner, track, out)) return AZ_INVALID;
-    if (!analysis_owner_current(sa_lifetime(owner))) return AZ_STALE;
+    if (!analysis_owner_current(lifetime)) return AZ_STALE;
     if (sa_cleaner_start()) return AZ_FAILED;
     if (!az_storage_sql_ready()) return AZ_UNSUPPORTED;
+    if (!analysis_owner_current(lifetime)) return AZ_STALE;
     if (pthread_mutex_trylock(&sa_mutex)) return AZ_BUSY;
     unsigned slot;
     int rc = AZ_LIMIT;
-    if (sa_open_slot(owner, &slot)) rc = sa_open_reserved(owner, track, out, loaded, vocals, slot);
+    if (sa_open_slot(owner, &slot)) rc = sa_open_reserved(lifetime, track, out, loaded, vocals, slot);
     pthread_mutex_unlock(&sa_mutex);
     return rc;
 }
@@ -874,7 +873,7 @@ static int sa_usb_register(struct sa_job *j, uint32_t phrases, struct sa_open_re
 static int sa_usb_open(struct sa_job *j, uint32_t phrases, struct sa_open_result *result) {
     az_track_ref track = {0};
     int rc = az_status_loaded_reference((unsigned) j->deck, j->load, &track);
-    if (!rc) rc = sa_open(j->owner, &track, result, 1, j->vocals);
+    if (!rc) rc = sa_open(j->lifetime, &track, result, 1, j->vocals);
     if (rc) {
         sa_job_drop(j);
         return rc;
@@ -976,6 +975,7 @@ static int sa_loaded_lease(struct sa_job *j, const struct azstatus_native_v1 *ap
                            const struct azstatus_native_receipt *receipt, struct sa_open_result *out) {
     uint32_t phrases = 0;
     int rc = sa_capture_loaded(j, &phrases);
+    if (!sa_owner_live(j)) rc = AZ_STALE;
     if (rc) {
         sa_job_drop(j);
         return rc;
@@ -995,9 +995,10 @@ static int sa_loaded_lease(struct sa_job *j, const struct azstatus_native_v1 *ap
 static int sa_loaded_request_valid(int owner, int deck, uint64_t load, const struct sa_open_result *out) {
     return owner >= 0 && deck >= 0 && deck < 4 && load && out;
 }
-static int sa_open_loaded(int owner, int deck, uint64_t load, struct sa_open_result *out, int vocals) {
+static int sa_open_loaded(az_analysis_owner lifetime, int deck, uint64_t load, struct sa_open_result *out, int vocals) {
+    int owner = sa_source_owner_index(lifetime);
     if (!sa_loaded_request_valid(owner, deck, load, out)) return AZ_INVALID;
-    if (!analysis_owner_current(sa_lifetime(owner))) return AZ_STALE;
+    if (!analysis_owner_current(lifetime)) return AZ_STALE;
     if (sa_cleaner_start()) return AZ_FAILED;
     const struct azstatus_native_v1 *api = sa_native();
     const struct azn_maps_api *maps = sa_loaded_maps(api);
@@ -1005,7 +1006,7 @@ static int sa_open_loaded(int owner, int deck, uint64_t load, struct sa_open_res
     struct azstatus_native_receipt receipt = {.size = sizeof receipt, .version = 1};
     int rc = sa_loaded_seed(api, deck, load, &receipt);
     if (rc) return rc;
-    struct sa_job job = {.owner = owner, .lifetime = sa_lifetime(owner), .reader_fd = -1, .loaded = 1, .deck = deck, .load = load, .native_epoch = receipt.epoch, .maps = maps, .vocals = vocals};
+    struct sa_job job = {.owner = owner, .lifetime = lifetime, .reader_fd = -1, .loaded = 1, .deck = deck, .load = load, .native_epoch = receipt.epoch, .maps = maps, .vocals = vocals};
     return sa_loaded_lease(&job, api, &receipt, out);
 }
 
@@ -1362,6 +1363,10 @@ static int sa_input_copy(az_analysis_owner owner, const analysis_source_request 
         input->needed = job->needed;
         input->load_epoch = job->native_epoch;
         rc = input->needed ? sa_input_grid(job, input) : ANALYSIS_SOURCE_COMPLETE;
+        if (rc == AZ_OK) {
+            input->reader_fd = job->reader_fd;
+            job->reader_fd = -1;
+        }
     }
     pthread_mutex_unlock(&sa_mutex);
     return rc;
@@ -1374,13 +1379,12 @@ int analysis_source_acquire(az_analysis_owner owner, const analysis_source_reque
                              analysis_source_input *input) {
     if (!sa_input_request_valid(request, input)) return AZ_INVALID;
     if (!analysis_owner_current(owner)) return AZ_STALE;
-    int index = sa_source_owner_index(owner);
     struct sa_open_result lease = {0};
     int vocals = !!(request->components & AZ_ANALYSIS_VOCALS);
-    int rc = request->loaded ? sa_open_loaded(index, request->deck, request->load, &lease, vocals) :
-                              sa_open(index, &request->track, &lease, 0, vocals);
+    int rc = request->loaded ? sa_open_loaded(owner, request->deck, request->load, &lease, vocals) :
+                              sa_open(owner, &request->track, &lease, 0, vocals);
     if (rc != AZ_OK && rc != AZ_PENDING) return rc;
-    *input = (analysis_source_input) {.lease = lease.job, .owner = owner, .bpm = lease.original_bpm,
+    *input = (analysis_source_input) {.lease = lease.job, .owner = owner, .reader_fd = -1, .bpm = lease.original_bpm,
                                       .track = lease.track, .deck = (unsigned) request->deck};
     memcpy(input->audio_path, lease.audio_path, sizeof input->audio_path);
     if (rc == AZ_PENDING) return rc;
@@ -1407,6 +1411,7 @@ void analysis_source_release(analysis_source_input *input) {
     sa_link_release(input->lease);
     pthread_mutex_unlock(&sa_mutex);
     sa_job_drop(&retired);
+    if (input->audio_path[0] && input->reader_fd >= 0) close(input->reader_fd);
     free(input->beats);
     memset(input, 0, sizeof *input);
 }

@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <errno.h>
+#include <dirent.h>
 #include <stdatomic.h>
 #include <sys/wait.h>
 static char st_test_mountinfo[PATH_MAX];
@@ -61,9 +62,25 @@ static const struct azn_analysis_source_api *fixture_source(void) {
     static const struct azn_analysis_source_api api = {.size = sizeof api, .version = 1, .open = fixture_source_open, .current = fixture_source_current, .close = fixture_source_close};
     return &api;
 }
-static int fixture_current = 1, fixture_published, fixture_released, fixture_native_phrases;
+static int fixture_current = 1, fixture_published, fixture_native_phrases;
+static _Atomic int fixture_released;
 static uint32_t fixture_grid_count = 2;
 static _Atomic int fixture_pause_current, fixture_current_entered, fixture_resume_current;
+static _Atomic int fixture_pause_admission, fixture_admission_entered, fixture_resume_admission;
+static _Atomic int fixture_fail_input_beats;
+void *__real_calloc(size_t count, size_t size);
+void *__wrap_calloc(size_t count, size_t size) {
+    if (count == 2 && size == sizeof(az_beat) && atomic_exchange(&fixture_fail_input_beats, 0)) return NULL;
+    return __real_calloc(count, size);
+}
+int __real_az_storage_sql_ready(void);
+int __wrap_az_storage_sql_ready(void) {
+    if (atomic_exchange(&fixture_pause_admission, 0)) {
+        atomic_store(&fixture_admission_entered, 1);
+        while (!atomic_load(&fixture_resume_admission)) usleep(1000);
+    }
+    return __real_az_storage_sql_ready();
+}
 int az_status_loaded_reference(unsigned deck, uint64_t load, az_track_ref *out) {
     if (deck || load != 44) return AZ_STALE;
     *out = fixture_loaded_ref;
@@ -208,18 +225,20 @@ static void typed_grid_result_validation(void) {
     beats[1].reserved = 1;
     assert(!sa_result_valid(&result));
 }
-static void await_retirement(analysis_source_input *input) {
-    for (unsigned i = 0; i < 1000 && !access(input->audio_path, F_OK); ++i) usleep(1000);
-    assert(access(input->audio_path, F_OK));
+static void input_reader_close(analysis_source_input *input) {
+    char locator[1024];
+    memcpy(locator, input->audio_path, sizeof locator);
+    analysis_source_release(input);
+    assert(!input->lease && !input->audio_path[0] && !input->beats);
+    assert(access(locator, F_OK));
+    analysis_source_release(input); /* runtime shutdown may repeat cleanup */
 }
 static void owner_lifecycle(const az_track_ref *track) {
     az_analysis_owner before = analysis_owner_get(0);
-    analysis_source_input jobs[8];
-    memset(jobs, 0, sizeof jobs);
+    analysis_source_input jobs[8] = {0}, replacement[4] = {0};
     analysis_owner_begin(1);
-    for (unsigned i = 0; i < 8; ++i) {
+    for (unsigned i = 0; i < 8; ++i)
         assert(acquire_track((int) (i / 4), AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS, track, &jobs[i]) == AZ_OK);
-    }
     analysis_source_input overflow = {0};
     assert(acquire_track(0, AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS, track, &overflow) == AZ_LIMIT);
     int reader = open(jobs[0].audio_path, O_RDONLY);
@@ -230,24 +249,42 @@ static void owner_lifecycle(const az_track_ref *track) {
     assert(child >= 0);
     if (!child) {
         close(ready[0]); close(resume[1]);
-        int own = open(jobs[0].audio_path, O_RDONLY);
-        char mark = own >= 0, bytes[17];
-        assert(write(ready[1], &mark, 1) == 1 && mark);
+        char mark = 1, bytes[17];
+        assert(write(ready[1], &mark, 1) == 1);
         assert(read(resume[0], &mark, 1) == 1);
-        assert(read(own, bytes, sizeof bytes) == sizeof bytes);
+        /* A decoder child is allowed to open its borrowed locator after the
+         * owner retires, provided the runtime has not released the input. */
+        int own = open(jobs[0].audio_path, O_RDONLY);
+        assert(own >= 0 && read(own, bytes, sizeof bytes) == sizeof bytes);
         assert(!memcmp(bytes, "audio-placeholder", sizeof bytes));
         close(own); _exit(0);
     }
     close(ready[1]); close(resume[0]);
     char mark;
     assert(read(ready[0], &mark, 1) == 1 && mark);
-    /* Retirement revokes admission and physically closes retained locators. */
     analysis_source_retire(analysis_owner_retire(0));
     assert(!analysis_owner_current(before));
-    await_retirement(&jobs[0]);
-    assert(!access(jobs[4].audio_path, F_OK));
     assert(acquire_track(0, AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS, track, &overflow) == AZ_STALE);
-    assert(open(jobs[0].audio_path, O_RDONLY) < 0);
+    char audio[PATH_MAX], changed[PATH_MAX];
+    snprintf(audio, sizeof audio, "%s/sdb1/audio.wav", g_media);
+    snprintf(changed, sizeof changed, "%s/sdb1/replacement.wav", g_media);
+    analysis_write(changed, "replacement-audio", 17);
+    assert(!rename(changed, audio));
+    az_analysis_owner after = analysis_owner_begin(0);
+    assert(!analysis_owner_current(analysis_owner_for_caller(0)));
+    analysis_owner_thread_bind(after);
+    assert(after.generation != before.generation && !analysis_owner_current(before));
+    for (unsigned i = 0; i < 4; ++i) {
+        int rc = AZ_LIMIT;
+        for (unsigned attempt = 0; attempt < 1000 && (rc == AZ_LIMIT || rc == AZ_BUSY); ++attempt) {
+            rc = acquire_track(0, AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS, track, &replacement[i]);
+            if (rc != AZ_OK) usleep(1000);
+        }
+        assert(rc == AZ_OK && replacement[i].lease > jobs[7].lease);
+    }
+    /* Reused capacity proves native reclamation ran. The input owns its
+     * descriptor independently, so no descriptor-number reuse can redirect it. */
+    assert(!access(jobs[0].audio_path, F_OK) && !access(jobs[4].audio_path, F_OK));
     char bytes[17];
     assert(read(reader, bytes, sizeof bytes) == sizeof bytes);
     assert(!memcmp(bytes, "audio-placeholder", sizeof bytes));
@@ -256,20 +293,87 @@ static void owner_lifecycle(const az_track_ref *track) {
     int status;
     assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && !WEXITSTATUS(status));
     close(ready[0]); close(resume[1]);
-    az_analysis_owner after = analysis_owner_begin(0);
-    assert(!analysis_owner_current(analysis_owner_for_caller(0)));
-    analysis_owner_thread_bind(after);
-    assert(after.generation != before.generation && !analysis_owner_current(before));
-    analysis_source_release(&jobs[0]);
-    for (unsigned i = 0; i < 4; ++i) {
-        assert(acquire_track(0, AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS, track, &jobs[i]) == AZ_OK);
-        assert(jobs[i].lease > jobs[7].lease);
-    }
+    for (unsigned i = 0; i < 4; ++i) input_reader_close(&jobs[i]);
     analysis_source_retire(analysis_owner_retire(0));
     analysis_source_retire(analysis_owner_retire(1));
-    await_retirement(&jobs[0]); await_retirement(&jobs[4]);
-    for (unsigned i = 0; i < 8; ++i) analysis_source_release(&jobs[i]);
+    for (unsigned i = 4; i < 8; ++i) input_reader_close(&jobs[i]);
+    for (unsigned i = 0; i < 4; ++i) input_reader_close(&replacement[i]);
     analysis_owner_thread_bind(analysis_owner_begin(0));
+    analysis_write(audio, "audio-placeholder", 17);
+    puts("Analysis input readers: paused subprocess opens retained audio after retirement, source replacement and capacity reuse");
+}
+static unsigned reader_count(void) {
+    DIR *directory = opendir("/proc/self/fd");
+    assert(directory);
+    unsigned count = 0;
+    while (readdir(directory)) ++count;
+    assert(!closedir(directory));
+    return count;
+}
+static void acquisition_failure_cleanup(const az_track_ref *track) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof path, "%s/sdb1/analysis.EXT", g_media);
+    size_t bytes = 0;
+    uint8_t *saved = st_read_file(path, &bytes);
+    assert(saved && bytes);
+    analysis_write(path, "", 0);
+    unsigned readers = reader_count();
+    atomic_store(&fixture_fail_input_beats, 1);
+    analysis_source_input input = {0};
+    assert(acquire_track(0, AZ_DATA_PHRASES, track, &input) == AZ_FAILED);
+    assert(!atomic_load(&fixture_fail_input_beats) && !input.lease && !input.audio_path[0]);
+    assert(reader_count() == readers);
+    analysis_source_release(&input);
+    assert(acquire_track(0, AZ_DATA_PHRASES, track, &input) == AZ_OK);
+    input_reader_close(&input);
+    analysis_write(path, saved, bytes);
+    free(saved);
+    puts("Analysis input failure: allocation refusal closes opened audio and releases admission capacity");
+}
+struct pending_request { az_analysis_owner owner; az_track_ref track; analysis_source_input input; int result; };
+static void *acquire_pending_after_replacement(void *opaque) {
+    struct pending_request *request = opaque;
+    analysis_source_request source = {.components = AZ_DATA_PHRASES, .track = request->track};
+    request->result = analysis_source_acquire(request->owner, &source, &request->input);
+    return NULL;
+}
+static void pending_admission_lifetime(const az_track_ref *track, int core) {
+    struct pending_request request = {.owner = core ? analysis_owner_core_begin() : analysis_owner_begin(1), .track = *track};
+    atomic_store(&fixture_admission_entered, 0);
+    atomic_store(&fixture_resume_admission, 0);
+    atomic_store(&fixture_pause_admission, 1);
+    pthread_t worker;
+    assert(!pthread_create(&worker, NULL, acquire_pending_after_replacement, &request));
+    while (!atomic_load(&fixture_admission_entered)) usleep(1000);
+    if (core) analysis_owner_core_retire();
+    else analysis_owner_retire(1);
+    az_analysis_owner replacement = core ? analysis_owner_core_begin() : analysis_owner_begin(1);
+    analysis_source_input no_link = {.lease = UINT64_MAX};
+    int available = AZ_BUSY;
+    for (unsigned i = 0; i < 1000 && available == AZ_BUSY; ++i) {
+        available = analysis_source_outcome(request.owner, &no_link);
+        if (available == AZ_BUSY) usleep(1000);
+    }
+    assert(available == AZ_STALE);
+    atomic_store(&fixture_resume_admission, 1);
+    assert(!pthread_join(worker, NULL));
+    if (request.result != AZ_STALE) fprintf(stderr, "pending admission core=%d rc=%d lease=%llu\n", core, request.result, (unsigned long long) request.input.lease);
+    assert(request.result == AZ_STALE && !request.input.lease);
+    analysis_source_retire(request.owner);
+    analysis_source_release(&request.input);
+    analysis_source_request source = {.components = AZ_DATA_PHRASES, .track = *track};
+    int rc = AZ_BUSY;
+    for (unsigned i = 0; i < 1000 && rc == AZ_BUSY; ++i) {
+        rc = analysis_source_acquire(replacement, &source, &request.input);
+        if (rc == AZ_BUSY) usleep(1000);
+    }
+    assert(rc == AZ_PENDING && request.input.lease);
+    analysis_source_release(&request.input);
+    if (core) analysis_owner_core_retire();
+    else analysis_owner_retire(1);
+    analysis_source_retire(replacement);
+    puts(core ? "Core pending-link admission: old generation refused, replacement usable" :
+                "Mod pending-link admission: old generation refused, replacement usable");
 }
 struct retirement_request { az_analysis_owner owner; int result; };
 static void *acquire_during_retirement(void *opaque) {
@@ -305,12 +409,21 @@ static void core_source_lifetime(const az_analysis_result_v1 *result) {
     analysis_source_input input = {0};
     assert(analysis_source_acquire(old, &request, &input) == AZ_OK);
     assert(input.beat_count == 2 && input.beats[1].beat_in_bar == 2);
+    int releases_before = atomic_load(&fixture_released);
     analysis_owner_core_retire();
+    analysis_source_retire(old);
     az_analysis_owner replacement = analysis_owner_core_begin();
     assert(replacement.generation != old.generation);
     assert(analysis_source_publish(old, &input, result) == AZ_STALE && !fixture_published);
     assert(input.beats[1].beat_in_bar == 2); /* copied input remains caller-owned */
-    analysis_source_release(&input);
+    for (unsigned i = 0; i < 1000 && atomic_load(&fixture_released) == releases_before; ++i) usleep(1000);
+    assert(atomic_load(&fixture_released) > releases_before);
+    int reader = open(input.audio_path, O_RDONLY);
+    char bytes[17];
+    assert(reader >= 0 && read(reader, bytes, sizeof bytes) == sizeof bytes);
+    assert(!memcmp(bytes, "audio-placeholder", sizeof bytes));
+    close(reader);
+    input_reader_close(&input);
     int rc = AZ_BUSY;
     for (unsigned i = 0; i < 1000 && rc == AZ_BUSY; ++i) {
         rc = analysis_source_acquire(replacement, &request, &input);
@@ -450,6 +563,7 @@ int main(void) {
     file = read_analysis(path, &n, &failed);
     assert(file && !failed && sa_tag_count(file, n, "PSSI") == 1);
     free(file);
+    acquisition_failure_cleanup(&ref);
     az_analysis_result_v1 short_result = {.size = 4, .version = AZ_DATA_VERSION};
     assert(publish_result(0, &(analysis_source_input){.lease = 1, .owner = owner_at(0)}, &short_result) == AZ_INVALID);
     /* A row without an analysis location gets complete files and a conditional
@@ -464,6 +578,8 @@ int main(void) {
     assert(acquire_track(0, AZ_DATA_PHRASES, &ref, &job) == AZ_OK);
     assert(publish_result(0, &job, &baseline_result) == AZ_PENDING);
     analysis_source_input saved_link = job;
+    pending_admission_lifetime(&ref, 0);
+    pending_admission_lifetime(&ref, 1);
     job = (analysis_source_input){0};
     int reopened;
     do { reopened = acquire_track(0, AZ_DATA_PHRASES, &ref, &job); } while (reopened == AZ_BUSY);

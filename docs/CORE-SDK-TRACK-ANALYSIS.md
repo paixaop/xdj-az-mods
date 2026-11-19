@@ -19,7 +19,9 @@ track reference with physical USB identity, read-only library resolution and fil
 signatures. Beatport sources are completed/decrypted downloads observed through
 the native source provider. Native Track resources remain private. The owned input
 uses an already opened read-only descriptor and an opaque owner generation;
-retirement revokes publication without invalidating independent open readers.
+retirement revokes publication without invalidating that locator or independent
+open readers. The runtime releases the input descriptor only after every decoder
+child has joined, so a delayed child cannot open a reused descriptor number.
 Native providers and publication remain gated by their firmware instruction and
 map-writer checks; a supported public ABI alone does not enable a new firmware.
 

@@ -18,12 +18,13 @@ typedef struct analysis_source_request {
     az_track_ref track;
 } analysis_source_request;
 /* Owned until release, which runs only after all decoder children have joined.
- * The audio descriptor locator may be opened by a subprocess. An already-open
- * descriptor survives retirement; a new open after release fails. */
+ * The audio descriptor locator remains valid across owner retirement and may
+ * be opened by a subprocess. Neither locator nor bytes may be used after release. */
 typedef struct analysis_source_input {
     uint64_t lease;
     az_analysis_owner owner;
     char audio_path[1024];
+    int reader_fd;
     az_beat *beats;
     uint32_t beat_count, needed;
     double bpm;
