@@ -8,9 +8,25 @@ import tempfile
 import unittest
 
 from compdb import compilation_entries
+from diagnostics import partition
 
 
 class CompilationDatabaseTests(unittest.TestCase):
+    def test_only_canonical_vendor_paths_leave_the_first_party_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            vendor = root / "vendor/analysis"
+            vendor.mkdir(parents=True)
+            (root / "alias").symlink_to(vendor, target_is_directory=True)
+            owned = [str(root / "src/analysis/kernel.c") + ":12:3: warning: vendor/analysis appears in message\n",
+                     str(root / "vendor/analysis-extra/header.h") + ":14: warning: retained\n",
+                     "unrecognized diagnostic must remain a failure\n"]
+            external = [str(vendor / "decoder.h") + ":8:5: warning: vendor header\n",
+                        str(root / "alias/audio.h") + ":9: warning: alias of vendor header\n"]
+            actual, dependencies = partition(owned + external, vendor)
+            self.assertEqual(actual, owned)
+            self.assertEqual(dependencies, external)
+
     def test_recursive_archive_keeps_real_sources_and_include_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()

@@ -104,6 +104,13 @@ while IFS= read -r f; do
         cat "$W/tidy.$k.log"; die "clang-tidy exited $rc on $f with no diagnostic"
     fi
 done < "$W/units.txt"
+# Header-based vendor libraries are parsed as dependencies of first-party units.
+# Keep their diagnostics visible, but outside this first-party source gate just
+# like the separately compiled vendor units omitted by compdb.py.
+separate_vendor_diagnostics() {
+    python3 "$SC/diagnostics.py" "$1" "$ROOT/vendor/analysis"
+}
+separate_vendor_diagnostics "$W/tidy.all"
 # one finding is printed once, though every unit that includes its header reports it
 sed -E "s|^$PWD/||" "$W/tidy.all" | sort -u | sed 's/^/TIDY  /' > "$W/tidy.out"
 
@@ -129,14 +136,16 @@ while IFS=$'\t' read -r -a a; do
         --template='{file}:{line}: cppcheck-{id}: {severity}: {message}' "${a[@]}" >> "$W/cpp.all" 2>&1 ||
         die "cppcheck failed on ${a[-1]}"
 done < "$W/cpp.args"
+separate_vendor_diagnostics "$W/cpp.all"
 sed -E "s|^$PWD/||" "$W/cpp.all" | sort -u | sed 's/^/CPPCHECK  /' > "$W/cpp.out"
 
 nt=$(wc -l < "$W/tidy.out" | tr -d ' ')
 nc=$(wc -l < "$W/cpp.out" | tr -d ' ')
 cat "$W/tidy.out" "$W/cpp.out"
+cat "$W/tidy.all.vendor" "$W/cpp.all.vendor" | sort -u | sed 's/^/VENDORED DEPENDENCY  /'
 nu=$(wc -l < "$W/units.txt" | tr -d ' ')
 if [ "$nt" -ne 0 ] || [ "$nc" -ne 0 ]; then
     echo "STATIC CHECK: FAILED ($nt clang-tidy, $nc cppcheck findings in $nu units; fix each, or suppress it with its reason: $S/.clang-tidy, tools/static-check/cppcheck.supp)"
     exit 1
 fi
-echo "STATIC CHECK: OK ($nu units, clang-tidy and cppcheck clean)"
+echo "STATIC CHECK: OK ($nu first-party units, clang-tidy and cppcheck clean; vendored diagnostics reported separately)"
