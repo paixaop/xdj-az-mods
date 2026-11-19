@@ -229,7 +229,7 @@ static void ar_finish(struct ar_job *job, int rc) {
 static void ar_publish_status(const struct ar_job *job) {
     if (!job->automatic) return;
     struct ar_load *deck = &ar.decks[job->request.deck];
-    if (deck->epoch == job->request.load_epoch) deck->status = job->status;
+    if (deck->loaded && deck->epoch == job->request.load_epoch) deck->status = job->status;
 }
 static void ar_finish_automatic(struct ar_job *job) {
     struct ar_load *deck = &ar.decks[job->request.deck];
@@ -413,6 +413,7 @@ static void ar_revoke(struct ar_job *job, int release) {
     job->released |= release;
     if (job->status.state == AZ_ANALYSIS_RUNNING || job->status.state == AZ_ANALYSIS_SAVED) return;
     ar_finish(job, AZ_STALE);
+    ar_publish_status(job);
     if (job->released) ar_drop(job);
 }
 static int ar_cancel_or_release(az_analysis_owner owner, uint64_t id, int release) {
@@ -503,6 +504,16 @@ void analysis_runtime_enable(az_analysis_owner owner, int enabled) {
     ar_signal();
     pthread_mutex_unlock(&ar.mutex);
 }
+/* The copied presentation belongs to one accepted load, not to the draining
+ * job. Revoke before clearing so a synchronous queued cancellation cannot
+ * restore an observation from the invalidated scope. */
+static void ar_clear_load(unsigned deck) {
+    struct ar_load *load = &ar.decks[deck];
+    load->attempted = 0;
+    struct ar_job *job = &ar.jobs[ANALYSIS_PUBLIC_SLOTS + deck];
+    if (job->status.request_id) ar_revoke(job, 1);
+    load->status = (az_analysis_status_v1) {.deck = deck};
+}
 void analysis_runtime_load(unsigned deck, uint64_t order, uint64_t epoch, int loaded, const az_track_ref *track) {
     if (deck >= 4) return;
     pthread_mutex_lock(&ar.mutex);
@@ -512,11 +523,7 @@ void analysis_runtime_load(unsigned deck, uint64_t order, uint64_t epoch, int lo
         return;
     }
     load->order = order;
-    if (load->epoch != epoch || !loaded) {
-        load->attempted = 0;
-        struct ar_job *job = &ar.jobs[ANALYSIS_PUBLIC_SLOTS + deck];
-        if (job->status.request_id) ar_revoke(job, 1);
-    }
+    if (load->epoch != epoch || !loaded) ar_clear_load(deck);
     load->epoch = epoch;
     load->loaded = loaded;
     load->track = track ? *track : (az_track_ref) {0};

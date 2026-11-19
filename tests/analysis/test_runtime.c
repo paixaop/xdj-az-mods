@@ -2,6 +2,7 @@
 #define _GNU_SOURCE 1
 #define _POSIX_C_SOURCE 200809L
 #include "../../src/azmod/analysis_runtime.h"
+#include "../../src/azmod/analysis_presentation.h"
 #include <assert.h>
 #include <pthread.h>
 #include <signal.h>
@@ -12,7 +13,7 @@
 #include <time.h>
 void analysis_fixture_fail_thread_start(void);
 static const char *audio;
-static atomic_int clock_offset, jump_at_acquire;
+static atomic_int clock_offset, jump_at_acquire, blocked_deck;
 /* Controlled monotonic passage for the real coordinator deadline wait. */
 int fixture_clock_gettime(clockid_t clock, struct timespec *out) {
     int rc = clock_gettime(clock, out);
@@ -40,7 +41,8 @@ int analysis_source_acquire(az_analysis_owner owner, const analysis_source_reque
     assert(!sigaltstack(NULL, &signal_stack) && !(signal_stack.ss_flags & SS_DISABLE));
     atomic_fetch_add(&acquisitions, 1);
     atomic_store(&entered, 1);
-    while (atomic_load(&blocked)) pause_ms();
+    while (atomic_load(&blocked) ||
+           (request->loaded && atomic_load(&blocked_deck) == request->deck + 1)) pause_ms();
     if (!analysis_owner_current(owner)) return AZ_STALE;
     *input = (analysis_source_input) {.lease = 1, .owner = owner, .needed = request->components, .deck = (unsigned) request->deck, .load_epoch = request->load, .track = request->track};
     snprintf(input->audio_path, sizeof input->audio_path, "%s", audio);
@@ -335,15 +337,188 @@ static void automatic_operation(void) {
     analysis_owner_core_retire();
     analysis_runtime_retire(core);
 }
+
+/* Copied built-in status must describe the accepted deck scope, even while
+ * the real coordinator is retiring an older source/worker transaction. */
+static uint64_t scope_order = 100;
+static az_analysis_status_v1 scope_status(unsigned deck) {
+    az_analysis_status_v1 status = {.size = sizeof status};
+    for (unsigned i = 0; i < 10000; ++i) {
+        int rc = analysis_runtime_deck_status(deck, &status);
+        if (rc == AZ_OK) return status;
+        assert(rc == AZ_BUSY);
+        pause_ms();
+    }
+    abort();
+}
+static void scope_idle(unsigned deck) {
+    az_analysis_status_v1 status = scope_status(deck);
+    assert(!status.state && !status.request_id && !status.completed_components);
+    assert(!strcmp(analysis_status_message(&status, AZ_OK), "Waiting for a USB or Beatport track"));
+}
+static void scope_same(unsigned deck, const az_analysis_status_v1 *before) {
+    az_analysis_status_v1 after = scope_status(deck);
+    assert(!memcmp(before, &after, sizeof after));
+}
+static void scope_unload_all(void) {
+    for (unsigned deck = 0; deck < 4; ++deck)
+        analysis_runtime_load(deck, ++scope_order, 0, 0, NULL);
+}
+static az_analysis_owner scope_start(void) {
+    scope_unload_all();
+    atomic_store(&acquire_result, AZ_PENDING);
+    atomic_store(&link_result, AZ_PENDING);
+    atomic_store(&blocked, 0);
+    atomic_store(&blocked_deck, 0);
+    az_analysis_owner core = analysis_owner_core_begin();
+    assert(core.generation);
+    analysis_runtime_enable(core, 1);
+    return core;
+}
+static void scope_drain(az_analysis_owner owner) {
+    /* The held source returns directly, then this unrelated public request
+     * crosses the same single coordinator. Its completion proves that the
+     * earlier job's final collection has happened, without private-state reads. */
+    atomic_store(&acquire_result, ANALYSIS_SOURCE_COMPLETE);
+    atomic_store(&blocked, 0);
+    atomic_store(&blocked_deck, 0);
+    az_analysis_request_v1 r = request(1);
+    uint64_t id;
+    assert(submit(owner, &r, &id) == AZ_OK);
+    assert(wait_state(owner, id, AZ_ANALYSIS_COMPLETE).result == AZ_NOT_FOUND);
+    release_request(owner, id);
+    atomic_store(&acquire_result, AZ_PENDING);
+}
+static void scope_stop(az_analysis_owner core, az_analysis_owner owner) {
+    analysis_owner_core_retire();
+    analysis_runtime_enable(core, 0);
+    scope_unload_all();
+    scope_drain(owner);
+    atomic_store(&acquire_result, AZ_OK);
+}
+static void scope_wait_source(void) {
+    for (unsigned i = 0; i < 10000 && !atomic_load(&entered); ++i) pause_ms();
+    assert(atomic_load(&entered));
+}
+static void scope_active_unload(az_analysis_owner owner, int same_epoch) {
+    az_analysis_owner core = scope_start();
+    atomic_store(&blocked, 1);
+    atomic_store(&entered, 0);
+    analysis_runtime_load(2, ++scope_order, 101, 1, NULL);
+    az_analysis_status_v1 running = wait_deck(2, AZ_ANALYSIS_RUNNING);
+    scope_wait_source();
+    /* Duplicate and delayed cuts cannot revoke or clear current work. */
+    analysis_runtime_load(2, scope_order, 0, 0, NULL);
+    analysis_runtime_load(2, scope_order - 1, 999, 0, NULL);
+    analysis_runtime_load(2, 0, 999, 0, NULL);
+    scope_same(2, &running);
+    analysis_runtime_load(2, ++scope_order, 101, 1, NULL);
+    scope_same(2, &running);
+    analysis_runtime_load(2, ++scope_order, same_epoch ? 101 : 0, 0, NULL);
+    scope_idle(2);
+    scope_drain(owner);
+    scope_idle(2); /* late cancellation must not restore the old status */
+    scope_stop(core, owner);
+}
+static void scope_replacement(az_analysis_owner owner) {
+    az_analysis_owner core = scope_start();
+    atomic_store(&blocked, 1);
+    atomic_store(&entered, 0);
+    analysis_runtime_load(2, ++scope_order, 201, 1, NULL);
+    az_analysis_status_v1 old = wait_deck(2, AZ_ANALYSIS_RUNNING);
+    scope_wait_source();
+    analysis_runtime_load(2, ++scope_order, 202, 1, NULL);
+    scope_idle(2);
+    /* Keep the replacement unstarted so a late old publication cannot be
+     * hidden by a newer automatic job immediately overwriting it. */
+    analysis_runtime_enable(core, 0);
+    scope_drain(owner);
+    scope_idle(2);
+    analysis_runtime_enable(core, 1);
+    az_analysis_status_v1 current = wait_deck(2, AZ_ANALYSIS_SAVED);
+    assert(current.request_id != old.request_id && current.load_epoch == 202);
+    assert(current.result == AZ_PENDING);
+    analysis_runtime_load(2, scope_order - 1, 201, 0, NULL);
+    scope_same(2, &current);
+    scope_stop(core, owner);
+}
+static void scope_queued_disable(az_analysis_owner owner) {
+    az_analysis_owner core = scope_start();
+    atomic_store(&blocked, 1);
+    atomic_store(&entered, 0);
+    az_analysis_request_v1 r = request(1);
+    uint64_t public_id;
+    assert(submit(owner, &r, &public_id) == AZ_OK);
+    scope_wait_source();
+    analysis_runtime_load(2, ++scope_order, 301, 1, NULL);
+    analysis_runtime_load(3, ++scope_order, 302, 1, NULL);
+    atomic_store(&blocked_deck, 3); /* deck2 holds while deck3 remains queued */
+    atomic_store(&blocked, 0);
+    az_analysis_status_v1 queued = wait_deck(3, AZ_ANALYSIS_QUEUED);
+    assert(wait_deck(2, AZ_ANALYSIS_RUNNING).request_id);
+    analysis_owner_core_retire();
+    analysis_runtime_enable(core, 0);
+    az_analysis_status_v1 cancelled = scope_status(3);
+    assert(cancelled.state == AZ_ANALYSIS_CANCELLED && cancelled.result == AZ_STALE);
+    assert(cancelled.request_id == queued.request_id && cancelled.load_epoch == 302);
+    /* Public work has independent ownership and remains retained/pending. */
+    assert(wait_state(owner, public_id, AZ_ANALYSIS_SAVED).result == AZ_PENDING);
+    scope_drain(owner);
+    assert(wait_deck(2, AZ_ANALYSIS_CANCELLED).result == AZ_STALE);
+    scope_same(3, &cancelled);
+    atomic_store(&link_result, AZ_OK);
+    source_wake();
+    assert(wait_state(owner, public_id, AZ_ANALYSIS_COMPLETE).result == AZ_OK);
+    release_request(owner, public_id);
+    scope_stop(core, owner);
+}
+static void scope_completed_receipts(az_analysis_owner owner) {
+    az_analysis_owner core = scope_start();
+    atomic_store(&acquire_result, ANALYSIS_SOURCE_COMPLETE);
+    analysis_runtime_load(2, ++scope_order, 401, 1, NULL);
+    az_analysis_status_v1 complete = wait_deck(2, AZ_ANALYSIS_COMPLETE);
+    assert(complete.result == AZ_NOT_FOUND);
+    analysis_runtime_load(2, ++scope_order, 401, 1, NULL);
+    scope_same(2, &complete);
+    analysis_owner_core_retire();
+    analysis_runtime_enable(core, 0);
+    scope_same(2, &complete); /* disabling does not erase a completed outcome */
+    analysis_runtime_load(2, scope_order, 402, 0, NULL);
+    analysis_runtime_load(2, scope_order - 1, 0, 0, NULL);
+    scope_same(2, &complete);
+    analysis_runtime_load(2, ++scope_order, 402, 1, NULL);
+    scope_idle(2); /* the completed outcome belongs to the prior load */
+    scope_stop(core, owner);
+}
+static void scope_cases(const char *only) {
+    assert(!only || !strcmp(only, "scope-unload") || !strcmp(only, "scope-same-epoch") ||
+           !strcmp(only, "scope-replacement") || !strcmp(only, "scope-disable") ||
+           !strcmp(only, "scope-completed"));
+    az_analysis_owner owner = analysis_owner_begin(6);
+    assert(owner.generation);
+    if (!only || !strcmp(only, "scope-unload")) scope_active_unload(owner, 0);
+    if (!only || !strcmp(only, "scope-same-epoch")) scope_active_unload(owner, 1);
+    if (!only || !strcmp(only, "scope-replacement")) scope_replacement(owner);
+    if (!only || !strcmp(only, "scope-disable")) scope_queued_disable(owner);
+    if (!only || !strcmp(only, "scope-completed")) scope_completed_receipts(owner);
+    analysis_runtime_retire(analysis_owner_retire(owner.slot));
+}
+
 #include "test_api.inc"
 int main(int argc, char **argv) {
-    assert(argc == 3);
+    assert(argc == 3 || argc == 4);
     audio = argv[1];
     az_analysis_capabilities_v1 caps = {.size = sizeof caps};
     assert(analysis_runtime_capabilities(&caps) == AZ_OK && caps.max_workers == 3);
     analysis_fixture_fail_thread_start();
     assert(analysis_runtime_start(argv[2]) == AZ_FAILED);
     assert(analysis_runtime_start(argv[2]) == AZ_OK);
+    if (argc == 4) {
+        scope_cases(argv[3]);
+        analysis_runtime_shutdown();
+        puts("Selected copied deck-status scope regression passed");
+        return 0;
+    }
     az_analysis_owner owner = analysis_owner_begin(0);
     public_contract(owner);
     invalid_requests(owner);
@@ -356,6 +531,7 @@ int main(int argc, char **argv) {
     capacity_and_retirement(owner);
     core_publication_retirement();
     automatic_operation();
+    scope_cases(NULL);
     analysis_runtime_shutdown();
     assert(atomic_load(&releases) <= atomic_load(&acquisitions));
     puts("Core runtime computation, copied results, owner retirement, capacity and link outcomes passed");
