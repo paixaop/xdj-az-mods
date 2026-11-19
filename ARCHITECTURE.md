@@ -170,7 +170,7 @@ existing `azstem.so` ownership and cross-library discovery interface.
 | `features.def` | The one declaration of every Mod Menu row: enum, settings key, label, parent, kind, flags, the legacy `azmod.cfg` slot and the help text (section 5, "Persistence") |
 | `azfeatures.h`, `azfeatures.c` | The row table built from `features.def` plus the rows mods register: values, parents, pins and the `azmod.cfg` slot mapping; pure logic, included by `menu.c` |
 | `azconf.h`, `azconf.c` | `azmod.conf`: reading and writing the settings file, the migration from 1.2.2's `azmod.cfg` and the copy kept for a rollback; its own translation unit |
-| `azmod-mod.h` | The community mod ABI (v1) and `AZ_CORE_VERSION`: the same file as `include/azmod-mod.h` in the [AZ-MODS SDK](https://github.com/Kyle-Hosman/az-mods-sdk) |
+| `azmod-mod.h` | The community mod ABI (v2) and `AZ_CORE_VERSION`: the same file as `include/azmod-mod.h` in the [AZ-MODS SDK](https://github.com/Kyle-Hosman/az-mods-sdk) |
 | `onelibrary_key_emulator.c` | Emulator-only `sqlite3_*` interposers: plain pass-through unless `/home/root/settings/azmod-onelibrarykey.on` exists, a flag for the emulator image only (on a deck it would force a wrong key into EP147's database connections) |
 | `eyeicon.h`, `menu_icons.h`, `stemsmark.h`, `vsbar.h` | Embedded image data drawn by the modules above |
 | `icons/` | Source SVGs for the menu icons; licenses and credits in `SOURCES.txt`, the `LICENSE-*` files beside them and the top-level `NOTICE` |
