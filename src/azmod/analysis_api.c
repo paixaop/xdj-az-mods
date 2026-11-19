@@ -25,6 +25,22 @@ static int sdk_analysis_result(const char *id, uint64_t request, az_analysis_res
                                 az_vocal_frame_v1 *vocals, uint32_t vc) {
     return analysis_runtime_result(sdk_analysis_caller(id, CM_RA()), request, out, phrases, pc, vocals, vc);
 }
+
+static int sdk_vocal_intervals(const char *id, const az_track_ref *track, az_vocal_snapshot_v1 *out,
+                               az_vocal_interval *intervals, uint32_t capacity) {
+    if (g_cm_on_ui || g_sdk_on_tap_thread) return AZ_INVALID;
+    int slot = st_mod_owner(id, CM_RA(), "vocal_intervals");
+    if (slot < 0) return AZ_INVALID;
+    return analysis_vocal_intervals(analysis_owner_for_caller((unsigned) slot), track, out, intervals, capacity);
+}
+static int sdk_vocal_intervals_loaded(const char *id, int deck, uint64_t load, az_vocal_snapshot_v1 *out,
+                                      az_vocal_interval *intervals, uint32_t capacity) {
+    if (g_cm_on_ui || g_sdk_on_tap_thread) return AZ_INVALID;
+    int slot = st_mod_owner(id, CM_RA(), "vocal_intervals_loaded");
+    if (slot < 0) return AZ_INVALID;
+    return analysis_vocal_intervals_loaded(analysis_owner_for_caller((unsigned) slot), deck, load, out, intervals, capacity);
+}
+
 static const az_analysis_v1 sdk_analysis = {
     .abi = AZ_ANALYSIS_ABI, .size = sizeof sdk_analysis,
     .capabilities = analysis_runtime_capabilities,

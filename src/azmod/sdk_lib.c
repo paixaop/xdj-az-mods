@@ -471,7 +471,7 @@ static int sdk_lib_spool_admit_detail(int stick, char reason[128]) {
     __atomic_store_n(&g_ls_leftover, 1, __ATOMIC_RELEASE);
     return AZ_OK;
 }
-static int sdk_lib_spool_admit(int stick) {
+int az_analysis_spool_admit(int stick) {
     char reason[128];
     return sdk_lib_spool_admit_detail(stick, reason);
 }
@@ -483,3 +483,5 @@ static int sdk_lib_spool_kick(const char *id, int stick) {
     cm_logf(c, !!rc, "lib_spool_kick: USB %d admission result %d %s", stick + 1, rc, reason);
     return rc ? -1 : 0;
 }
+
+int az_storage_sql_ready(void) { return sdk_sq_resolve(); }

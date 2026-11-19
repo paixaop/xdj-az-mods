@@ -299,6 +299,11 @@ static void *sd_thread_entry(void *p) {
     return r;
 }
 
+#ifndef SDK_PROC_IMPL
+static az_analysis_owner sd_thread_lifetime(unsigned owner) {
+    return g_cm_on_ui ? analysis_owner_get(owner) : analysis_owner_for_caller(owner);
+}
+#endif
 /* az_core_v1.thread_start: 0 = started. */
 static int sd_thread_start(const char *id, const char *name, void *(*fn)(void *), void *arg) {
     cm_mod *c = cm_self(id, CM_RA(), "thread_start");
@@ -327,7 +332,7 @@ static int sd_thread_start(const char *id, const char *name, void *(*fn)(void *)
     s->arg = arg;
     s->owner = owner;
 #ifndef SDK_PROC_IMPL
-    s->analysis_owner = g_cm_on_ui ? analysis_owner_get((unsigned) owner) : analysis_owner_for_caller((unsigned) owner);
+    s->analysis_owner = sd_thread_lifetime((unsigned) owner);
 #endif
     snprintf(s->name, sizeof s->name, "%s", name && *name ? name : c->id);
     pthread_attr_t at;

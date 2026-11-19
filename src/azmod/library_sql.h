@@ -14,5 +14,6 @@ struct az_library_sql {
     int ok;
 };
 const struct az_library_sql *az_storage_sql(void);
+int az_storage_sql_ready(void);
 void *sdk_db_open(const char *database);
 #endif

@@ -131,7 +131,7 @@ static int sa_load_cell_ready(const struct ds_cell *cell, uint64_t load) {
            cell->info.scope == AZ_STATUS_LOAD_SCOPE && cell->info.scope_id == load &&
            cell->bytes == sizeof(az_track_ref);
 }
-static int sa_loaded_ref(unsigned deck, uint64_t load, az_track_ref *out) {
+int az_status_loaded_reference(unsigned deck, uint64_t load, az_track_ref *out) {
     if (deck >= 4 || !load || !out) return AZ_INVALID;
     int rc = AZ_BUSY;
     pthread_mutex_lock(&ds.mu);

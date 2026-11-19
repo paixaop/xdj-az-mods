@@ -1569,7 +1569,12 @@ static void sdk_ui_tick(void);
 
 #include "sdk_status.c"
 #ifndef SDK_PROC_IMPL
-#include "sdk_analysis_service.c"
+#include "analysis_native_adapter.h"
+const char *az_analysis_state_dir(void) { return CM_STATE; }
+int az_analysis_thread_create(pthread_t *thread, const pthread_attr_t *attributes,
+                              void *(*entry)(void *), void *argument) {
+    return az_thread_create(thread, attributes, entry, argument);
+}
 #include "analysis_api.c"
 #endif
 #ifndef SDK_PROC_IMPL

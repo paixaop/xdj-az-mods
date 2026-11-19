@@ -4018,7 +4018,7 @@ control "sdk track data: duplicate IDs merged across sources" "$d/control"
 if [ "$(uname -s)" = Linux ]; then
     $CC "${CFLAGS[@]}" $SDK_EXPORT -pthread -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$OUT/sdkdata/provider" $T/sdktrack_test.c guest/azmod/sdk_command_engine.c guest/azmod/track_storage.c -lsqlite3 -ldl -lm
     suite "sdk stored track disk provider" "$OUT/sdkdata/provider"
-    $CC "${CFLAGS[@]}" $SDK_EXPORT -Wno-unused-function -Wno-missing-field-initializers -pthread -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -DLSAPPLY_INC="\"$OUT/lsapply/real.inc\"" -o "$d/analysis-service" $T/sdkanalysis_service_test.c guest/azmod/analysis_owner.c guest/azmod/sdk_command_engine.c guest/azmod/track_storage.c -lsqlite3 -ldl -lm
+    $CC "${CFLAGS[@]}" $SDK_EXPORT -Wno-unused-function -Wno-missing-field-initializers -pthread -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -DLSAPPLY_INC="\"$OUT/lsapply/real.inc\"" -o "$d/analysis-service" $T/sdkanalysis_service_test.c guest/azmod/analysis_owner.c guest/azmod/analysis_source.c guest/azmod/analysis_encoding.c guest/azmod/sdk_command_engine.c guest/azmod/track_storage.c -lsqlite3 -ldl -lm
     suite "sdk analysis source leases and USB persistence" "$d/analysis-service"
     for v in database-alias database-uri missing-parent wave-errors analysis-binding track-fifo wave-fifo analysis-path-limit preview-extension; do
         $CC "${CFLAGS[@]}" $SDK_EXPORT -pthread -I"$d/review/$v" -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$d/$v" $T/sdktrack_test.c guest/azmod/sdk_command_engine.c "$d/review/$v/track_storage.c" -lsqlite3 -ldl -lm
