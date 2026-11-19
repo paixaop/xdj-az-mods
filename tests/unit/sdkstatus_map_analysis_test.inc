@@ -134,7 +134,7 @@ void test_make_body(void *result, const void *argument) {
     }
     memcpy(result, &p, sizeof p);
 }
-extern void test_make(void);
+extern struct native_result_storage test_make(const struct az_native_phrase_atom_ref *argument);
 static void test_memory(struct AnalysisMemory *memory, const void *data, size_t size) {
     if ((int) memory_calls++ == memory_failure) fixture_raise();
     memory->data = (uintptr_t) malloc(size);
@@ -171,7 +171,7 @@ int test_analysis(const struct azn_maps_api *api) {
     test_analysis_bindings();
     struct aznm_packet initial = {0};
     assert(api->capture(0, epoch, &initial) == AZ_UNSUPPORTED);
-    analysis_ops.make = (az_native_phrase_make_fn) test_make;
+    analysis_ops.make = test_make;
     analysis_ops.memory = test_memory;
     analysis_ops.memory_drop = test_memory_drop;
     analysis_ops.grant = test_grant;

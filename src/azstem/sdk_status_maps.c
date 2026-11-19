@@ -23,18 +23,31 @@ static const Profile profiles[] = {
     {0x2612530, 0x2754518, 0x2798328, 0x29280a0, 0x2797d30},
     {0x294c9b0, 0x2a9cfa8, 0x2ae4df8, 0x2c99430, 0x2ae4800}};
 static const Profile *profile;
-#define DEFINE_READ(type, name)                                         \
-    static type read_##name(uintptr_t object, unsigned offset) {        \
-        type value;                                                     \
-        memcpy(&value, (const void *) (object + offset), sizeof value); \
-        return value;                                                   \
-    }
-DEFINE_READ(uintptr_t, ptr)
-DEFINE_READ(uint32_t, u32)
-DEFINE_READ(int64_t, i64)
-DEFINE_READ(int, int)
-DEFINE_READ(double, double)
-#undef DEFINE_READ
+static uintptr_t read_ptr(uintptr_t object, unsigned offset) {
+    uintptr_t value;
+    memcpy(&value, (const void *) (object + offset), sizeof value);
+    return value;
+}
+static uint32_t read_u32(uintptr_t object, unsigned offset) {
+    uint32_t value;
+    memcpy(&value, (const void *) (object + offset), sizeof value);
+    return value;
+}
+static int64_t read_i64(uintptr_t object, unsigned offset) {
+    int64_t value;
+    memcpy(&value, (const void *) (object + offset), sizeof value);
+    return value;
+}
+static int read_int(uintptr_t object, unsigned offset) {
+    int value;
+    memcpy(&value, (const void *) (object + offset), sizeof value);
+    return value;
+}
+static double read_double(uintptr_t object, unsigned offset) {
+    double value;
+    memcpy(&value, (const void *) (object + offset), sizeof value);
+    return value;
+}
 static bool typed(uintptr_t object, uintptr_t vtable) {
     return object >= 0x10000 && !(object & 7) && read_ptr(object, 0) == vtable;
 }
