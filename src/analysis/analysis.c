@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
-#include "azmod-timestamps.h"
+#include "../common/aztimestamp.h"
 #include "phrase.h"
 struct ta_result {
     az_analysis_result_v1 view;

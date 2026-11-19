@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-only
 .DEFAULT_GOAL := all
-AZ_SDK ?= ../az-mods-sdk
-AZ_SDK_INCLUDE ?= $(AZ_SDK)/include
+AZ_SDK_INCLUDE ?= src/azmod
 OUT ?= out/analysis
 ANALYSIS_ASSETS ?= assets/analysis
 CC = cc
@@ -9,7 +8,7 @@ AR ?= ar
 PYTHON ?= python3
 SANITIZE ?=
 CPPFLAGS += -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE -I$(AZ_SDK_INCLUDE) \
-            -Isrc/analysis -Isrc/analysis/dsp/include -Ivendor/analysis/faad/include -Ivendor/analysis/faad/libfaad -Ivendor/analysis/mimalloc/include
+            -Isrc/analysis -Isrc/analysis/dsp/include -Ivendor/analysis/dsp -Ivendor/analysis/faad/include -Ivendor/analysis/faad/libfaad -Ivendor/analysis/mimalloc/include
 CFLAGS += -std=c11 -O2 -Wall -Wextra -Werror -fPIC -fvisibility=hidden \
           -ffp-contract=off -fno-omit-frame-pointer -fno-optimize-sibling-calls -fexceptions -fasynchronous-unwind-tables -pthread
 LDLIBS += -lm -pthread

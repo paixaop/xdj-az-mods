@@ -9,7 +9,7 @@
 #include <stddef.h>
 #include <neaacdec.h>
 #include "aac.h"
-#include "azmod-timestamps.h"
+#include "../common/aztimestamp.h"
 
 /* Each MP4 parser has a separate 16 MiB allocation budget. It cannot consume
  * the mod's address space with hostile sample-table counts. The thread-local
