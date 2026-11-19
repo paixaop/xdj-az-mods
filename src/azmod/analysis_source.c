@@ -849,14 +849,9 @@ static struct sa_job *sa_find_owned_job(uint64_t id, int owner) {
         if (sa_jobs[i].id == id && sa_jobs[i].owner == owner) found = &sa_jobs[i];
     return found;
 }
-static int sa_usb_register(struct sa_job *j, uint32_t phrases, struct sa_open_result *result) {
-    if (pthread_mutex_lock(&sa_mutex)) {
-        sa_job_drop(j);
-        return AZ_FAILED;
-    }
+static int sa_usb_bind(struct sa_job *j, uint32_t phrases, struct sa_open_result *result) {
     struct sa_job *found = sa_find_owned_job(result->job, j->owner);
     if (!found || found->lifetime.generation != j->lifetime.generation) {
-        pthread_mutex_unlock(&sa_mutex);
         sa_job_drop(j);
         return AZ_STALE;
     }
@@ -865,6 +860,14 @@ static int sa_usb_register(struct sa_job *j, uint32_t phrases, struct sa_open_re
     result->needed = found->needed;
     if (rc == ANALYSIS_SOURCE_COMPLETE && found->needs_link) rc = AZ_PENDING;
     if (rc) sa_job_drop(found);
+    return rc;
+}
+static int sa_usb_register(struct sa_job *j, uint32_t phrases, struct sa_open_result *result) {
+    if (pthread_mutex_lock(&sa_mutex)) {
+        sa_job_drop(j);
+        return AZ_FAILED;
+    }
+    int rc = sa_usb_bind(j, phrases, result);
     pthread_mutex_unlock(&sa_mutex);
     return rc;
 }
@@ -1137,7 +1140,7 @@ int analysis_vocal_intervals_loaded(az_analysis_owner lifetime, int deck, uint64
                                       az_vocal_interval *intervals, uint32_t capacity) {
     int owner = sa_source_owner_index(lifetime);
     if (!analysis_owner_current(lifetime)) return AZ_STALE;
-    if (owner < 0 || deck < 0 || deck >= 4 || !load ||
+    if (deck < 0 || deck >= 4 || !load ||
         !sv_output_valid(out, intervals, capacity)) return AZ_INVALID;
     const struct azstatus_native_v1 *api = sa_native();
     const struct azn_maps_api *maps = sv_loaded_maps(api);
