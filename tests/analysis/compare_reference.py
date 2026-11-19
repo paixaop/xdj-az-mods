@@ -6,6 +6,7 @@ parser=argparse.ArgumentParser(description='Compare the C analysis test driver w
 parser.add_argument('reference', type=Path)
 parser.add_argument('probe', type=Path)
 parser.add_argument('artifacts', type=Path, help='output directory outside the checkout')
+parser.add_argument('--assets', type=Path, required=True, help='private model asset directory outside the checkout')
 args=parser.parse_args()
 mod=Path(__file__).resolve().parents[2]
 base=args.artifacts.resolve()
@@ -33,8 +34,8 @@ def read_old(path):
 modes=[('sequential',p,v) for p in (1,2,3) for v in (1,2,3)] + [('concurrent',1,1),('concurrent',1,2),('concurrent',2,1)]
 rows=[]
 for i,(mode,phrase,vocal) in enumerate(modes):
- env=dict(os.environ,TRACK_ANALYSIS_STAGE_MODE=mode,TRACK_ANALYSIS_PHRASE_THREADS=str(phrase),TRACK_ANALYSIS_PVDI_THREADS=str(vocal),TRACK_ANALYSIS_PVDI_MODEL=str(mod/'assets/analysis/pvdi-model.bin'))
- for kind,cmd in [('old',[str(old),str(base/'repeated-voice.wav'),str(base/'grid.DAT'),'120',str(base/f'old-{i}.TA03'),'-','40']),('c',[str(new),str(base/'repeated-voice.wav'),str(mod/'assets/analysis'),'40',str(base/f'c-{i}.json')])]:
+ env=dict(os.environ,TRACK_ANALYSIS_STAGE_MODE=mode,TRACK_ANALYSIS_PHRASE_THREADS=str(phrase),TRACK_ANALYSIS_PVDI_THREADS=str(vocal),TRACK_ANALYSIS_PVDI_MODEL=str(args.assets.resolve()/'pvdi-model.bin'))
+ for kind,cmd in [('old',[str(old),str(base/'repeated-voice.wav'),str(base/'grid.DAT'),'120',str(base/f'old-{i}.TA03'),'-','40']),('c',[str(new),str(base/'repeated-voice.wav'),str(args.assets.resolve()),'40',str(base/f'c-{i}.json')])]:
   env['TRACK_ANALYSIS_PVDI_FEATURES']=str(base/f'{kind}-{i}.features');env['TRACK_ANALYSIS_PVDI_PROBABILITIES']=str(base/f'{kind}-{i}.probabilities')
   start=time.monotonic(); r=subprocess.run(cmd,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=180)
   (base/f'{kind}-{i}.log').write_bytes(r.stdout+r.stderr)
