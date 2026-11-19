@@ -1042,7 +1042,7 @@ static int fo_locator_valid(const struct fo_locator *where) {
 }
 static int fo_source_root(struct fo_read *r, const struct fo_locator *where) {
     unsigned found = 0;
-    for (unsigned i = 0; i < 2; i++) {
+    for (int i = 0; i < 2; i++) {
         struct st_source source;
         if (!st_source_read(i, &source) && strlen(source.mount) == where->length - 8 && !memcmp(where->root, source.mount, where->length - 8)) {
             r->source = source;
@@ -1088,7 +1088,7 @@ static uint32_t fo_find_content(struct fo_read *r, const struct fo_locator *wher
 }
 static int fo_probe_files(struct fo_read *r, const struct st_resolution *row) {
     for (unsigned f = 0; f < 2; f++) {
-        ss_file_probe(&r->source, row, f, &r->files[f]);
+        ss_file_probe(&r->source, row, f != 0, &r->files[f]);
         if (!r->files[f].path[0] || (r->files[f].rc && r->files[f].rc != AZ_UNSUPPORTED) ||
             (!r->files[f].rc && r->files[f].device != r->source.device)) return 0;
     }
@@ -1424,7 +1424,7 @@ static int fi_path_valid(const char *path, size_t bytes, const uint16_t *audio, 
 }
 static int fi_source_paths(const char *actual, size_t bytes, char root[1024], char analysis[1024]) {
     unsigned found = 0;
-    for (unsigned port = 0; port < 2; port++) {
+    for (int port = 0; port < 2; port++) {
         struct st_source source;
         if (st_source_read(port, &source)) continue;
         size_t mount = strlen(source.mount);
@@ -1572,7 +1572,7 @@ static int fi_install_watch(struct fo_read *read, const uint64_t tokens[2]) {
     struct st_resolution row = {0};
     memcpy(row.analysis, read->files[0].relative, sizeof row.analysis);
     for (unsigned file = 0; file < 2; file++)
-        if (!tokens[file]) ss_file_probe(&read->source, &row, file, &read->files[file]);
+        if (!tokens[file]) ss_file_probe(&read->source, &row, file != 0, &read->files[file]);
     ss_arm_paths(&read->watch, read->files);
     /* Install the receiving watch before checking the original watches again.
      * This closes the handoff interval even if file bytes later repeat. */
@@ -2337,6 +2337,8 @@ static int ss_finish_saved(struct ss_saved_revision *q, unsigned *index) {
     int finished = !q->targets;
     if (finished) {
         --ss_saved_count;
+        /* Move overlapping pointer slots, preserving the FIFO order of owned jobs. */
+        // NOLINTNEXTLINE(bugprone-sizeof-expression): queue elements are pointers, not saved-revision records.
         memmove(ss_saved_queue + (*index), ss_saved_queue + (*index) + 1, (ss_saved_count - (*index)) * sizeof *ss_saved_queue);
         ss_saved_bytes -= q->total;
     } else ++(*index);

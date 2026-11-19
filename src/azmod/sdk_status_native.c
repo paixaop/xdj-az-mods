@@ -850,6 +850,7 @@ struct ds_map_receipt {
     int availability[2];
 };
 static int ds_map_samples(const struct azn_maps_api *api, const struct aznm_component *part, unsigned count, struct ds_map_receipt *map) {
+    if (!count) return AZ_AVAIL_EMPTY;
     map->ticks = malloc(count * sizeof *map->ticks);
     if (!map->ticks) return AZ_LIMIT;
     uint32_t samples = 0, rate = 0;

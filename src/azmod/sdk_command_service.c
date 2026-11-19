@@ -74,6 +74,9 @@ static int sdk_exit_delivery_admission(const struct azexit_delivery_v2 *delivery
     return delivery->reserve && delivery->close_local && delivery->drive && delivery->ready;
 }
 static const struct azexit_delivery_v2 *sdk_exit_delivery(const struct azexit_service *api) {
+    /* The minimum prefix ends after the pointer member, not its target object.
+     * Using the current whole struct size would reject future appended prefixes. */
+    // NOLINTNEXTLINE(bugprone-sizeof-expression): exact ABI member width, covered by short-prefix tests.
     if (!api || api->version != 1 || api->size < AZEXIT_SERVICE_DELIVERY_SIZE) return NULL;
     const struct azexit_delivery_v2 *delivery = api->delivery;
     return delivery && delivery->size >= sizeof *delivery && delivery->version == AZEXIT_DELIVERY_VERSION &&

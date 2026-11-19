@@ -828,7 +828,7 @@ static int ds_key_mode(const char *text, int *major) {
 static int ds_pitch(const char *text, int *pitch, int *major) {
     if (!text || !*text) return 0;
     if (ds_camelot_pitch(text, pitch, major)) return 1;
-    static const unsigned note[] = {9, 11, 0, 2, 4, 5, 7}; /* A..G */
+    static const int note[] = {9, 11, 0, 2, 4, 5, 7}; /* A..G */
     if (*text < 'A' || *text > 'G') return 0;
     int n = note[*text++ - 'A'];
     text = ds_accidental(text, &n);
@@ -1529,8 +1529,8 @@ static int ds_path_contiguous(const struct ds_path_reduction *r) {
     return !memcmp(r->previous, &r->from, sizeof r->from) || (r->previous->kind == AZ_PHRASE_START &&
                                                               ds_opening_at(&r->map, &p->from, p->from_window_rate, p->from_window_samples));
 }
-static int ds_path_action_ready(const struct ds_path_reduction *r, const az_status_occurrence_v1 *action) {
-    return r->path && r->path->kind == DS_PATH_ACTION && action && r->has_from && r->has_to &&
+static int ds_path_action_ready(const struct ds_path_reduction *r) {
+    return r->path && r->path->kind == DS_PATH_ACTION && r->has_from && r->has_to &&
            r->previous && ds_endpoint_known(&r->map, r->previous) && memcmp(&r->from, &r->to, sizeof r->from);
 }
 static int ds_path_lost(const struct ds_path_reduction *r) {
@@ -1552,7 +1552,7 @@ static void ds_path_reduce(struct ds_deck *d, const struct ds_path *p, const az_
     if (ds_path_contiguous(&r)) {
         az_status_phrase_endpoint_v1 active = *r.previous;
         ds_crossings(d, &r.map, p, &active, now, &fail);
-    } else if (ds_path_action_ready(&r, action)) {
+    } else if (action && ds_path_action_ready(&r)) {
         *pair = (az_status_phrase_transition_v1) {.size = sizeof *pair, .version = AZ_DATA_VERSION, .discontinuity = action->kind, .from = r.from, .to = r.to};
         *routes |= DS_PHRASE_ROUTE;
     } else if (ds_path_lost(&r)) *lost |= DS_PHRASE_ROUTE;

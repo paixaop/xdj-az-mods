@@ -2,6 +2,14 @@
 static unsigned native_map_reads, native_map_releases, native_map_pairs, native_map_holds, native_map_seeds;
 static int native_map_clock_result = AZ_OK, native_map_origins_present = 1;
 static uint32_t native_map_clock_rate = 100;
+static int native_map_empty_rows;
+static int native_map_rows(const struct aznm_component *part, unsigned kind, void *rows, uint32_t capacity, uint32_t *count) {
+    if (native_map_empty_rows && rows && kind == AZNM_GRID) {
+        *count = 0;
+        return AZ_OK;
+    }
+    return legacy_map_rows(part, kind, rows, capacity, count);
+}
 static int native_map_exact_samples(const struct aznm_component *part, int64_t *ticks, uint32_t capacity, uint32_t *count, uint32_t *rate) {
     assert(part->content == 1 && capacity == 3);
     ++native_map_reads;
@@ -21,7 +29,7 @@ static void native_map_seed(unsigned deck) {
     ++native_map_seeds;
 }
 static const struct azn_maps_api *native_map_exact_api(void) {
-    static const struct azn_maps_api api = {.size = sizeof api, .version = 1, .read = legacy_map_rows, .release = native_map_release, .seed = native_map_seed, .read_samples = native_map_exact_samples};
+    static const struct azn_maps_api api = {.size = sizeof api, .version = 1, .read = native_map_rows, .release = native_map_release, .seed = native_map_seed, .read_samples = native_map_exact_samples};
     return &api;
 }
 static int native_map_origins(const struct aznm_packet *packet, uint64_t tokens[3]) {
@@ -81,9 +89,18 @@ static void test_native_map_clocks(void) {
     ++r.epoch; /* a taken obsolete packet must still release its retained rows */
     ds_native_apply(&r);
     assert(native_map_releases == 5 && native_map_reads == 4);
+    --r.epoch;
+    native_map_empty_rows = 1;
+    ++r.map.grid.revision;
+    unsigned reads = native_map_reads;
+    ds_native_apply(&r);
+    grid = cell(AZ_STATUS_GRID, AZ_STATUS_GRID_CURRENT);
+    assert(grid && grid->info.info.availability == AZ_AVAIL_EMPTY && !grid->info.count);
+    assert(native_map_reads == reads && !grid->clock.ticks);
+    native_map_empty_rows = 0;
     atomic_store(&ds_native_api, NULL);
     atomic_store(&ds_file_cues, NULL);
-    puts("PASS exact native map clocks, rate/limit rejection, paired FILE custody and obsolete packet release");
+    puts("PASS exact native map clocks, empty second reads, rate/limit rejection, paired FILE custody and obsolete packet release");
 }
 static unsigned native_load_seeds, native_metadata_seeds, native_stems_seeds;
 static int native_load_seed_available = 1;
