@@ -18,6 +18,9 @@ static void changed(const az_deck_status_event_v1 *e, void *user) {
     }
 }
 static int init(const az_core_v1 *core) {
+    if (!AZ_HAS(core, library_service) || core->library_service(1) ||
+        !core->library_service(AZ_LIBRARY_ABI)) return -1;
+    puts("ABI1 library rejected");
     if (!AZ_HAS(core, observation_service)) return -1;
     lib = core->observation_service(AZ_OBSERVATION_ABI);
     if (!AZ_OBSERVATION_HAS(lib, on_deck_status) || !AZ_OBSERVATION_HAS(lib, deck_status_release)) return -1;

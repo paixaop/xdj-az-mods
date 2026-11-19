@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
-/* Compile against the previous public header. Both loaders must run this same
- * ELF and honor a write and read through its original service table. */
+/* Compile against the previous public header. Its original loader runs this
+ * same ELF and honors a setting round trip; the ABI2 loader must refuse it. */
 #include "azmod-mod.h"
 #include <stdio.h>
 #define ID "legacy-status-client"
