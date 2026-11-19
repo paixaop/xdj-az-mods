@@ -492,6 +492,8 @@ static void nonblocking_publication_retirement(const az_analysis_result_v1 *resu
     assert(request.outcome == AZ_STALE && !fixture_published);
     assert(st_disk_sig(dat) == before_dat && st_disk_sig(ext) == before_ext);
     analysis_source_release(&request.input);
+    for (unsigned i = 0; i < 1000 && !atomic_load(&fixture_released); i++) usleep(1000);
+    assert(atomic_load(&fixture_released) == 1);
     if (!core) analysis_owner_thread_bind(analysis_owner_begin(0));
     fixture_released = 0;
     puts(core ? "Core publication: retirement during native validation prevents file/native writes" : "Mod publication: retirement during native validation prevents file/native writes");
@@ -568,6 +570,10 @@ static void busy_publication(const az_analysis_result_v1 *phrases, int scenario)
     close(fd);
     analysis_source_release(&input);
     assert(!input.lease);
+    /* Retirement may detach the job before the cleaner releases native owners
+     * outside its lock. Observe that release before resetting fixture counts. */
+    for (unsigned i = 0; i < 1000 && !atomic_load(&fixture_released); i++) usleep(1000);
+    assert(atomic_load(&fixture_released) == 1);
     if (scenario == 4) analysis_owner_thread_bind(analysis_owner_begin(0));
     fixture_current = 1;
     for (unsigned i = 0; i < 3; i++) assert(!unlink(paths[i]));
