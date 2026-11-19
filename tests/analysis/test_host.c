@@ -31,7 +31,10 @@ void analysis_runtime_retire(az_analysis_owner owner) {
     assert(owner.generation == accepted.generation && !analysis_owner_current(owner));
     ++retired;
 }
-void analysis_runtime_shutdown(void) { assert(retired > joined); ++joined; }
+void analysis_runtime_shutdown(void) {
+    assert(retired > joined);
+    ++joined;
+}
 void analysis_source_retire(az_analysis_owner owner) {
     assert(owner.generation == accepted.generation && !analysis_owner_current(owner));
     ++reclaimed;
@@ -45,8 +48,10 @@ static void diagnostic(const char *text) {
     ++diagnostics;
 }
 static void terminal(unsigned deck, uint64_t id, uint32_t state, int result) {
-    observations[deck] = (az_analysis_status_v1){.size = sizeof(az_analysis_status_v1),
-        .request_id = id, .state = state, .result = result};
+    observations[deck] = (az_analysis_status_v1) {.size = sizeof(az_analysis_status_v1),
+                                                  .request_id = id,
+                                                  .state = state,
+                                                  .result = result};
     strcpy(observations[deck].diagnostic, "native failure");
 }
 static void startup_and_retirement(void) {
@@ -99,18 +104,26 @@ static void result_delivery(void) {
     analysis_host_notices(banner, diagnostic);
     assert(banners == 1 && diagnostics == 2); /* cancellation never celebrates saved data */
 }
+static void reused_analysis_notices(void) {
+    unsigned before_banners = banners, before_diagnostics = diagnostics;
+    terminal(0, 8, AZ_ANALYSIS_COMPLETE, AZ_NOT_FOUND);
+    observations[0].diagnostic[0] = '\0';
+    analysis_host_notices(banner, diagnostic);
+    analysis_host_notices(banner, diagnostic);
+    assert(banners == before_banners && diagnostics == before_diagnostics);
+    terminal(0, 9, AZ_ANALYSIS_FAILED, AZ_NOT_FOUND);
+    analysis_host_notices(banner, diagnostic);
+    assert(banners == before_banners && diagnostics == before_diagnostics + 1);
+    analysis_host_notices(banner, diagnostic);
+    assert(banners == before_banners && diagnostics == before_diagnostics + 1);
+}
 static void presentation(void) {
-    struct { unsigned state; int result; const char *text; } cases[] = {
-        {0, AZ_OK, "Waiting"}, {AZ_ANALYSIS_QUEUED, AZ_OK, "Checking"},
-        {AZ_ANALYSIS_RUNNING, AZ_PENDING, "Analysing"},
-        {AZ_ANALYSIS_SAVED, AZ_PENDING, "waiting for library"},
-        {AZ_ANALYSIS_CANCELLED, AZ_OK, "cancelled"},
-        {AZ_ANALYSIS_COMPLETE, AZ_OK, "ready"},
-        {AZ_ANALYSIS_COMPLETE, AZ_NOT_FOUND, "ready"},
-        {AZ_ANALYSIS_FAILED, AZ_UNSUPPORTED, "Unsupported"},
-        {AZ_ANALYSIS_FAILED, AZ_STALE, "changed"},
-        {AZ_ANALYSIS_FAILED, AZ_FAILED, "failed"}
-    };
+    struct {
+        unsigned state;
+        int result;
+        const char *text;
+    } cases[] = {
+        {0, AZ_OK, "Waiting"}, {AZ_ANALYSIS_QUEUED, AZ_OK, "Checking"}, {AZ_ANALYSIS_RUNNING, AZ_PENDING, "Analysing"}, {AZ_ANALYSIS_SAVED, AZ_PENDING, "waiting for library"}, {AZ_ANALYSIS_CANCELLED, AZ_OK, "cancelled"}, {AZ_ANALYSIS_COMPLETE, AZ_OK, "ready"}, {AZ_ANALYSIS_COMPLETE, AZ_NOT_FOUND, "ready"}, {AZ_ANALYSIS_FAILED, AZ_UNSUPPORTED, "Unsupported"}, {AZ_ANALYSIS_FAILED, AZ_STALE, "changed"}, {AZ_ANALYSIS_FAILED, AZ_FAILED, "failed"}};
     assert(strstr(analysis_status_message(NULL, AZ_BUSY), "Updating"));
     assert(strstr(analysis_status_message(NULL, AZ_UNSUPPORTED), "unavailable"));
     for (unsigned i = 0; i < sizeof cases / sizeof *cases; ++i) {
@@ -121,6 +134,7 @@ static void presentation(void) {
 int main(void) {
     startup_and_retirement();
     result_delivery();
+    reused_analysis_notices();
     presentation();
     uint64_t previous = accepted.generation;
     analysis_host_shutdown();

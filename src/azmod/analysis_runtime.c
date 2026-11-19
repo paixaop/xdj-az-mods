@@ -213,16 +213,17 @@ static int ar_compute(struct ar_job *job, char error[160]) {
     return rc;
 }
 static void ar_finish(struct ar_job *job, int rc) {
+    int completed = rc == AZ_OK || rc == ANALYSIS_SOURCE_COMPLETE;
     job->publishing = 0;
     job->status.result = rc == ANALYSIS_SOURCE_COMPLETE ? AZ_NOT_FOUND : rc;
-    job->status.state = rc == AZ_OK || rc == ANALYSIS_SOURCE_COMPLETE ? AZ_ANALYSIS_COMPLETE : AZ_ANALYSIS_FAILED;
+    job->status.state = completed ? AZ_ANALYSIS_COMPLETE : AZ_ANALYSIS_FAILED;
     if (atomic_load(&job->cancelled)) {
         job->status.state = AZ_ANALYSIS_CANCELLED;
         job->status.result = AZ_STALE;
     }
-    if (rc == AZ_OK || rc == ANALYSIS_SOURCE_COMPLETE)
+    if (completed)
         job->status.completed_components = job->request.components;
-    if (!job->status.diagnostic[0] && rc)
+    if (!job->status.diagnostic[0] && !completed)
         snprintf(job->status.diagnostic, sizeof job->status.diagnostic, "analysis result %d", rc);
 }
 static void ar_publish_status(const struct ar_job *job) {
