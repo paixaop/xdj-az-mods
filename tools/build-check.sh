@@ -13,8 +13,13 @@ g=${1:-$(dirname "$0")/../../guest}
     exit 2
 }
 g=$(cd "$g" && pwd)
+project=$(cd "$g/.." && pwd)
+source_dir=$(basename "$g")
+[ -f "$project/src/analysis/build.mk" ] && [ -d "$project/vendor/analysis" ] || {
+    echo "build-check needs the source and vendor directories from one core checkout" >&2; exit 2;
+}
 mkdir -p "$g/out"; rm -f "$g/out/azmod.so" "$g/out/azstem.so"
-if ! docker run --rm --platform=linux/arm64 -v "$g":/g azmod-build:18.04 make -B -C /g CC=gcc azmod azstem >"$g/out/build-check.log" 2>&1; then
+if ! docker run --rm --platform=linux/arm64 -v "$project":/work azmod-build:18.04 make -B -C "/work/$source_dir" CC=gcc azmod azstem >"$g/out/build-check.log" 2>&1; then
     grep -m5 "error" "$g/out/build-check.log" >&2 || true
     echo "BUILD FAILED (log: $g/out/build-check.log)" >&2; exit 1
 fi
