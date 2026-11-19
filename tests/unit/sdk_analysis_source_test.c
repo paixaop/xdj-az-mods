@@ -1,5 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* Isolated AArch64 fixture. Production has no synthetic source registration. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #define AZ_STATUS_NATIVE_PRODUCER
 #include "../../src/common/azanalysis_native.h"
 #include "../../src/common/azloadobserver.h"
@@ -34,6 +37,8 @@ static int wait_decrypt(uintptr_t owner, const WeakTrack *weak, int generation) 
 #include <assert.h>
 #include <stdio.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
+#include <link.h>
 static bool loaded[4] = {true, true, false, false};
 static uint64_t load_epoch = 7, load_generation = 8;
 static unsigned char load_id[12] = {1, 0, 0, 0, 6, 0, 1, 0, 42, 0, 0, 0};
@@ -60,6 +65,57 @@ static int wait_result(uintptr_t owner, const WeakTrack *weak, int generation) {
     (void) generation;
     return native_result;
 }
+static uintptr_t install_address;
+static unsigned patch_calls, patch_mode;
+static int fixture_image(struct dl_phdr_info *info, size_t size, void *out) {
+    (void) size;
+    if (info->dlpi_name && *info->dlpi_name) return 0;
+    *(uintptr_t *) out = info->dlpi_addr;
+    return 1;
+}
+static int fixture_patch(uintptr_t address, void *replacement, void **original, const char *name) {
+    assert(address == install_address && replacement && original);
+    assert(!strcmp(name, "sdk-beatport-analysis"));
+    ++patch_calls;
+    *original = patch_mode == 2 ? (void *) wait_result : NULL;
+    return patch_mode != 0;
+}
+static void installer_child(void) {
+    uintptr_t base = 0;
+    assert(dl_iterate_phdr(fixture_image, &base) == 1);
+    install_address = base + 0xd39610;
+    const uintptr_t page_address = install_address & ~(uintptr_t) 4095;
+    void *page = mmap((void *) page_address, 4096, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(page == (void *) page_address);
+    assert(install_source(1, fixture_patch) == AZ_UNSUPPORTED);
+    assert(install_source(2, NULL) == AZ_UNSUPPORTED);
+    assert(install_source(2, fixture_patch) == AZ_UNSUPPORTED && !patch_calls);
+    const uint32_t words[] = {0xa9b57bfdu, 0x910003fdu, 0x6d0527e8u, 0x0f000408u};
+    memcpy((void *) install_address, words, sizeof words);
+    assert(install_source(2, fixture_patch) == AZ_FAILED && patch_calls == 1);
+    patch_mode = 1;
+    assert(install_source(2, fixture_patch) == AZ_FAILED && patch_calls == 2);
+    patch_mode = 2;
+    assert(install_source(2, fixture_patch) == AZ_OK && patch_calls == 3);
+    assert(install_source(2, fixture_patch) == AZ_OK && patch_calls == 3);
+    assert(install_source(1, fixture_patch) == AZ_UNSUPPORTED && patch_calls == 3);
+    assert(!munmap(page, 4096));
+}
+static void checked_installation(void) {
+    /* Installation changes process-global native bias/state. Keep this actual
+     * production installer test separate from the fixed-address ABI fixture. */
+    pid_t child = fork();
+    assert(child >= 0);
+    if (!child) {
+        installer_child();
+        exit(0);
+    }
+    int status = 0;
+    assert(waitpid(child, &status, 0) == child);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    puts("Beatport source installer: profile gate, failed patch, trampoline and idempotence passed");
+}
 struct Native {
     unsigned char bytes[0x200];
 };
@@ -83,6 +139,7 @@ static struct azn_analysis_source opening(unsigned deck) {
     return out;
 }
 int main() {
+    checked_installation();
     assert(install_source(1, NULL) == AZ_UNSUPPORTED);
     // Real AAPCS64 nontrivial x8 return exercised through the fixed profile entry.
     void *page = mmap((void *) 0x178d000, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
