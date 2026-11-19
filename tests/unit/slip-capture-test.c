@@ -304,6 +304,9 @@ int main(int argc, char **argv) {
         slip_capture_get_stats(NULL);
     } else if (!strcmp(argv[1], "reject")) {
         slip_capture_stats before = stats();
+        errno = EINTR;
+        azdiag_slip_dispatch_call(NULL);
+        assert(errno == EINTR && stats().rejected == before.rejected + 1);
         FRAME(wrong, 255, 1);
         wrong.call.caller_link = caller + 4;
         frame_invoke(&wrong);
@@ -316,7 +319,7 @@ int main(int argc, char **argv) {
         FRAME(kind, 255, 1);
         kind.call.kind = AZCE_KIND_SELECTION;
         frame_invoke(&kind);
-        assert(stats().saved == 0 && stats().rejected == before.rejected + 4);
+        assert(stats().saved == 0 && stats().rejected == before.rejected + 5);
         absent(1);
         FRAME(valid, 255, 1);
         frame_invoke(&valid);

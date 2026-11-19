@@ -112,11 +112,16 @@ static void capture_frame(const struct azce_call *call) {
 
 void azdiag_slip_dispatch_call(struct azce_call *call) {
     int incoming_errno = errno;
+    if (!call) {
+        count_loss(&rejected);
+        errno = incoming_errno;
+        return;
+    }
     capture_frame(call);
     errno = incoming_errno;
     /* Gate and every capture operation finish before native forwarding.
      * No post-original work changes its result, errno or exception unwinding. */
-    if (call) azdiag_slip_invoke_original(call);
+    azdiag_slip_invoke_original(call);
 }
 
 int slip_capture_read(uint64_t sequence, struct slip_capture_record *out) {

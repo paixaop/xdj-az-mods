@@ -16,7 +16,11 @@ class SlipBinding(unittest.TestCase):
         firmware=pathlib.Path(os.environ.get("AZ_FIRMWARE_ROOT",str(ROOT.parent/"anchor/firmware")))
         if not (firmware/"EP147-1.30").exists():self.skipTest("original firmware inputs unavailable")
         header=(ROOT/"src/azmod/slip_diagnostic/profiles.h").read_text()
-        profiles=re.findall(r'\{"([^"]+)","([^"]+)",\{(0x[0-9a-f]+),(\d+),"([0-9a-f]+)"\},\{(0x[0-9a-f]+),(\d+),"([0-9a-f]+)"\},(0x[0-9a-f]+)\}',header)
+        profile_pattern=(r'\{\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*'
+                         r'\{\s*(0x[0-9a-f]+)\s*,\s*(\d+)\s*,\s*"([0-9a-f]+)"\s*\}\s*,\s*'
+                         r'\{\s*(0x[0-9a-f]+)\s*,\s*(\d+)\s*,\s*"([0-9a-f]+)"\s*\}\s*,\s*'
+                         r'(0x[0-9a-f]+)\s*\}')
+        profiles=re.findall(profile_pattern,header)
         self.assertEqual(len(profiles),2)
         for version,tag,cb,cb_size,cb_hash,dispatch,d_size,d_hash,caller in profiles:
             with self.subTest(version=version):

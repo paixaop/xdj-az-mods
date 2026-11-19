@@ -5,6 +5,7 @@
 #include "profiles.h"
 #include <link.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <time.h>
@@ -118,7 +119,7 @@ int az_slip_diagnostic_start(const char *tag, const struct az_slip_diagnostic_ho
         return -1;
     }
     atomic_store_explicit(&slip_installed, 1, memory_order_release);
-    core->log("SDK_SLIP_CAPTURE_READY v=1 profile=%s target=0x%llx caller=0x%llx max_records=512 ring=128 semantics=raw_no_deck",
-              profile->name, (unsigned long long) (image.base + profile->callback.rva), (unsigned long long) (image.base + profile->caller));
+    core->log("SDK_SLIP_CAPTURE_READY v=1 profile=%s target=0x%" PRIxPTR " caller=0x%" PRIxPTR " max_records=512 ring=128 semantics=raw_no_deck",
+              profile->name, image.base + profile->callback.rva, image.base + profile->caller);
     return 0;
 }
