@@ -40,7 +40,20 @@ static int thread_create(pthread_t *thread, const pthread_attr_t *attributes, vo
     assert(!pthread_attr_getinheritsched(attributes, &inherit) && inherit == PTHREAD_EXPLICIT_SCHED);
     assert(!pthread_attr_getschedparam(attributes, &priority) && priority.sched_priority == 0);
     assert(!pthread_attr_getdetachstate(attributes, &detached) && detached == PTHREAD_CREATE_DETACHED);
-    return fail_create ? EAGAIN : pthread_create(thread, attributes, entry, argument);
+    if (fail_create) return EAGAIN;
+#ifdef __APPLE__
+    /* Darwin accepts explicit priority zero but runs it below its SCHED_OTHER
+     * range (15..47). Validate the deck attributes above, then use the host's
+     * inherited scheduling so this fixture cannot starve under coverage load. */
+    pthread_attr_t host;
+    assert(!pthread_attr_init(&host));
+    assert(!pthread_attr_setdetachstate(&host, detached));
+    int rc = pthread_create(thread, &host, entry, argument);
+    assert(!pthread_attr_destroy(&host));
+    return rc;
+#else
+    return pthread_create(thread, attributes, entry, argument);
+#endif
 }
 #ifdef __APPLE__
 static int thread_name(pthread_t thread, const char *name) {
