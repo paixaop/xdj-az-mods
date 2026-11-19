@@ -2409,6 +2409,7 @@ mutate "$d/real.inc" "$d/ctl-newer.inc" 's/g_conf_readonly = r == -3;/g_conf_rea
 mutate "$d/real.inc" "$d/ctl-noauth.inc" 's/    if \(r != 0\) \{\n        \/\* -1 absent/    if (1) {\n        \/* -1 absent/'
 $CC -w -Iguest/azmod -c -o "$d/menu.o" guest/azmod/menu.c
 $CC -w -Iguest/azmod -c -o "$d/azconf.o" guest/azmod/azconf.c
+$CC -w -Iguest/azmod -c -o "$d/analysis_settings.o" guest/azmod/analysis_settings.c
 $CC -w -Iguest/azmod -Dmain=lanetest_main -c -o "$d/stubs.o" guest/azmod/lanetest.c
 # control 5: no rollback check (azmod.cfg rewritten by 1.2.2 is ignored: its change is lost)
 mutate "$d/real.inc" "$d/ctl-norollback.inc" 's/if \(was && strcmp\(was, cur\)\)/if (0)/'
@@ -2428,7 +2429,7 @@ mutate "$d/real.inc" "$d/ctl-nowzsave.inc" 's/    wz_conf_capture\(c\);/    (voi
 mutate "$d/real.inc" "$d/ctl-nowzload.inc" 's/    wz_conf_apply\(c\);/    (void) 0;/'
 for v in real ctl-byid ctl-inplace ctl-newer ctl-noauth ctl-norollback ctl-stale ctl-choiceonoff ctl-noimport ctl-nosmallsave ctl-nosmallimport ctl-nowzsave ctl-nowzload; do
     $CC "${CFLAGS[@]}" -Wno-unused-parameter -Iguest/azmod -I$T -DCFG_INC="\"$d/$v.inc\"" \
-        -o "$d/$v" $T/cfg_test.c "$d/menu.o" "$d/azconf.o" "$d/stubs.o"
+        -o "$d/$v" $T/cfg_test.c "$d/menu.o" "$d/azconf.o" "$d/analysis_settings.o" "$d/stubs.o"
 done
 suite "settings" "$d/real" "$d/scratch-real"
 
@@ -2453,7 +2454,7 @@ for v in real ctl; do
         $CC -w -I"$G" -c -o "$d/azconf-$v-$b.o" "$G/azconf.c"
         $CC -std=gnu11 -O1 -w "${F[@]}" -I"$G" -I$T -DMENU_C="\"$G/menu.c\"" -DCM_CATALOG="\"$d/nocat\"" \
             -DCFG_INC="\"$d/cfg.inc\"" -DMENUDUMP_NEW='"menudump_new.h"' -o "$d/$v-$b" $T/menudump_test.c \
-            "$d/stubs.o" "$d/azconf-$v-$b.o"
+            "$d/stubs.o" "$d/azconf-$v-$b.o" "$OUT/cfg/analysis_settings.o"
     done
 done
 mkdir -p "$d/s1" "$d/s2" "$d/s3" "$d/s4"

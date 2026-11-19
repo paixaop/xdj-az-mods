@@ -42,7 +42,6 @@
 #include "menu.h"
 #include "azconf.h"
 #include "analysis_host.h"
-#include "analysis_settings.h"
 #include "ep147addr.h" /* EP_<v130> -> this build's EP147 address (generated table) */
 #include "ep147png.h"  /* the PNG images in this build's .rodata: where stick art may go */
 #include "bus_cfg.h"   /* settings word, color words and LED blocks the bus threads read */
@@ -1390,7 +1389,9 @@ static int conf_pinned(const struct azconf *c, const char *key) {
     }
     return 0;
 }
-static void conf_apply(const struct azconf *c, azmod_state *s) {
+#include "analysis_settings.h"
+static void conf_apply(struct azconf *c, azmod_state *s) {
+    if (analysis_settings_migrate(c)) dbg("analysis: could not migrate the saved enable setting\n");
     char key[64];
     for (int i = 0; i < AZF_COUNT; i++)
         if (azf_conf_key(i, key, sizeof key))
@@ -1678,7 +1679,6 @@ static void load_settings(azmod_state *s) {
         if (!migrated && r == -3)
             dbg("cfg: azmod.conf is a newer version and there is no azmod.cfg: defaults\n");
     }
-    if (analysis_settings_migrate(c)) dbg("analysis: could not migrate the saved enable setting\n");
     conf_apply(c, s);
     if (!s) {
         azconf_free(c);
@@ -2147,7 +2147,6 @@ static void drag_scroll_to(uintptr_t lb, int row);
 static void drag_end_local(void);
 static void msg_tick(void) {
     sdk_ui_msg_drain(); /* banners and post_ui calls the community mods queued */
-    analysis_host_notices(analysis_banner, analysis_diagnostic);
     drag_handoff_drain(); /* a drop or BACK the bus thread recorded: before anything reads the drag */
     fl_tick();
     if (__atomic_load_n(&g_drag_settle, __ATOMIC_ACQUIRE)) {
@@ -2506,9 +2505,10 @@ static void msg_tick(void) {
 #include "browse_columns.c" /* PREVIEW and the sub column remembered; Column Edit's columns */
 #include "clock_native.c" /* the Clock in the place of EP147's status bar readout */
 static void bf_tick(void); /* browse_fields.c */
-static void sdk_beatport_msg_tick(void); /* sdk_beatport.c */
+#include "beatport_service.h"
 static void calltimers_hook(void *self) {
     msg_tick();
+    analysis_host_notices(analysis_banner, analysis_diagnostic);
     bt_mods_tick();
     bc_tick();
     cn_tick();
@@ -2516,7 +2516,7 @@ static void calltimers_hook(void *self) {
     sk_tick();
     mp_anim_tick();
     cm_icons_tick();
-    sdk_beatport_msg_tick();
+    bp_login_message_tick();
     /* installed at run time from any thread: never branch to an original not yet visible */
     void (*o)(void *) = __atomic_load_n(&g_orig_calltimers, __ATOMIC_ACQUIRE);
     if (o)

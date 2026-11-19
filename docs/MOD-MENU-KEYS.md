@@ -30,6 +30,7 @@ the table and `features.def` disagree.
 | `stem-marks` | Stem Marks | toggle | stems | 0 = off, 1 = on |
 | `stem-mark-style` | Stem Mark Style | choice | stem-marks | 0 = "Color", 1 = "Mono" |
 | `stem-volume-eq` | Stem Volume on CH 3/4 EQ | toggle | stems | 0 = off, 1 = on |
+| `track-analysis` | Track Analysis | toggle | - | 0 = off, 1 = on |
 | `drum-roll` | Drum Roll | toggle | - | 0 = off, 1 = on |
 | `drum-roll-bank` | Bank | choice | drum-roll | 0 = "1", 1 = "2", 2 = "3", 3 = "4" |
 | `drum-roll-paused-deck` | Paused Deck | choice | drum-roll | 0 = "Master", 1 = "Own Track" |
