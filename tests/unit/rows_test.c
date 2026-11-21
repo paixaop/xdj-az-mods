@@ -119,56 +119,33 @@ static int select_row(azmod_state *s, int item) {
     return 0;
 }
 
-static unsigned vocal_gap;
-static int vocal_enabled, vocal_updates, analysis_enabled;
-static void vocal_config(unsigned gap_ms, int enabled) {
-    vocal_gap = gap_ms;
-    vocal_enabled = enabled;
-    ++vocal_updates;
-}
-static void analysis_enabled_changed(int enabled) { analysis_enabled = enabled; }
-static void vocal_rows(void) {
+static uint32_t extraction_mask;
+static void extraction_changed(uint32_t mask) { extraction_mask = mask; }
+static void extraction_rows(void) {
+    CHECK("phrase and vocal extraction are independent Extras rows",
+          az_row(AZF_PHRASE_EXTRACTION)->parent == AZF_EXTRAS && az_row(AZF_VOCAL_EXTRACTION)->parent == AZF_EXTRAS);
+    azmod_analysis_configure = extraction_changed;
+    az_set(AZF_PHRASE_EXTRACTION, 0);
+    az_set(AZF_VOCAL_EXTRACTION, 1);
+    azf_analysis_changed(0, NULL);
+    CHECK("only vocals enabled", extraction_mask == AZ_ANALYSIS_VOCALS);
+    az_set(AZF_PHRASE_EXTRACTION, 1);
+    az_set(AZF_VOCAL_EXTRACTION, 0);
+    azf_analysis_changed(0, NULL);
+    CHECK("only phrases enabled", extraction_mask == AZ_DATA_PHRASES);
+    az_set(AZF_PHRASE_EXTRACTION, 0);
+    azf_analysis_changed(0, NULL);
+    CHECK("both extraction settings off", extraction_mask == 0);
     az_defaults();
-    azf_vocal_lines_changed(0, NULL); /* callbacks are safe before host startup */
     azf_analysis_changed(0, NULL);
-    azmod_vocal_lines_config = vocal_config;
-    azmod_analysis_enable = analysis_enabled_changed;
-    azf_vocal_lines_changed(0, NULL);
-    CHECK("vocal defaults: below phrases, two-second gap, scrolling optional",
-          vocal_gap == 2000 && vocal_enabled && az_on(AZF_VOCAL_LINES_PHRASES) && !az_on(AZF_VOCAL_LINES_WAVE));
-    CHECK("vocal settings belong to Track Analysis",
-          az_parent(AZF_VOCAL_LINES_GAP) == AZF_TRACK_ANALYSIS &&
-              az_parent(AZF_VOCAL_LINES_WAVE) == AZF_TRACK_ANALYSIS &&
-              az_parent(AZF_VOCAL_LINES_PHRASES) == AZF_TRACK_ANALYSIS);
-    CHECK("legacy vocal rows remain lookup-compatible but hidden",
-          az_hidden(AZF_VOCAL_INDICATOR) && az_hidden(AZF_VOCAL_IND_WAVE) && az_hidden(AZF_VOCAL_IND_PREVIEW));
-    const unsigned expected[] = {0, 250, 500, 1000, 2000, 3000, 5000, 10000};
-    for (unsigned i = 0; i < sizeof expected / sizeof *expected; i++) {
-        az_set(AZF_VOCAL_LINES_GAP, (int) i);
-        az_row(AZF_VOCAL_LINES_GAP)->d.on_change((int) i, NULL);
-        CHECK("merge gap choices reach the cache in milliseconds", vocal_gap == expected[i]);
-    }
-    az_set(AZF_VOCAL_LINES_PHRASES, 0);
-    az_row(AZF_VOCAL_LINES_PHRASES)->d.on_change(0, NULL);
-    CHECK("no worker reads when both vocal targets are disabled", !vocal_enabled);
-    az_set(AZF_VOCAL_LINES_WAVE, 1);
-    az_row(AZF_VOCAL_LINES_WAVE)->d.on_change(1, NULL);
-    CHECK("scrolling target enables the worker independently", vocal_enabled);
-    az_set(AZF_TRACK_ANALYSIS, 0);
-    azf_analysis_changed(0, NULL);
-    CHECK("disabling Track Analysis disables vocal presentation", !analysis_enabled && !vocal_enabled);
-    az_set(AZF_TRACK_ANALYSIS, 1);
-    azf_analysis_changed(1, NULL);
-    CHECK("re-enabling analysis restores vocal settings", analysis_enabled && vocal_enabled && vocal_updates > 8);
-    azmod_vocal_lines_config = NULL;
-    azmod_analysis_enable = NULL;
+    CHECK("both extraction settings default on", extraction_mask == (AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS));
+    azmod_analysis_configure = NULL;
 }
-
 int main(void) {
-    vocal_rows();
     ut_suite = "registered rows";
     azf_log = logf_;
     az_defaults();
+    extraction_rows();
     az_feature_v2 f;
 #define ROW(...) (f = (az_feature_v2) {.size = sizeof f, __VA_ARGS__}, azf_register("testmod", &f))
     int fx = ROW(.key = "fx", .label = "FX Bus", .kind = AZ_ROW_TOGGLE, .help = "A test switch.", .on_change = changed);

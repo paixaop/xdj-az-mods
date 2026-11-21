@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #include "analysis_host.h"
 #include "analysis_presentation.h"
-#include "vocal_lines.h"
 #include <stdatomic.h>
 static _Atomic int started;
 /* Message-thread presentation cursors, not scheduler or result copies. */
@@ -34,6 +33,10 @@ void analysis_host_enable(int enabled) {
     analysis_runtime_enable(owner, 0);
     analysis_source_retire(owner);
 }
+void analysis_host_configure(uint32_t components) {
+    analysis_runtime_components(components);
+    analysis_host_enable(components != 0);
+}
 static int analysis_notice_ready(unsigned deck, az_analysis_status_v1 *status) {
     if (analysis_runtime_deck_status(deck, status) != AZ_OK) return 0;
     if (!status->request_id || status->request_id == announced[deck]) return 0;
@@ -61,7 +64,6 @@ void analysis_host_notices(void (*banner)(const char *, int), void (*diagnostic)
 }
 void analysis_host_shutdown(void) {
     if (!atomic_exchange_explicit(&started, 0, memory_order_acq_rel)) return;
-    vocal_lines_stop();
     az_analysis_owner owner = analysis_owner_core();
     analysis_owner_core_retire();
     analysis_runtime_retire(owner);

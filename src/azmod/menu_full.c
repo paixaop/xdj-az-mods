@@ -488,10 +488,10 @@ static void c_choice_rect(const azmod_fb *fb, int left, int row, int it, int b, 
 /* A row's description (features.def help): under a left entry's header in its pane, or on the
  * line under a member row. */
 #include "analysis_presentation.h"
-static const char *c_analysis_desc(void) {
+static const char *c_analysis_desc(int it) {
     /* Menu drawing and this buffer have the same overlay-thread owner. */
     static char text[640];
-    size_t used = (size_t) snprintf(text, sizeof text, "%s\n\n", az_row(AZF_TRACK_ANALYSIS)->d.help);
+    size_t used = (size_t) snprintf(text, sizeof text, "%s\n\n", az_row(it)->d.help);
     for (unsigned deck = 0; deck < 4; ++deck) {
         az_analysis_status_v1 status = {.size = sizeof status};
         int rc = azmod_analysis_status ? azmod_analysis_status(deck, &status) : AZ_UNSUPPORTED;
@@ -503,7 +503,7 @@ static const char *c_analysis_desc(void) {
     return text;
 }
 static const char *c_desc(int it) {
-    if (it == AZF_TRACK_ANALYSIS) return c_analysis_desc();
+    if (it == AZF_PHRASE_EXTRACTION || it == AZF_VOCAL_EXTRACTION) return c_analysis_desc(it);
     const struct az_row *r = az_row(it);
     return r && r->d.help ? r->d.help : "";
 }

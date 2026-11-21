@@ -1001,6 +1001,7 @@ static void sm_serve(unsigned cid, unsigned h, unsigned media, const char *title
      * event a row that was evicted from a full queue may get */
     __atomic_store_n(&g_sm_dirty, 1, __ATOMIC_RELEASE);
 }
+static void vx_poll(void);
 /* Preview Hot Cues (preview_hotcues.c, included at the end) ride this worker */
 static int ph_queued(void);
 static int ph_serve_one(FILE *lg);
@@ -1043,61 +1044,55 @@ static int sm_work_one(FILE *lg) {
     sm_serve(cid, h, media, title, lg);
     return 1;
 }
-struct sm_world_watch {
-    long long library, checked_ms, stems;
-};
-static void sm_mark_world_changed(FILE *lg) {
-    sm_lock();
-    for (int i = 0; i < SM_CACHE; i++)
-        if (g_smc[i].st) g_smc[i].stale = 1;
-    ph_world_changed();
-    sm_unlock();
-    __atomic_store_n(&g_sm_world, 1, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_sm_dirty, 1, __ATOMIC_RELEASE);
-    if (lg && g_sm_budget-- > 0) fprintf(lg, "WORLD changed: statuses marked stale\n");
-}
-static void sm_check_world(struct sm_world_watch *watch, FILE *lg) {
-    if (drag_now_ms() - watch->checked_ms <= 3000) return;
-    long long library = sm_world_sig();
-    watch->checked_ms = drag_now_ms();
-    long long stems = sm_stems_sig();
-    if (stems != watch->stems) {
-        watch->stems = stems;
-        memset(g_smpc, 0, sizeof g_smpc);
-    }
-    if (library != watch->library) {
-        watch->library = library;
-        sm_mark_world_changed(lg);
-    }
-}
-static void sm_wait_for_work(void) {
-    sm_lock();
-    if (!g_smq_n && !ph_queued()) {
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_sec += 1;
-        pthread_cond_timedwait(&g_sm_cv, &g_sm_mu, &ts);
-    }
-    sm_unlock();
-}
-static void sm_check_pending(void) {
-    static long long checked_ms;
-    if (drag_now_ms() - checked_ms < 1000) return;
-    checked_ms = drag_now_ms();
-    sm_pend_scan();
-}
 static void *sm_worker(void *arg) {
     (void) arg;
     struct sched_param sp = {0};
-    if (pthread_setschedparam(pthread_self(), SCHED_IDLE, &sp) == 0) g_sm_idle_thread = 1;
+    if (pthread_setschedparam(pthread_self(), SCHED_IDLE, &sp) == 0)
+        g_sm_idle_thread = 1; /* sm_lock() leaves the idle class while it holds g_sm_mu */
     FILE *lg = azlog_open("/tmp/azmod-stemsmark.log", "a");
-    if (lg) setvbuf(lg, NULL, _IOLBF, 0);
-    struct sm_world_watch watch = {sm_world_sig(), drag_now_ms(), sm_stems_sig()};
+    if (lg)
+        setvbuf(lg, NULL, _IOLBF, 0);
+    long long sig = sm_world_sig(), sig_at = drag_now_ms(), ssig = sm_stems_sig();
     for (;;) {
-        sm_wait_for_work();
-        sm_check_pending();
-        sm_check_world(&watch, lg);
+        sm_lock();
+        if (!g_smq_n && !ph_queued()) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_sec += 1;
+            pthread_cond_timedwait(&g_sm_cv, &g_sm_mu, &ts);
+        }
+        sm_unlock();
+        {
+            static long long pend_at;
+            if (drag_now_ms() - pend_at >= 1000) {
+                pend_at = drag_now_ms();
+                sm_pend_scan();
+            }
+        }
+        if (drag_now_ms() - sig_at > 3000) {
+            long long s = sm_world_sig();
+            sig_at = drag_now_ms();
+            long long ss = sm_stems_sig();
+            if (ss != ssig) {
+                ssig = ss;
+                memset(g_smpc, 0, sizeof g_smpc);
+            }               /* stems folders changed */
+            if (s != sig) { /* keep drawing the old answer until re-checked */
+                sig = s;
+                sm_lock();
+                for (int i = 0; i < SM_CACHE; i++)
+                    if (g_smc[i].st)
+                        g_smc[i].stale = 1;
+                ph_world_changed();
+                sm_unlock();
+                __atomic_store_n(&g_sm_world, 1, __ATOMIC_RELEASE);
+                __atomic_store_n(&g_sm_dirty, 1, __ATOMIC_RELEASE);
+                if (lg && g_sm_budget-- > 0)
+                    fprintf(lg, "WORLD changed: statuses marked stale\n");
+            }
+        }
         sm_db_release_unused(lg);
+        vx_poll(); /* Vocal Indicator (vocal_indicator.c, included by extras.c) */
         sm_work_one(lg);
     }
     return 0;

@@ -861,6 +861,16 @@ typedef struct az_analysis_status_v1 {
     uint32_t deck;
     char diagnostic[160];
 } az_analysis_status_v1;
+/* Successful, durably published analysis, including validated reuse. */
+typedef struct az_analysis_complete_v1 {
+    uint32_t size, version;
+    uint64_t sequence, request_id, load_epoch;
+    az_track_ref track;
+    uint32_t source_kind, deck; /* deck is meaningful only for AZ_ANALYSIS_DECK */
+    uint32_t generated_components, available_components; /* PHRASES / VOCALS */
+    uint32_t missed, reserved; /* missed: journal overflow; reacquire current state */
+} az_analysis_complete_v1;
+typedef void (*az_analysis_complete_fn)(const az_analysis_complete_v1 *, void *);
 typedef struct az_analysis_capabilities_v1 {
     uint32_t size, version, components, stage_modes;
     uint32_t max_workers, max_requests, max_owner_requests, reserved;
@@ -886,6 +896,15 @@ typedef struct az_analysis_v1 {
                            az_vocal_snapshot_v1 *out, az_vocal_interval *intervals, uint32_t capacity);
     int (*vocal_intervals_loaded)(const char *id, int deck, uint64_t load_epoch,
                                   az_vocal_snapshot_v1 *out, az_vocal_interval *intervals, uint32_t capacity);
+    /* Optional append-only extension; check AZ_ANALYSIS_HAS. Register once from
+     * init(), before workers. Broadcasts successful built-in and SDK analysis,
+     * including reuse (generated_components=0), starting at registration.
+     * UI-thread callbacks run outside provider locks, even with tick=NULL.
+     * Copy records needed later; reacquire data and validate the load before use.
+     * At most 16 deliveries/UI turn. missed=1 reports a bounded-journal gap.
+     * Failed init/retired owners receive nothing. No event for failure, cancel,
+     * or saved files still awaiting publication/link completion. */
+    int (*on_complete)(const char *id, az_analysis_complete_fn fn, void *user);
 } az_analysis_v1;
 #define AZ_ANALYSIS_HAS(service, field) \
     ((service) && (service)->abi == AZ_ANALYSIS_ABI && \

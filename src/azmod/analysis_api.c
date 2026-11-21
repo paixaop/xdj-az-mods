@@ -42,7 +42,7 @@ static int sdk_vocal_intervals_loaded(const char *id, int deck, uint64_t load, a
 }
 
 static const az_analysis_v1 sdk_analysis = {
-    .abi = AZ_ANALYSIS_ABI, .size = sizeof sdk_analysis, .capabilities = analysis_runtime_capabilities, .request = sdk_analysis_request, .status = sdk_analysis_status, .cancel = sdk_analysis_cancel_request, .release = sdk_analysis_release_request, .result = sdk_analysis_result, .vocal_intervals = sdk_vocal_intervals, .vocal_intervals_loaded = sdk_vocal_intervals_loaded};
+    .abi = AZ_ANALYSIS_ABI, .size = sizeof sdk_analysis, .capabilities = analysis_runtime_capabilities, .request = sdk_analysis_request, .status = sdk_analysis_status, .cancel = sdk_analysis_cancel_request, .release = sdk_analysis_release_request, .result = sdk_analysis_result, .vocal_intervals = sdk_vocal_intervals, .vocal_intervals_loaded = sdk_vocal_intervals_loaded, .on_complete = sdk_on_analysis_complete};
 static const az_analysis_v1 *sdk_analysis_service(uint32_t abi) {
     return abi == AZ_ANALYSIS_ABI ? &sdk_analysis : NULL;
 }

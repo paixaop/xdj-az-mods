@@ -233,11 +233,11 @@ int main(void) {
             more0++;
             mt0 = g_txt[i].s;
         }
-    /* The retired Vocal Indicator row is hidden. Its replacements belong to Track Analysis's
-     * own pane, so the preview's last line now says "+6 more". The registered rows below
-     * overflow it further. */
-    CHECK("no mod rows: the official rows end the preview card with \"+6 more\"",
-          more0 == 1 && !strcmp(mt0, "+6 more"));
+    /* the official switches are more than the card holds (Column Edit and Preview Hot Cues live
+     * on Browse View Mods' own screen, like the Overlays readouts), so its last line that fits
+     * says "+8 more"; the registered rows below overflow it further */
+    CHECK("no mod rows: the official rows end the preview card with \"+8 more\"",
+          more0 == 1 && !strcmp(mt0, "+8 more"));
 
     /* ---- 20 registered rows: 16 from one mod (one with an icon), 4 from "testmod" (a SCREEN) ---- */
     memset(g_icon, 255, sizeof g_icon);

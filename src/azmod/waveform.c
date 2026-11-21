@@ -941,9 +941,7 @@ static void wvupd_hook(long self) {
     g_in_root = 0;
 }
 static void gridaa_enter(long wwb, long pos_p, float zoom);
-static void vx_upd_begin(int d, long wwb, long pos_p, float zoom); /* vocal_indicator.c */
-static void vx_upd_commit(int skipped);
-static void vx_upd_rendered(void);
+static void vx_upd(int d, long wwb, long pos_p, float zoom); /* vocal_indicator.c */
 /* Update profile: per deck, FUN_01b93a28's duration, the gap since the previous
  * build ended, and one backtrace. Message thread only; published to
  * /tmp/azmod-updprof by the 1 Hz rates block. */
@@ -958,77 +956,56 @@ static long up_now_ns(void) {
     clock_gettime(CLOCK_MONOTONIC, &t);
     return t.tv_sec * 1000000000L + t.tv_nsec;
 }
-struct azm_up_scope {
-    int deck, skipped;
-    long started;
-};
-static struct azm_up_scope g_up_scope[8];
-static unsigned g_up_depth;
-static void azm_upd_scope_begin(void) {
-    unsigned depth = g_up_depth++;
-    if (depth < 8) g_up_scope[depth] = (struct azm_up_scope) {g_up_deck, g_upd_skip, g_up_t0};
-    g_upd_skip = 0;
-}
-static void azm_upd_scope_end(void) {
-    if (!g_up_depth) return;
-    unsigned depth = --g_up_depth;
-    if (depth >= 8) return;
-    g_up_deck = g_up_scope[depth].deck;
-    g_upd_skip = g_up_scope[depth].skipped;
-    g_up_t0 = g_up_scope[depth].started;
-}
-static int azm_upd_lookup(long a0, long a1) {
-    int kn = __atomic_load_n(&g_wkey_n, __ATOMIC_RELAXED);
-    for (int i = 0; i < kn; i++)
-        if (g_wkey[i].ptr == (unsigned long) a0 || g_wkey[i].ptr == (unsigned long) a1)
-            return g_wkey[i].deck;
-    return azm_upd_deck_of(a0);
-}
-static int azm_upd_duplicate(int deck) {
-    if (deck < 0 || deck >= AZMOD_STEM_DECKS || !g_in_root || !g_orig_wvupd) return 0;
-    if (g_built_pass[deck] != g_root_pass) {
-        g_built_pass[deck] = g_root_pass;
-        return 0;
-    }
-    g_upd_skip = 1;
-    __atomic_fetch_add(&g_upd_skipped, 1, __ATOMIC_RELAXED);
-    return 1;
-}
-static void azm_upd_backtrace(int deck) {
-    uintptr_t fp;
-    __asm__ volatile("mov %0, x29" : "=r"(fp));
-    long frame = (long) fp;
-    int count = 0;
-    while (count < 12 && frame > 0x10000 && !(frame & 7)) {
-        g_up_bt[deck][count++] = *(long *) (frame + 8);
-        long next = *(long *) frame;
-        if (next <= frame) break;
-        frame = next;
-    }
-    g_up_btn[deck] = count;
-}
-static void azm_upd_profile(int deck) {
-    g_up_deck = -1;
-    if (deck < 0 || deck >= AZMOD_STEM_DECKS) return;
-    long t = up_now_ns();
-    if (g_up_lastend) g_up_gap_ns[deck] += t - g_up_lastend;
-    g_up_t0 = t;
-    g_up_deck = deck;
-    if (!g_up_btn[deck]) azm_upd_backtrace(deck);
-}
 int azm_upd_enter(long a0, long a1, float zoom) {
-    azm_upd_scope_begin();
     __atomic_fetch_add(&g_upd_calls, 1, __ATOMIC_RELAXED);
     gridaa_enter(a0, a1, zoom);
     int prev = __atomic_load_n(&g_upd_deck, __ATOMIC_RELAXED);
-    int deck = azm_upd_lookup(a0, a1);
-    if (deck >= 0) {
-        __atomic_store_n(&g_upd_deck, deck, __ATOMIC_RELAXED);
+    int d = -1;
+    int kn = __atomic_load_n(&g_wkey_n, __ATOMIC_RELAXED);
+    for (int i = 0; i < kn && d < 0; i++) {
+        if (g_wkey[i].ptr == (unsigned long) a0 || g_wkey[i].ptr == (unsigned long) a1)
+            d = g_wkey[i].deck;
+    }
+    if (d < 0)
+        d = azm_upd_deck_of(a0); /* update()-style: widget in x0 */
+    if (d >= 0) {
+        __atomic_store_n(&g_upd_deck, d, __ATOMIC_RELAXED);
         __atomic_fetch_add(&g_upd_bound, 1, __ATOMIC_RELAXED);
     }
-    vx_upd_begin(deck, a0, a1, zoom);
-    if (azm_upd_duplicate(deck)) g_up_deck = -1;
-    else azm_upd_profile(deck);
+    if (d >= 0 && d < AZMOD_STEM_DECKS)
+        vx_upd(d, a0, a1, zoom); /* Vocal Indicator: this deck's scroll and zoom */
+    if (d >= 0 && d < AZMOD_STEM_DECKS && g_in_root && g_orig_wvupd) {
+        if (g_built_pass[d] == g_root_pass) {
+            g_upd_skip = 1;
+            __atomic_fetch_add(&g_upd_skipped, 1, __ATOMIC_RELAXED);
+            g_up_deck = -1;
+            return prev;
+        }
+        g_built_pass[d] = g_root_pass;
+    }
+    if (d >= 0 && d < AZMOD_STEM_DECKS) {
+        long t = up_now_ns();
+        if (g_up_lastend)
+            g_up_gap_ns[d] += t - g_up_lastend;
+        g_up_t0 = t;
+        g_up_deck = d;
+        if (!g_up_btn[d]) {
+            uintptr_t fp;
+            __asm__ volatile("mov %0, x29" : "=r"(fp));
+            long f = (long) fp;
+            int k = 0;
+            while (k < 12 && f > 0x10000 && !(f & 7)) {
+                long v = *(long *) (f + 8);
+                g_up_bt[d][k++] = v;
+                long nf = *(long *) f;
+                if (nf <= f)
+                    break;
+                f = nf;
+            }
+            g_up_btn[d] = k;
+        }
+    } else
+        g_up_deck = -1;
     return prev;
 }
 /* ---- Bright Grid (part of 60 FPS Waveforms, no menu row of its own) -------
@@ -1183,7 +1160,6 @@ static void gridaa_enter(long wwb, long pos_p, float zoom) {
     g_gridaa_ok = 1;
 }
 void azm_upd_exit(int prev) {
-    vx_upd_commit(g_upd_skip);
     g_gridaa_ok = 0;
     g_upd_skip = 0;
     if (g_up_deck >= 0) {
@@ -1196,7 +1172,6 @@ void azm_upd_exit(int prev) {
         g_up_lastend = t;
         g_up_deck = -1;
     }
-    azm_upd_scope_end();
     __atomic_store_n(&g_upd_deck, prev, __ATOMIC_RELAXED);
 }
 #include "brightgrid.h" /* the pixel rule gridmake_hook applies */
@@ -1916,7 +1891,6 @@ out:
 }
 void azm_rw_exit(long prov, long *save);
 void azm_rw_exit(long prov, long *save) {
-    vx_upd_rendered();
     if (save[0])
         *(volatile long *) (prov + 8) = save[0];
     if (save[1])
