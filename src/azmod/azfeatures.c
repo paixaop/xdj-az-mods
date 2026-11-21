@@ -8,9 +8,21 @@
 
 void (*azmod_analysis_enable)(int enabled);
 int (*azmod_analysis_status)(unsigned deck, az_analysis_status_v1 *out);
+void (*azmod_vocal_lines_config)(unsigned gap_ms, int enabled);
+void azf_vocal_lines_changed(int value, void *user) {
+    (void) value;
+    (void) user;
+    static const unsigned gaps[] = {0, 250, 500, 1000, 2000, 3000, 5000, 10000};
+    int choice = az_value(AZF_VOCAL_LINES_GAP);
+    if ((unsigned) choice >= sizeof gaps / sizeof *gaps) choice = 4;
+    int enabled = az_on(AZF_TRACK_ANALYSIS) &&
+                  (az_on(AZF_VOCAL_LINES_WAVE) || az_on(AZF_VOCAL_LINES_PHRASES));
+    if (azmod_vocal_lines_config) azmod_vocal_lines_config(gaps[choice], enabled);
+}
 void azf_analysis_changed(int value, void *user) {
     (void) user;
     if (azmod_analysis_enable) azmod_analysis_enable(value);
+    azf_vocal_lines_changed(value, NULL);
 }
 
 /* ---- the official rows ----------------------------------------------------------------- */

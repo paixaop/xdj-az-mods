@@ -4,7 +4,8 @@
 #include <assert.h>
 #include <string.h>
 
-static int start_result, starts, enables, last_enabled, retired, joined, reclaimed;
+static int start_result, starts, enables, last_enabled, retired, joined, reclaimed, vocal_stops;
+void vocal_lines_stop(void) { ++vocal_stops; }
 static unsigned queries, banners, diagnostics;
 static az_analysis_owner accepted;
 static az_analysis_status_v1 observations[4];
@@ -138,7 +139,7 @@ int main(void) {
     presentation();
     uint64_t previous = accepted.generation;
     analysis_host_shutdown();
-    assert(retired == 1 && joined == 1 && reclaimed == 2);
+    assert(retired == 1 && joined == 1 && reclaimed == 2 && vocal_stops == 1);
     unsigned before = queries;
     analysis_host_notices(banner, diagnostic);
     analysis_host_shutdown();
@@ -146,6 +147,6 @@ int main(void) {
     assert(analysis_host_start("/usb/MODS/analysis/assets", 1) == AZ_OK);
     assert(accepted.generation != previous);
     analysis_host_shutdown();
-    assert(retired == 2 && joined == 2 && reclaimed == 3);
+    assert(retired == 2 && joined == 2 && reclaimed == 3 && vocal_stops == 2);
     puts("analysis host: lifecycle, copied status, and presentation passed");
 }

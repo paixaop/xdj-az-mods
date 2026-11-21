@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #include "analysis_host.h"
 #include "analysis_presentation.h"
+#include "vocal_lines.h"
 #include <stdatomic.h>
 static _Atomic int started;
 /* Message-thread presentation cursors, not scheduler or result copies. */
@@ -60,6 +61,7 @@ void analysis_host_notices(void (*banner)(const char *, int), void (*diagnostic)
 }
 void analysis_host_shutdown(void) {
     if (!atomic_exchange_explicit(&started, 0, memory_order_acq_rel)) return;
+    vocal_lines_stop();
     az_analysis_owner owner = analysis_owner_core();
     analysis_owner_core_retire();
     analysis_runtime_retire(owner);

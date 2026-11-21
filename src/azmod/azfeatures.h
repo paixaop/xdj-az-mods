@@ -193,6 +193,8 @@ extern void (*azf_log)(const char *fmt, ...); /* NULL = silent */
 void azf_fps60_bypass(void *user);
 void azf_fps60_member_changed(int value, void *user);
 void azf_analysis_changed(int value, void *user);
+void azf_vocal_lines_changed(int value, void *user);
+extern void (*azmod_vocal_lines_config)(unsigned gap_ms, int enabled);
 /* Core startup binds these before accepting menu input. No mod identity is used. */
 extern void (*azmod_analysis_enable)(int enabled);
 extern int (*azmod_analysis_status)(unsigned deck, az_analysis_status_v1 *out);
