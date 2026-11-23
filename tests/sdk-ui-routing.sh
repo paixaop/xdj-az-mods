@@ -13,14 +13,16 @@ from pathlib import Path
 import json,re,sys
 out=Path(sys.argv[1])
 groups={
-    'refresh': ('waveform.c', ['ov_refresh_tile','ov_refresh_if_needed']),
+    'refresh': ('waveform.c', ['ov_cue_deferred','ov_cue_defer','cue_marker_source','cue_markers_held',
+        'overview_cue_update_hook','detail_cue_update_hook','cue_marker_entry','install_cue_marker_display',
+        'ov_refresh_tile','ov_cue_rebuild_tile','ov_cue_refresh_tile','ov_refresh_if_needed']),
     'bus': ('bus_interpose.c', ['gpiodrv_slot','bus_fd_drop','bus_fd_forget','bus_note_panel',
         'bus_note_device','bus_fd_note','epoll_ctl','epoll_wait','bus_route_frame','bus_read_frame','read']),
     'overlay': ('mod_menu_overlay.c', ['ov_frame','overlay_thread']),
     'startup': ('azmod.c', ['sdk_source_join_patch','sdk_sources_configure_at_start',
         'sdk_source_capture_at_start','azmod_bind_build','azmod_bind_sources','azmod_init']),
     'waveinstall': ('azmod.c', ['install_wave_identity','install_wave_grid',
-        'install_wave_renderers','install_wave_timers','install_wavestems_hook']),
+        'install_wave_renderers','install_cue_batch_presentation','install_wave_timers','install_wavestems_hook']),
     'statichooks': ('mod_menu_overlay.c', ['install_static_hooks']),
     'mode': ('stems_display.c', ['bpmctor_hook','modeget_from_deck_screen',
         'modeget_publish','modeget_stems','modeget_log','modeget_hook']),
@@ -28,7 +30,7 @@ groups={
 for group,(filename,names) in groups.items():
     path=Path('src/azmod')/filename;source=path.read_text();parts=[]
     for name in names:
-        match=re.search(r'^(?:__attribute__\(\(constructor\)\)\s+)?(?:static )?(?:void|int|ssize_t) \*?'+name+r'\([^;{]*\{',source,re.M)
+        match=re.search(r'^(?:__attribute__\(\(constructor\)\)\s+)?(?:static )?(?:void|bool|int|ssize_t) \*?'+name+r'\([^;{]*\{',source,re.M)
         assert match,name
         end=source.index('\n}',match.start())+2
         parts.append('#line {} {}\n'.format(source[:match.start()].count('\n')+1,json.dumps(str(path.resolve())))+source[match.start():end]+'\n')

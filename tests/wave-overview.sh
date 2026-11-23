@@ -85,9 +85,9 @@ root=Path(sys.argv[1]); text=(root/'functions.inc').read_text()
 old='scope __attribute__((cleanup(ov_lease_cleanup))) ='
 assert text.count(old)==1
 text=text.replace(old,'scope =')
-old='    g_orig_ov(self);\n}'
+old='    ov_render_leased(self, &lease);\n}'
 assert text.count(old)==1
-(root/'normal-only.inc').write_text(text.replace(old,'    g_orig_ov(self);\n    ov_lease_cleanup(&scope);\n}'))
+(root/'normal-only.inc').write_text(text.replace(old,'    ov_render_leased(self, &lease);\n    ov_lease_cleanup(&scope);\n}'))
 text=Path('src/azstem/overview_lease.c').read_text()
 old='rc, &count, count + 1,'
 assert text.count(old)==1

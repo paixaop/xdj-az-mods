@@ -88,6 +88,10 @@ extern void fixture_finish(unsigned deck, uint64_t token, unsigned outcome, int 
 extern void fixture_settle(unsigned deck, uint64_t token);
 extern void fixture_advertise(int enabled);
 extern void fixture_arbitration(void);
+extern unsigned fixture_cue_operation(void);
+extern void fixture_cue_busy_once(void);
+extern void fixture_cue_bank(unsigned count, uint64_t revision);
+extern void fixture_cue_finish(unsigned deck, uint64_t token, unsigned outcome, int reason);
 
 struct client {
     int owner, terminal, released, retire;
@@ -236,6 +240,84 @@ static void *complete_after_wait(void *opaque) {
     fixture_finish(finish->deck, finish->token, AZ_COMMAND_APPLIED, AZ_OK, 1);
     return NULL;
 }
+struct batch_client {
+    az_cue_batch_request plan;
+    az_command_result terminal;
+    unsigned terminals, releases;
+};
+static void batch_completed(const az_command_completion *completion, void *opaque) {
+    struct batch_client *client = opaque;
+    assert(completion->settled && completion->result.request_id == client->plan.request_id);
+    assert(!sdk_command_cue_presentation_hold(client->plan.deck));
+    az_command_result out = {.size = sizeof out};
+    assert(library->cue_batch_submit_async("four", &client->plan, batch_completed, client, &out) == AZ_OK);
+    assert(out.outcome == completion->result.outcome);
+    if (completion->kind == AZ_COMMAND_COMPLETION_TERMINAL) {
+        assert(!client->terminals++);
+        client->terminal = completion->result;
+        assert(library->command_acknowledge("four", client->plan.request_id) == AZ_OK);
+    } else {
+        assert(completion->kind == AZ_COMMAND_COMPLETION_RELEASED && !client->releases++);
+        assert(!memcmp(&client->terminal, &completion->result, sizeof client->terminal));
+    }
+}
+static void run_cue_batch(unsigned mode, uint64_t id, unsigned existing, int fail_second) {
+    const unsigned deck = 3;
+    const uint64_t load = 13, revision = 400;
+    fixture_cue_bank(existing, revision);
+    struct batch_client client = {.plan = {
+        .size = sizeof(az_cue_batch_request), .version = AZ_DATA_VERSION, .deck = deck,
+        .mode = mode, .request_id = id, .expected_load_generation = load, .expected_revision = revision,
+        .deadline_ns = scmd_monotonic(NULL) + UINT64_C(5000000000), .count = 2,
+        .entries = {
+            {.classification = AZ_CUE_HOT, .type = AZ_CUE_POINT, .slot = 1, .position_s = 2, .comment = "start"},
+            {.classification = AZ_CUE_MEMORY, .type = AZ_CUE_LOOP, .position_s = 4, .end_s = 6}
+        }
+    }};
+    az_command_result out = {.size = sizeof out};
+    fixture_cue_busy_once();
+    assert(library->cue_batch_submit_async("four", &client.plan, batch_completed, &client, &out) == AZ_OK);
+    uint64_t token = wait_token(deck, 0);
+    assert(sdk_command_cue_presentation_hold(deck) == load);
+    assert(!sdk_command_cue_presentation_hold(2));
+    az_cue_batch_request changed = client.plan;
+    changed.entries[0].rgb = 0xaa2211;
+    assert(library->cue_batch_submit_async("four", &changed, batch_completed, &client, &out) == AZ_INVALID);
+    if (existing) {
+        assert(fixture_cue_operation() == AZ_CMD_MEMORY_DELETE && fixture_claim(deck, token) == AZ_OK);
+        fixture_cue_finish(deck, token, AZ_COMMAND_APPLIED, AZ_OK);
+        token = wait_token(deck, token);
+    }
+    assert(fixture_cue_operation() == AZ_CMD_CUE_POINT_SET && fixture_claim(deck, token) == AZ_OK);
+    fixture_cue_finish(deck, token, AZ_COMMAND_APPLIED, AZ_OK);
+    token = wait_token(deck, token);
+    assert(fixture_cue_operation() == AZ_CMD_CUE_LOOP_SET && fixture_claim(deck, token) == AZ_OK);
+    assert(sdk_command_cue_presentation_hold(deck) == load);
+    assert(!sdk_command_ui_drain(8) && !client.terminals);
+    fixture_cue_finish(deck, token, fail_second ? AZ_COMMAND_REJECTED : AZ_COMMAND_APPLIED,
+                       fail_second ? AZ_FAILED : AZ_OK);
+    while (!client.releases) (void) drain_ui();
+    assert(client.terminal.outcome == (fail_second ? AZ_COMMAND_UNCERTAIN : AZ_COMMAND_APPLIED));
+    assert(client.terminal.revision == (fail_second ? 0 : token));
+}
+static void reject_colliding_batch(void) {
+    fixture_cue_bank(1, 500);
+    struct batch_client client = {.plan = {
+        .size = sizeof(az_cue_batch_request), .version = AZ_DATA_VERSION, .deck = 3,
+        .mode = AZ_CUE_BATCH_REPLACE, .request_id = 3, .expected_load_generation = 13,
+        .expected_revision = 500, .deadline_ns = scmd_monotonic(NULL) + UINT64_C(5000000000),
+        .count = 2, .entries = {
+            {.classification = AZ_CUE_MEMORY, .type = AZ_CUE_POINT, .position_s = 2.},
+            {.classification = AZ_CUE_MEMORY, .type = AZ_CUE_POINT, .position_s = 2. + 0.25 / 48000}
+        }
+    }};
+    az_command_result out = {.size = sizeof out};
+    assert(library->cue_batch_submit_async("four", &client.plan, batch_completed, &client, &out) == AZ_OK);
+    while (!client.releases) (void) drain_ui();
+    assert(client.terminal.outcome == AZ_COMMAND_REJECTED && client.terminal.reason == AZ_INVALID);
+    az_native_cue_snapshot saved = {.size = sizeof saved};
+    assert(!fixture_token(3) && sdk_native_cues(3, &saved) == AZ_OK && saved.count == 1 && saved.revision == 500);
+}
 int main(void) {
     ui = pthread_self();
     g_cm_on_ui = 1;
@@ -370,6 +452,12 @@ int main(void) {
     prepare(&over_quota, 0, 3, 120, long_budget);
     assert(submit(&over_quota) == AZ_LIMIT); /* RELEASED is still pending */
     for (unsigned i = 0; i < 12; ++i) cleanup(&batch[i]);
+
+    assert(AZ_COMMANDS_HAS(library, cue_batch_submit_async));
+    sdk_command_cue_presentation_enable();
+    run_cue_batch(AZ_CUE_BATCH_IF_EMPTY, 1, 0, 0);
+    run_cue_batch(AZ_CUE_BATCH_REPLACE, 2, 1, 1);
+    reject_colliding_batch();
 
 #ifdef AZ_COMMAND_REAL_X
     XCloseDisplay(overlay.dpy);

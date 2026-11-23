@@ -21,6 +21,7 @@
  * Entry points: apply_ui60(), install_wave_scale(), wave_prov_report().
  */
 #include "../common/azoverviewlease.h"
+#include "sdk_command_service.h"
 /* ---- Force the native STEMS pad grid on the WAVEFORM center screen ----
  * PadStatusWidget (ctor 0x01df6240) builds 8 children at this+0xe0..0x110; its
  * mode switch FUN_01df6010 shows exactly one, chosen by the pad-mode enum from
@@ -2202,6 +2203,8 @@ static struct {
  * juce::Component at 0): g_ovtile keeps the identity for lookups, these say whether the widget
  * still exists. Registered by disp_wref_init. */
 static _Atomic uintptr_t g_ovtile_w[24];
+static uint64_t g_ovtile_cue_load[24]; /* JUCE message thread only */
+static unsigned g_ovtile_cue_deferred;
 /* Every cached display widget range, registered once (ep_mem.h wref_track). All of these
  * classes have juce::Component at offset 0 (RTTI: PadStatusWidget, PadModeStatusWidget,
  * PadSlipLoopWidget, ImagesComponent, PadCueWidget, DeckInfo4DeckWidget, XPadParamWidget,
@@ -2285,6 +2288,66 @@ static int ov_deck_via_tile(long self) {
             return g_ovtile[i].deck;
     return -1;
 }
+static int ov_cue_deferred(int tile) {
+    unsigned deck = (unsigned) g_ovtile[tile].deck;
+    g_ovtile_cue_load[tile] = sdk_command_cue_presentation_hold(deck);
+    unsigned bit = 1u << tile;
+    if (g_ovtile_cue_load[tile]) {
+        g_ovtile_cue_deferred |= bit;
+        return 1;
+    }
+    g_ovtile_cue_deferred &= ~bit;
+    return 0;
+}
+static int ov_cue_defer(long self) {
+    if (!on_msg_thread()) return 0;
+    int n = __atomic_load_n(&g_ovtile_n, __ATOMIC_ACQUIRE);
+    for (int i = 0; i < n; ++i)
+        if (wref_get(&g_ovtile_w[i]) == (uintptr_t) self) return ov_cue_deferred(i);
+    return 0;
+}
+
+/* The upper collections poll retained revisions for saved memory and Hot
+ * markers. Returning false leaves their revisions and image untouched; the
+ * normal JUCE update consumes the final revision after the hold clears.
+ * The under collections own the current main cue and continue to update. */
+static uintptr_t perdeck_block(int deck);
+static bool (*g_orig_overview_cue_update)(void *);
+static bool (*g_orig_detail_cue_update)(void *);
+
+static int cue_marker_source(uintptr_t self, int deck) {
+    uintptr_t block = perdeck_block(deck);
+    if (!block) return 0;
+    uintptr_t bank = *(const uintptr_t *)(block + 0x1040);
+    if (!bank) return 0;
+    return *(const uintptr_t *)(self + 0x958) == *(const uintptr_t *)bank &&
+           *(const uintptr_t *)(self + 0x968) == *(const uintptr_t *)(bank + 0x10);
+}
+static int cue_markers_held(void *self) {
+    if (!on_msg_thread()) return 0;
+    for (int deck = 0; deck < AZMOD_STEM_DECKS; ++deck)
+        if (sdk_command_cue_presentation_hold((unsigned) deck) && cue_marker_source((uintptr_t) self, deck))
+            return 1;
+    return 0;
+}
+static bool overview_cue_update_hook(void *self) {
+    return !cue_markers_held(self) && g_orig_overview_cue_update(self);
+}
+static bool detail_cue_update_hook(void *self) {
+    return !cue_markers_held(self) && g_orig_detail_cue_update(self);
+}
+static int cue_marker_entry(uintptr_t entry) {
+    uintptr_t first, second;
+    return img_q(entry, &first) && first == UINT64_C(0x910003fda9be7bfd) &&
+           img_q(entry + 8, &second) && second == UINT64_C(0xa90153f3f944b401);
+}
+static int install_cue_marker_display(void) {
+    uintptr_t overview = (uintptr_t) ep_off(0x1c0a088, 0x1d73808);
+    uintptr_t detail = (uintptr_t) ep_off(0x1b8d700, 0x1cf6d30);
+    if (!cue_marker_entry(overview) || !cue_marker_entry(detail)) return 0;
+    return azm_install_hook(overview, (void *) overview_cue_update_hook, (void **) &g_orig_overview_cue_update) == 1 &&
+           azm_install_hook(detail, (void *) detail_cue_update_hook, (void **) &g_orig_detail_cue_update) == 1;
+}
 static _Atomic int g_ovprobe = 12;
 static struct azov_lease_api g_ovlease;
 static int g_ovlease_bound;
@@ -2334,9 +2397,25 @@ static void ov_lease_cleanup(struct ov_lease_scope *scope) {
         (void) released;
     }
 }
+static void ov_render_leased(long self, const struct azov_lease *lease) {
+    long content = (long) lease->content_key; /* identity only */
+    int slot = ov_owned_slot(self);
+    if (slot < 0 || !content) {
+        g_orig_ov(self);
+        return;
+    }
+    g_ovi[slot].content = content;
+    g_ovi[slot].cnt = lease->count;
+    g_ovi[slot].deck = ov_deck_via_tile(self);
+    unsigned char *scaled = ov_scaled_for(slot, lease->points, lease->count);
+    if (scaled && g_ovlease.install(lease->token, scaled))
+        __atomic_fetch_add(&g_ov_applied, 1, __ATOMIC_RELAXED);
+    g_orig_ov(self);
+}
 static void ov_hook_owned(long self, uintptr_t held, uintptr_t native_return, uintptr_t native_stack)
     __attribute__((used));
 static void ov_hook_owned(long self, uintptr_t held, uintptr_t native_return, uintptr_t native_stack) {
+    if (ov_cue_defer(self)) return;
     __atomic_fetch_add(&g_ov_calls, 1, __ATOMIC_RELAXED);
     if (!on_msg_thread()) {
         g_orig_ov(self);
@@ -2351,35 +2430,13 @@ static void ov_hook_owned(long self, uintptr_t held, uintptr_t native_return, ui
     __atomic_fetch_add(&g_ov_acquired, 1, __ATOMIC_RELAXED);
     struct ov_lease_scope scope __attribute__((cleanup(ov_lease_cleanup))) = {
         {lease.token[0], lease.token[1]}, 1};
-    long content = (long) lease.content_key; /* Identity only; the broker owns dereferences. */
-    const unsigned char *arr = lease.points;
-    int cnt = lease.count;
     /* Budgeted log of the first few overview draws and their tile binding. */
     if (__atomic_fetch_sub(&g_ovprobe, 1, __ATOMIC_RELAXED) > 0) {
         wwb_log("ovprobe: self=%lx content=%lx tile=%lx -> deck=%d (table n=%d)", (unsigned long) self,
-                (unsigned long) content, (unsigned long) (self - OV_IN_TILE), ov_deck_via_tile(self),
+                (unsigned long) lease.content_key, (unsigned long) (self - OV_IN_TILE), ov_deck_via_tile(self),
                 __atomic_load_n(&g_ovtile_n, __ATOMIC_RELAXED));
     }
-    int slot = ov_owned_slot(self);
-    if (slot < 0 || !content) {
-        g_orig_ov(self);
-        return;
-    }
-    g_ovi[slot].content = content;
-    g_ovi[slot].cnt = cnt;
-    /* Deck by identity (tile ctor census) only; unknown means stock. */
-    g_ovi[slot].deck = ov_deck_via_tile(self);
-    unsigned char *sc = ov_scaled_for(slot, arr, cnt);
-    if (!sc) {
-        g_orig_ov(self);
-        return;
-    }
-    if (!g_ovlease.install(scope.token, sc)) {
-        g_orig_ov(self);
-        return;
-    }
-    __atomic_fetch_add(&g_ov_applied, 1, __ATOMIC_RELAXED);
-    g_orig_ov(self);
+    ov_render_leased(self, &lease);
 }
 /* Only the native entry shim captures the updater's verified ownership.
  * Manual refreshes call the original renderer and retain stock rendering. */
@@ -2450,10 +2507,31 @@ static void ov_refresh_tile(int tile, int decks) {
     /* This path has no owning Content boundary: retain stock rendering. */
     ov_repaint(self);
 }
+static void ov_cue_rebuild_tile(int tile) {
+    uintptr_t overview = wref_get(&g_ovtile_w[tile]);
+    if (!overview) return;
+    uintptr_t widget = overview - OV_IN_TILE, vtable, update;
+    uintptr_t type = (uintptr_t) ep_off(0x2ba0488, 0x2f1a3b8);
+    if (!own_q(widget, &vtable) || vtable != type) return;
+    if (!img_q(vtable + 5 * sizeof(uintptr_t), &update)) return;
+    if (update == (uintptr_t) ep_off(0x1c16aa0, 0x1d80220))
+        ((void (*)(uintptr_t)) update)(widget);
+}
+static void ov_cue_refresh_tile(int tile) {
+    uint64_t load = g_ovtile_cue_load[tile];
+    if (!load) return;
+    unsigned deck = (unsigned) g_ovtile[tile].deck;
+    if (sdk_command_cue_presentation_hold(deck) == load) return;
+    g_ovtile_cue_load[tile] = 0;
+    g_ovtile_cue_deferred &= ~(1u << tile);
+    if (sdk_command_cue_presentation_current(deck, load)) ov_cue_rebuild_tile(tile);
+}
 static void ov_refresh_if_needed(void) {
     int decks = __atomic_exchange_n(&g_ov_refresh, 0, __ATOMIC_ACQ_REL);
-    if (!decks)
-        return;
+    if (!decks && !g_ovtile_cue_deferred) return;
     int nt = __atomic_load_n(&g_ovtile_n, __ATOMIC_RELAXED);
-    for (int t = 0; t < nt; t++) ov_refresh_tile(t, decks);
+    for (int t = 0; t < nt; t++) {
+        if (decks) ov_refresh_tile(t, decks);
+        ov_cue_refresh_tile(t);
+    }
 }

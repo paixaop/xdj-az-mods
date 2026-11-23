@@ -214,6 +214,7 @@ struct scmd_admission {
     enum scmd_detail detail;
     uint64_t now;
     struct scmd_record *slot;
+    const az_cue_batch_request *batch;
 };
 struct scmd_retry {
     const az_command_request *request;
@@ -221,26 +222,46 @@ struct scmd_retry {
     az_command_completion_fn callback;
     void *user;
     enum scmd_detail detail;
+    const az_cue_batch_request *batch;
 };
 static int scmd_find_retry(struct scmd_admission *admission, struct scmd_retry *retry) {
     struct scmd_record *existing = scmd_find_id(admission->engine, admission->owner, admission->request.request_id);
     if (existing) {
-        *retry = (struct scmd_retry) {&existing->request, &existing->result, existing->callback, existing->callback_user, existing->detail};
+        *retry = (struct scmd_retry) {&existing->request, &existing->result, existing->callback, existing->callback_user, existing->detail, &existing->batch.plan};
         return 1;
     }
     struct scmd_pending_delivery *pending = scmd_find_pending_id(admission->engine, admission->owner, admission->request.request_id);
     if (!pending) return 0;
-    *retry = (struct scmd_retry) {&pending->request, &pending->result, pending->callback, pending->callback_user, SCMD_DETAIL_NONE};
+    *retry = (struct scmd_retry) {&pending->request, &pending->result, pending->callback, pending->callback_user, SCMD_DETAIL_NONE, &pending->batch};
+    return 1;
+}
+static int scmd_batch_entry_equal(const az_cue_batch_entry *a, const az_cue_batch_entry *b) {
+    return a->classification == b->classification && a->type == b->type && a->slot == b->slot &&
+           a->rgb == b->rgb && scmd_argument_encoding(a->position_s) == scmd_argument_encoding(b->position_s) &&
+           scmd_argument_encoding(a->end_s) == scmd_argument_encoding(b->end_s) &&
+           !strcmp(a->comment, b->comment);
+}
+static int scmd_batch_equal(const az_cue_batch_request *stored, const az_cue_batch_request *incoming) {
+    if (!incoming) return !stored->count;
+    if (stored->count != incoming->count || stored->mode != incoming->mode) return 0;
+    for (unsigned i = 0; i < stored->count; ++i)
+        if (!scmd_batch_entry_equal(&stored->entries[i], &incoming->entries[i])) return 0;
     return 1;
 }
 static int scmd_retry_admission(struct scmd_admission *admission, const struct scmd_retry *retry) {
-    if (!scmd_request_equal(retry->request, &admission->request) || retry->callback != admission->callback || retry->user != admission->user) {
+    if (!scmd_request_equal(retry->request, &admission->request) || retry->callback != admission->callback ||
+        retry->user != admission->user || !scmd_batch_equal(retry->batch, admission->batch)) {
         admission->detail = SCMD_DETAIL_ID_CONFLICT;
         return AZ_INVALID;
     }
     admission->detail = retry->detail;
     scmd_copy_result(admission->output, retry->result);
     return AZ_OK;
+}
+static void scmd_copy_batch(struct scmd_record *record, const az_cue_batch_request *batch) {
+    record->batch.plan = *batch;
+    record->batch.native_token = record->token;
+    record->batch.revision = batch->expected_revision;
 }
 static int scmd_adapter_valid(const struct scmd_adapter *adapter) {
     return adapter && adapter->arguments && adapter->begin && adapter->dispatch && adapter->end;
@@ -326,12 +347,33 @@ static void scmd_admission_commit(struct scmd_admission *admission) {
     slot->callback = admission->callback;
     slot->callback_user = admission->user;
     slot->request = admission->request;
+    if (admission->batch) scmd_copy_batch(slot, admission->batch);
     slot->result = (az_command_result) {sizeof slot->result, AZ_DATA_VERSION, AZ_COMMAND_ACCEPTED, AZ_PENDING,
                                         admission->request.request_id, 0, admission->now};
     engine->highest_id[admission->owner] = admission->request.request_id;
     scmd_publish(engine, slot);
     scmd_copy_result(admission->output, &slot->result);
     admission->detail = SCMD_DETAIL_NONE;
+}
+static int scmd_admit_locked(struct scmd_admission *admission);
+int scmd_admit_batch(struct scmd_engine *e, int owner, const az_cue_batch_request *batch,
+                     az_command_completion_fn callback, void *user,
+                     const struct scmd_adapter *adapter, az_command_result *out) {
+    struct scmd_admission admission = {
+        .engine = e, .owner = owner, .callback = callback, .user = user, .output = out,
+        .adapter = adapter, .batch = batch, .detail = SCMD_DETAIL_ARGUMENTS,
+        .request = {
+            .size = sizeof(az_command_request), .version = AZ_DATA_VERSION,
+            .operation = AZ_CMD_CUE_POINT_SET, .deck = batch->deck,
+            .request_id = batch->request_id, .expected_load_generation = batch->expected_load_generation,
+            .expected_revision = batch->expected_revision, .deadline_ns = batch->deadline_ns,
+            .flags = AZ_COMMAND_PERSIST | AZ_COMMAND_NATIVE_LOAD | AZ_COMMAND_NATIVE_CUE_IDS
+        }
+    };
+    pthread_mutex_lock(&e->mu);
+    int rc = scmd_admit_locked(&admission);
+    pthread_mutex_unlock(&e->mu);
+    return rc;
 }
 static int scmd_admit_locked(struct scmd_admission *admission) {
     if (admission->engine->owner_closed[admission->owner]) return AZ_INVALID;
@@ -378,6 +420,7 @@ int scmd_move_to_pending_locked(struct scmd_engine *e, struct scmd_record *r) {
     p->result = r->result;
     p->callback = r->callback;
     p->callback_user = r->callback_user;
+    p->batch = r->batch.plan;
     memset(r, 0, sizeof *r);
     return 1;
 }

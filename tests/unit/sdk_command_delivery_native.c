@@ -23,6 +23,13 @@ typedef struct azexit_service azexit_service;
 _Atomic(uint64_t) mailbox[4];
 _Atomic(unsigned) stopped[4];
 _Atomic(bool) advertised = true;
+static _Atomic uint64_t cue_revision = 1;
+static _Atomic unsigned cue_count;
+static _Atomic unsigned cue_operation;
+static _Atomic unsigned cue_busy;
+static const uint64_t cue_operations = (UINT64_C(1) << AZ_CMD_CUE_POINT_SET) |
+    (UINT64_C(1) << AZ_CMD_CUE_LOOP_SET) | (UINT64_C(1) << AZ_CMD_HOT_CLEAR) |
+    (UINT64_C(1) << AZ_CMD_MEMORY_DELETE);
 int activity;
 
 void signal(void) {
@@ -37,7 +44,10 @@ uint64_t clock_ns(void) {
 unsigned mask(void) {
     return atomic_load_explicit(&(delivery_transport.bound), memory_order_acquire) && atomic_load_explicit(&(advertised), memory_order_acquire) ? 15u : 0u;
 }
-uint64_t ready(unsigned deck) { return deck < 4 && mask() ? UINT64_C(1) << AZ_CMD_LOOP_EXIT : 0; }
+static uint64_t commands(void) {
+    return mask() ? (UINT64_C(1) << AZ_CMD_LOOP_EXIT) | cue_operations : 0;
+}
+uint64_t ready(unsigned deck) { return deck < 4 ? commands() : 0; }
 int target(unsigned deck, uint64_t *load) {
     *load = deck + 10;
     return AZ_OK;
@@ -49,6 +59,43 @@ int submit(const azexit_request *request) {
     atomic_store_explicit(&(mailbox[deck]), request->token, memory_order_release);
     signal();
     return AZ_PENDING;
+}
+static int submit_command(const azexit_request *request, uint32_t operation) {
+    assert(operation == AZ_CMD_LOOP_EXIT);
+    return submit(request);
+}
+static int target_cue(unsigned deck, struct azexit_cue_target *out) {
+    assert(deck < 4);
+    *out = (struct azexit_cue_target) {
+        .revision = atomic_load(&cue_revision), .revision_valid = 1,
+        .persistent_commands = cue_operations, .revision_commands = cue_operations
+    };
+    return AZ_OK;
+}
+static int native_cues(unsigned deck, az_native_cue_snapshot *out) {
+    assert(out->size >= sizeof *out);
+    *out = (az_native_cue_snapshot) {
+        .size = sizeof *out, .version = AZ_DATA_VERSION, .deck = deck,
+        .native_load_generation = deck + 10, .revision = atomic_load(&cue_revision),
+        .count = atomic_load(&cue_count), .source_rate_hz = 48000,
+        .entries = {{.classification = AZ_CUE_MEMORY, .entry_id = 1, .type = AZ_CUE_POINT}}
+    };
+    return AZ_OK;
+}
+static int submit_cue(const struct azexit_cue_request *request) {
+    assert(request->expected_revision == atomic_load(&cue_revision));
+    if (atomic_exchange(&cue_busy, 0)) {
+        delivery_notify(request->identity.deck);
+        return AZ_BUSY;
+    }
+    atomic_store(&cue_operation, request->operation);
+    return submit(&request->identity);
+}
+unsigned fixture_cue_operation(void) { return atomic_load(&cue_operation); }
+void fixture_cue_busy_once(void) { atomic_store(&cue_busy, 1); }
+void fixture_cue_bank(unsigned count, uint64_t revision) {
+    atomic_store(&cue_count, count);
+    atomic_store(&cue_revision, revision);
 }
 int old_poll(unsigned unused, azexit_result *out) {
     (void) unused;
@@ -80,7 +127,7 @@ const azexit_delivery_v2 delivery = {
     delivery_bind, delivery_reserve, delivery_close_local, drive, ready};
 const azexit_service service = {
     sizeof service, 1, mask, target, submit, old_control, old_poll, old_control,
-    NULL, NULL, NULL, NULL, NULL, NULL, NULL, &delivery};
+    commands, submit_command, NULL, submit_cue, target_cue, NULL, native_cues, &delivery};
 
 
 const azexit_service *fixture_service(void) {
@@ -103,6 +150,15 @@ void fixture_finish(unsigned deck, uint64_t token, unsigned outcome, int reason,
     azexit_receipt value = delivery_receipt(cell->request, AZEXIT_RECEIPT_TERMINAL, settled, deck + 100,
                                             clock_ns(), outcome, reason, outcome == AZ_COMMAND_APPLIED ? token : 0);
     assert(delivery_publish(&value, false, 0) == AZ_OK);
+}
+void fixture_cue_finish(unsigned deck, uint64_t token, unsigned outcome, int reason) {
+    if (outcome == AZ_COMMAND_APPLIED) {
+        unsigned op = fixture_cue_operation();
+        if (op == AZ_CMD_MEMORY_DELETE || op == AZ_CMD_HOT_CLEAR) atomic_fetch_sub(&cue_count, 1);
+        else atomic_fetch_add(&cue_count, 1);
+        atomic_store(&cue_revision, token);
+    }
+    fixture_finish(deck, token, outcome, reason, 1);
 }
 void fixture_settle(unsigned deck, uint64_t token) {
     delivery_Token *cell = delivery_find(token);

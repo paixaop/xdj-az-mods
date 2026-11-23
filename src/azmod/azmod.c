@@ -2627,7 +2627,12 @@ static int install_wave_renderers(int nowave) {
     } /* end azmod-nowave.on guard */
     return wp;
 }
+static void install_cue_batch_presentation(void) {
+    if (g_orig_rtick && g_orig_ov && g_orig_tileowner && g_orig_tilector && install_cue_marker_display())
+        sdk_command_cue_presentation_enable();
+}
 static void install_wave_timers(void) {
+    install_cue_batch_presentation();
     g_scroll60_ok = access("/home/root/settings/azmod-scroll60.off", F_OK) != 0;
     int g =
         azm_install_hook(JUCE_STARTTIMER, (void *) starttimer_hook, (void **) &g_orig_starttimer);

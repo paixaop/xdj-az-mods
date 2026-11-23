@@ -55,6 +55,9 @@ static int install_wave_scale(void) {
     return 1;
 }
 static int ui60ui_at_start(void) { return 1; }
+static unsigned cue_presentation;
+static int install_cue_marker_display(void) { return 1; }
+static void sdk_command_cue_presentation_enable(void) { ++cue_presentation; }
 static void install_vb_dtor(void) { vb_dtor_order = ++serial; }
 static void install_vinyl_slider(void) { vb_slider_order = ++serial; }
 #define access fixture_access
@@ -97,7 +100,8 @@ INSTALL(install_rowcache)
 static void reset_hooks(void) {
     memset(seen, 0, sizeof seen);
     memset(hook_order, 0, sizeof hook_order);
-    serial = scale_calls = segv_calls = 0;
+    serial = scale_calls = segv_calls = cue_presentation = 0;
+    g_orig_ov = g_orig_tileowner = g_orig_tilector = NULL;
 }
 static void waveform_installs(void) {
     for (unsigned v = 0; v < 4; v++) {
@@ -122,6 +126,7 @@ static void waveform_installs(void) {
         assert(seen[SW2D_PAINT] == !nowave && seen[WAVE_OVERVIEW] == !nowave);
         assert(scale_calls == !nowave && segv_calls == !nowave);
         assert(seen[OV_TILE_OWNER] == !nowave && seen[OV_TILE_CTOR] == !nowave);
+        assert(cue_presentation == !nowave);
         assert(seen[JUCE_STARTTIMER] && seen[DISPREFRESH_TIMERCB]);
         assert(seen[FLING_REL] == !scroll_off && seen[RM_PAINTNOW] == !scroll_off);
         assert(g_scroll60_ok == !scroll_off && g_feedlock_ok == !feed_off);

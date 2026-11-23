@@ -75,6 +75,12 @@ struct scmd_adapter {
     int (*dispatch)(void *, const az_command_request *, uint64_t, struct scmd_completion *);
     void (*end)(void *, uint32_t);
 };
+struct scmd_cue_batch {
+    az_cue_batch_request plan;
+    uint64_t native_token, revision;
+    unsigned created, changed, creating, stop;
+    struct azexit_receipt terminal;
+};
 struct scmd_record {
     uint64_t token, execution_revision, owner_lifetime, native_lifetime;
     int owner, phase, pinned, awaiting;
@@ -85,6 +91,7 @@ struct scmd_record {
     enum scmd_detail detail;
     az_command_request request;
     az_command_result result;
+    struct scmd_cue_batch batch;
 };
 /* A released notification can outlive the primary command record. This is a
  * reservation identity, not a second command slot: it keeps the callback,
@@ -97,6 +104,7 @@ struct scmd_pending_delivery {
     az_command_result result;
     az_command_completion_fn callback;
     void *callback_user;
+    az_cue_batch_request batch;
 };
 struct scmd_change {
     uint32_t size, version;
@@ -157,6 +165,8 @@ int scmd_admit(struct scmd_engine *e, int owner, const az_command_request *reque
                az_command_completion_fn callback, void *user,
                const struct scmd_target *target, const struct scmd_adapter *adapter,
                az_command_result *out, enum scmd_detail *detail_out, int target_pending);
+int scmd_admit_batch(struct scmd_engine *, int, const az_cue_batch_request *,
+                     az_command_completion_fn, void *, const struct scmd_adapter *, az_command_result *);
 
 int scmd_move_to_pending_locked(struct scmd_engine *e, struct scmd_record *r);
 

@@ -55,3 +55,17 @@ static __attribute__((unused)) int sdk_command_acknowledge(const char *id, uint6
     return AZ_INVALID;
 #endif
 }
+#ifdef CM_MAX
+static int sdk_command_batch_owner_ready(const cm_mod *mod, int owner) {
+    return mod->state == AZCM_LOADED || (g_sdk_in_init && g_cm_loading == owner);
+}
+static int sdk_command_batch_submit_async(const char *id, const az_cue_batch_request *batch,
+                                          az_command_completion_fn callback, void *user,
+                                          az_command_result *out) {
+    cm_mod *mod = cm_self(id, CM_RA(), "cue_batch_submit_async");
+    if (!g_cm_on_ui || !mod || !callback || !cm_command_code(mod, (uintptr_t) callback)) return AZ_INVALID;
+    int owner = (int) (mod - g_cm);
+    if (!sdk_command_batch_owner_ready(mod, owner)) return AZ_INVALID;
+    return sdk_exit_submit_batch(owner, batch, callback, user, out);
+}
+#endif

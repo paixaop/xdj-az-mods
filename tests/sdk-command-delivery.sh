@@ -8,7 +8,7 @@ if [[ $(uname -s) != Linux ]]; then
 fi
 task_tmp=$(mktemp -d "${TMPDIR:-/tmp}/az-command-delivery.XXXXXX")
 trap 'rm -rf "$task_tmp"' EXIT
-flags=(-O1 -g -Wall -Wextra -Werror -Wno-unused-function -pthread -Isrc/common -Isrc/azmod)
+flags=(-O1 -g -Wall -Wextra -Werror -Wno-unused-function -pthread "-I$PWD/src/common" "-I$PWD/src/azmod")
 link=()
 if [[ ${AZ_COMMAND_REAL_X:-0} == 1 ]]; then
     flags+=(-DAZ_COMMAND_REAL_X)
@@ -25,7 +25,7 @@ awk '/^static int sdk_command_submit\(/,/^}/' src/azmod/sdk_track.c > "$task_tmp
 awk '
 /^static const az_commands_v1 g_sdk_command_service =/ { table = 1; print; next }
 table && /^};/ { table = 0; print; next }
-table && /^[ ]+\.(abi|size|command_[a-z_]+) =/ { print }
+table && /^[ ]+\.(abi|size|command_[a-z_]+|cue_batch_submit_async) =/ { print }
 /^static const az_commands_v1 \*sdk_command_service\(/,/^}/ { print }
 /^static const az_core_v1 g_cm_core =/ { core = 1; print; next }
 core && /^};/ { core = 0; print; next }
@@ -37,5 +37,5 @@ awk -v source="$PWD/src/azmod/mod_menu_overlay.c" '/^\/\* X input can start an e
     -DSDK_LIBRARY_INC="\"$task_tmp/library.inc\"" -DSDK_OVERLAY_INC="\"$task_tmp/overlay.inc\"" \
     -c tests/unit/sdk_command_delivery_test.c -o "$task_tmp/core.o"
 "${HOST_CC:-cc}" -std=gnu11 "${flags[@]}" tests/unit/sdk_command_delivery_native.c src/azmod/sdk_command_engine.c "$task_tmp/core.o" \
-    "${link[@]}" -o "$task_tmp/delivery"
+    "${link[@]}" -lm -o "$task_tmp/delivery"
 "$task_tmp/delivery"

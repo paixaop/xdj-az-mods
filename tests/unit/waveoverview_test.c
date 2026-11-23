@@ -52,6 +52,9 @@ static int ov_deck_via_tile(long self) {
     (void) self;
     return selected_deck;
 }
+/* This fixture isolates the Content lease. Command-delivery tests exercise
+ * the separate batch presentation hold. */
+static int ov_cue_defer(long self) { (void) self; return 0; }
 static void *overview_dlsym(void *handle, const char *name) {
     (void) handle;
     CHECK(!strcmp(name, "azstem_overview_lease_v1"));

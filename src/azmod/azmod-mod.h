@@ -500,6 +500,25 @@ typedef struct az_command_completion {
 } az_command_completion;
 typedef void (*az_command_completion_fn)(const az_command_completion *completion, void *user);
 
+/* Complete desired bank, in original-track seconds. The core copies the
+ * request before returning. A single request ID owns the entire operation,
+ * including acknowledgement and release through the command service.
+ * expected_revision comes from the same native cue snapshot as the target
+ * load. REPLACE authorizes removal of that snapshot's existing saved bank.
+ * A partial application reports UNCERTAIN. */
+#define AZ_CUE_BATCH_LIMIT 18u
+enum { AZ_CUE_BATCH_IF_EMPTY = 1, AZ_CUE_BATCH_REPLACE };
+typedef struct az_cue_batch_entry {
+    uint32_t classification, type, slot, rgb;
+    double position_s, end_s;
+    char comment[128];
+} az_cue_batch_entry;
+typedef struct az_cue_batch_request {
+    uint32_t size, version, deck, mode;
+    uint64_t request_id, expected_load_generation, expected_revision, deadline_ns;
+    uint32_t count, reserved;
+    az_cue_batch_entry entries[AZ_CUE_BATCH_LIMIT];
+} az_cue_batch_request;
 
 /* ---- Passive deck status. Borrowed values and nested arrays live through the UI callback. */
 /* Check AZ_OBSERVATION_HAS for on_deck_status and deck_status_release. */
@@ -961,6 +980,10 @@ typedef struct az_commands_v1 {
                                 az_command_completion_fn callback, void *user,
                                 az_command_result *out);
     int (*command_acknowledge)(const char *id, uint64_t request_id);
+    /* Optional. AZ_UNSUPPORTED if the native provider cannot batch this load. */
+    int (*cue_batch_submit_async)(const char *id, const az_cue_batch_request *request,
+                                  az_command_completion_fn callback, void *user,
+                                  az_command_result *out);
 } az_commands_v1;
 #define AZ_COMMANDS_HAS(service, field) \
     ((service) && (service)->abi == AZ_COMMANDS_ABI && \
