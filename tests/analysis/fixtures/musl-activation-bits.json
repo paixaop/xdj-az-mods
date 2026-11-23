@@ -1,0 +1,19 @@
+{
+  "source": "Retained ARM64 musl 1.2.5 SDK libc.a used by Track Analysis 0.4.4",
+  "generator": "../generate_activation_reference.c",
+  "functions": [
+    "expf",
+    "expm1f",
+    "tanhf"
+  ],
+  "count": 4096,
+  "format": "uint32 IEEE-754 bits: input, expf, expm1f, tanhf",
+  "seed": 17,
+  "target": "aarch64-linux-musl, ARMv8.0",
+  "compiler_flags": [
+    "-O2",
+    "-fno-builtin",
+    "-static"
+  ],
+  "sha256": "d9b574383f80c6b9d09f0dd2755c3b528e28bbf3d8a247765c6c41deb2688d4a"
+}
