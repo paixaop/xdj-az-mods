@@ -499,7 +499,8 @@ typedef void (*az_command_completion_fn)(const az_command_completion *completion
 
 
 /* ---- Passive deck status. Borrowed values and nested arrays live through the UI callback. */
-#define AZ_DECK_STATUS_MIN_CORE "1.2.6" /* also check AZ_LIB_HAS for both status members */
+/* Check AZ_OBSERVATION_HAS for on_deck_status and deck_status_release. */
+#define AZ_DECK_STATUS_MIN_CORE "1.2.6"
 enum {
     AZ_STATUS_LOAD, AZ_STATUS_METADATA, AZ_STATUS_KEY, AZ_STATUS_CUES,
     AZ_STATUS_LOOP, AZ_STATUS_GRID, AZ_STATUS_PHRASES, AZ_STATUS_TRANSPORT,

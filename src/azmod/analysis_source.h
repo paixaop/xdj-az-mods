@@ -4,8 +4,13 @@
 #include "azmod-mod.h"
 #include <stdint.h>
 /* A core feature and a community initialization have separate lifetimes. */
-enum { AZ_ANALYSIS_OWNER_CORE = 1, AZ_ANALYSIS_OWNER_MOD = 2 };
-enum { ANALYSIS_SOURCE_COMPLETE = 100 }; /* Validated source already has requested components. */
+enum {
+    AZ_ANALYSIS_OWNER_CORE = 1,
+    AZ_ANALYSIS_OWNER_MOD = 2
+};
+enum {
+    ANALYSIS_SOURCE_COMPLETE = 100
+}; /* Validated source already has requested components. */
 
 typedef struct az_analysis_owner {
     uint64_t generation;
@@ -18,12 +23,13 @@ typedef struct analysis_source_request {
     az_track_ref track;
 } analysis_source_request;
 /* Owned until release, which runs only after all decoder children have joined.
- * The audio descriptor locator may be opened by a subprocess. An already-open
- * descriptor survives retirement; a new open after release fails. */
+ * The audio descriptor locator remains valid across owner retirement and may
+ * be opened by a subprocess. Neither locator nor bytes may be used after release. */
 typedef struct analysis_source_input {
     uint64_t lease;
     az_analysis_owner owner;
     char audio_path[1024];
+    int reader_fd;
     az_beat *beats;
     uint32_t beat_count, needed;
     double bpm;
@@ -50,7 +56,7 @@ void analysis_source_release(analysis_source_input *input);
 /* Nonblocking revocation; physical cleanup is performed by a service worker. */
 void analysis_source_retire(az_analysis_owner owner);
 int analysis_vocal_intervals(az_analysis_owner owner, const az_track_ref *track,
-                              az_vocal_snapshot_v1 *out, az_vocal_interval *intervals, uint32_t capacity);
+                             az_vocal_snapshot_v1 *out, az_vocal_interval *intervals, uint32_t capacity);
 int analysis_vocal_intervals_loaded(az_analysis_owner owner, int deck, uint64_t load,
-                                     az_vocal_snapshot_v1 *out, az_vocal_interval *intervals, uint32_t capacity);
+                                    az_vocal_snapshot_v1 *out, az_vocal_interval *intervals, uint32_t capacity);
 #endif

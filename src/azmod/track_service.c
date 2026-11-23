@@ -163,7 +163,7 @@ static int st_disk_detail(const az_track_ref *ref, const struct st_source *sourc
     if (!data->signatures[file_slot]) return AZ_UNSUPPORTED;
     int rc = st_wave_read(data->files[file_slot], data);
     return rc ? rc : track_service_disk_fresh(ref, data, NULL) ? AZ_OK
-                                                    : AZ_STALE;
+                                                               : AZ_STALE;
 }
 static int st_analysis_relative(const char *analysis, unsigned file, char relative[1024]) {
     snprintf(relative, 1024, "%s", analysis);
@@ -299,9 +299,7 @@ void track_service_status_register(void (*jobs)(void)) { atomic_store(&g_st_stat
 int track_service_status_started(void) { return atomic_load(&g_st_status_jobs) != NULL; }
 int track_service_capabilities(az_data_capabilities *out) {
     if (!out || st_record_size(out) < sizeof *out) return AZ_INVALID;
-    az_data_capabilities value = {.size = out->size, .version = AZ_DATA_VERSION,
-        .stored_components = track_service_enabled() && az_storage_sql()->ok > 0 ? 31u : 0u,
-        .max_requests_per_mod = ST_PER_OWNER, .max_snapshots = ST_SLOTS, .max_wave_samples = ST_WAVE};
+    az_data_capabilities value = {.size = out->size, .version = AZ_DATA_VERSION, .stored_components = track_service_enabled() && az_storage_sql()->ok > 0 ? 31u : 0u, .max_requests_per_mod = ST_PER_OWNER, .max_snapshots = ST_SLOTS, .max_wave_samples = ST_WAVE};
     *out = value;
     return AZ_OK;
 }

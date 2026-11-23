@@ -4,17 +4,18 @@
 static int g_sdk_on_tap_thread, g_cm_on_ui = 1;
 #define CM_RA() ((uintptr_t)1)
 static int st_mod_owner(const char *id, uintptr_t caller, const char *service) {
-    assert(!strcmp(service, "analysis"));
+    assert(!strcmp(service, "analysis") || !strcmp(service, "vocal_intervals") ||
+           !strcmp(service, "vocal_intervals_loaded"));
     return id && !strcmp(id, "analysis-client") && caller == 1 ? 0 : -1;
 }
-static int sdk_vocal_intervals(const char *id, const az_track_ref *track,
+int analysis_vocal_intervals(az_analysis_owner owner, const az_track_ref *track,
     az_vocal_snapshot_v1 *out, az_vocal_interval *intervals, uint32_t capacity) {
-    (void)id; (void)track; (void)out; (void)intervals; (void)capacity;
+    (void)owner; (void)track; (void)out; (void)intervals; (void)capacity;
     return AZ_UNSUPPORTED;
 }
-static int sdk_vocal_intervals_loaded(const char *id, int deck, uint64_t epoch,
+int analysis_vocal_intervals_loaded(az_analysis_owner owner, int deck, uint64_t epoch,
     az_vocal_snapshot_v1 *out, az_vocal_interval *intervals, uint32_t capacity) {
-    (void)id; (void)deck; (void)epoch; (void)out; (void)intervals; (void)capacity;
+    (void)owner; (void)deck; (void)epoch; (void)out; (void)intervals; (void)capacity;
     return AZ_UNSUPPORTED;
 }
 #include "../../src/azmod/analysis_api.c"
@@ -66,6 +67,19 @@ static void public_contract(az_analysis_owner owner) {
     g_sdk_on_tap_thread = 0; g_cm_on_ui = 0;
     assert(service->request("analysis-client", &r, &id) != AZ_OK && !id);
     analysis_owner_thread_bind(owner);
+    az_vocal_snapshot_v1 snapshot = {.size = sizeof snapshot};
+    az_vocal_interval intervals[4];
+    assert(service->vocal_intervals("another-owner", &r.track, &snapshot, intervals, 4) == AZ_INVALID);
+    assert(service->vocal_intervals_loaded("another-owner", 1, 1, &snapshot, intervals, 4) == AZ_INVALID);
+    g_cm_on_ui = 1;
+    assert(service->vocal_intervals("analysis-client", &r.track, &snapshot, intervals, 4) == AZ_INVALID);
+    assert(service->vocal_intervals_loaded("analysis-client", 1, 1, &snapshot, intervals, 4) == AZ_INVALID);
+    g_cm_on_ui = 0; g_sdk_on_tap_thread = 1;
+    assert(service->vocal_intervals("analysis-client", &r.track, &snapshot, intervals, 4) == AZ_INVALID);
+    assert(service->vocal_intervals_loaded("analysis-client", 1, 1, &snapshot, intervals, 4) == AZ_INVALID);
+    g_sdk_on_tap_thread = 0;
+    assert(service->vocal_intervals("analysis-client", &r.track, &snapshot, intervals, 4) == AZ_UNSUPPORTED);
+    assert(service->vocal_intervals_loaded("analysis-client", 1, 1, &snapshot, intervals, 4) == AZ_UNSUPPORTED);
     atomic_store(&with_grid, 1);
     const unsigned components[] = {AZ_DATA_PHRASES, AZ_ANALYSIS_VOCALS, AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS};
     for (unsigned c = 0; c < 3; c++) {

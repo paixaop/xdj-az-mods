@@ -71,8 +71,9 @@ static void sdk_rows_tick(void) { g_rows_ticks++; }
  * keep its optional per-frame services self-contained here. */
 static void sdk_data_callbacks_tick(void) {}
 static void sdk_beatport_owner_tick(void) {}
-static void sdk_cue_tick(void) {}
-static _Atomic(void *) g_sdk_exit_bound;
+static int native_bound, cue_ticks;
+static void sdk_cue_tick(void) { ++cue_ticks; }
+static int sdk_command_native_bound(void) { return native_bound; }
 static void azsdk_slip_collect_v1(void) {}
 /* the quarantine's heartbeat (cm_orderly.h has its own suite) */
 static long g_rtick_n;
@@ -131,5 +132,14 @@ int main(void) {
     g_cm_live = 1;
     CHECK("a running mod: the question is shown and answered too", asked_and_answered());
     CHECK("... and the mod's own tick and queue run (CONTROL for the setup)", g_mod_ticks > 0 && g_drains > 0);
+    int before = cue_ticks;
+    native_bound = 1;
+    g_now += 40;
+    community_tick();
+    CHECK("bound native command service owns cue observations", cue_ticks == before);
+    native_bound = 0;
+    g_now += 40;
+    community_tick();
+    CHECK("unbound companion retains independent cue observations", cue_ticks == before + 1);
     return ut_summary();
 }

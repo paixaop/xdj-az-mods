@@ -14,7 +14,11 @@
 #include <unistd.h>
 #define CM_MAX 2
 #define CM_RA() ((uintptr_t) __builtin_return_address(0))
-typedef struct { uintptr_t lo, hi; int running; char id[16]; } cm_mod;
+typedef struct {
+    uintptr_t lo, hi;
+    int running;
+    char id[16];
+} cm_mod;
 static cm_mod g_cm[CM_MAX];
 static _Thread_local int g_cm_on_ui;
 static int g_cm_loading = -1, g_cm_in_frame, fail_alloc, fail_create;
@@ -24,7 +28,9 @@ static cm_mod *cm_self(const char *id, uintptr_t caller, const char *service) {
 }
 static int cm_running(const cm_mod *mod) { return mod->running; }
 static void cm_logf(cm_mod *mod, int level, const char *format, ...) {
-    (void) mod; (void) level; (void) format;
+    (void) mod;
+    (void) level;
+    (void) format;
 }
 static void *thread_allocate(size_t size) { return fail_alloc ? NULL : malloc(size); }
 static int thread_create(pthread_t *thread, const pthread_attr_t *attributes, void *(*entry)(void *), void *argument) {
@@ -34,10 +40,26 @@ static int thread_create(pthread_t *thread, const pthread_attr_t *attributes, vo
     assert(!pthread_attr_getinheritsched(attributes, &inherit) && inherit == PTHREAD_EXPLICIT_SCHED);
     assert(!pthread_attr_getschedparam(attributes, &priority) && priority.sched_priority == 0);
     assert(!pthread_attr_getdetachstate(attributes, &detached) && detached == PTHREAD_CREATE_DETACHED);
-    return fail_create ? EAGAIN : pthread_create(thread, attributes, entry, argument);
+    if (fail_create) return EAGAIN;
+#ifdef __APPLE__
+    /* Darwin accepts explicit priority zero but runs it below its SCHED_OTHER
+     * range (15..47). Validate the deck attributes above, then use the host's
+     * inherited scheduling so this fixture cannot starve under coverage load. */
+    pthread_attr_t host;
+    assert(!pthread_attr_init(&host));
+    assert(!pthread_attr_setdetachstate(&host, detached));
+    int rc = pthread_create(thread, &host, entry, argument);
+    assert(!pthread_attr_destroy(&host));
+    return rc;
+#else
+    return pthread_create(thread, attributes, entry, argument);
+#endif
 }
 #ifdef __APPLE__
-static int thread_name(pthread_t thread, const char *name) { (void) thread; return pthread_setname_np(name); }
+static int thread_name(pthread_t thread, const char *name) {
+    (void) thread;
+    return pthread_setname_np(name);
+}
 #define pthread_setname_np thread_name
 #endif
 #define malloc thread_allocate
@@ -48,7 +70,11 @@ static int thread_name(pthread_t thread, const char *name) { (void) thread; retu
 #ifdef __APPLE__
 #undef pthread_setname_np
 #endif
-struct run { az_analysis_owner expected; _Atomic int entered, resume, finished; int spawn; };
+struct run {
+    az_analysis_owner expected;
+    _Atomic int entered, resume, finished;
+    int spawn;
+};
 static void *entry(void *opaque) {
     struct run *run = opaque;
     az_analysis_owner bound = analysis_owner_for_caller(0);
@@ -88,15 +114,18 @@ int main(void) {
     assert(sd_thread_start("mod-a", "stopped", entry, &run) == -1);
     g_cm_loading = 0;
     assert(sd_thread_start("mod-a", NULL, entry, &run) == 0);
-    wait_for(&run.finished); wait_empty();
-    g_cm_loading = -1; g_cm[0].running = 1;
+    wait_for(&run.finished);
+    wait_empty();
+    g_cm_loading = -1;
+    g_cm[0].running = 1;
     g_cm_in_frame = 1;
     assert(sd_thread_start("mod-a", "frame", entry, &run) == -1);
     g_cm_in_frame = 0;
-    assert(sd_thread_start("mod-a", "foreign", (void *(*)(void *))(uintptr_t) 1, &run) == -1);
+    assert(sd_thread_start("mod-a", "foreign", (void *(*) (void *) )(uintptr_t) 1, &run) == -1);
     fail_alloc = 1;
     assert(sd_thread_start("mod-a", "alloc", entry, &run) == -1 && !sd_threads_of(0));
-    fail_alloc = 0; fail_create = 1;
+    fail_alloc = 0;
+    fail_create = 1;
     assert(sd_thread_start("mod-a", "pthread", entry, &run) == -1 && !sd_threads_of(0));
     fail_create = 0;
     struct run blocked[4] = {0};
@@ -115,15 +144,18 @@ int main(void) {
     az_analysis_owner next = analysis_owner_begin(0);
     assert(next.generation != first.generation);
     atomic_store(&retiring.resume, 1);
-    wait_for(&retiring.finished); wait_empty();
+    wait_for(&retiring.finished);
+    wait_empty();
     /* A raw/unbound worker never inherits the current generation through its code address. */
     g_cm_on_ui = 0;
     struct run unbound = {.resume = 1};
     assert(sd_thread_start("mod-a", "unbound", entry, &unbound) == 0);
-    wait_for(&unbound.finished); wait_empty();
+    wait_for(&unbound.finished);
+    wait_empty();
     g_cm_on_ui = 1;
     struct run current = {.expected = next, .resume = 1};
     assert(sd_thread_start("mod-a", "new-worker", entry, &current) == 0);
-    wait_for(&current.finished); wait_empty();
+    wait_for(&current.finished);
+    wait_empty();
     puts("SDK thread start: real callbacks, admission/quota failures, payload cleanup and epoch inheritance passed");
 }

@@ -28,6 +28,6 @@ int track_service_wave_acquire(int owner, uint64_t, const az_wave_snapshot **);
 int track_service_release(int owner, uint64_t, int cancel);
 int track_service_event(int owner, uint64_t, az_data_change *);
 /* Host-owned thread trampoline preserves alternate-stack setup. */
-int az_storage_thread_create(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *);
+int az_storage_thread_create(pthread_t *, const pthread_attr_t *, void *(*) (void *), void *);
 #pragma GCC visibility pop
 #endif

@@ -148,25 +148,25 @@ struct scmd_record *scmd_find_token(struct scmd_engine *e, uint64_t token);
 void scmd_clear_barrier(struct scmd_engine *e, const struct scmd_record *r);
 
 void scmd_finish(struct scmd_engine *e, struct scmd_record *r, uint32_t outcome, int reason,
-                               uint64_t revision, enum scmd_detail detail, uint64_t now, int awaiting);
+                 uint64_t revision, enum scmd_detail detail, uint64_t now, int awaiting);
 
 int scmd_target_valid(const az_command_request *r, const struct scmd_target *t,
-                                    const struct scmd_adapter *adapter, enum scmd_detail *detail);
+                      const struct scmd_adapter *adapter, enum scmd_detail *detail);
 
 int scmd_admit(struct scmd_engine *e, int owner, const az_command_request *request,
-                             az_command_completion_fn callback, void *user,
-                             const struct scmd_target *target, const struct scmd_adapter *adapter,
-                             az_command_result *out, enum scmd_detail *detail_out, int target_pending);
+               az_command_completion_fn callback, void *user,
+               const struct scmd_target *target, const struct scmd_adapter *adapter,
+               az_command_result *out, enum scmd_detail *detail_out, int target_pending);
 
 int scmd_move_to_pending_locked(struct scmd_engine *e, struct scmd_record *r);
 
 int scmd_submit(struct scmd_engine *e, int owner, const az_command_request *request,
-                              const struct scmd_target *target, const struct scmd_adapter *adapter,
-                              az_command_result *out, enum scmd_detail *detail_out);
+                const struct scmd_target *target, const struct scmd_adapter *adapter,
+                az_command_result *out, enum scmd_detail *detail_out);
 int scmd_submit_async(struct scmd_engine *e, int owner, const az_command_request *request,
-                                    az_command_completion_fn callback, void *user,
-                                    const struct scmd_target *target, const struct scmd_adapter *adapter,
-                                    az_command_result *out, enum scmd_detail *detail_out, int target_pending);
+                      az_command_completion_fn callback, void *user,
+                      const struct scmd_target *target, const struct scmd_adapter *adapter,
+                      az_command_result *out, enum scmd_detail *detail_out, int target_pending);
 int scmd_owner_deliverable(struct scmd_engine *e, int owner, uint64_t lifetime);
 int scmd_acknowledge(struct scmd_engine *e, int owner, uint64_t id);
 /* Reserve the next callback identity while holding the store lock, then invoke it

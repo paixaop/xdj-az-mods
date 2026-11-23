@@ -20,6 +20,6 @@ if [ "$(uname -s)" = Linux ]; then
     python3 tests/unit/extract_spool.py > "$task_tmp/spool.inc"
     ${HOST_CC:-cc} "${flags[@]}" -Wno-unused-function -Wno-missing-field-initializers -rdynamic \
         -DLIB_INC='"sdk_lib.c"' -DLSAPPLY_INC="\"$task_tmp/spool.inc\"" -Itests/unit -Isrc/azmod tests/unit/sdkanalysis_service_test.c src/azmod/analysis_owner.c src/azmod/analysis_source.c src/azmod/analysis_encoding.c src/azmod/sdk_command_engine.c src/azmod/sdk_command_service.c src/azmod/track_service.c src/azmod/track_storage.c \
-        -lsqlite3 -ldl -lm -o "$task_tmp/service"
+        -Wl,--wrap=az_storage_sql_ready,--wrap=calloc,--wrap=pthread_mutex_trylock -lsqlite3 -ldl -lm -o "$task_tmp/service"
     "$task_tmp/service"
 fi

@@ -125,7 +125,7 @@ fz_prepare() {
         [ ! -d guest/azmod/icons ] || cp -R guest/azmod/icons "$dir/azmod/"
         grep -q '^static void cm_load(void)' "$dir/azmod/screen_community.c" ;;
     sdklib)
-        cp guest/azmod/sdk_lib.c guest/azmod/azmod-mod.h guest/azmod/pioneer_dir.h $FZ_UT/sdklib_test.c $FZ_UT/check.h "$dir/"
+        cp guest/azmod/sdk_lib.c guest/azmod/azmod-mod.h guest/azmod/pioneer_dir.h guest/azmod/library_sql.h $FZ_UT/sdklib_test.c $FZ_UT/check.h "$dir/"
         grep -q '^static void sdk_copy_col' "$dir/sdk_lib.c" ;;
     sdkanalysis)
         mkdir -p "$dir/../common"

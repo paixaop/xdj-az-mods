@@ -86,7 +86,9 @@ static int ar_policy(void) {
 #ifdef __linux__
     cpu_set_t cpus;
     CPU_ZERO(&cpus);
-    CPU_SET(1, &cpus); CPU_SET(2, &cpus); CPU_SET(3, &cpus);
+    CPU_SET(1, &cpus);
+    CPU_SET(2, &cpus);
+    CPU_SET(3, &cpus);
     return !sched_setaffinity(0, sizeof cpus, &cpus) && !setpriority(PRIO_PROCESS, 0, 19);
 #else
     return 1;
@@ -114,7 +116,8 @@ static int ar_source_valid(const az_analysis_request_v1 *r) {
 static int ar_request_valid(const az_analysis_request_v1 *r) {
     if (!r || r->size < sizeof *r || r->version != AZ_ANALYSIS_REQUEST_VERSION) return 0;
     if (!r->components || (r->components & ~(AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS))) return 0;
-    for (unsigned i = 0; i < 4; i++) if (r->reserved[i]) return 0;
+    for (unsigned i = 0; i < 4; i++)
+        if (r->reserved[i]) return 0;
     return ar_source_valid(r) && ar_execution_valid(r);
 }
 static struct ar_job *ar_find(az_analysis_owner owner, uint64_t id) {
@@ -139,10 +142,14 @@ static void ar_admit(struct ar_job *job, az_analysis_owner owner, const az_analy
     ar_drop(job);
     job->owner = owner;
     job->request = *r;
-    job->status = (az_analysis_status_v1){.size = sizeof job->status,
-        .version = AZ_DATA_VERSION, .state = AZ_ANALYSIS_QUEUED,
-        .request_id = ++ar.serial, .load_epoch = r->load_epoch,
-        .track = r->track, .deck = r->deck, .result = AZ_PENDING};
+    job->status = (az_analysis_status_v1) {.size = sizeof job->status,
+                                           .version = AZ_DATA_VERSION,
+                                           .state = AZ_ANALYSIS_QUEUED,
+                                           .request_id = ++ar.serial,
+                                           .load_epoch = r->load_epoch,
+                                           .track = r->track,
+                                           .deck = r->deck,
+                                           .result = AZ_PENDING};
 }
 static int ar_admission(az_analysis_owner owner, struct ar_job **job) {
     if (!analysis_owner_current(owner)) return AZ_STALE;
@@ -160,7 +167,7 @@ int analysis_runtime_request(az_analysis_owner owner, const az_analysis_request_
         ar_admit(job, owner, r);
         *id = job->status.request_id;
         ar.notification++;
-    ar_signal();
+        ar_signal();
     }
     pthread_mutex_unlock(&ar.mutex);
     return rc;
@@ -174,11 +181,9 @@ static int ar_cancelled(void *user) {
 }
 static int ar_engine(struct ar_job *job, const analysis_source_input *input, char error[160]) {
     if (ar_cancelled(job)) return AZ_STALE;
-    ta_execution execution = {(ta_stage_mode)job->request.stage_mode,
-        job->request.phrase_threads, job->request.vocal_threads};
-    ta_request request = {.audio_path = input->audio_path, .assets_path = ar.assets,
-        .beats = input->beats, .beat_count = input->beat_count, .needed = input->needed,
-        .bpm = input->bpm, .execution = &execution, .cancelled = ar_cancelled, .user = job};
+    ta_execution execution = {(ta_stage_mode) job->request.stage_mode,
+                              job->request.phrase_threads, job->request.vocal_threads};
+    ta_request request = {.audio_path = input->audio_path, .assets_path = ar.assets, .beats = input->beats, .beat_count = input->beat_count, .needed = input->needed, .bpm = input->bpm, .execution = &execution, .cancelled = ar_cancelled, .user = job};
     int rc = ta_analyze(&request, &job->result, error, 160);
     if (rc == TA_CANCELLED) return AZ_STALE;
     if (rc == TA_LIMIT) return AZ_LIMIT;
@@ -193,8 +198,10 @@ static int ar_compute(struct ar_job *job, char error[160]) {
     if (clock_gettime(CLOCK_MONOTONIC, &job->started)) return AZ_FAILED;
     if (ar_cancelled(job)) return AZ_STALE;
     analysis_source_request request = {.loaded = job->request.source_kind == AZ_ANALYSIS_DECK,
-        .components = job->request.components, .deck = (int32_t)job->request.deck,
-        .load = job->request.load_epoch, .track = job->request.track};
+                                       .components = job->request.components,
+                                       .deck = (int32_t) job->request.deck,
+                                       .load = job->request.load_epoch,
+                                       .track = job->request.track};
     int rc = analysis_source_acquire(job->owner, &request, &job->input);
     if (rc) return rc;
     rc = ar_engine(job, &job->input, error);
@@ -206,22 +213,23 @@ static int ar_compute(struct ar_job *job, char error[160]) {
     return rc;
 }
 static void ar_finish(struct ar_job *job, int rc) {
+    int completed = rc == AZ_OK || rc == ANALYSIS_SOURCE_COMPLETE;
     job->publishing = 0;
     job->status.result = rc == ANALYSIS_SOURCE_COMPLETE ? AZ_NOT_FOUND : rc;
-    job->status.state = rc == AZ_OK || rc == ANALYSIS_SOURCE_COMPLETE ? AZ_ANALYSIS_COMPLETE : AZ_ANALYSIS_FAILED;
+    job->status.state = completed ? AZ_ANALYSIS_COMPLETE : AZ_ANALYSIS_FAILED;
     if (atomic_load(&job->cancelled)) {
         job->status.state = AZ_ANALYSIS_CANCELLED;
         job->status.result = AZ_STALE;
     }
-    if (rc == AZ_OK || rc == ANALYSIS_SOURCE_COMPLETE)
+    if (completed)
         job->status.completed_components = job->request.components;
-    if (!job->status.diagnostic[0] && rc)
+    if (!job->status.diagnostic[0] && !completed)
         snprintf(job->status.diagnostic, sizeof job->status.diagnostic, "analysis result %d", rc);
 }
 static void ar_publish_status(const struct ar_job *job) {
     if (!job->automatic) return;
     struct ar_load *deck = &ar.decks[job->request.deck];
-    if (deck->epoch == job->request.load_epoch) deck->status = job->status;
+    if (deck->loaded && deck->epoch == job->request.load_epoch) deck->status = job->status;
 }
 static void ar_finish_automatic(struct ar_job *job) {
     struct ar_load *deck = &ar.decks[job->request.deck];
@@ -230,10 +238,14 @@ static void ar_finish_automatic(struct ar_job *job) {
     if (ar_retryable(job->status.result) && !atomic_load(&job->cancelled)) deck->attempted = 0;
 }
 static void ar_configuration_failure(struct ar_load *load, unsigned deck, const char *error) {
-    load->status = (az_analysis_status_v1){.size = sizeof load->status,
-        .version = AZ_DATA_VERSION, .request_id = ++ar.serial,
-        .state = AZ_ANALYSIS_FAILED, .result = AZ_INVALID,
-        .deck = deck, .load_epoch = load->epoch, .track = load->track};
+    load->status = (az_analysis_status_v1) {.size = sizeof load->status,
+                                            .version = AZ_DATA_VERSION,
+                                            .request_id = ++ar.serial,
+                                            .state = AZ_ANALYSIS_FAILED,
+                                            .result = AZ_INVALID,
+                                            .deck = deck,
+                                            .load_epoch = load->epoch,
+                                            .track = load->track};
     snprintf(load->status.diagnostic, sizeof load->status.diagnostic, "%s", error);
 }
 static void ar_collect(struct ar_job *job, int rc) {
@@ -254,11 +266,7 @@ static void ar_prepare_automatic(unsigned deck) {
         ar_configuration_failure(load, deck, error);
         return;
     }
-    az_analysis_request_v1 r = {.size = sizeof r, .version = AZ_ANALYSIS_REQUEST_VERSION,
-        .source_kind = AZ_ANALYSIS_DECK, .components = AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS,
-        .track = load->track, .load_epoch = load->epoch, .deck = deck,
-        .stage_mode = (uint32_t)execution.mode, .phrase_threads = execution.phrase_threads,
-        .vocal_threads = execution.vocal_threads};
+    az_analysis_request_v1 r = {.size = sizeof r, .version = AZ_ANALYSIS_REQUEST_VERSION, .source_kind = AZ_ANALYSIS_DECK, .components = AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS, .track = load->track, .load_epoch = load->epoch, .deck = deck, .stage_mode = (uint32_t) execution.mode, .phrase_threads = execution.phrase_threads, .vocal_threads = execution.vocal_threads};
     ar_admit(job, ar.automatic_owner, &r);
     job->automatic = 1;
     load->status = job->status;
@@ -336,12 +344,18 @@ static long ar_saved_deadline(void) {
 }
 static void ar_wait_work(void) {
     long remaining = ar_saved_deadline();
-    if (remaining < 0) { pthread_cond_wait(&ar.wake, &ar.mutex); return; }
-    if (!remaining) { ar.notification++; return; }
+    if (remaining < 0) {
+        pthread_cond_wait(&ar.wake, &ar.mutex);
+        return;
+    }
+    if (!remaining) {
+        ar.notification++;
+        return;
+    }
     if (ar_wait_seconds(remaining) == ETIMEDOUT) ar.notification++;
 }
 static void *ar_worker(void *unused) {
-    (void)unused;
+    (void) unused;
     ar.policy = ar_policy();
     pthread_mutex_lock(&ar.mutex);
     while (!ar.stopping) {
@@ -356,9 +370,15 @@ static void *ar_worker(void *unused) {
 int analysis_runtime_start(const char *assets) {
     if (!assets || !*assets || strlen(assets) >= sizeof ar.assets) return AZ_INVALID;
     pthread_mutex_lock(&ar.mutex);
-    if (ar.started) { pthread_mutex_unlock(&ar.mutex); return AZ_OK; }
+    if (ar.started) {
+        pthread_mutex_unlock(&ar.mutex);
+        return AZ_OK;
+    }
     int condition = ar_condition_init();
-    if (condition) { pthread_mutex_unlock(&ar.mutex); return condition; }
+    if (condition) {
+        pthread_mutex_unlock(&ar.mutex);
+        return condition;
+    }
     snprintf(ar.assets, sizeof ar.assets, "%s", assets);
     ar.stopping = 0;
     analysis_source_set_wake(analysis_runtime_wake);
@@ -393,6 +413,7 @@ static void ar_revoke(struct ar_job *job, int release) {
     job->released |= release;
     if (job->status.state == AZ_ANALYSIS_RUNNING || job->status.state == AZ_ANALYSIS_SAVED) return;
     ar_finish(job, AZ_STALE);
+    ar_publish_status(job);
     if (job->released) ar_drop(job);
 }
 static int ar_cancel_or_release(az_analysis_owner owner, uint64_t id, int release) {
@@ -427,34 +448,37 @@ static int ar_result_ready(const struct ar_job *job, const az_analysis_result_v1
     return *result ? AZ_OK : AZ_NOT_FOUND;
 }
 static void ar_copy_arrays(const az_analysis_result_v1 *r, az_analysis_result_v1 *copy,
-                            az_analysis_phrase_v1 *phrases, az_vocal_frame_v1 *vocals) {
+                           az_analysis_phrase_v1 *phrases, az_vocal_frame_v1 *vocals) {
     if (r->phrases.count) memcpy(phrases, r->phrases.entries, r->phrases.count * sizeof *phrases);
     if (r->vocals.count) memcpy(vocals, r->vocals.frames, r->vocals.count * sizeof *vocals);
     copy->phrases.entries = r->phrases.count ? phrases : NULL;
     copy->vocals.frames = r->vocals.count ? vocals : NULL;
 }
 static int ar_copy_result(const struct ar_job *job, az_analysis_result_v1 *out,
-                           az_analysis_phrase_v1 *phrases, uint32_t pc,
-                           az_vocal_frame_v1 *vocals, uint32_t vc) {
+                          az_analysis_phrase_v1 *phrases, uint32_t pc,
+                          az_vocal_frame_v1 *vocals, uint32_t vc) {
     const az_analysis_result_v1 *r = NULL;
     int rc = ar_result_ready(job, &r);
     if (rc) return rc;
     az_analysis_result_v1 copy = *r;
     copy.phrases.entries = NULL;
     copy.vocals.frames = NULL;
-    if (pc < r->phrases.count || vc < r->vocals.count) { *out = copy; return AZ_LIMIT; }
+    if (pc < r->phrases.count || vc < r->vocals.count) {
+        *out = copy;
+        return AZ_LIMIT;
+    }
     ar_copy_arrays(r, &copy, phrases, vocals);
     *out = copy;
     return AZ_OK;
 }
 static int ar_result_arguments(uint64_t id, const az_analysis_result_v1 *out,
-                                const az_analysis_phrase_v1 *phrases, uint32_t pc,
-                                const az_vocal_frame_v1 *vocals, uint32_t vc) {
+                               const az_analysis_phrase_v1 *phrases, uint32_t pc,
+                               const az_vocal_frame_v1 *vocals, uint32_t vc) {
     return id && out && out->size >= sizeof *out && (!pc || phrases) && (!vc || vocals);
 }
 int analysis_runtime_result(az_analysis_owner owner, uint64_t id, az_analysis_result_v1 *out,
-                             az_analysis_phrase_v1 *phrases, uint32_t pc,
-                             az_vocal_frame_v1 *vocals, uint32_t vc) {
+                            az_analysis_phrase_v1 *phrases, uint32_t pc,
+                            az_vocal_frame_v1 *vocals, uint32_t vc) {
     if (!ar_result_arguments(id, out, phrases, pc, vocals, vc)) return AZ_INVALID;
     if (pthread_mutex_trylock(&ar.mutex)) return AZ_BUSY;
     struct ar_job *job = ar_find(owner, id);
@@ -464,10 +488,7 @@ int analysis_runtime_result(az_analysis_owner owner, uint64_t id, az_analysis_re
 }
 int analysis_runtime_capabilities(az_analysis_capabilities_v1 *out) {
     if (!out || out->size < sizeof *out) return AZ_INVALID;
-    *out = (az_analysis_capabilities_v1){.size = sizeof *out, .version = AZ_DATA_VERSION,
-        .components = AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS,
-        .stage_modes = (1u << AZ_ANALYSIS_SEQUENTIAL) | (1u << AZ_ANALYSIS_CONCURRENT),
-        .max_workers = 3, .max_requests = 8, .max_owner_requests = 4};
+    *out = (az_analysis_capabilities_v1) {.size = sizeof *out, .version = AZ_DATA_VERSION, .components = AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS, .stage_modes = (1u << AZ_ANALYSIS_SEQUENTIAL) | (1u << AZ_ANALYSIS_CONCURRENT), .max_workers = 3, .max_requests = 8, .max_owner_requests = 4};
     return AZ_OK;
 }
 void analysis_runtime_enable(az_analysis_owner owner, int enabled) {
@@ -483,20 +504,29 @@ void analysis_runtime_enable(az_analysis_owner owner, int enabled) {
     ar_signal();
     pthread_mutex_unlock(&ar.mutex);
 }
+/* The copied presentation belongs to one accepted load, not to the draining
+ * job. Revoke before clearing so a synchronous queued cancellation cannot
+ * restore an observation from the invalidated scope. */
+static void ar_clear_load(unsigned deck) {
+    struct ar_load *load = &ar.decks[deck];
+    load->attempted = 0;
+    struct ar_job *job = &ar.jobs[ANALYSIS_PUBLIC_SLOTS + deck];
+    if (job->status.request_id) ar_revoke(job, 1);
+    load->status = (az_analysis_status_v1) {.deck = deck};
+}
 void analysis_runtime_load(unsigned deck, uint64_t order, uint64_t epoch, int loaded, const az_track_ref *track) {
     if (deck >= 4) return;
     pthread_mutex_lock(&ar.mutex);
     struct ar_load *load = &ar.decks[deck];
-    if (!order || order <= load->order) { pthread_mutex_unlock(&ar.mutex); return; }
-    load->order = order;
-    if (load->epoch != epoch || !loaded) {
-        load->attempted = 0;
-        struct ar_job *job = &ar.jobs[ANALYSIS_PUBLIC_SLOTS + deck];
-        if (job->status.request_id) ar_revoke(job, 1);
+    if (!order || order <= load->order) {
+        pthread_mutex_unlock(&ar.mutex);
+        return;
     }
+    load->order = order;
+    if (load->epoch != epoch || !loaded) ar_clear_load(deck);
     load->epoch = epoch;
     load->loaded = loaded;
-    load->track = track ? *track : (az_track_ref){0};
+    load->track = track ? *track : (az_track_ref) {0};
     ar.notification++;
     ar_signal();
     pthread_mutex_unlock(&ar.mutex);

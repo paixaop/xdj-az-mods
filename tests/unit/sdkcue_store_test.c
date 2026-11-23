@@ -38,7 +38,7 @@ void capture_body(void *out, const void *p) {
     memcpy(out, &value, sizeof value);
     ++players;
 }
-extern void capture(void);
+extern struct native_result_storage capture(struct az_native_player_interface *interface);
 void destroy_player(void *unused) {
     (void) unused;
     --players;
@@ -69,7 +69,7 @@ void capture_where_body(void *out, const void *p) {
     memcpy(out, &value, sizeof value);
     ++where_refs;
 }
-extern void capture_where(void);
+extern struct native_result_storage capture_where(const struct az_native_player *player);
 void *lookup(void *self, const void *key) {
     assert(self == service && get(key, 0) == ((uintptr_t) (where_from)));
     return pack;
@@ -136,12 +136,12 @@ void copy_property(void *out, const void *in) {
     memcpy(out, in, sizeof(azcs_native_property));
     ++properties;
 }
-void allocate_body(void *out, const void *count) {
-    void *data = malloc((uintptr_t) count);
+void allocate_body(void *out, size_t count) {
+    void *data = malloc(count);
     if (data) ++strings;
     memcpy(out, &data, sizeof data);
 }
-extern void allocate(void);
+extern struct native_result_storage allocate(size_t count);
 void destroy_string(azcs_native_string *p) {
     free(p->data);
     --strings;
@@ -164,8 +164,8 @@ azcs_profile profile() {
     p.get_current_cue = get_current_cue;
     p.copy_property = copy_property;
     p.serialize_property = serialize;
-    p.where_from = (az_native_location_acquire_fn) capture_where;
-    p.string_allocate = (az_native_string_allocate_fn) allocate;
+    p.where_from = capture_where;
+    p.string_allocate = allocate;
     p.string_destroy = destroy_string;
     p.color_construct = color;
     return p;

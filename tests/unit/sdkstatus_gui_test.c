@@ -56,7 +56,10 @@ static _Atomic(const struct azstatus_native_v1 *) ds_native_api;
 #define BPMSTATE_LIVE 0xa0
 #define BPMCTRL_OFF 16
 #define BPMCTRL_VT 0
-enum { EPB_V130 = 1, EPB_V200 = 2 };
+enum {
+    EPB_V130 = 1,
+    EPB_V200 = 2
+};
 static int g_ep147_build;
 static uintptr_t g_ep_img_lo, g_ep_img_hi;
 static struct {

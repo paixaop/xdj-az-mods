@@ -3386,6 +3386,14 @@ for v in real ctl-norotate ctl-nocap; do
 done
 suite "logcap" "$d/real" "$d/scratch-real"
 
+# Analysis failures use normal bounded logging, independently of debug-only tracing.
+d="$OUT/analysis-log"; mkdir -p "$d/scratch"
+{ extract guest/azmod/azmod.c '^static FILE \*azlog_open\(.*\) \{$'
+  extract guest/azmod/azmod.c '^static void analysis_diagnostic\('; } > "$d/real.inc"
+grep -q 'azmod-analysis.log' "$d/real.inc" || { echo "analysis log extraction failed"; exit 2; }
+$CC "${CFLAGS[@]}" -I$T -DANALYSIS_LOG_INC="\"$d/real.inc\"" -o "$d/real" $T/analysis_log_test.c
+suite "analysis diagnostic logging" "$d/real" "$d/scratch"
+
 # azrs.sh: the log() function, run on its own with a small cap
 azrs_log_test() { # $1 = azrs.sh -> 0 when 2000 lines leave log <= cap + 32 lines and a log.1
     local w; w=$(mktemp -d "$OUT/azrs.XXXXXX")
@@ -4031,7 +4039,7 @@ control "sdk track data: duplicate IDs merged across sources" "$d/control"
 if [ "$(uname -s)" = Linux ]; then
     $CC "${CFLAGS[@]}" $SDK_EXPORT -pthread -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$OUT/sdkdata/provider" $T/sdktrack_test.c guest/azmod/sdk_command_engine.c guest/azmod/sdk_command_service.c guest/azmod/track_service.c guest/azmod/track_storage.c -Wl,--wrap=open,--wrap=pread -lsqlite3 -ldl -lm
     suite "sdk stored track disk provider" "$OUT/sdkdata/provider"
-    $CC "${CFLAGS[@]}" $SDK_EXPORT -Wno-unused-function -Wno-missing-field-initializers -pthread -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -DLSAPPLY_INC="\"$OUT/lsapply/real.inc\"" -o "$d/analysis-service" $T/sdkanalysis_service_test.c guest/azmod/analysis_owner.c guest/azmod/analysis_source.c guest/azmod/analysis_encoding.c guest/azmod/sdk_command_engine.c guest/azmod/sdk_command_service.c guest/azmod/track_service.c guest/azmod/track_storage.c -lsqlite3 -ldl -lm
+    $CC "${CFLAGS[@]}" $SDK_EXPORT -Wno-unused-function -Wno-missing-field-initializers -pthread -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -DLSAPPLY_INC="\"$OUT/lsapply/real.inc\"" -o "$d/analysis-service" $T/sdkanalysis_service_test.c guest/azmod/analysis_owner.c guest/azmod/analysis_source.c guest/azmod/analysis_encoding.c guest/azmod/sdk_command_engine.c guest/azmod/sdk_command_service.c guest/azmod/track_service.c guest/azmod/track_storage.c -Wl,--wrap=az_storage_sql_ready,--wrap=calloc,--wrap=pthread_mutex_trylock -lsqlite3 -ldl -lm
     suite "sdk analysis source leases and USB persistence" "$d/analysis-service"
     for v in database-alias database-uri missing-parent wave-errors analysis-binding track-fifo wave-fifo analysis-path-limit preview-extension; do
         $CC "${CFLAGS[@]}" $SDK_EXPORT -pthread -I"$d/review/$v" -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$d/$v" $T/sdktrack_test.c guest/azmod/sdk_command_engine.c guest/azmod/sdk_command_service.c "$d/review/$v/track_service.c" "$d/review/$v/track_storage.c" -Wl,--wrap=open,--wrap=pread -lsqlite3 -ldl -lm
@@ -4199,6 +4207,7 @@ echo
 # frame buffer by one is reported by cppcheck. The copies live under guest/out (docker shares the
 # source tree, not $TMPDIR).
 echo "=== static analysis (static-check.sh) ==="
+if python3 tools/static-check/test_compdb.py; then :; else failures=$((failures + 1)); fi
 if [ -n "$COMPILE_ONLY" ]; then echo "(compile-only pass: static-check.sh not run)"
 elif bash tools/static-check.sh; then :; else failures=$((failures + 1)); fi
 SCC="$ROOT/guest/out/unit-staticctl"; rm -rf "$SCC"; mkdir -p "$SCC/real" "$SCC/uaf" "$SCC/oob"

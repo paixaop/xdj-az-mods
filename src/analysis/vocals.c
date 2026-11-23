@@ -32,7 +32,9 @@ typedef struct {
 } Scratch;
 typedef struct {
     float b0, b1, b2, a1, a2, z1, z2, ring[5];
-    int rp, sample_rate, count;
+    int rp;
+    unsigned sample_rate;
+    int count;
     double phase, ratio;
     float *samples, sine[N + N / 4], window[N];
     /* Immutable per-job FFT plan, shared by every analysis frame. */
@@ -101,40 +103,180 @@ static void matrix_multiply(const Matrix *m, const float *x, const float *bias, 
 #if defined(__aarch64__)
 /* Eight output columns by up to eight windows use at most sixteen NEON
  * accumulators. Reusing weights across eight windows reduces memory traffic. */
-#define TA_MATRIX_GROUP(Batch)                                                                     \
-    static void matrix_group_##Batch(const Matrix *m, const float *x, const float *bias, float *y) \
-    {                                                                                              \
-    /* Independent windows share each weight load and keep accumulators in NEON registers. */  \
-        for (int j = 0; j < m->columns; j += 8) {                                                  \
-            float32x4_t sums[Batch][2];                                                            \
-            for (int b = 0; b < Batch; b++)                                                        \
-                for (int k = 0; k < 2; k++)                                                        \
-                    sums[b][k] = vdupq_n_f32(0);                                                   \
-            const float *w = m->packed + j * m->rows;                                              \
-            for (int i = 0; i < m->rows; i++, w += 8) {                                            \
-            /* Prefetch eight rows ahead without leaving the packed block. */                  \
-                if (i + 8 < m->rows) __builtin_prefetch(w + 64, 0, 3);                             \
-                float32x4_t w0 = vld1q_f32(w), w1 = vld1q_f32(w + 4);                              \
-                for (int b = 0; b < Batch; b++) {                                                  \
-                    float v = x[b * 512 + i];                                                      \
-                    sums[b][0] = vfmaq_n_f32(sums[b][0], w0, v);                                   \
-                    sums[b][1] = vfmaq_n_f32(sums[b][1], w1, v);                                   \
-                }                                                                                  \
-            }                                                                                      \
-            for (int b = 0; b < Batch; b++)                                                        \
-                for (int k = 0; k < 2; k++)                                                        \
-                    vst1q_f32(y + b * 1024 + j + k * 4,                                            \
-                              vaddq_f32(sums[b][k], vld1q_f32(bias + j + k * 4)));                 \
-        }                                                                                          \
+static void matrix_group_2(const Matrix *m, const float *x, const float *bias, float *y) {
+/* Independent windows share each weight load and keep accumulators in NEON registers. */
+    for (int j = 0; j < m->columns; j += 8) {
+        float32x4_t sums[(2)][2];
+        for (int b = 0; b < (2); b++)
+            for (int k = 0; k < 2; k++)
+                sums[b][k] = vdupq_n_f32(0);
+        const float *w = m->packed + j * m->rows;
+        for (int i = 0; i < m->rows; i++, w += 8) {
+        /* Prefetch eight rows ahead without leaving the packed block. */
+            if (i + 8 < m->rows) __builtin_prefetch(w + 64, 0, 3);
+            float32x4_t w0 = vld1q_f32(w), w1 = vld1q_f32(w + 4);
+            for (int b = 0; b < (2); b++) {
+                float v = x[b * 512 + i];
+                sums[b][0] = vfmaq_n_f32(sums[b][0], w0, v);
+                sums[b][1] = vfmaq_n_f32(sums[b][1], w1, v);
+            }
+        }
+        for (int b = 0; b < (2); b++)
+            for (int k = 0; k < 2; k++)
+                vst1q_f32(y + b * 1024 + j + k * 4,
+                          vaddq_f32(sums[b][k], vld1q_f32(bias + j + k * 4)));
     }
-TA_MATRIX_GROUP(2)
-TA_MATRIX_GROUP(3)
-TA_MATRIX_GROUP(4)
-TA_MATRIX_GROUP(5)
-TA_MATRIX_GROUP(6)
-TA_MATRIX_GROUP(7)
-TA_MATRIX_GROUP(8)
-#undef TA_MATRIX_GROUP
+}
+
+static void matrix_group_3(const Matrix *m, const float *x, const float *bias, float *y) {
+/* Independent windows share each weight load and keep accumulators in NEON registers. */
+    for (int j = 0; j < m->columns; j += 8) {
+        float32x4_t sums[(3)][2];
+        for (int b = 0; b < (3); b++)
+            for (int k = 0; k < 2; k++)
+                sums[b][k] = vdupq_n_f32(0);
+        const float *w = m->packed + j * m->rows;
+        for (int i = 0; i < m->rows; i++, w += 8) {
+        /* Prefetch eight rows ahead without leaving the packed block. */
+            if (i + 8 < m->rows) __builtin_prefetch(w + 64, 0, 3);
+            float32x4_t w0 = vld1q_f32(w), w1 = vld1q_f32(w + 4);
+            for (int b = 0; b < (3); b++) {
+                float v = x[b * 512 + i];
+                sums[b][0] = vfmaq_n_f32(sums[b][0], w0, v);
+                sums[b][1] = vfmaq_n_f32(sums[b][1], w1, v);
+            }
+        }
+        for (int b = 0; b < (3); b++)
+            for (int k = 0; k < 2; k++)
+                vst1q_f32(y + b * 1024 + j + k * 4,
+                          vaddq_f32(sums[b][k], vld1q_f32(bias + j + k * 4)));
+    }
+}
+
+static void matrix_group_4(const Matrix *m, const float *x, const float *bias, float *y) {
+/* Independent windows share each weight load and keep accumulators in NEON registers. */
+    for (int j = 0; j < m->columns; j += 8) {
+        float32x4_t sums[(4)][2];
+        for (int b = 0; b < (4); b++)
+            for (int k = 0; k < 2; k++)
+                sums[b][k] = vdupq_n_f32(0);
+        const float *w = m->packed + j * m->rows;
+        for (int i = 0; i < m->rows; i++, w += 8) {
+        /* Prefetch eight rows ahead without leaving the packed block. */
+            if (i + 8 < m->rows) __builtin_prefetch(w + 64, 0, 3);
+            float32x4_t w0 = vld1q_f32(w), w1 = vld1q_f32(w + 4);
+            for (int b = 0; b < (4); b++) {
+                float v = x[b * 512 + i];
+                sums[b][0] = vfmaq_n_f32(sums[b][0], w0, v);
+                sums[b][1] = vfmaq_n_f32(sums[b][1], w1, v);
+            }
+        }
+        for (int b = 0; b < (4); b++)
+            for (int k = 0; k < 2; k++)
+                vst1q_f32(y + b * 1024 + j + k * 4,
+                          vaddq_f32(sums[b][k], vld1q_f32(bias + j + k * 4)));
+    }
+}
+
+static void matrix_group_5(const Matrix *m, const float *x, const float *bias, float *y) {
+/* Independent windows share each weight load and keep accumulators in NEON registers. */
+    for (int j = 0; j < m->columns; j += 8) {
+        float32x4_t sums[(5)][2];
+        for (int b = 0; b < (5); b++)
+            for (int k = 0; k < 2; k++)
+                sums[b][k] = vdupq_n_f32(0);
+        const float *w = m->packed + j * m->rows;
+        for (int i = 0; i < m->rows; i++, w += 8) {
+        /* Prefetch eight rows ahead without leaving the packed block. */
+            if (i + 8 < m->rows) __builtin_prefetch(w + 64, 0, 3);
+            float32x4_t w0 = vld1q_f32(w), w1 = vld1q_f32(w + 4);
+            for (int b = 0; b < (5); b++) {
+                float v = x[b * 512 + i];
+                sums[b][0] = vfmaq_n_f32(sums[b][0], w0, v);
+                sums[b][1] = vfmaq_n_f32(sums[b][1], w1, v);
+            }
+        }
+        for (int b = 0; b < (5); b++)
+            for (int k = 0; k < 2; k++)
+                vst1q_f32(y + b * 1024 + j + k * 4,
+                          vaddq_f32(sums[b][k], vld1q_f32(bias + j + k * 4)));
+    }
+}
+
+static void matrix_group_6(const Matrix *m, const float *x, const float *bias, float *y) {
+/* Independent windows share each weight load and keep accumulators in NEON registers. */
+    for (int j = 0; j < m->columns; j += 8) {
+        float32x4_t sums[(6)][2];
+        for (int b = 0; b < (6); b++)
+            for (int k = 0; k < 2; k++)
+                sums[b][k] = vdupq_n_f32(0);
+        const float *w = m->packed + j * m->rows;
+        for (int i = 0; i < m->rows; i++, w += 8) {
+        /* Prefetch eight rows ahead without leaving the packed block. */
+            if (i + 8 < m->rows) __builtin_prefetch(w + 64, 0, 3);
+            float32x4_t w0 = vld1q_f32(w), w1 = vld1q_f32(w + 4);
+            for (int b = 0; b < (6); b++) {
+                float v = x[b * 512 + i];
+                sums[b][0] = vfmaq_n_f32(sums[b][0], w0, v);
+                sums[b][1] = vfmaq_n_f32(sums[b][1], w1, v);
+            }
+        }
+        for (int b = 0; b < (6); b++)
+            for (int k = 0; k < 2; k++)
+                vst1q_f32(y + b * 1024 + j + k * 4,
+                          vaddq_f32(sums[b][k], vld1q_f32(bias + j + k * 4)));
+    }
+}
+
+static void matrix_group_7(const Matrix *m, const float *x, const float *bias, float *y) {
+/* Independent windows share each weight load and keep accumulators in NEON registers. */
+    for (int j = 0; j < m->columns; j += 8) {
+        float32x4_t sums[(7)][2];
+        for (int b = 0; b < (7); b++)
+            for (int k = 0; k < 2; k++)
+                sums[b][k] = vdupq_n_f32(0);
+        const float *w = m->packed + j * m->rows;
+        for (int i = 0; i < m->rows; i++, w += 8) {
+        /* Prefetch eight rows ahead without leaving the packed block. */
+            if (i + 8 < m->rows) __builtin_prefetch(w + 64, 0, 3);
+            float32x4_t w0 = vld1q_f32(w), w1 = vld1q_f32(w + 4);
+            for (int b = 0; b < (7); b++) {
+                float v = x[b * 512 + i];
+                sums[b][0] = vfmaq_n_f32(sums[b][0], w0, v);
+                sums[b][1] = vfmaq_n_f32(sums[b][1], w1, v);
+            }
+        }
+        for (int b = 0; b < (7); b++)
+            for (int k = 0; k < 2; k++)
+                vst1q_f32(y + b * 1024 + j + k * 4,
+                          vaddq_f32(sums[b][k], vld1q_f32(bias + j + k * 4)));
+    }
+}
+
+static void matrix_group_8(const Matrix *m, const float *x, const float *bias, float *y) {
+/* Independent windows share each weight load and keep accumulators in NEON registers. */
+    for (int j = 0; j < m->columns; j += 8) {
+        float32x4_t sums[(8)][2];
+        for (int b = 0; b < (8); b++)
+            for (int k = 0; k < 2; k++)
+                sums[b][k] = vdupq_n_f32(0);
+        const float *w = m->packed + j * m->rows;
+        for (int i = 0; i < m->rows; i++, w += 8) {
+        /* Prefetch eight rows ahead without leaving the packed block. */
+            if (i + 8 < m->rows) __builtin_prefetch(w + 64, 0, 3);
+            float32x4_t w0 = vld1q_f32(w), w1 = vld1q_f32(w + 4);
+            for (int b = 0; b < (8); b++) {
+                float v = x[b * 512 + i];
+                sums[b][0] = vfmaq_n_f32(sums[b][0], w0, v);
+                sums[b][1] = vfmaq_n_f32(sums[b][1], w1, v);
+            }
+        }
+        for (int b = 0; b < (8); b++)
+            for (int k = 0; k < 2; k++)
+                vst1q_f32(y + b * 1024 + j + k * 4,
+                          vaddq_f32(sums[b][k], vld1q_f32(bias + j + k * 4)));
+    }
+}
 #endif
 static void matrix_windows(const Matrix *m, const float *x, const float *bias, float *y,
                            int batch)
@@ -343,7 +485,7 @@ static float lagrange(const float *r, int p, float t)
     float side = (right1 + left1) + (right2 + left2) * 0.5f;
     return fmaf(side, t, mid * r[b]);
 }
-static Frontend *frontend_init(ta_context *c, int rate, uint64_t frames)
+static Frontend *frontend_init(ta_context *c, unsigned rate, uint64_t frames)
 {
     Frontend *f = ta_alloc(c, 1, sizeof *f);
     f->sample_rate = rate;

@@ -3,8 +3,14 @@
 #define SDK_STATUS_NATIVE_HOST_H
 #include <stdint.h>
 #include <stddef.h>
-enum { DS_BUILD_130 = 1, DS_BUILD_200 = 2 };
-struct ds_master_state { uint64_t event, revision, observed; int deck; };
+enum {
+    DS_BUILD_130 = 1,
+    DS_BUILD_200 = 2
+};
+struct ds_master_state {
+    uint64_t event, revision, observed;
+    int deck;
+};
 /* A master cut runs prepare, copies the state, then calls consume synchronously
  * under the existing writer lock. No callback retains the stack-owned record. */
 __attribute__((visibility("hidden"))) void az_status_host_master_cut(void (*prepare)(void), void (*consume)(const struct ds_master_state *, void *), void *);

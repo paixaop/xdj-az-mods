@@ -93,6 +93,7 @@ int sa_result_valid(const az_analysis_result_v1 *r) {
 }
 static void sa_encode_grid(const az_analysis_result_v1 *r, uint8_t *tag, uint32_t gn) {
     if (!gn) return;
+    // NOLINTNEXTLINE(bugprone-not-null-terminated-result): native FourCC stores exactly four bytes.
     memcpy(tag, "PQTZ", 4);
     sa_put32(tag + 4, 24);
     sa_put32(tag + 8, gn);
@@ -107,6 +108,7 @@ static void sa_encode_grid(const az_analysis_result_v1 *r, uint8_t *tag, uint32_
 }
 static void sa_encode_phrases(const az_analysis_result_v1 *r, uint8_t *tag, uint32_t pn) {
     if (!pn) return;
+    // NOLINTNEXTLINE(bugprone-not-null-terminated-result): native FourCC stores exactly four bytes.
     memcpy(tag, "PSSI", 4);
     sa_put32(tag + 4, 32);
     sa_put32(tag + 8, pn);
@@ -133,6 +135,7 @@ static void sa_encode_phrases(const az_analysis_result_v1 *r, uint8_t *tag, uint
 }
 static void sa_encode_vocals(const az_analysis_result_v1 *r, uint8_t *tag, uint32_t vn) {
     if (!vn) return;
+    // NOLINTNEXTLINE(bugprone-not-null-terminated-result): native FourCC stores exactly four bytes.
     memcpy(tag, "PVDI", 4);
     sa_put32(tag + 4, 24);
     sa_put32(tag + 8, vn);
@@ -149,9 +152,11 @@ uint8_t *sa_encode_native(const az_analysis_result_v1 *r, struct sa_tags *tags) 
     tags->pn = r->phrases.count ? 32 + r->phrases.count * 24 : 0;
     tags->vn = r->vocals.count ? 24 + r->vocals.count : 0;
     tags->rate = r->source_rate;
-    tags->frames = (uint32_t)r->source_frames;
+    tags->frames = (uint32_t) r->source_frames;
     tags->method = r->vocals.method;
-    uint8_t *bytes = calloc(tags->gn + tags->pn + tags->vn, 1);
+    size_t size = (size_t) tags->gn + tags->pn + tags->vn;
+    if (!size) return NULL;
+    uint8_t *bytes = calloc(size, 1);
     if (!bytes) return NULL;
     tags->grid = bytes;
     tags->phrase = bytes + tags->gn;

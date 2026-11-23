@@ -144,7 +144,7 @@ static void scmd_publish(struct scmd_engine *e, const struct scmd_record *r) {
     entry->value.result = r->result;
 }
 void scmd_finish(struct scmd_engine *e, struct scmd_record *r, uint32_t outcome, int reason,
-                               uint64_t revision, enum scmd_detail detail, uint64_t now, int awaiting) {
+                 uint64_t revision, enum scmd_detail detail, uint64_t now, int awaiting) {
     r->phase = SCMD_FINAL;
     r->awaiting = awaiting;
     r->detail = detail;
@@ -171,7 +171,7 @@ static int scmd_target_revision_valid(const az_command_request *r, const struct 
     return AZ_OK;
 }
 int scmd_target_valid(const az_command_request *r, const struct scmd_target *t,
-                                    const struct scmd_adapter *adapter, enum scmd_detail *detail) {
+                      const struct scmd_adapter *adapter, enum scmd_detail *detail) {
     uint64_t bit = UINT64_C(1) << r->operation;
     if (!t || !(t->commands & bit)) {
         *detail = SCMD_DETAIL_CAPABILITY;
@@ -347,9 +347,9 @@ static int scmd_admit_locked(struct scmd_admission *admission) {
     return AZ_OK;
 }
 int scmd_admit(struct scmd_engine *e, int owner, const az_command_request *request,
-                             az_command_completion_fn callback, void *user,
-                             const struct scmd_target *target, const struct scmd_adapter *adapter,
-                             az_command_result *out, enum scmd_detail *detail_out, int target_pending) {
+               az_command_completion_fn callback, void *user,
+               const struct scmd_target *target, const struct scmd_adapter *adapter,
+               az_command_result *out, enum scmd_detail *detail_out, int target_pending) {
     if (detail_out) *detail_out = SCMD_DETAIL_ARGUMENTS;
     if (!e || !scmd_owner_ok(owner) || !scmd_output_ok(out)) return AZ_INVALID;
     struct scmd_admission admission = {.engine = e, .owner = owner, .target_pending = target_pending, .callback = callback, .user = user, .target = target, .adapter = adapter, .output = out, .detail = SCMD_DETAIL_ARGUMENTS};
@@ -382,8 +382,8 @@ int scmd_move_to_pending_locked(struct scmd_engine *e, struct scmd_record *r) {
     return 1;
 }
 static int scmd_submit_target(struct scmd_engine *e, int owner, const az_command_request *request,
-                                     const struct scmd_target *target, const struct scmd_adapter *adapter,
-                                     az_command_result *out, enum scmd_detail *detail_out, int target_pending) {
+                              const struct scmd_target *target, const struct scmd_adapter *adapter,
+                              az_command_result *out, enum scmd_detail *detail_out, int target_pending) {
     if (!scmd_request_valid(request)) {
         if (detail_out) *detail_out = SCMD_DETAIL_ARGUMENTS;
         return AZ_INVALID;
@@ -391,14 +391,14 @@ static int scmd_submit_target(struct scmd_engine *e, int owner, const az_command
     return scmd_admit(e, owner, request, NULL, NULL, target, adapter, out, detail_out, target_pending);
 }
 int scmd_submit(struct scmd_engine *e, int owner, const az_command_request *request,
-                              const struct scmd_target *target, const struct scmd_adapter *adapter,
-                              az_command_result *out, enum scmd_detail *detail_out) {
+                const struct scmd_target *target, const struct scmd_adapter *adapter,
+                az_command_result *out, enum scmd_detail *detail_out) {
     return scmd_submit_target(e, owner, request, target, adapter, out, detail_out, 0);
 }
 int scmd_submit_async(struct scmd_engine *e, int owner, const az_command_request *request,
-                                    az_command_completion_fn callback, void *user,
-                                    const struct scmd_target *target, const struct scmd_adapter *adapter,
-                                    az_command_result *out, enum scmd_detail *detail_out, int target_pending) {
+                      az_command_completion_fn callback, void *user,
+                      const struct scmd_target *target, const struct scmd_adapter *adapter,
+                      az_command_result *out, enum scmd_detail *detail_out, int target_pending) {
     if (!callback || !scmd_request_valid(request)) return AZ_INVALID;
     return scmd_admit(e, owner, request, callback, user, target, adapter, out, detail_out, target_pending);
 }

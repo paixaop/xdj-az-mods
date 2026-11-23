@@ -491,10 +491,13 @@ Beats phrase_beats(ta_context *c, Samples s, Timing t)
     Beats b = { .timing = t,
                 .coordinates = pos,
                 .initial = activity_start(s.middle, s.rate / 8, t.bpm, t.offset) };
-    D *arrays[] = { &b.lowLevels, &b.middleLevels, &b.allLevels, &b.lowPeaks,
-                    &b.lowPeakChanges, &b.quarterMean, &b.middlePeaks };
-    for (size_t i = 0; i < sizeof arrays / sizeof *arrays; i++)
-        *arrays[i] = ta_new_doubles(c, n);
+    b.lowLevels = ta_new_doubles(c, n);
+    b.middleLevels = ta_new_doubles(c, n);
+    b.allLevels = ta_new_doubles(c, n);
+    b.lowPeaks = ta_new_doubles(c, n);
+    b.lowPeakChanges = ta_new_doubles(c, n);
+    b.quarterMean = ta_new_doubles(c, n);
+    b.middlePeaks = ta_new_doubles(c, n);
     b.quarters = ta_new_doubles(c, n * 4);
     b.eighths = ta_new_doubles(c, n * 8);
     B starts = ta_new_bytes(c, n);

@@ -238,18 +238,20 @@ mkdir -p $W/root/az-usbload/community/empty-lib; : > $W/root/az-usbload/communit
 mod huge-lib; truncate -s 17M $W/root/az-usbload/community/huge-lib/huge-lib.so; manifest huge-lib '["any"]' false
 mod undef-lib -DMOD_UNDEF; manifest undef-lib '["any"]' false
 mod null-entry -DMOD_NULLENTRY; manifest null-entry '["any"]' false
+mod abi-1 -DMOD_ABI=1; manifest abi-1 '["any"]' false
 mod abi-99 -DMOD_ABI=99; manifest abi-99 '["any"]' false
 mod small-desc -DMOD_SIZE=8; manifest small-desc '["any"]' false
 mod no-init -DMOD_NOINIT; manifest no-init '["any"]' false
 mod fw-text; manifest fw-text '"any"' false
-enable good-any no-lib empty-lib huge-lib undef-lib null-entry abi-99 small-desc no-init fw-text
+enable good-any no-lib empty-lib huge-lib undef-lib null-entry abi-1 abi-99 small-desc no-init fw-text
 $W/harness init > $W/out
-ok "a good mod loads beside 9 broken libraries (CONTROL)" '[ "$(st good-any)" = 1 ] && grep -q "^LIVE 1" $W/out'
+ok "a good mod loads beside 10 broken libraries (CONTROL)" '[ "$(st good-any)" = 1 ] && grep -q "^LIVE 1" $W/out'
 ok "no library file: refused, named"         '[ "$(st no-lib)" = 3 ] && rs no-lib | grep -q "Missing no-lib.so"'
 ok "an empty library: refused"               '[ "$(st empty-lib)" = 3 ] && rs empty-lib | grep -q "empty or too large"'
 ok "a library over 16 MB: refused"           '[ "$(st huge-lib)" = 3 ] && rs huge-lib | grep -q "empty or too large"'
 ok "a library dlopen cannot load: refused, with its reason (not the path)" '[ "$(st undef-lib)" = 3 ] && rs undef-lib | grep -q "Could not load: undefined symbol: az_test_symbol_nobody_defines"'
 ok "a descriptor that is NULL: refused"      '[ "$(st null-entry)" = 3 ] && rs null-entry | grep -q "returned nothing"'
+ok "retired ABI1 descriptor: refused with a current manifest" '[ "$(st abi-1)" = 3 ] && rs abi-1 | grep -q "different mod API"'
 ok "another API's descriptor: refused"       '[ "$(st abi-99)" = 3 ] && rs abi-99 | grep -q "different mod API"'
 ok "a descriptor too small: refused"         '[ "$(st small-desc)" = 3 ] && rs small-desc | grep -q "different mod API"'
 ok "no init(): refused"                      '[ "$(st no-init)" = 3 ] && rs no-init | grep -q "has no init()"'

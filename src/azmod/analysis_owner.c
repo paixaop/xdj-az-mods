@@ -10,7 +10,7 @@ static uint64_t next_generation(void) {
     do {
         if (before == UINT64_MAX) return 0;
     } while (!atomic_compare_exchange_weak_explicit(&sequence, &before, before + 1,
-                                                   memory_order_relaxed, memory_order_relaxed));
+                                                    memory_order_relaxed, memory_order_relaxed));
     return before + 1;
 }
 az_analysis_owner analysis_owner_begin(unsigned slot) {

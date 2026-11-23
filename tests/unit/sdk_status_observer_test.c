@@ -3,6 +3,7 @@
 #include "sdk_status_diagnostics.h"
 #include "sdk_status_host.h"
 #include <assert.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 static unsigned notifications, callbacks, bindings;
@@ -33,9 +34,7 @@ static void observe(unsigned deck, uint64_t cut, uint64_t load, int ready, const
     track = *ref;
 }
 static struct ds_field field(unsigned key, uint64_t load, unsigned provenance, uint64_t revision, const void *value) {
-    return (struct ds_field) {.topic = AZ_STATUS_LOAD, .field = key, .info = {
-        .info = {AZ_AVAIL_READY, provenance, revision, ds_now()}, .scope = AZ_STATUS_LOAD_SCOPE,
-        .scope_id = load, .provider_id = 9, .count = 1}, .value = value};
+    return (struct ds_field) {.topic = AZ_STATUS_LOAD, .field = key, .info = {.info = {AZ_AVAIL_READY, provenance, revision, ds_now()}, .scope = AZ_STATUS_LOAD_SCOPE, .scope_id = load, .provider_id = 9, .count = 1}, .value = value};
 }
 static void publish(unsigned key, uint64_t load, unsigned provenance, uint64_t revision, const void *value, unsigned flags) {
     struct ds_field f = field(key, load, provenance, revision, value);
@@ -78,7 +77,38 @@ static void test_observer_interest(void) {
     }
     assert(gui_interest & AZ_STATUS_TOPIC(AZ_STATUS_LOAD));
 }
+static void *proof_thread(void *unused) {
+    (void) unused;
+    struct ds_proof_context next = {.kind = DS_PROOF_RETIRE, .binding_cut = 37};
+    struct ds_proof_context previous = ds_proof_enter(&next);
+    assert(!previous.kind && !previous.binding_cut);
+    ds_proof_restore(&previous);
+    return NULL;
+}
+static void test_proof_context(void) {
+    assert(!ds_proof_is_enabled());
+    ds_enable_proofs();
+    assert(ds_proof_is_enabled());
+    struct ds_proof_context outer = {.kind = DS_PROOF_GAP, .binding_cut = 12};
+    struct ds_proof_context inner = {.kind = DS_PROOF_BASELINE, .binding_cut = 23};
+    struct ds_proof_context empty = ds_proof_enter(&outer);
+    assert(!empty.kind && !empty.binding_cut);
+    struct ds_proof_context saved = ds_proof_enter(&inner);
+    assert(saved.kind == outer.kind && saved.binding_cut == outer.binding_cut);
+    pthread_t thread;
+    assert(!pthread_create(&thread, NULL, proof_thread, NULL)); /* altstack-ok: joined unit fixture */
+    assert(!pthread_join(thread, NULL));
+    inner.binding_cut = 99; /* Enter retained a copy, not this caller's pointer. */
+    struct ds_proof_context current = ds_proof_enter(&empty);
+    assert(current.kind == inner.kind && current.binding_cut == 23);
+    ds_proof_restore(&current);
+    ds_proof_restore(&saved); /* Nested scope restores the outer receipt exactly. */
+    current = ds_proof_enter(&empty);
+    assert(current.kind == outer.kind && current.binding_cut == outer.binding_cut);
+    ds_proof_restore(&empty);
+}
 int main(void) {
+    test_proof_context();
     assert(sdk_status_analysis_bind(observe) == AZ_UNSUPPORTED);
     ds_enable();
     uint32_t state = AZ_STATUS_LOAD_LOADED;

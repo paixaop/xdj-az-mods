@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unwind.h>
+struct az_native_control;
+struct az_native_type_info;
 struct fixture_control {
     const void *const *vtable;
     int strong, weak;
@@ -22,7 +24,7 @@ static inline void fixture_weak_drop(struct fixture_owner *p) {
 }
 static inline void fixture_drop(struct fixture_owner *p) {
     if (p->control && __atomic_sub_fetch(&p->control->strong, 1, __ATOMIC_ACQ_REL) == 0) {
-        ((void (*)(void *)) p->control->vtable[2])(p->control);
+        ((void (*)(struct az_native_control *)) p->control->vtable[2])((struct az_native_control *) p->control);
         fixture_weak_drop(p);
     }
     memset(p, 0, sizeof *p);
@@ -51,16 +53,21 @@ static inline struct fixture_owner fixture_make(size_t size, const void *const *
     p->strong = p->weak = 1;
     return (struct fixture_owner) {p + 1, p};
 }
-static inline void fixture_destroy(void *p) { free(p); }
-static inline void fixture_noop(void *p) { (void) p; }
-static inline void *fixture_deleter(void *p, const void *type) {
+static inline void fixture_destroy(struct az_native_control *p) { free(p); }
+static inline void fixture_noop(struct az_native_control *p) { (void) p; }
+static inline void *fixture_deleter(struct az_native_control *p, const struct az_native_type_info *type) {
     (void) p;
     (void) type;
     return NULL;
 }
-#define FIXTURE_VTABLE(name, dispose) static const void *const name[] = {                                    \
-                                          (void *) fixture_noop, (void *) fixture_destroy, (void *) dispose, \
-                                          (void *) fixture_destroy, (void *) fixture_deleter}
+/* Keep the independent layout model, with callbacks matching the native
+ * function signatures used by the production owner helper. The adapter calls
+ * each fixture's independently implemented disposal routine normally. */
+#define FIXTURE_VTABLE(name, dispose)                                                   \
+    static void name##_dispose(struct az_native_control *control) { dispose(control); } \
+    static const void *const name[] = {                                                 \
+        (void *) fixture_noop, (void *) fixture_destroy, (void *) name##_dispose,       \
+        (void *) fixture_destroy, (void *) fixture_deleter}
 /* A foreign native unwind in C exercises the same unwinder and cleanup path.
  * The payload is owned until the catch boundary deletes the exception. */
 static unsigned fixture_exception_deletions;

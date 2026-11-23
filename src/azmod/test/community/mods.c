@@ -15,10 +15,10 @@ static const az_core_v1 *C;
 #include <stdio.h>
 #endif
 #ifdef MOD_CTORCRASH
+#include <signal.h>
 __attribute__((constructor)) static void ctor_crash(void) {
-    volatile int *z = (volatile int *) 0;
-    *z = 5;
-}   /* dies inside dlopen */
+    raise(SIGSEGV);
+}   /* dies inside dlopen, without compiler-dependent undefined behavior */
 #endif
 #ifdef MOD_CTORMARK   /* proves whether any of the mod's code ran: dlopen runs this before init() */
 #include <fcntl.h>

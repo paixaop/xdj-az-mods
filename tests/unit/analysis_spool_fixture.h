@@ -5,11 +5,29 @@ static struct {
     int (*finalize)(void *);
     int (*get_autocommit)(void *);
 } g_sq;
-static int lib_backup(void *connection, FILE *log) { (void) connection; (void) log; return 0; }
-static void lib_invalidate(uintptr_t cache, void *connection, FILE *log) { (void) cache; (void) connection; (void) log; }
-static void ls_pdb_sync(void *connection, const char *path, const char *hint, FILE *log) { (void) connection; (void) path; (void) hint; (void) log; }
+static int lib_backup(void *connection, FILE *log) {
+    (void) connection;
+    (void) log;
+    return 0;
+}
+static void lib_invalidate(uintptr_t cache, void *connection, FILE *log) {
+    (void) cache;
+    (void) connection;
+    (void) log;
+}
+static void ls_pdb_sync(void *connection, const char *path, const char *hint, FILE *log) {
+    (void) connection;
+    (void) path;
+    (void) hint;
+    (void) log;
+}
 static int ls_art_fix(void *connection, const char *root, const char *buf, size_t size, FILE *log) {
-    (void) connection; (void) root; (void) buf; (void) size; (void) log; return 0;
+    (void) connection;
+    (void) root;
+    (void) buf;
+    (void) size;
+    (void) log;
+    return 0;
 }
 #include LSAPPLY_INC
 static int apply_analysis_spool(void *database, const char *path) {

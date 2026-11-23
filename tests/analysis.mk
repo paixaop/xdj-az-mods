@@ -22,7 +22,10 @@ $(OUT)/test_parallel_analysis: tests/analysis/test_parallel_analysis.c $(TEST_EN
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
 $(OUT)/test_activation_math: tests/analysis/test_activation_math.c tests/analysis/fixtures/musl-activation-bits.inc $(filter $(OUT)/vendor/analysis/musl-math/%,$(TEST_ENGINE_OBJ))
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $< $(filter %.o,$^) $(LDLIBS) -o $@
-test: $(OUT)/test_phrase_edges $(OUT)/test_phrases $(OUT)/test_execution $(OUT)/test_vocal_kernels $(OUT)/test_vocal_frontend $(OUT)/test_analysis $(OUT)/test_parallel_analysis $(OUT)/test_activation_math
+$(OUT)/test_fft: tests/analysis/test_fft.c $(OUT)/src/analysis/dsp/dsp.o
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
+test: $(OUT)/test_fft $(OUT)/test_phrase_edges $(OUT)/test_phrases $(OUT)/test_execution $(OUT)/test_vocal_kernels $(OUT)/test_vocal_frontend $(OUT)/test_analysis $(OUT)/test_parallel_analysis $(OUT)/test_activation_math
+	$(OUT)/test_fft
 	$(OUT)/test_phrase_edges
 	$(OUT)/test_phrases
 	$(OUT)/test_execution
@@ -40,5 +43,19 @@ $(OUT)/analysis_runtime_test.o: src/azmod/analysis_runtime.c src/azmod/analysis_
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Dclock_gettime=fixture_clock_gettime -Dpthread_cond_timedwait=fixture_condition_wait -c $< -o $@
 $(OUT)/test_runtime: tests/analysis/test_runtime.c tests/analysis/test_api.inc src/azmod/analysis_api.c $(OUT)/analysis_runtime_test.o src/azmod/analysis_owner.c $(TEST_ENGINE_OBJ)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $(filter-out %.inc src/azmod/analysis_api.c,$^) $(LDLIBS) -o $@
-test-runtime: $(OUT)/test_runtime
+test-runtime: $(OUT)/test_runtime $(OUT)/test_mod_lifecycle
 	$(OUT)/test_runtime tests/analysis/fixtures/pvdi-voice.wav $(ANALYSIS_ASSETS)
+	$(OUT)/test_mod_lifecycle tests/analysis/fixtures/pvdi-voice.wav $(ANALYSIS_ASSETS)
+
+# Actual loader lifecycle definitions with the real coordinator and engine.
+COMMUNITY_SOURCE ?= src/azmod/community.c
+$(OUT)/mod_lifecycle.inc: $(COMMUNITY_SOURCE) tests/analysis/extract_mod_lifecycle.py
+	@mkdir -p $(@D)
+	$(PYTHON) tests/analysis/extract_mod_lifecycle.py $(COMMUNITY_SOURCE) > $@
+$(OUT)/analysis_runtime_lifecycle.o: src/azmod/analysis_runtime.c src/azmod/analysis_runtime.h src/azmod/analysis_source.h
+	@mkdir -p $(@D)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Dclock_gettime=fixture_clock_gettime -Dpthread_cond_timedwait=fixture_condition_wait -Dta_analyze=lifecycle_analyze -Dta_result_free=lifecycle_result_free -c $< -o $@
+$(OUT)/test_mod_lifecycle: tests/analysis/test_mod_lifecycle.c tests/analysis/test_runtime.c tests/analysis/test_api.inc src/azmod/analysis_api.c $(OUT)/mod_lifecycle.inc $(OUT)/analysis_runtime_lifecycle.o src/azmod/analysis_owner.c $(TEST_ENGINE_OBJ)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DMOD_LIFECYCLE_INC='"$(abspath $(OUT)/mod_lifecycle.inc)"' $(LDFLAGS) $(filter-out %.inc tests/analysis/test_runtime.c src/azmod/analysis_api.c,$^) $(LDLIBS) -o $@
+test-mod-lifecycle: $(OUT)/test_mod_lifecycle
+	$(OUT)/test_mod_lifecycle tests/analysis/fixtures/pvdi-voice.wav $(ANALYSIS_ASSETS)
