@@ -52,6 +52,8 @@ static int track_service_event(int owner, uint64_t after, az_data_change *out) {
     return st_event_read(&g_st, owner, after, out);
 }
 #include "sdk_data_callbacks.c"
+#include "analysis_source.h"
+#include "analysis_callbacks.c"
 static int counts[CM_MAX], commands[CM_MAX], saw_missed, last_status;
 static uint64_t last_ticket;
 static void data(const az_data_change *event, void *user) {
@@ -101,6 +103,66 @@ static uint64_t request(int owner, unsigned id, int wave) {
     assert(st_request_with_wave(&g_st, owner, &r, wave ? ST_DETAIL : AZ_DATA_METADATA,
                                 wave ? &q : NULL, &ticket) == AZ_OK);
     return ticket;
+}
+static unsigned analysis_counts[3], analysis_gap;
+static int retire_in_callback;
+static void analysis_complete(const az_analysis_complete_v1 *event, void *user) {
+    unsigned slot = (unsigned) (uintptr_t) user;
+    assert(event->size == sizeof *event && event->version == 1 && event->request_id);
+    assert(event->available_components == (AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS));
+    assert(event->generated_components == AZ_ANALYSIS_VOCALS);
+    analysis_counts[slot]++;
+    analysis_gap |= event->missed;
+    /* Listener reentry is outside journal locks. */
+    struct analysis_listener probe = {0};
+    assert(analysis_events_listen(&probe, analysis_complete, NULL) == AZ_OK);
+    if (retire_in_callback) analysis_owner_retire(slot);
+}
+static void analysis_callbacks_contract(void) {
+    assert(sdk_on_analysis_complete("one", analysis_complete, NULL) == AZ_INVALID);
+    for (unsigned slot = 0; slot < 3; ++slot) {
+        init((int) slot);
+        analysis_owner_begin(slot);
+        const char *id = slot == 0 ? "one" : slot == 1 ? "two"
+                                                       : "failed";
+        assert(sdk_on_analysis_complete(id, NULL, NULL) == AZ_INVALID);
+        assert(sdk_on_analysis_complete(id, analysis_complete, (void *) (uintptr_t) slot) == AZ_OK);
+        assert(sdk_on_analysis_complete(id, analysis_complete, NULL) == AZ_LIMIT);
+    }
+    g_sdk_in_init = 0;
+    g_cm_loading = -1;
+    g_cm[0].state = g_cm[1].state = AZCM_LOADED;
+    g_cm[2].state = 0;
+    analysis_owner_retire(2);
+    az_analysis_complete_v1 event = {.request_id = 42, .load_epoch = 7, .generated_components = AZ_ANALYSIS_VOCALS, .available_components = AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS};
+    analysis_events_publish(&event);
+    sdk_analysis_callbacks_tick();
+    assert(analysis_counts[0] == 1 && analysis_counts[1] == 1 && !analysis_counts[2]);
+    sdk_analysis_callbacks_tick();
+    assert(analysis_counts[0] == 1);
+    for (unsigned i = 0; i < 80; ++i) analysis_events_publish(&event);
+    sdk_analysis_callbacks_tick();
+    assert(analysis_counts[0] == 17 && analysis_counts[1] == 17 && analysis_gap);
+    retire_in_callback = 1;
+    sdk_analysis_callbacks_tick();
+    assert(analysis_counts[0] == 18 && analysis_counts[1] == 18);
+    sdk_analysis_callbacks_tick();
+    assert(analysis_counts[0] == 18);
+    analysis_owner_begin(0);
+    sdk_analysis_callbacks_tick();
+    assert(analysis_counts[0] == 18);
+    init(0);
+    assert(sdk_on_analysis_complete("one", analysis_complete, NULL) == AZ_OK);
+    g_sdk_in_init = 0;
+    g_cm_loading = -1;
+    g_cm[0].state = AZCM_LOADED;
+    retire_in_callback = 0;
+    sdk_analysis_callbacks_tick();
+    assert(analysis_counts[0] == 18);
+    analysis_events_publish(&event);
+    sdk_analysis_callbacks_tick();
+    assert(analysis_counts[0] == 19 && analysis_counts[1] == 18);
+    puts("analysis callbacks: broadcast, ordering, bounded gap, reentry and lifetime passed");
 }
 int main(void) {
     assert(sdk_on_data_event("unknown", data, NULL) == AZ_INVALID);
@@ -225,6 +287,7 @@ int main(void) {
     ++g_sdk_commands.owner_lifetime[0];
     sdk_data_callbacks_tick();
     assert(commands[0] == 2 && "a restarted mod must not receive an old command completion");
+    analysis_callbacks_contract();
     st_destroy(&g_st);
     puts("data callbacks: passed");
     return 0;

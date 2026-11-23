@@ -2034,7 +2034,7 @@ static struct plsnap g_grab;
 static void drag_cancel(void);
 static int az_banner_strip(const char *text, int dur_ms); /* banner.c */
 static int az_banner_box(const char *l1, const char *l2, int dur_ms);
-static void analysis_banner(const char *text, int ms) { (void) az_banner_box(text, NULL, ms); }
+static void analysis_banner(const char *text, int ms) { (void) az_banner_strip(text, ms); }
 static void analysis_diagnostic(const char *text) {
     FILE *f = azlog_open("/tmp/azmod-analysis.log", "a");
     if (!f) return;

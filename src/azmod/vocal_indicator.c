@@ -1,171 +1,119 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
-/* ---- Vocal Indicator: where a track's vocals are, above each deck's overview waveform -------
- * Included by extras.c. It rides stem_marks.c's worker (vx_poll, from its loop), library
- * connections (sm_db_for) and lock (g_sm_mu), as Preview Hot Cues does.
- *
- * Data: the track's ANLZ0000.2EX, section PVDI (vd_anlz.h): one level 0..4 per ~46 ms. The
- * worker polls each deck's loaded track (azstem's deck snapshot: content_id and title), finds
- * its analysis path and length in the library of every stick that holds (content_id, title),
- * and reads the PVDI section. Two sticks that disagree, a track without PVDI or with an empty
- * one, a track without a length, or anything unreadable: rekordbox has no answer. The levels from
- * the track's vocals stem (vd_from_stem_env) are read too, once azstem holds its final envelope,
- * and show first; rekordbox's show when the track has no stems. Neither: nothing is drawn.
- *
- * Draw: from the deck panel's paintOverChildren (extras.c ht_paintover: PlayerInfo{2,4}
- * DeckWidget, its deck from the ctor's field). The panel's PlayerInfoWaveformWidget is the
- * child whose child holds the overview (gui::OverviewWaveform1200PointWidget, by vtable); the
- * strip spans that overview's x range, centered in the empty band between the lowest visible
- * widget above it and its top (the cue marker row). No such band (2/4 DECK and 4 DECK, where the
- * overview sits under the title bar): no strip. Column x of a w px overview covers
- * [x L / w, (x + 1) L / w) of a track L s long, and shows the strongest frame there; levels
- * 1..4 are one blue at rising opacity over the panel's own background (a deeper blue on a light
- * theme), level 0 is not drawn.
- *
- * Repaint: the title setter (every frame, per deck on screen) asks for one repaint of the panel
- * each time what the strip should show changes. */
-#include "vd_anlz.h"
+/* Upstream 1.2.9 painting and stem-envelope detection. The stem-marks worker
+ * supplies PVDI through the shared USB/Beatport resolver. Missing data waits for
+ * Track Analysis; disabled or unsuccessful analysis permits the stem fallback.
+ * Native load identities fence both worker results and cached painting. */
+#include "analysis_vocals.h"
+#include "analysis_runtime.h"
+#include "analysis_events.h"
+#include "sdk_status_native.h"
 #include "../common/azdeckinfo.h"
 
-#define VX_H 4         /* strip height, px */
-#define VX_MIN_BAND 10 /* the empty band it needs above the cue markers */
-#define VX_DASH 4      /* dash and gap, px: the overview's own dashed rows' rhythm */
+#define VX_H 4
+#define VX_WTOP 25 /* gap between the lane's beat ticks and waveform */
+#define VX_MIN_BAND 10
+#define VX_DASH 4
 #define VX_GAP 2
-#define VX_RGB 0x5cb8ffu       /* over a dark ground */
-#define VX_RGB_LIGHT 0x1060c8u /* over a light ground */
+#define VX_RGB 0x5cb8ffu
+#define VX_RGB_LIGHT 0x1060c8u
 #define VX_MAXW 1280
 #define VX_POLL_MS 250
-#define VX_FILE_MAX (64u << 20)
 
 static int vx_on(void) { return az_on(AZF_VOCAL_INDICATOR) && az_active(AZF_VOCAL_INDICATOR); }
 static int vx_row_on(int f) { return vx_on() && az_on(f) && az_active(f); }
 static int vx_prev_on(void) { return vx_row_on(AZF_VOCAL_IND_PREVIEW); }
 static int vx_wave_on(void) { return vx_row_on(AZF_VOCAL_IND_WAVE); }
 
-/* Under g_sm_mu. st: 0 nothing, 2 known, 3 unknown. gen changes with every new answer. */
-static struct vx_deck {
-    unsigned cid, gen;
-    int st;
-    char title[160];
-    struct vd_track t;  /* rekordbox's */
-    unsigned len_s;
-    struct vd_track ts; /* from the vocals stem */
-    unsigned len_ss;
-} g_vx[AZMOD_STEM_DECKS];
-/* g_sm_mu held: what deck d's strips show now, its levels and length; VD_NONE = nothing */
-static int vx_show(int d, const struct vd_track **t, unsigned *len) {
-    struct vx_deck *e = &g_vx[d];
-    int src = vd_pick_source(e->st == 2 && e->t.n && e->len_s, e->ts.n && e->len_ss);
-    if (t)
-        *t = src == VD_STEM ? &e->ts : &e->t;
-    if (len)
-        *len = src == VD_STEM ? e->len_ss : e->len_s;
-    return src;
+static void vx_completed(const az_analysis_complete_v1 *event, void *user) {
+    (void) user;
+    if (!(event->available_components & AZ_ANALYSIS_VOCALS)) return;
+    sm_lock();
+    pthread_cond_signal(&g_sm_cv);
+    sm_unlock();
+}
+void vocal_indicator_events_init(void) {
+    int rc = analysis_events_core_listen(vx_completed, NULL);
+    if (rc != AZ_OK) analysis_diagnostic("Vocal Indicator completion subscription failed");
 }
 
-/* ---- the worker ---------------------------------------------------------------------------- */
-static int vx_pread(void *ctx, uint8_t *b, size_t n, uint64_t off) { return ph_pread(ctx, b, n, off); }
-/* the PVDI of one stick's .2EX beside the library's .DAT path: 1 found, 0 none, -1 unreadable */
-static int vx_from_file(const char *mount, const char *adp, struct vd_track *t) {
-    char p[700];
-    size_t L = strlen(adp);
-    if (L <= 4 || L + strlen(mount) >= sizeof p || strcasecmp(adp + L - 4, ".DAT"))
-        return -1;
-    snprintf(p, sizeof p, "%s%.*s.2EX", mount, (int) (L - 4), adp);
-    int fd = open(p, O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-        return -1;
-    struct stat sb;
-    int r = fstat(fd, &sb) == 0 && sb.st_size > 0
-                ? vd_anlz_read(vx_pread, &fd, (uint64_t) sb.st_size, VX_FILE_MAX, t)
-                : -1;
-    close(fd);
-    return r;
+/* g_sm_mu protects display data. Only vx_poll writes load/state on the worker.
+ * st: 0 empty, 1 checking source, 2 PVDI ready, 3 stem fallback, 4 awaiting extraction. */
+static struct vx_deck {
+    uint64_t load;
+    unsigned gen;
+    int st, analysis_on;
+    struct vd_track t;
+    unsigned len_s;
+    struct vd_track ts;
+    unsigned len_ss;
+} g_vx[AZMOD_STEM_DECKS];
+static unsigned g_vx_stemgen[AZMOD_STEM_DECKS];
+static int vx_load(int deck, struct azstatus_native_receipt *load) {
+    if (!ds_native_load_seed((unsigned) deck, load)) return 0;
+    return load->a == AZN_LOADED && load->unit && load->epoch && load->load_generation;
 }
-/* (cid, title) on every stick: 1 known (t, len_s filled), 0 unknown */
-static int vx_resolve(unsigned cid, const char *title, struct vd_track *t, unsigned *len_s,
-                      FILE *lg) {
-    DIR *rd = opendir("/media/usb");
-    if (!rd)
-        return 0;
-    struct dirent *de;
-    int hits = 0, bad = 0;
-    struct vd_track a = {0};
-    unsigned alen = 0;
-    while ((de = readdir(rd)) && !bad) {
-        if (de->d_name[0] == '.')
-            continue;
-        char mount[128];
-        if (snprintf(mount, sizeof mount, "/media/usb/%s", de->d_name) >= (int) sizeof mount)
-            continue;
-        void *db = sm_db_for(mount, lg);
-        if (!db)
-            continue;
-        void *st = 0;
-        if (g_sq.prepare(db,
-                         "SELECT analysisDataFilePath, length FROM content WHERE content_id = ?1 "
-                         "AND title = ?2",
-                         -1, &st, 0) != 0 ||
-            !st) {
-            bad++;
-            break;
-        }
-        g_sq.bind_int64(st, 1, cid);
-        g_smsq.bind_text(st, 2, title, -1, (void *) -1 /* SQLITE_TRANSIENT */);
-        while (!bad && g_sq.step(st) == SQLITE_ROW) {
-            const unsigned char *ap = g_sq.column_text(st, 0);
-            long long secs = g_sq.column_int64(st, 1);
-            struct vd_track b = {0};
-            int k = ap && ap[0] == '/' && secs > 0 && secs < 24 * 3600
-                        ? vx_from_file(mount, (const char *) ap, &b)
-                        : -1;
-            if (lg)
-                fprintf(lg, "  vocal cid=%u %s%s -> %d n=%u\n", cid, mount,
-                        ap ? (const char *) ap : "-", k, k == 1 ? b.n : 0);
-            if (k != 1) {
-                bad++;
-            } else if (!hits) {
-                a = b;
-                alen = (unsigned) secs;
-                hits++;
-                continue;
-            } else if (b.n != a.n || b.hop != a.hop || b.rate != a.rate || (unsigned) secs != alen ||
-                       memcmp(b.v, a.v, a.n)) {
-                bad++;
-            }
-            free(b.v);
-        }
-        g_sq.finalize(st);
-    }
-    closedir(rd);
-    if (!hits || bad) {
-        free(a.v);
-        return 0;
-    }
-    *t = a;
-    *len_s = alen;
-    return 1;
+static int vx_current(int deck, uint64_t generation) {
+    struct azstatus_native_receipt load;
+    return vx_load(deck, &load) && load.load_generation == generation;
 }
-static void vx_set(int d, unsigned cid, const char *title, int st, struct vd_track *t,
-                   unsigned len_s) {
-    uint8_t *old, *olds;
+static int vx_source(const struct vx_deck *e) {
+    if (e->st == 2 && e->t.n && e->len_s) return VD_RB;
+    if (e->analysis_on != !!az_on(AZF_VOCAL_EXTRACTION)) return VD_NONE;
+    return e->st == 3 && e->ts.n && e->len_ss ? VD_STEM : VD_NONE;
+}
+/* g_sm_mu held; no files, model inference or scheduler locks on the paint path. */
+static int vx_show(int d, const struct vd_track **t, unsigned *len) {
+    struct vx_deck *e = &g_vx[d];
+    int src = vx_current(d, e->load) ? vx_source(e) : VD_NONE;
+    if (t) *t = src == VD_STEM ? &e->ts : &e->t;
+    if (len) *len = src == VD_STEM ? e->len_ss : e->len_s;
+    return src;
+}
+static void vx_replace(int d, uint64_t load, int state, struct vd_track *track, unsigned length) {
     sm_lock();
     struct vx_deck *e = &g_vx[d];
-    old = e->t.v;
-    olds = e->ts.v;
-    memset(&e->ts, 0, sizeof e->ts);
-    e->len_ss = 0;
-    e->cid = cid;
-    snprintf(e->title, sizeof e->title, "%s", title);
-    e->st = st;
-    if (t)
-        e->t = *t;
-    else
-        memset(&e->t, 0, sizeof e->t);
-    e->len_s = len_s;
-    e->gen++;
+    uint8_t *old = e->t.v, *stems = e->ts.v;
+    unsigned generation = e->gen + 1;
+    *e = (struct vx_deck) {.load = load, .gen = generation, .st = state, .analysis_on = !!az_on(AZF_VOCAL_EXTRACTION), .len_s = length};
+    if (track) e->t = *track;
     sm_unlock();
     free(old);
-    free(olds);
+    free(stems);
+    g_vx_stemgen[d] = 0;
+}
+static void vx_state(int d, uint64_t load, int state) {
+    const struct vx_deck *e = &g_vx[d];
+    if (e->load == load && e->st == state && e->analysis_on == !!az_on(AZF_VOCAL_EXTRACTION)) return;
+    vx_replace(d, load, state, NULL, 0);
+}
+/* A status for a different load never authorizes fallback. Startup failure also
+ * counts as unavailable analysis; the core reports its normal diagnostic. */
+static int vx_waiting(int d, uint64_t load) {
+    if (!az_on(AZF_VOCAL_EXTRACTION) || !azmod_analysis_status) return 0;
+    az_analysis_status_v1 status = {.size = sizeof status};
+    int rc = azmod_analysis_status((unsigned) d, &status);
+    if (rc == AZ_UNSUPPORTED) return 0;
+    if (rc != AZ_OK || status.load_epoch != load) return 1;
+    return status.state < AZ_ANALYSIS_COMPLETE;
+}
+static void vx_refresh(int d, uint64_t load) {
+    if (g_vx[d].st == 4 && vx_waiting(d, load)) return;
+    struct vd_track track = {0};
+    unsigned length = 0;
+    int rc = analysis_vocal_track_loaded((unsigned) d, load, &track, &length);
+    if (!vx_current(d, load)) {
+        free(track.v);
+        return;
+    }
+    if (rc == AZ_OK) {
+        vx_replace(d, load, 2, &track, length);
+        return;
+    }
+    if (rc == AZ_STALE || rc == AZ_BUSY) {
+        vx_state(d, load, 1);
+        return;
+    }
+    vx_state(d, load, vx_waiting(d, load) ? 4 : 3);
 }
 /* The levels from deck d's stems; t = NULL, none. */
 static void vx_set_stems(int d, struct vd_track *t, unsigned len_s) {
@@ -181,11 +129,6 @@ static void vx_set_stems(int d, struct vd_track *t, unsigned len_s) {
     sm_unlock();
     free(old);
 }
-/* worker: each deck's loaded track, at most every VX_POLL_MS. Off = everything let go. */
-static FILE *g_vx_lg;
-static int g_vx_budget = 400; /* log lines */
-/* worker only: the envelope generation the levels from stems were built from + 1, 0 = none */
-static unsigned g_vx_stemgen[AZMOD_STEM_DECKS];
 #define VX_STEM_VOCALS 0 /* azstem's slots */
 #define VX_STEM_OTHER 1
 /* Deck d's levels from its stems, whenever their envelope appears or changes. */
@@ -225,60 +168,22 @@ static void vx_from_stems(int d, unsigned cid, FILE *lg) {
         fprintf(lg, "deck %d cid=%u -> from stems ok=%d n=%u len=%u\n", d, cid, ok, t.n, len);
     vx_set_stems(d, ok ? &t : 0, ok ? len : 0);
 }
+static void vx_poll_deck(int d, int enabled) {
+    struct azstatus_native_receipt load;
+    if (!enabled || !vx_load(d, &load)) {
+        vx_state(d, 0, 0);
+        return;
+    }
+    if (g_vx[d].load != load.load_generation) vx_state(d, load.load_generation, 1);
+    if (g_vx[d].st != 2) vx_refresh(d, load.load_generation);
+    if (g_vx[d].st == 3) vx_from_stems(d, load.content_id, NULL);
+}
 static void vx_poll(void) {
     static long long at;
-    static azstem_deck_snapshot_fn snap;
-    if (drag_now_ms() - at < VX_POLL_MS)
-        return;
+    if (drag_now_ms() - at < VX_POLL_MS) return;
     at = drag_now_ms();
     int on = vx_prev_on() || vx_wave_on();
-    if (on && !snap)
-        *(void **) &snap = dlsym(RTLD_DEFAULT, "azstem_deck_snapshot");
-    for (int d = 0; d < AZMOD_STEM_DECKS; d++) {
-        struct azstem_deck_snap s;
-        memset(&s, 0, sizeof s);
-        s.size = (int) sizeof s;
-        int known = on && snap && snap(d, &s) == 0;
-        sm_lock();
-        unsigned cid = g_vx[d].cid;
-        int st = g_vx[d].st, same = known && s.content_id == cid && !strcmp(s.title, g_vx[d].title);
-        sm_unlock();
-        if (!known || s.loaded == 0 || !s.content_id || !s.title[0]) {
-            if (st && (!on || s.loaded == 0))
-                vx_set(d, 0, "", 0, 0, 0);
-            continue;
-        }
-        if (s.loaded != 1)
-            continue;
-        if (same && st) {
-            vx_from_stems(d, cid, g_vx_budget > 0 ? g_vx_lg : 0);
-            continue;
-        }
-        g_vx_stemgen[d] = 0;
-        if (st && !same)
-            vx_set(d, 0, "", 0, 0, 0); /* another track: the old strip goes at once */
-        if (!g_vx_lg && g_vx_budget > 0) {
-            g_vx_lg = azlog_open("/tmp/azmod-vocalindicator.log", "a");
-            if (g_vx_lg)
-                setvbuf(g_vx_lg, NULL, _IOLBF, 0);
-        }
-        FILE *lg = g_vx_budget-- > 0 ? g_vx_lg : 0;
-        struct vd_track t = {0};
-        unsigned len = 0;
-        int ok = vx_resolve(s.content_id, s.title, &t, &len, lg);
-        if (lg)
-            fprintf(lg, "deck %d cid=%u -> %s n=%u len=%u\n", d, s.content_id,
-                    ok ? "known" : "unknown", t.n, len);
-        if (ok && !t.n) { /* a section with no frames: nothing was detected or nothing was run */
-            free(t.v);
-            t.v = 0;
-            ok = 0;
-        }
-        vx_set(d, s.content_id, s.title, ok ? 2 : 3, ok ? &t : 0, len);
-        if (!ok)
-            free(t.v);
-        vx_from_stems(d, s.content_id, lg);
-    }
+    for (int d = 0; d < AZMOD_STEM_DECKS; ++d) vx_poll_deck(d, on);
 }
 
 /* ---- the detailed waveform's scroll (message thread, from waveform.c azm_upd_enter) ----- */
@@ -311,9 +216,7 @@ static struct {
     int w, valid; /* valid: col[] holds deck gen's levels for width w */
     uint8_t col[VX_MAXW];
 } g_vx_cols[AZMOD_STEM_DECKS];
-/* what the last repaint was asked for: gen + 1, 0 = nothing. One request per change is enough:
- * JUCE merges dirty areas, so the paint that follows covers the whole panel whatever partial
- * paints come between, and a panel that is not showing is painted whole when it shows. */
+/* Last preview strip repaint: gen + 1, or 0 for an empty strip. */
 static unsigned g_vx_asked[AZMOD_STEM_DECKS];
 
 static uintptr_t vx_full_vt(uintptr_t c) { /* the primary vtable of a child's full object, or 0 */
@@ -406,34 +309,42 @@ static unsigned g_vx_wasked[AZMOD_STEM_DECKS]; /* as g_vx_asked, for the lanes *
 static int vx_wave_want(int d) { /* g_sm_mu held */
     return vx_wave_on() && vx_show(d, 0, 0) != VD_NONE ? (int) g_vx[d].gen + 1 : 0;
 }
-/* the title setter, deck d on screen (message thread): repaint the panel when what the strip
- * should show changes */
+static void vx_preview_repaint(uintptr_t panel, int d, unsigned want) {
+    int rect[4];
+    if (want == g_vx_asked[d] || !vx_geom(panel, rect)) return;
+    g_vx_asked[d] = want;
+    ((void (*)(void *, const int *)) PM_REPAINT_AREA)((void *) panel, rect);
+}
+static uintptr_t vx_wave_view(uintptr_t panel) {
+    for (int depth = 0; depth <= 8 && ht_ptr_ok(panel); ++depth) {
+        if (*(volatile uintptr_t *) panel == PM_VIEW_VT) return panel;
+        panel = *(volatile uintptr_t *) (panel + 0x18);
+    }
+    return 0;
+}
+static void vx_wave_repaint(uintptr_t panel, int d, unsigned want) {
+    if (want == g_vx_wasked[d]) return;
+    uintptr_t view = vx_wave_view(panel);
+    int origin[4], lane[4];
+    if (!view || !ht_screen_rect(view, origin) || !pm_deckbox(view, d, lane)) return;
+    if (lane[2] <= 0 || lane[3] < VX_WTOP + VX_H) return;
+    int rect[4] = {lane[0] - origin[0], lane[1] - origin[1] + VX_WTOP, lane[2], VX_H};
+    g_vx_wasked[d] = want;
+    ((void (*)(void *, const int *)) PM_REPAINT_AREA)((void *) view, rect);
+}
+/* A completion refreshes only the vocal bands. Their geometry matches the paint hooks. */
 static void vx_title(uintptr_t panel, int d) {
     if (d < 0 || d >= AZMOD_STEM_DECKS || !ht_ptr_ok(panel))
         return;
     sm_lock();
     unsigned want = vx_prev_on() && vx_show(d, 0, 0) != VD_NONE ? g_vx[d].gen + 1 : 0;
-    sm_unlock();
-    if (want != g_vx_asked[d]) {
-        g_vx_asked[d] = want;
-        ((void (*)(void *)) JUCE_COMPONENT_REPAINT)((void *) panel);
-    }
-    sm_lock();
     unsigned wwant = (unsigned) vx_wave_want(d);
     sm_unlock();
-    if (wwant != g_vx_wasked[d]) { /* the lanes: the WaveformView this panel sits in */
-        uintptr_t v = panel;
-        for (int k = 0; k < 8 && ht_ptr_ok(v) && *(volatile uintptr_t *) v != PM_VIEW_VT; k++)
-            v = *(volatile uintptr_t *) (v + 0x18);
-        if (ht_ptr_ok(v) && *(volatile uintptr_t *) v == PM_VIEW_VT) {
-            g_vx_wasked[d] = wwant;
-            ((void (*)(void *)) JUCE_COMPONENT_REPAINT)((void *) v);
-        }
-    }
+    vx_preview_repaint(panel, d, want);
+    vx_wave_repaint(panel, d, wwant);
 }
 
 /* ---- above the detailed waveform (WaveformView's paintOverChildren, extras.c pm_poc_hook) - */
-#define VX_WTOP 25 /* in the gap between the lane's top row of beat ticks (22 px) and the waveform */
 /* deck d's level for each of w screen columns from x0, with EP147's playhead line at px */
 static int vx_wave_cols(int d, int x0, int w, int px, uint8_t *col) {
     float zoom = g_vx_wzoom[d];

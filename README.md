@@ -225,7 +225,8 @@ Smaller tweaks, each with its own switch in the Mod Menu (most of them under
 | **Overlays** | Small readouts on the deck screen: FPS, CPU use and clock, RAM and temperature |
 | **Clock** | A clock in the status bar, with optional seconds. Tap it for a countdown timer |
 | **Key in Track Title** | Each deck's key at the end of its track title. Tap it for key shift |
-| **Vocal Indicator** | Where the vocals are, above each deck's overview waveform (tracks analyzed with vocal detection in rekordbox) |
+| **Vocal Indicator** | PVDI vocals on the preview and scrolling waveform; waits for Vocal Extraction, with stems as fallback when extraction is off or fails |
+| **Phrase Extraction / Vocal Extraction** | Independent Extras switches for generating missing USB and Beatport analysis |
 | **Camelot Keys** | Keys shown in Camelot notation in the track lists and the deck info |
 | **Preview Hot Cues** | Hot cue marks on the track list's waveform previews |
 | **Extended Lead-In** | Spin a track back up to 5 minutes before its start; BEAT JUMP back runs into it |

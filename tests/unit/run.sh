@@ -4031,7 +4031,7 @@ $CC "${CFLAGS[@]}" -pthread -I"$d" -o "$d/real" $T/sdkdata_test.c -lm
 suite "sdk track data, parser, timing and concurrent consumers" "$d/real"
 $CC "${CFLAGS[@]}" -Iguest/azmod -o "$d/analysis-write" $T/sdkanalysis_write_test.c
 suite "sdk analysis insertion preserves existing ANLZ data" "$d/analysis-write"
-$CC "${CFLAGS[@]}" -Wno-unused-function -pthread -Iguest/azmod -o "$d/callbacks" $T/sdk_data_callbacks_test.c guest/azmod/sdk_command_engine.c -lm
+$CC "${CFLAGS[@]}" -Wno-unused-function -pthread -Iguest/azmod -o "$d/callbacks" $T/sdk_data_callbacks_test.c guest/azmod/sdk_command_engine.c guest/azmod/analysis_events.c guest/azmod/analysis_owner.c -lm
 suite "sdk data and command callbacks without mod polling" "$d/callbacks"
 python3 "$T/sdk_review_controls.py" guest/azmod "$d/review"
 for v in timing-size timing-version; do

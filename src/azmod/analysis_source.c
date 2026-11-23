@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 #include "analysis_native_adapter.h"
 #include "analysis_encoding.h"
+#include "analysis_vocals.h"
 #include "track_storage.h"
 #include "library_sql.h"
 #include "sdk_analysis.h"
@@ -45,6 +46,8 @@ struct sa_job {
     uint32_t needed;
     int vocals, reader_fd;
     int loaded, deck, streaming;
+    int display_read; /* synchronous, read-only native-load lease; no producer owner */
+    unsigned vocal_length_s;
     uint64_t load, native_epoch, audio_token;
     const struct azn_analysis_source_api *audio_api;
     const struct azn_maps_api *maps;
@@ -66,7 +69,7 @@ static void sa_link_release(uint64_t id);
 static void sa_link_wake(void);
 static int sa_cleaner_start(void);
 static int sa_owner_live(const struct sa_job *job) {
-    return analysis_owner_current(job->lifetime);
+    return job->display_read || analysis_owner_current(job->lifetime);
 }
 static int sa_loaded_current(const struct sa_job *job);
 static void sa_job_drop(struct sa_job *job);
@@ -1102,6 +1105,9 @@ static int sv_query(const az_track_ref *track, struct sa_job *j, struct st_resol
     az_storage_sql()->close(db);
     return rc;
 }
+static unsigned sv_duration(const struct st_resolution *row) {
+    return row->duration_ticks > 0 && row->duration_ticks < 86400 ? (unsigned) row->duration_ticks : 0;
+}
 static int sv_analysis_paths(struct sa_job *j, const struct st_resolution *row) {
     size_t n = strlen(row->analysis);
     if (row->analysis_limited || n < 4 || strcmp(row->analysis + n - 4, ".DAT")) return AZ_UNSUPPORTED;
@@ -1131,6 +1137,7 @@ static int sv_location(const az_track_ref *track, struct sa_job *j) {
     struct st_resolution row = {0};
     rc = sv_query(track, j, &row);
     if (rc) return rc;
+    j->vocal_length_s = sv_duration(&row);
     rc = sv_analysis_paths(j, &row);
     if (rc) return rc;
     sv_signatures(j);
@@ -1220,6 +1227,76 @@ int analysis_vocal_intervals_loaded(az_analysis_owner lifetime, int deck, uint64
     struct sa_job j = {.owner = owner, .lifetime = lifetime, .reader_fd = -1, .deck = deck, .load = load, .native_epoch = receipt.epoch, .vocals = 1};
     int rc = sv_loaded_location(&j, api, receipt.source_kind);
     return rc ? rc : sv_loaded_read(&j, maps, out, intervals, capacity);
+}
+
+struct va_bytes {
+    const uint8_t *data;
+    size_t size;
+};
+static int va_read_bytes(void *context, uint8_t *out, size_t count, uint64_t offset) {
+    const struct va_bytes *bytes = context;
+    if (offset > bytes->size || count > bytes->size - offset) return 0;
+    memcpy(out, bytes->data + offset, count);
+    return 1;
+}
+static int va_tag_count(const uint8_t *file, size_t size) {
+    int count = 0;
+    for (size_t at = sa_u32(file + 4); at < size; at += sa_u32(file + at + 8))
+        count += !memcmp(file + at, "PVDI", 4);
+    return count;
+}
+static int va_parse(const uint8_t *file, size_t size, struct vd_track *out) {
+    if (!file) return AZ_NOT_FOUND;
+    int count = va_tag_count(file, size);
+    if (!count) return AZ_NOT_FOUND;
+    if (count != 1) return AZ_FAILED;
+    struct va_bytes bytes = {file, size};
+    int rc = vd_anlz_read(va_read_bytes, &bytes, size, SA_FILE_MAX, out);
+    if (rc < 0) return AZ_FAILED;
+    return out->n ? AZ_OK : AZ_NOT_FOUND;
+}
+static int va_read(struct sa_job *job, struct vd_track *out, unsigned *length) {
+    size_t size = 0;
+    int failed = 0;
+    uint8_t *file = sa_read(job->ex2, &size, &failed);
+    struct vd_track track = {0};
+    int rc = failed ? AZ_FAILED : va_parse(file, size, &track);
+    free(file);
+    if (!sa_current(job)) rc = AZ_STALE;
+    if (rc != AZ_OK) {
+        free(track.v);
+        return rc;
+    }
+    unsigned seconds = job->vocal_length_s;
+    if (!seconds) seconds = (unsigned) (((uint64_t) track.n * track.hop + track.rate / 2) / track.rate);
+    *length = seconds ? seconds : 1;
+    *out = track;
+    return AZ_OK;
+}
+static int va_capture(struct sa_job *job, const struct azn_maps_api *maps,
+                      struct vd_track *out, unsigned *length) {
+    int rc = maps->capture((unsigned) job->deck, job->load, &job->native_map);
+    if (rc) return rc;
+    job->maps = maps;
+    job->loaded = 1;
+    return va_read(job, out, length);
+}
+static int va_loaded(const struct azstatus_native_v1 *api, unsigned deck, uint64_t load,
+                     struct vd_track *out, unsigned *length) {
+    const struct azn_maps_api *maps = sv_loaded_maps(api);
+    if (!maps) return AZ_UNSUPPORTED;
+    struct azstatus_native_receipt receipt = {.size = sizeof receipt, .version = 1};
+    if (sa_loaded_seed(api, (int) deck, load, &receipt)) return AZ_STALE;
+    struct sa_job job = {.display_read = 1, .reader_fd = -1, .deck = (int) deck, .load = load, .native_epoch = receipt.epoch, .vocals = 1};
+    int rc = sv_loaded_location(&job, api, receipt.source_kind);
+    if (!rc) rc = va_capture(&job, maps, out, length);
+    sa_job_drop(&job);
+    return rc;
+}
+int analysis_vocal_track_loaded(unsigned deck, uint64_t load, struct vd_track *out,
+                                unsigned *length_s) {
+    if (deck >= 4 || !load || !out || !length_s) return AZ_INVALID;
+    return va_loaded(sa_native(), deck, load, out, length_s);
 }
 
 

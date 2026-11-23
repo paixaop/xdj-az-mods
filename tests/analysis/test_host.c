@@ -9,6 +9,7 @@ static unsigned queries, banners, diagnostics;
 static az_analysis_owner accepted;
 static az_analysis_status_v1 observations[4];
 static int replies[4];
+void analysis_runtime_components(uint32_t components) { (void) components; }
 int analysis_runtime_start(const char *assets) {
     assert(!strcmp(assets, "/usb/MODS/analysis/assets"));
     ++starts;

@@ -383,11 +383,14 @@ int main(int argc, char **argv) {
      * the same configuration boundary used by early startup and the overlay. */
     put(conf_path, "version = 1\ntrack-analysis:enabled = off\n");
     boot(&s);
-    CHECK("analysis migration preserves disabled automatic work", !az_on(AZF_TRACK_ANALYSIS));
-    CHECK("analysis migration writes the core key and retires the old key",
-          has(conf_path, "track-analysis = off") && !has(conf_path, "track-analysis:enabled"));
+    CHECK("analysis migration preserves disabled automatic work", !az_on(AZF_PHRASE_EXTRACTION) && !az_on(AZF_VOCAL_EXTRACTION));
+    CHECK("analysis migration writes independent keys and retires the old key",
+          has(conf_path, "phrase-extraction = off") && has(conf_path, "vocal-extraction = off") && !has(conf_path, "track-analysis"));
     put(conf_path, "version = 1\ntrack-analysis = on\ntrack-analysis:enabled = off\n");
     boot(&s);
-    CHECK("explicit built-in analysis preference wins", az_on(AZF_TRACK_ANALYSIS));
+    CHECK("explicit built-in analysis preference wins", az_on(AZF_PHRASE_EXTRACTION) && az_on(AZF_VOCAL_EXTRACTION));
+    put(conf_path, "version = 1\ntrack-analysis = on\nvocal-extraction = off\n");
+    boot(&s);
+    CHECK("per-component preference wins over legacy combined setting", az_on(AZF_PHRASE_EXTRACTION) && !az_on(AZF_VOCAL_EXTRACTION));
     return ut_summary();
 }

@@ -33,6 +33,10 @@ void analysis_host_enable(int enabled) {
     analysis_runtime_enable(owner, 0);
     analysis_source_retire(owner);
 }
+void analysis_host_configure(uint32_t components) {
+    analysis_runtime_components(components);
+    analysis_host_enable(components != 0);
+}
 static int analysis_notice_ready(unsigned deck, az_analysis_status_v1 *status) {
     if (analysis_runtime_deck_status(deck, status) != AZ_OK) return 0;
     if (!status->request_id || status->request_id == announced[deck]) return 0;

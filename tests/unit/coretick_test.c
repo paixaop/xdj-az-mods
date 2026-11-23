@@ -70,6 +70,9 @@ static void sdk_rows_tick(void) { g_rows_ticks++; }
  * extracted coretick fixture deliberately includes only community_tick, so
  * keep its optional per-frame services self-contained here. */
 static void sdk_data_callbacks_tick(void) {}
+static int core_analysis_ticks;
+static void analysis_events_core_tick(void) { ++core_analysis_ticks; }
+static void sdk_analysis_callbacks_tick(void) {}
 static void sdk_beatport_owner_tick(void) {}
 static int native_bound, cue_ticks;
 static void sdk_cue_tick(void) { ++cue_ticks; }
@@ -121,6 +124,7 @@ int main(void) {
     ut_suite = "core dialog";
     g_cm_n = 0, g_cm_live = 0;
     CHECK("no community mod at all: the core's question is shown and answered", asked_and_answered());
+    CHECK("core analysis completion listeners run without community mods", core_analysis_ticks == 3);
     CHECK("... and nothing of the mods' runs", g_mod_ticks == 0 && g_drains == 0 && g_deck_ticks == 0);
     g_cm_n = 2, g_cm_live = 0;
     g_cm[0] = (cm_mod) {.state = AZCM_REFUSED, .m = &g_mod};

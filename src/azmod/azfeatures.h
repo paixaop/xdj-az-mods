@@ -194,7 +194,8 @@ void azf_fps60_bypass(void *user);
 void azf_fps60_member_changed(int value, void *user);
 void azf_analysis_changed(int value, void *user);
 /* Core startup binds these before accepting menu input. No mod identity is used. */
-extern void (*azmod_analysis_enable)(int enabled);
+uint32_t azf_analysis_components(void);
+extern void (*azmod_analysis_configure)(uint32_t components);
 extern int (*azmod_analysis_status)(unsigned deck, az_analysis_status_v1 *out);
 #pragma GCC visibility pop
 #endif

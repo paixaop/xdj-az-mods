@@ -1575,10 +1575,11 @@ int az_analysis_thread_create(pthread_t *thread, const pthread_attr_t *attribute
                               void *(*entry)(void *), void *argument) {
     return az_thread_create(thread, attributes, entry, argument);
 }
-#include "analysis_api.c"
 #endif
 #ifndef SDK_PROC_IMPL
 #include "sdk_data_callbacks.c"
+#include "analysis_callbacks.c"
+#include "analysis_api.c"
 #include "sdk_beatport.c"
 #endif
 
@@ -2425,6 +2426,7 @@ static void community_tick(void) {
     sdk_confirm_tick(); /* the dialog: also the core's own questions, with no mod loaded */
 #ifndef SDK_PROC_IMPL
     sdk_beatport_owner_tick();
+    analysis_events_core_tick();
 #endif
     if (!g_cm_n) return;
     sdk_rows_tick();    /* rows of mods that stopped leave the menu, also when none runs */
@@ -2448,6 +2450,7 @@ static void community_tick(void) {
      * unbound core admits no native commands. */
     if (!sdk_command_native_bound()) sdk_cue_tick();
     sdk_data_callbacks_tick();                  /* works for mods with no tick callback */
+    sdk_analysis_callbacks_tick();
 #endif
     cm_tick_callbacks(now);
 }

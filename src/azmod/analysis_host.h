@@ -7,6 +7,7 @@
  * message thread; they only present copied results and never advance work. */
 int analysis_host_start(const char *assets, int enabled);
 void analysis_host_enable(int enabled);
+void analysis_host_configure(uint32_t components);
 void analysis_host_notices(void (*banner)(const char *, int), void (*diagnostic)(const char *));
 /* A normal process exit releases its resources through the OS. An explicit
  * service shutdown must run off native/UI threads and joins all computation. */

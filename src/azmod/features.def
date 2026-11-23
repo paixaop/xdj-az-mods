@@ -83,10 +83,6 @@ AZ_FEATURE( STEM_MARK_STYLE,   "stem-mark-style",            "Stem Mark Style", 
 AZ_FEATURE( STEM_EQ,           "stem-volume-eq",             "Stem Volume on CH 3/4 EQ",   STEMS,        AZ_ROW_TOGGLE,  0,                              32,
             .d.help = "HI = vocals, MID = inst + bass, LOW = drums.")
 
-AZ_FEATURE( TRACK_ANALYSIS,    "track-analysis",             "Track Analysis",             NONE,         AZ_ROW_TOGGLE,  AZ_ROW_DEFAULT_ON,              -1,
-            .d.on_change = azf_analysis_changed,
-            .d.help = "Generate missing phrases and vocal intervals automatically for USB and Beatport tracks.")
-
 /* the drum-roll sampler (SLIP LOOP + pad 8, played on the X-PAD) */
 AZ_FEATURE( DRUM_ROLL,         "drum-roll",                  "Drum Roll",                  NONE,         AZ_ROW_TOGGLE,  0,                              6,
             .d.help = "Press pad 8 in SLIP LOOP to arm it, then play it on the X-PAD.\nSamples come from "
@@ -140,6 +136,13 @@ AZ_FEATURE( THEMES,            "themes",                     "Themes",          
 
 AZ_FEATURE( EXTRAS,            "extras",                     "Extras",                     NONE,         AZ_ROW_GROUP,   AZ_ROW_CHILD_ICONS,             -1,
             .d.help = "Small changes to how the deck works.")
+AZ_FEATURE( PHRASE_EXTRACTION, "phrase-extraction",          "Phrase Extraction",          EXTRAS,       AZ_ROW_TOGGLE,  AZ_ROW_DEFAULT_ON,              -1,
+            .d.on_change = azf_analysis_changed,
+            .d.help = "Generate missing phrase analysis for USB and Beatport tracks. Preserves existing phrases and the track's beat grid.")
+AZ_FEATURE( VOCAL_EXTRACTION,  "vocal-extraction",           "Vocal Extraction",           EXTRAS,       AZ_ROW_TOGGLE,  AZ_ROW_DEFAULT_ON,              -1,
+            .d.on_change = azf_analysis_changed,
+            .d.help = "Generate missing PVDI vocal analysis for USB and Beatport tracks. The Vocal Indicator waits for it, then uses stems if extraction fails.")
+
 /* the deck-screen readouts: a switch whose rows live on their own screen (Overlays >) */
 AZ_FEATURE( OVERLAYS,          "overlays",                   "Overlays",                   EXTRAS,       AZ_ROW_TOGGLE,  0,                              14,
             .screen = AZ_OVERLAYS,
@@ -199,8 +202,7 @@ AZ_FEATURE( DECK_KEY_TITLE,    "deck-key-title",             "Key in Track Title
 /* rekordbox's vocal detection (PVDI, in each track's .2EX) as a dashed strip above each deck's
  * overview, where the panel has room for it (vocal_indicator.c) */
 AZ_FEATURE( VOCAL_INDICATOR,   "vocal-indicator",            "Vocal Indicator",            EXTRAS,       AZ_ROW_TOGGLE,  0,                              -1,
-            .d.help = "Shows where the vocals are, from rekordbox's vocal detection.\nNeeds "
-                      "tracks analyzed with vocal detection in rekordbox.")
+            .d.help = "Shows PVDI vocal analysis. Waits for Track Analysis when enabled.\nUses vocal stems if analysis is disabled or fails and PVDI is unavailable.")
 /* where it shows: above each deck's scrolling waveform, above its waveform preview */
 AZ_FEATURE( VOCAL_IND_WAVE,    "vocal-indicator-waveform",   "Above Waveform",             VOCAL_INDICATOR, AZ_ROW_TOGGLE, AZ_ROW_DEFAULT_ON,           -1,
             .d.help = "A strip along the top of each deck's waveform.")

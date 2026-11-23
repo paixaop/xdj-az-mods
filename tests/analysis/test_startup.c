@@ -1,21 +1,20 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #include "analysis_host.h"
+#include "analysis_vocals.h"
 #include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 static int available, enabled, start_result, bind_result;
 static unsigned logs, started, bound, phase;
+static unsigned vocal_events;
+void vocal_indicator_events_init(void) { ++vocal_events; }
 static char last_diagnostic[128];
-static void (*azmod_analysis_enable)(int);
+static void (*azmod_analysis_configure)(uint32_t);
 static int (*azmod_analysis_status)(unsigned, az_analysis_status_v1 *);
-enum {
-    AZF_TRACK_ANALYSIS = 1
-};
-static int az_on(int id) {
-    assert(id == AZF_TRACK_ANALYSIS);
-    return enabled;
-}
+static uint32_t azf_analysis_components(void) { return enabled ? AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS : 0; }
+void analysis_runtime_components(uint32_t components) { assert(components == azf_analysis_components()); }
+void analysis_host_configure(uint32_t components) { enabled = components != 0; }
 static void analysis_diagnostic(const char *text) {
     assert(text);
     snprintf(last_diagnostic, sizeof last_diagnostic, "%s", text);
@@ -68,7 +67,7 @@ int main(void) {
     assert(core_analysis_assets(path, 3) == AZ_LIMIT);
     start_result = AZ_FAILED;
     core_analysis_start();
-    assert(logs == 2 && started == 1 && !bound && !azmod_analysis_enable);
+    assert(logs == 2 && started == 1 && !bound && !azmod_analysis_configure);
     assert(strstr(last_diagnostic, "core startup failed"));
     char result_text[32];
     snprintf(result_text, sizeof result_text, "(%d)", AZ_FAILED);
@@ -76,7 +75,7 @@ int main(void) {
     start_result = AZ_OK;
     bind_result = AZ_UNSUPPORTED;
     core_analysis_start();
-    assert(logs == 3 && bound == 1 && azmod_analysis_enable && !azmod_analysis_status);
+    assert(logs == 3 && bound == 1 && azmod_analysis_configure && !azmod_analysis_status);
     assert(strstr(last_diagnostic, "automatic load observation failed"));
     snprintf(result_text, sizeof result_text, "(%d)", AZ_UNSUPPORTED);
     assert(strstr(last_diagnostic, result_text));
@@ -84,8 +83,9 @@ int main(void) {
     enabled = 1;
     core_services_init();
     assert(phase == 2 && started == 3 && bound == 2 && logs == 3);
+    assert(vocal_events == 1);
     assert(azmod_analysis_status == analysis_runtime_deck_status);
-    azmod_analysis_enable(0);
+    azmod_analysis_configure(0);
     assert(!enabled);
     puts("analysis startup: core ordering, asset location, and explicit failure passed");
 }
