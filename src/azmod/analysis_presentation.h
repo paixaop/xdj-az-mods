@@ -14,16 +14,4 @@ static inline const char *analysis_result_message(int result) {
     default: return "Analysis failed; see core log";
     }
 }
-static inline const char *analysis_status_message(const az_analysis_status_v1 *status, int rc) {
-    if (rc == AZ_BUSY) return "Updating analysis status";
-    if (rc != AZ_OK) return "Analysis service unavailable";
-    switch (status->state) {
-    case 0: return "Waiting for a USB or Beatport track";
-    case AZ_ANALYSIS_QUEUED: return "Checking phrases and vocals";
-    case AZ_ANALYSIS_RUNNING: return "Analysing phrases and vocals";
-    case AZ_ANALYSIS_SAVED: return "Analysis saved; waiting for library linking";
-    case AZ_ANALYSIS_CANCELLED: return "Source changed or analysis cancelled";
-    default: return analysis_result_message(status->result);
-    }
-}
 #endif

@@ -120,17 +120,13 @@ static void reused_analysis_notices(void) {
 }
 static void presentation(void) {
     struct {
-        unsigned state;
         int result;
         const char *text;
     } cases[] = {
-        {0, AZ_OK, "Waiting"}, {AZ_ANALYSIS_QUEUED, AZ_OK, "Checking"}, {AZ_ANALYSIS_RUNNING, AZ_PENDING, "Analysing"}, {AZ_ANALYSIS_SAVED, AZ_PENDING, "waiting for library"}, {AZ_ANALYSIS_CANCELLED, AZ_OK, "cancelled"}, {AZ_ANALYSIS_COMPLETE, AZ_OK, "ready"}, {AZ_ANALYSIS_COMPLETE, AZ_NOT_FOUND, "ready"}, {AZ_ANALYSIS_FAILED, AZ_UNSUPPORTED, "Unsupported"}, {AZ_ANALYSIS_FAILED, AZ_STALE, "changed"}, {AZ_ANALYSIS_FAILED, AZ_FAILED, "failed"}};
-    assert(strstr(analysis_status_message(NULL, AZ_BUSY), "Updating"));
-    assert(strstr(analysis_status_message(NULL, AZ_UNSUPPORTED), "unavailable"));
-    for (unsigned i = 0; i < sizeof cases / sizeof *cases; ++i) {
-        az_analysis_status_v1 status = {.state = cases[i].state, .result = cases[i].result};
-        assert(strstr(analysis_status_message(&status, AZ_OK), cases[i].text));
-    }
+        {AZ_OK, "ready"}, {AZ_NOT_FOUND, "ready"}, {AZ_UNSUPPORTED, "Unsupported"},
+        {AZ_STALE, "changed"}, {AZ_FAILED, "failed"}};
+    for (unsigned i = 0; i < sizeof cases / sizeof *cases; ++i)
+        assert(strstr(analysis_result_message(cases[i].result), cases[i].text));
 }
 int main(void) {
     startup_and_retirement();

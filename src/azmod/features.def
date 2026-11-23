@@ -136,12 +136,6 @@ AZ_FEATURE( THEMES,            "themes",                     "Themes",          
 
 AZ_FEATURE( EXTRAS,            "extras",                     "Extras",                     NONE,         AZ_ROW_GROUP,   AZ_ROW_CHILD_ICONS,             -1,
             .d.help = "Small changes to how the deck works.")
-AZ_FEATURE( PHRASE_EXTRACTION, "phrase-extraction",          "Phrase Extraction",          EXTRAS,       AZ_ROW_TOGGLE,  AZ_ROW_DEFAULT_ON,              -1,
-            .d.on_change = azf_analysis_changed,
-            .d.help = "Generate missing phrase analysis for USB and Beatport tracks. Preserves existing phrases and the track's beat grid.")
-AZ_FEATURE( VOCAL_EXTRACTION,  "vocal-extraction",           "Vocal Extraction",           EXTRAS,       AZ_ROW_TOGGLE,  AZ_ROW_DEFAULT_ON,              -1,
-            .d.on_change = azf_analysis_changed,
-            .d.help = "Generate missing PVDI vocal analysis for USB and Beatport tracks. The Vocal Indicator waits for it, then uses stems if extraction fails.")
 
 /* the deck-screen readouts: a switch whose rows live on their own screen (Overlays >) */
 AZ_FEATURE( OVERLAYS,          "overlays",                   "Overlays",                   EXTRAS,       AZ_ROW_TOGGLE,  0,                              14,
@@ -199,6 +193,12 @@ AZ_FEATURE( HIDE_TRACK_TITLE,  "hide-track-title",           "Hide Track Title",
  * (extras.c, Key in Track Title) */
 AZ_FEATURE( DECK_KEY_TITLE,    "deck-key-title",             "Key in Track Title",         EXTRAS,       AZ_ROW_TOGGLE,  0,                              -1,
             .d.help = "Shows each deck's key at the end of its track title. Tap it for key shift.")
+AZ_FEATURE( PHRASE_EXTRACTION, "phrase-extraction",          "Phrase Extraction",          EXTRAS,       AZ_ROW_TOGGLE,  AZ_ROW_DEFAULT_ON,              -1,
+            .d.on_change = azf_analysis_changed,
+            .d.help = "Generate missing phrase analysis for USB and Beatport tracks. Preserves existing phrases and the track's beat grid.")
+AZ_FEATURE( VOCAL_EXTRACTION,  "vocal-extraction",           "Vocal Extraction",           EXTRAS,       AZ_ROW_TOGGLE,  AZ_ROW_DEFAULT_ON,              -1,
+            .d.on_change = azf_analysis_changed,
+            .d.help = "Generate missing PVDI vocal analysis for USB and Beatport tracks. The Vocal Indicator waits for it, then uses stems if extraction fails.")
 /* rekordbox's vocal detection (PVDI, in each track's .2EX) as a dashed strip above each deck's
  * overview, where the panel has room for it (vocal_indicator.c) */
 AZ_FEATURE( VOCAL_INDICATOR,   "vocal-indicator",            "Vocal Indicator",            EXTRAS,       AZ_ROW_TOGGLE,  0,                              -1,
