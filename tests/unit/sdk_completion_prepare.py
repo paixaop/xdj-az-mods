@@ -171,8 +171,8 @@ class Build:
                 self.runs.append(("ext-time-" + kind + "-" + mode, binary, kind))
             self.compile("ext-time-input-" + mode, [self.fixture("sdkinput_test.c")], mode,
                          extra=c_live_flags + ["-Wno-missing-field-initializers", self.macro("SDK_INPUT_C", azmod / "sdk_input.c")], links=["-lm"])
-            self.compile("ext-command-" + mode, [self.fixture("sdkcommand_test.c")], mode, extra=mod_inc, links=["-lm"])
-            self.compile("ext-command-wrappers-" + mode, [self.fixture("sdkcommand_wrapper_test.c")], mode,
+            self.compile("ext-command-" + mode, [self.fixture("sdkcommand_test.c"), azmod / "sdk_command_engine.c"], mode, extra=mod_inc, links=["-lm"])
+            self.compile("ext-command-wrappers-" + mode, [self.fixture("sdkcommand_wrapper_test.c"), azmod / "sdk_command_engine.c"], mode,
                          extra=mod_inc + [owner, submit], links=["-lm"])
             self.compile("ext-stored-" + mode, [self.fixture("sdkstored_test.c")], mode, extra=mod_inc, links=["-lm"])
             self.compile("ext-mono-preview-" + mode, [self.fixture("sdkmonopreview_test.c")], mode, extra=mod_inc, links=["-lm"])
@@ -194,7 +194,7 @@ class Build:
                          extra=common_inc + ["-c"], run=False)
             for testing in (False, True):
                 self.compile("ext-native-commands-" + ("testing-" if testing else "production-") + mode,
-                             [self.root / "src/azstem/sdk_native_commands.c", self.fixture("sdknativecommands_test.c")], mode,
+                             [self.root / "src/azstem/sdk_native_commands.c", self.fixture("sdknativecommands_test.c"), azmod / "sdk_command_engine.c"], mode,
                              extra=common_inc + mod_inc + ["-fexceptions", "-fasynchronous-unwind-tables", "-fvisibility=hidden"] + (["-DAZSDK_NATIVE_COMMANDS_TESTING"] if testing else []), links=[str(self.fixture("native_unwind.c")), "-lstdc++", "-ldl", "-lm"])
         for name in TIME_SAMPLES:
             self.compile("ext-time-" + name + "-control", [self.fixture("sdksampletime_test.c")],
@@ -208,10 +208,10 @@ class Build:
             self.compile("ext-" + name + "-control", [live / (name + ".c"), self.fixture("sdkloopobserver_test.c")],
                          extra=live_flags, links=[str(self.fixture("native_unwind.c")), "-lstdc++", "-ldl", "-lm"], diagnostic=ASSERTION)
         for name in COMMAND:
-            self.compile("ext-command-" + name + "-control", [self.fixture("sdkcommand_test.c")],
+            self.compile("ext-command-" + name + "-control", [self.fixture("sdkcommand_test.c"), command / name / "sdk_command_engine.c"],
                          extra=["-I" + str(command / name)] + mod_inc, links=["-lm"], diagnostic=ASSERTION)
         for name in WRAPPERS:
-            self.compile("ext-command-" + name + "-control", [self.fixture("sdkcommand_wrapper_test.c")],
+            self.compile("ext-command-" + name + "-control", [self.fixture("sdkcommand_wrapper_test.c"), azmod / "sdk_command_engine.c"],
                          extra=mod_inc + [owner, self.macro("SDK_COMMAND_SUBMIT_INC", command / name / "submit.inc"),
                                          self.macro("SDK_COMMAND_IMPL", command / name / "sdk_command.c")], links=["-lm"], diagnostic=ASSERTION)
         for name in STORED:
@@ -260,16 +260,16 @@ class Build:
         self.compile("ext-sources-bridge-control", [sources / "bridge-control.c", self.root / "src/azmod/sdk_cache_message.c", common / "azcache_scopes.c"],
                      extra=common_inc, diagnostic=ASSERTION)
         for name in NATIVE_COMMANDS:
-            self.compile("ext-native-commands-" + name + "-control", [native / (name + ".c"), self.fixture("sdknativecommands_test.c")],
+            self.compile("ext-native-commands-" + name + "-control", [native / (name + ".c"), self.fixture("sdknativecommands_test.c"), azmod / "sdk_command_engine.c"],
                          extra=common_inc + mod_inc + ["-DAZSDK_NATIVE_COMMANDS_TESTING", "-fexceptions", "-fasynchronous-unwind-tables", "-fvisibility=hidden"], links=[str(self.fixture("native_unwind.c")), "-lstdc++", "-ldl", "-lm"], diagnostic="FAIL nativecommands:")
         for name, mode, macro, extra, diagnostic in [
                 ("heap", "asan", "SCMD_TEST_HEAP", "-fno-sanitize=undefined", "AddressSanitizer: heap-buffer-overflow"),
                 ("signed", "asan", "SCMD_TEST_SIGNED", "-fno-sanitize=address", "runtime error: signed integer overflow"),
                 ("race", "tsan", "SCMD_TEST_RACE", None, "ThreadSanitizer: data race")]:
-            self.compile("ext-command-" + name + "-control", [self.fixture("sdkcommand_test.c")], mode,
+            self.compile("ext-command-" + name + "-control", [self.fixture("sdkcommand_test.c"), azmod / "sdk_command_engine.c"], mode,
                          extra=mod_inc + ["-D" + macro] + ([extra] if extra else []), links=["-lm"], diagnostic=diagnostic)
         growth = [self.cc] + self.flags("plain") + ["-I" + str(command / "request-growth")] + mod_inc
-        growth += [str(self.fixture("sdkcommand_test.c")), "-lm", "-o", str(self.work / "request-growth-rejected")]
+        growth += [str(self.fixture("sdkcommand_test.c")), str(command / "request-growth/sdk_command_engine.c"), "-lm", "-o", str(self.work / "request-growth-rejected")]
         self.actions.append(("command-request-growth", growth, "command request grew"))
         adapter = self.work / "adapter.c"
         adapter.write_text('#include "sdk_command_engine.h"\nstatic struct scmd_adapter adapter;\nint main(void) { return adapter.context != 0; }\n')
