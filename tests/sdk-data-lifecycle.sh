@@ -8,19 +8,21 @@ python3 - "$work/lifecycle.inc" <<'PY'
 from pathlib import Path
 import sys
 track=Path('src/azmod/sdk_track.c').read_text()
-needle='static void sdk_data_retire_owner('
-if needle in track:
-    start=track.index(needle)
-    retire=track[start:track.index('\n}',start)+2]
-else:
-    retire='static void sdk_data_retire_owner(int owner) { (void)owner; }'
+service=Path('src/azmod/track_service.c').read_text()
+def function(text, name):
+    import re
+    start=re.search(r'^(?:static )?(?:void|int) '+name+r'\(', text, re.M).start()
+    at=text.index('{', start)+1
+    depth=1
+    while depth:
+        depth += (text[at]=='{')-(text[at]=='}')
+        at += 1
+    return text[start:at]
 source=Path('src/azmod/community.c').read_text()
-start=source.index('static int cm_run_init(')
-end=source.index('\n}',start)+2
-init=source[start:end].replace('cm_run_init(', 'run_actual_init(', 1)
-start=track.index('static void sdk_data_owner_init(')
-owner_init=track[start:track.index('\n}',start)+2]
-Path(sys.argv[1]).write_text(owner_init+'\n'+retire+'\n'+init+'\n')
+init=function(source,'cm_run_init').replace('cm_run_init(', 'run_actual_init(', 1)
+parts=[function(service,'track_service_owner_init'),function(service,'track_service_owner_retire'),
+       function(track,'sdk_data_owner_init'),function(track,'sdk_data_retire_owner'),init]
+Path(sys.argv[1]).write_text('\n'.join(parts)+'\n')
 PY
 flags=(-std=c11 -O1 -g -Wall -Wextra -Werror -pthread -Isrc/azmod)
 case ${SAN:-plain} in plain|'') ;; asan)flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer);;tsan)flags+=(-fsanitize=thread);;*)exit 2;;esac

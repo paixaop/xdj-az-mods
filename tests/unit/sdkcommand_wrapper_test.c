@@ -1,3 +1,9 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE
+#endif
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* Actual SDK wrappers and owner helper, with synthetic module/engine state only. */
 #define _POSIX_C_SOURCE 200809L
@@ -26,6 +32,7 @@ static cm_mod *cm_self(const char *id, uintptr_t caller, const char *service) {
 #ifndef SDK_COMMAND_IMPL
 #define SDK_COMMAND_IMPL "sdk_command.c"
 #endif
+#include "sdk_command_service.c"
 #include SDK_COMMAND_IMPL
 #include SDK_COMMAND_SUBMIT_INC
 

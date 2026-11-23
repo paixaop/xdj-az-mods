@@ -397,8 +397,7 @@ int main(int argc, char **argv) {
         pthread_create(&t, NULL, live_stress_bus, NULL);
         for (int i = 0; i < n; i++) {
             if (azcm_live_set(argv[3], 0) != 1) bad++;
-            for (unsigned s = 0; s < DS_SUBS; ++s)
-                if (ds.sub[s].handle && ds.sub[s].owner == (int) (cm_find(argv[3]) - g_cm)) bad++;
+            bad += ds_owner_subscriptions((int) (cm_find(argv[3]) - g_cm));
             if (azcm_live_set(argv[3], 1) != 1) bad++;
         }
         __atomic_store_n(&g_live_stress_run, 0, __ATOMIC_RELEASE);

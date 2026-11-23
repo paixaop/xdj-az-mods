@@ -2965,7 +2965,7 @@ static void ep147_late_init(void) { /* EP147 addresses that cannot be constant i
 }
 #include "sdk_status_source.c"
 #include "sdk_status_map_source.c"
-#include "sdk_status_save.c"
+#include "sdk_status_store.h"
 static int sdk_source_join_patch(uintptr_t at, uintptr_t expected, void *hook, void **original, int slot) {
     if (slot) return *(uintptr_t *) at == expected && azm_patch_vtable(at, hook, original) == 1;
     return azm_install_hook_at(at, hook, original, "status-source") == 1;

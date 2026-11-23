@@ -1,3 +1,9 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE
+#endif
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* Linux descriptor test with the production store, wrappers, table entries and
  * overlay wait. The native action is scripted; X can use a real display. */
@@ -30,6 +36,7 @@ static int cm_command_code(cm_mod *mod, uintptr_t address) {
 }
 static struct st_engine g_st = ST_ENGINE_INIT;
 #include SDK_OWNER_INC
+#include "sdk_command_service.c"
 #include "sdk_command.c"
 #include SDK_SUBMIT_INC
 #include "sdk_data_callbacks.c"

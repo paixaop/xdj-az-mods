@@ -35,6 +35,7 @@ static int fake_clock_gettime(clockid_t clock, struct timespec *out) {
 #include TEMPO_INC
 #undef clock_gettime
 static int g_st_enabled = 1;
+static int track_service_enabled(void) { return g_st_enabled; }
 static _Atomic(azstem_deck_snapshot_fn) g_sd_snap;
 static _Atomic int g_sd_playing[4];
 static int dg_slip_enum = 2;

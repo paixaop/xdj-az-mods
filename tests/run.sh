@@ -28,16 +28,24 @@ PUB=$PWD
 for h in caption_strips collabels fxart fxbars fxhdr holdtile menulabels sfxtile onelibkey onelibkey_sm srcref stems4art wavref; do
     [ -f "src/azmod/$h.h" ] || { echo "src/azmod/$h.h is missing: run python3 tools/extract-assets.py <official azmod.so> first" >&2; exit 2; }
 done
-V=$PUB/tests/.work/tree
-rm -rf "$PUB/tests/.work"
+if [ -n "${AZ_TEST_WORK_ROOT:-}" ]; then
+    case "$AZ_TEST_WORK_ROOT" in /*) ;; *) echo "AZ_TEST_WORK_ROOT must be absolute" >&2; exit 2 ;; esac
+    [ ! -e "$AZ_TEST_WORK_ROOT" ] || { echo "AZ_TEST_WORK_ROOT must be a fresh directory" >&2; exit 2; }
+    V=$AZ_TEST_WORK_ROOT/tree
+else
+    V=$PUB/tests/.work/tree
+    rm -rf "$PUB/tests/.work"
+fi
 mkdir -p "$V/guest/out" "$V/tools/refactor" "$V/docs"
-for d in azmod azstem common azhandoff; do
+for d in azmod azstem common azhandoff analysis; do
     mkdir -p "$V/guest/$d"
     cp -R "src/$d/." "$V/guest/$d/"
 done
 # Fixtures also include the published ../../src paths. Keep this relative alias
 # inside the staged tree, so it resolves within the same container mount.
 ln -s guest "$V/src"
+mkdir -p "$V/vendor"
+cp -R vendor/analysis "$V/vendor/analysis"
 cp src/azmod/test/lanetest.c "$V/guest/azmod/lanetest.c"
 cp tests/unit/common/*.c "$V/guest/common/"
 mkdir -p "$V/guest/azrs" && cp deck/azrs/azrs.sh "$V/guest/azrs/azrs.sh"

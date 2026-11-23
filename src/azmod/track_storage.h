@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/stat.h>
+#pragma GCC visibility push(hidden)
 struct st_source {
     az_track_ref ref;
     uint64_t mount_id, device, inode;
@@ -36,4 +37,5 @@ int st_read_row(void *database, uint32_t track, struct st_resolution *row);
  * They expose no native object or mutable service state. */
 int az_storage_stick_mount(int stick, char *mount, size_t capacity);
 const char *az_storage_mountinfo(void);
+#pragma GCC visibility pop
 #endif

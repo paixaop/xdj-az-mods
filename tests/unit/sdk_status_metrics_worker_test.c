@@ -6,19 +6,19 @@
 #include <stdio.h>
 #include <unistd.h>
 #include "sdk_status_engine.c"
-static void ds_wake(void) {}
-static void ds_deadline(uint64_t ns) { (void) ns; }
-static int ds_live(int owner) { return owner >= 0; }
-static void ds_gui_interest(uint64_t topics) { (void) topics; }
-static void ds_native_interest(unsigned deck, uint64_t topics) {
+void az_status_host_wake(void) {}
+void az_status_host_deadline(uint64_t ns) { (void) ns; }
+int az_status_host_live(int owner) { return owner >= 0; }
+void az_status_host_gui_interest(uint64_t topics) { (void) topics; }
+void az_status_host_native_interest(unsigned deck, uint64_t topics) {
     (void) deck;
     (void) topics;
 }
-static void sdk_status_store_interest(unsigned deck, uint64_t topics) {
+void az_status_host_store_interest(unsigned deck, uint64_t topics) {
     (void) deck;
     (void) topics;
 }
-static void sdk_status_store_binding(unsigned deck, uint64_t epoch, const az_track_ref *ref, uint64_t cut) {
+void az_status_host_store_binding(unsigned deck, uint64_t epoch, const az_track_ref *ref, uint64_t cut) {
     (void) deck;
     (void) epoch;
     (void) ref;
@@ -65,13 +65,13 @@ int __wrap_nanosleep(const struct timespec *requested, struct timespec *remainin
     pthread_exit(NULL);
 }
 int main(void) {
-    ds_start_metrics();
+    ds_start_metrics(access(CM_ROOT "/azmod.deck-status.metrics", F_OK) == 0, 0);
     assert(!creates && !ds_proofs.enabled);
     ds.metrics[0] = (struct ds_metrics) {.capture_gaps = 5, .revision_losses = 7, .resyncs = 11, .callbacks = 37};
     ds.deck[0].current.sequence = 13;
     int marker = open(CM_ROOT "/azmod.deck-status.metrics", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     assert(marker >= 0 && !close(marker));
-    ds_start_metrics();
+    ds_start_metrics(access(CM_ROOT "/azmod.deck-status.metrics", F_OK) == 0, 0);
     assert(creates == 1 && !pthread_join(worker, NULL) && sleeps == 3);
     assert(ds_proofs.enabled && atomic_load(&ds_proof_enabled));
     FILE *file = fopen(DS_METRICS_PATH, "re");

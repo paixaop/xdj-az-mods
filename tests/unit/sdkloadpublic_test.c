@@ -14,6 +14,7 @@
 #define AZMOD_STEM_DECKS 4
 static int __attribute__((unused)) master_state_supported(void) { return 0; }
 static int g_st_enabled = 1;
+static int track_service_enabled(void) { return g_st_enabled; }
 static _Atomic(azstem_deck_snapshot_fn) g_sd_snap;
 static _Atomic(azstem_deck_beat_phase_fn) g_sd_phase;
 static _Atomic(azstem_deck_observation_v1_fn) g_sd_observation;

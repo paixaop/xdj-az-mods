@@ -24,6 +24,6 @@ struct ds_proof_context {
     uint64_t device, inode, mount_id, file_device[2], file_inode[2], file_signature[2];
     uint64_t topics, providers[4], revisions[AZ_STATUS_TOPIC_COUNT];
 };
-static _Thread_local struct ds_proof_context ds_proof_context;
-static _Atomic unsigned ds_proof_enabled __attribute__((unused));
+extern _Thread_local struct ds_proof_context ds_proof_context;
+extern _Atomic unsigned ds_proof_enabled;
 #endif

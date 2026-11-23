@@ -21,7 +21,6 @@ static int apply_analysis_spool(void *database, const char *path) {
     assert(bytes);
     int rc = ls_apply_buf(database, 0, path, bytes, NULL);
     free(bytes);
-    sa_link_wake();
     return rc;
 }
 static void await_link(analysis_source_input *input, int expected) {

@@ -3,19 +3,37 @@
 #include "../../src/azmod/analysis_runtime.h"
 #include <assert.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+void analysis_fixture_fail_thread_start(void);
 static const char *audio;
-static atomic_int acquisitions, publications, releases, blocked, entered, pending, link_result, outcomes, acquire_result;
+static atomic_int clock_offset, jump_at_acquire;
+/* Controlled monotonic passage for the real coordinator deadline wait. */
+int fixture_clock_gettime(clockid_t clock, struct timespec *out) {
+    int rc = clock_gettime(clock, out);
+    if (!rc && clock == CLOCK_MONOTONIC) out->tv_sec += atomic_load(&clock_offset);
+    return rc;
+}
+#ifdef __linux__
+int fixture_condition_wait(pthread_cond_t *condition, pthread_mutex_t *mutex, const struct timespec *deadline) {
+    struct timespec actual = *deadline;
+    actual.tv_sec -= atomic_load(&clock_offset);
+    return pthread_cond_timedwait(condition, mutex, &actual);
+}
+#endif
+static atomic_int acquisitions, publications, releases, blocked, entered, pending, link_result, outcomes, acquire_result, with_grid, publish_busy, publish_attempts, publication_blocked, publication_entered;
 static void (*source_wake)(void);
 static atomic_uint_fast64_t cancel_after_publish;
 static void pause_ms(void) { struct timespec t = {0, 1000000}; nanosleep(&t, NULL); }
 void analysis_source_set_wake(void (*wake)(void)) { source_wake = wake; }
 int analysis_source_acquire(az_analysis_owner owner, const analysis_source_request *request,
                             analysis_source_input *input) {
+    stack_t signal_stack;
+    assert(!sigaltstack(NULL, &signal_stack) && !(signal_stack.ss_flags & SS_DISABLE));
     atomic_fetch_add(&acquisitions, 1);
     atomic_store(&entered, 1);
     while (atomic_load(&blocked)) pause_ms();
@@ -24,12 +42,24 @@ int analysis_source_acquire(az_analysis_owner owner, const analysis_source_reque
         .needed = request->components, .deck = (unsigned)request->deck,
         .load_epoch = request->load, .track = request->track};
     snprintf(input->audio_path, sizeof input->audio_path, "%s", audio);
+    if (atomic_load(&with_grid) && (request->components & AZ_DATA_PHRASES)) {
+        input->beat_count = 26; input->bpm = 120;
+        input->beats = calloc(input->beat_count, sizeof *input->beats);
+        assert(input->beats);
+        for (unsigned i = 0; i < input->beat_count; i++)
+            input->beats[i] = (az_beat){.time_s = i * 0.5, .bpm = 120, .beat_in_bar = i % 4 + 1};
+    }
+    if (atomic_exchange(&jump_at_acquire, 0)) atomic_store(&clock_offset, 599);
     return atomic_load(&acquire_result);
 }
 int analysis_source_publish(az_analysis_owner owner, const analysis_source_input *input,
                             const az_analysis_result_v1 *result) {
-    assert(input->lease && result->vocals.count);
+    assert(input->lease && (result->vocals.count || result->phrases.count));
+    atomic_store(&publication_entered, 1);
+    while (atomic_load(&publication_blocked)) pause_ms();
     if (!analysis_owner_current(owner)) return AZ_STALE;
+    atomic_fetch_add(&publish_attempts, 1);
+    if (atomic_load(&publish_busy) && atomic_fetch_sub(&publish_busy, 1) > 0) return AZ_BUSY;
     atomic_fetch_add(&publications, 1);
     uint64_t cancel_id = atomic_load(&cancel_after_publish);
     if (cancel_id) assert(analysis_runtime_cancel(owner, cancel_id) == AZ_OK);
@@ -102,6 +132,19 @@ static void invalid_requests(az_analysis_owner owner) {
     r.phrase_threads = 1; r.reserved[2] = 1;
     assert(submit(owner, &r, &id) == AZ_INVALID);
     assert(!id);
+    r = request(1); r.source_kind = 99;
+    assert(submit(owner, &r, &id) == AZ_INVALID);
+    r.source_kind = AZ_ANALYSIS_TRACK;
+    assert(submit(owner, &r, &id) == AZ_INVALID);
+    r.track = (az_track_ref){.size = sizeof r.track, .version = AZ_DATA_VERSION,
+        .track_id = 55, .source_id = 1};
+    r.track.version++;
+    assert(submit(owner, &r, &id) == AZ_INVALID); r.track.version--;
+    r.track.source_id = 3;
+    assert(submit(owner, &r, &id) == AZ_INVALID); r.track.source_id = 1;
+    assert(submit(owner, &r, &id) == AZ_OK);
+    assert(wait_state(owner, id, AZ_ANALYSIS_COMPLETE).result == AZ_OK);
+    release_request(owner, id);
 }
 static void capacity_and_retirement(az_analysis_owner owner) {
     atomic_store(&blocked, 1); atomic_store(&entered, 0);
@@ -163,6 +206,31 @@ static void pending_link(az_analysis_owner owner) {
     release_request(owner, id);
     atomic_store(&pending, 0);
 }
+static void pending_deadline(az_analysis_owner owner) {
+    atomic_store(&acquire_result, AZ_PENDING); atomic_store(&link_result, AZ_PENDING);
+    atomic_store(&jump_at_acquire, 1);
+    int queries = atomic_load(&outcomes);
+    az_analysis_request_v1 r = request(1);
+    uint64_t id;
+    assert(submit(owner, &r, &id) == AZ_OK);
+    assert(wait_state(owner, id, AZ_ANALYSIS_FAILED).result == AZ_STALE);
+    assert(atomic_load(&outcomes) == queries); /* deadline ends it without polling source */
+    release_request(owner, id);
+    atomic_store(&acquire_result, AZ_OK); atomic_store(&clock_offset, 0);
+}
+static void busy_publication(az_analysis_owner owner) {
+    int opened = atomic_load(&acquisitions), committed = atomic_load(&publications);
+    int attempts = atomic_load(&publish_attempts);
+    atomic_store(&publish_busy, 2);
+    az_analysis_request_v1 r = request(1);
+    uint64_t id;
+    assert(submit(owner, &r, &id) == AZ_OK);
+    assert(wait_state(owner, id, AZ_ANALYSIS_COMPLETE).result == AZ_OK);
+    assert(atomic_load(&acquisitions) == opened + 1);
+    assert(atomic_load(&publications) == committed + 1);
+    assert(atomic_load(&publish_attempts) == attempts + 3);
+    release_request(owner, id);
+}
 static void acquisition_outcomes(az_analysis_owner owner) {
     const int outcomes[] = {AZ_NOT_FOUND, ANALYSIS_SOURCE_COMPLETE};
     const unsigned states[] = {AZ_ANALYSIS_FAILED, AZ_ANALYSIS_COMPLETE};
@@ -183,6 +251,26 @@ static az_analysis_status_v1 wait_deck(unsigned deck, unsigned state) {
         pause_ms();
     }
     abort();
+}
+static void core_publication_retirement(void) {
+    az_analysis_owner old = analysis_owner_core_begin();
+    atomic_store(&with_grid, 1); atomic_store(&publication_entered, 0);
+    atomic_store(&publication_blocked, 1);
+    int committed = atomic_load(&publications);
+    analysis_runtime_enable(old, 1);
+    analysis_runtime_load(1, 1, 71, 1, NULL);
+    for (unsigned i = 0; i < 10000 && !atomic_load(&publication_entered); i++) pause_ms();
+    assert(atomic_load(&publication_entered));
+    analysis_owner_core_retire(); analysis_runtime_enable(old, 0);
+    az_analysis_owner replacement = analysis_owner_core_begin();
+    assert(replacement.generation != old.generation);
+    analysis_runtime_enable(replacement, 1);
+    atomic_store(&publication_blocked, 0);
+    assert(wait_deck(1, AZ_ANALYSIS_COMPLETE).result == AZ_OK);
+    assert(atomic_load(&publications) == committed + 1); /* only replacement may publish */
+    analysis_owner_core_retire(); analysis_runtime_enable(replacement, 0);
+    analysis_runtime_load(1, 2, 72, 0, NULL);
+    atomic_store(&with_grid, 0);
 }
 static void automatic_operation(void) {
     az_analysis_owner core = analysis_owner_core_begin();
@@ -211,14 +299,18 @@ static void automatic_operation(void) {
     analysis_owner_core_retire();
     analysis_runtime_retire(core);
 }
+#include "test_api.inc"
 int main(int argc, char **argv) {
     assert(argc == 3); audio = argv[1];
     az_analysis_capabilities_v1 caps = {.size = sizeof caps};
     assert(analysis_runtime_capabilities(&caps) == AZ_OK && caps.max_workers == 3);
+    analysis_fixture_fail_thread_start();
+    assert(analysis_runtime_start(argv[2]) == AZ_FAILED);
     assert(analysis_runtime_start(argv[2]) == AZ_OK);
     az_analysis_owner owner = analysis_owner_begin(0);
-    invalid_requests(owner); acquisition_outcomes(owner); computation(owner); pending_link(owner); cancel_publication_collection(owner);
-    capacity_and_retirement(owner); automatic_operation();
+    public_contract(owner);
+    invalid_requests(owner); acquisition_outcomes(owner); busy_publication(owner); pending_deadline(owner); computation(owner); pending_link(owner); cancel_publication_collection(owner);
+    capacity_and_retirement(owner); core_publication_retirement(); automatic_operation();
     analysis_runtime_shutdown();
     assert(atomic_load(&releases) <= atomic_load(&acquisitions));
     puts("Core runtime computation, copied results, owner retirement, capacity and link outcomes passed");

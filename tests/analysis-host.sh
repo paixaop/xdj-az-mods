@@ -17,3 +17,6 @@ if [ "$(uname -s)" = Linux ]; then wrap+=(-Wl,--wrap=azconf_set); fi
 "${CC:-cc}" "${flags[@]}" "$root/tests/analysis/test_settings.c" \
   "$root/src/azmod/analysis_settings.c" "$root/src/azmod/azconf.c" "${wrap[@]}" -o "$work/settings"
 "$work/settings" "$work/settings.conf"
+
+"${CC:-cc}" "${flags[@]}" "$root/tests/analysis/test_startup.c" -o "$work/startup"
+"$work/startup"

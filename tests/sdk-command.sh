@@ -89,9 +89,9 @@ wrapper_controls = {
     'wrapper-release-owner': ('module', 'st_mod_owner(id, CM_RA(), "command_release")', '((void) id, 0)'),
     'wrapper-arguments': ('submit', '!scmd_request_valid(r)',
         '(!r || scmd_size(r) < sizeof *r || r->version != AZ_DATA_VERSION || r->deck > 3 || r->operation < AZ_CMD_LOOP_IN || r->operation > AZ_CMD_CUE_COLOR || !r->request_id || !r->expected_load_generation || !r->deadline_ns || r->quantization > AZ_QUANTIZE_ON)'),
-    'wrapper-poll-state': ('module', 'scmd_poll(&g_sdk_commands, owner, request_id, out)', '((void) request_id, (void) out, AZ_STALE)'),
+    'wrapper-poll-state': ('module', 'sdk_command_read(owner, request_id, out)', '((void) request_id, (void) out, AZ_STALE)'),
     'wrapper-cancel-state': ('module', 'sdk_exit_cancel_request(owner, request_id, out)', '((void) sdk_exit_cancel_request, (void) request_id, (void) out, AZ_STALE)'),
-    'wrapper-release-state': ('module', 'scmd_release(&g_sdk_commands, owner, request_id)', '((void) request_id, AZ_STALE)'),
+    'wrapper-release-state': ('module', 'sdk_command_drop(owner, request_id)', '((void) request_id, AZ_STALE)'),
 }
 for name, (which, old, new) in wrapper_controls.items():
     original = submit if which == 'submit' else module

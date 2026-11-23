@@ -49,10 +49,11 @@ if [ "${SAN:-plain}" = asan ] && "${HOST_CC:-cc}" --version | grep -qi clang; th
 fi
 if [ "$(uname -s)" = Linux ]; then
     provider_flags=("${flags[@]}" -Wno-unused-function -Wno-missing-field-initializers -rdynamic -DLIB_INC='"sdk_lib.c"' -Itests/unit)
-    ${HOST_CC:-cc} "${provider_flags[@]}" -Isrc/azmod tests/unit/sdktrack_test.c src/azmod/sdk_command_engine.c src/azmod/track_storage.c -lsqlite3 -ldl -lm -o "$task_tmp/provider"
+    ${HOST_CC:-cc} "${provider_flags[@]}" -Isrc/azmod tests/unit/sdktrack_test.c src/azmod/sdk_command_engine.c src/azmod/sdk_command_service.c src/azmod/track_service.c src/azmod/track_storage.c -Wl,--wrap=open,--wrap=pread -lsqlite3 -ldl -lm -o "$task_tmp/provider"
     "$task_tmp/provider"
+    "$task_tmp/provider" worker
     for control in database-alias database-uri missing-parent wave-errors analysis-binding track-fifo wave-fifo analysis-path-limit preview-extension; do
-        ${HOST_CC:-cc} "${provider_flags[@]}" -I"$task_tmp/review/$control" -Isrc/azmod tests/unit/sdktrack_test.c src/azmod/sdk_command_engine.c "$task_tmp/review/$control/track_storage.c" -lsqlite3 -ldl -lm -o "$task_tmp/$control"
+        ${HOST_CC:-cc} "${provider_flags[@]}" -I"$task_tmp/review/$control" -Isrc/azmod tests/unit/sdktrack_test.c src/azmod/sdk_command_engine.c src/azmod/sdk_command_service.c "$task_tmp/review/$control/track_service.c" "$task_tmp/review/$control/track_storage.c" -Wl,--wrap=open,--wrap=pread -lsqlite3 -ldl -lm -o "$task_tmp/$control"
         if ( ulimit -c 0; "$task_tmp/$control" >"$task_tmp/$control.log" 2>&1 ) 2>/dev/null; then
             echo "FAIL: $control control was not caught" >&2; exit 1
         fi

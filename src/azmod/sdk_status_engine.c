@@ -2,8 +2,9 @@
 /* All state below belongs to reducer/UI, never to a real-time writer. Each
  * retained cut shares immutable field revisions. The separate motion slot
  * cannot evict a discrete transition. Callback pins outlive cursor removal. */
-#include "sdk_status_layout.h"
-#include "sdk_status_proof.h"
+#include "sdk_status_engine.h"
+#include "sdk_status_host.h"
+#include "sdk_status_diagnostics.h"
 #include "../common/azstatus_identity.h"
 #include "../common/aztimestamp.h"
 #include <math.h>
@@ -13,26 +14,19 @@
 #include <string.h>
 #include <time.h>
 #include <stdatomic.h>
+_Thread_local struct ds_proof_context ds_proof_context;
+_Atomic unsigned ds_proof_enabled;
 #define DS_HISTORY 256u
-#define DS_SUBS 32u
-#define DS_BYTES (16u * 1024u * 1024u)
 #define DS_ACTION_ROUTES (AZ_STATUS_TOPIC(AZ_STATUS_TRANSPORT) | AZ_STATUS_TOPIC(AZ_STATUS_POSITION))
 #define DS_PHRASE_ROUTE AZ_STATUS_TOPIC(AZ_STATUS_PHRASE_TRANSITION)
 #define DS_MOTION_TOPICS (AZ_STATUS_TOPIC(AZ_STATUS_POSITION) | AZ_STATUS_TOPIC(AZ_STATUS_PHASE))
 /* Internal journal flag, added only after the reducer commits the cut. */
 #define DS_FLUSH_MOTION 64u
-static uint64_t ds_now(void) {
+uint64_t ds_now(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t) ts.tv_sec * UINT64_C(1000000000) + ts.tv_nsec;
 }
-static void ds_wake(void);
-static void ds_deadline(uint64_t ns);
-static void sdk_status_store_binding(unsigned deck, uint64_t epoch, const az_track_ref *ref, uint64_t cut);
-static void sdk_status_store_interest(unsigned deck, uint64_t topics);
-static void ds_native_interest(unsigned deck, uint64_t topics);
-static int ds_live(int owner);
-static void ds_gui_interest(uint64_t topics);
 
 struct ds_cell {
     unsigned refs;
@@ -48,7 +42,6 @@ struct ds_image {
 };
 /* A built-in consumer receives a copied reducer cut after ds.mu is released.
  * The cut sequence lets the consumer reject notifications reordered by threads. */
-typedef void (*ds_core_load_fn)(unsigned, uint64_t, uint64_t, int, const az_track_ref *);
 static _Atomic(ds_core_load_fn) ds_core_load;
 struct ds_analysis_cut {
     uint64_t order, epoch;
@@ -113,14 +106,6 @@ struct ds_subscription {
     int owner;
     struct ds_cursor cursor[4];
 };
-/* One-millisecond upper-bound buckets; the last bucket is over 250 ms. */
-#define DS_LATENCY_BUCKETS 252
-struct ds_metrics {
-    uint64_t high_water, evictions, capture_gaps, revision_losses, callbacks, resyncs;
-    uint64_t last_lost_topics;
-    uint64_t latency[2][DS_LATENCY_BUCKETS];
-    uint64_t dispatch[2][DS_LATENCY_BUCKETS];
-};
 static struct {
     pthread_mutex_t mu;
     struct ds_deck deck[4];
@@ -136,14 +121,6 @@ static struct {
 /* Append-only evidence is enabled with the existing metrics switch. Producers
  * copy bounded scalars under ds.mu; only the metrics thread performs file I/O.
  * Exhaustion is sticky and never wraps into apparently complete evidence. */
-#define DS_PROOF_CAPACITY 16384u
-struct ds_proof_record {
-    uint64_t id, interval, sequence, epoch, input_lost, lost, routes, pending;
-    uint64_t settled, ready, unavailable, handle, topics, cursor_before;
-    az_track_ref source;
-    struct ds_proof_context context;
-    unsigned kind, deck, file_only, flags, input_reason, reason, committed;
-};
 static struct {
     unsigned enabled, count, overflow;
     uint64_t capture_base[4], revision_base[4], resync_base[4], sequence_base[4];
@@ -347,7 +324,7 @@ static int ds_duration_field(unsigned topic, unsigned field) {
     return (topic == AZ_STATUS_METADATA && field >= AZ_STATUS_METADATA_DURATION_S) ||
            (topic == AZ_STATUS_POSITION && field >= AZ_STATUS_POSITION_REMAINING_S);
 }
-static int ds_payload_same(unsigned topic, unsigned field, const void *before, const void *after,
+int ds_payload_same(unsigned topic, unsigned field, const void *before, const void *after,
                            size_t bytes, const struct ds_time_axis *a, const struct ds_time_axis *b) {
     if (!before || !after) return 0;
     unsigned type = ds_layout[topic].field[field].type;
@@ -738,8 +715,846 @@ static void ds_append(struct ds_deck *d, unsigned flags, uint64_t routes,
     r->pair = pair ? *pair : (az_status_phrase_transition_v1) {0};
 }
 
-#include "sdk_status_derived.c"
-#include "sdk_status_path.c"
+/* SPDX-License-Identifier: GPL-3.0-only */
+/* Included inside the reducer. Only combine READY fields from the current cut.
+ * The caller already holds ds.mu and has applied the transaction's whole delta. */
+#include "camelot_text.h"
+static const struct ds_cell *ds_ready(const struct ds_image *im, unsigned topic, unsigned field) {
+    const struct ds_cell *c = im->field[topic][field];
+    if (!c || c->info.info.availability != AZ_AVAIL_READY ||
+        (c->info.scope == AZ_STATUS_LOAD_SCOPE && (!im->epoch || c->info.scope_id != im->epoch))) return NULL;
+    return c;
+}
+static const void *ds_value(const struct ds_image *im, unsigned topic, unsigned field) {
+    const struct ds_cell *c = ds_ready(im, topic, field);
+    return c ? c->data : NULL;
+}
+static int ds_integer_is(const struct ds_image *im, unsigned t, unsigned f, int value) {
+    const int32_t *n = ds_value(im, t, f);
+    return n && *n == value;
+}
+/* Only an old derived value is withdrawn when a dependency is missing. The
+ * absence of a head provider by itself never claims support for remaining. */
+static struct ds_field ds_derived_field(struct ds_deck *deck, unsigned t, unsigned f, uint64_t now, const void *v, const struct ds_cell *old) {
+    return (struct ds_field) {t, f, {.info = {v ? AZ_AVAIL_READY : AZ_AVAIL_STALE, AZ_PROV_DERIVED, old ? old->info.info.revision : 0, now}, .scope = AZ_STATUS_LOAD_SCOPE, .count = v ? 1u : 0u, .scope_id = deck->current.epoch, .provider_id = AZSP_DERIVED + (deck - ds.deck) + 1}, v, NULL};
+}
+
+static void ds_commit_derived(struct ds_image *im, struct ds_field *p, size_t bytes, uint64_t *loss) {
+    int exhausted = p->info.info.revision == UINT64_MAX;
+    if (!exhausted) {
+        p->info.info.revision++;
+        exhausted = ds_set(im, p, bytes) == AZ_LIMIT;
+    }
+    if (exhausted) {
+        ds_clear_field(&im->field[p->topic][p->field]);
+        *loss |= AZ_STATUS_TOPIC(p->topic);
+    }
+}
+
+static int ds_derived(struct ds_deck *deck, unsigned t, unsigned f, uint64_t now,
+                      const void *v, size_t bytes, uint64_t *loss) {
+    struct ds_image *im = &deck->current;
+    const struct ds_cell *old = im->field[t][f];
+    if (!v && (!old || old->info.info.provenance != AZ_PROV_DERIVED)) return 0;
+    struct ds_field p = ds_derived_field(deck, t, f, now, v, old);
+    struct ds_time_axis clock = {.units_per_second = 1, .window_samples = deck->head_window_samples, .window_rate = deck->head_window_rate};
+    if (t == AZ_STATUS_POSITION && f == AZ_STATUS_POSITION_REMAINING_S) p.clock = &clock;
+    if (v && ds_layout[t].field[f].type == DS_STRING) p.info.count = (unsigned) bytes - 1;
+    if (ds_same(old, &p, bytes)) return 0;
+    ds_commit_derived(im, &p, bytes, loss);
+    return 1;
+}
+/* EP147's native Camelot formatter uses the relative major pitch class for
+ * minor keys. Preserve the stored spelling in KEY.original. */
+static int ds_camelot_pitch(const char *text, int *pitch, int *major) {
+    for (int n = 0; n < 12; ++n)
+        for (int m = 0; m < 2; ++m) {
+            char encoded[4];
+            ct_camelot(n, m, encoded);
+            if (!strcmp(text, encoded)) {
+                *pitch = n;
+                *major = m;
+                return 1;
+            }
+        }
+    return 0;
+}
+
+static const char *ds_accidental(const char *text, int *note) {
+    if (*text == '#') {
+        ++*note;
+        ++text;
+    } else if (*text == 'b') {
+        --*note;
+        ++text;
+    } else if (!strncmp(text, "♯", 3)) {
+        ++*note;
+        text += 3;
+    } else if (!strncmp(text, "♭", 3)) {
+        --*note;
+        text += 3;
+    }
+    return text;
+}
+
+static int ds_key_mode(const char *text, int *major) {
+    static const struct {
+        const char *text;
+        int major;
+    } modes[] = {
+        {"", 1},
+        {"maj", 1},
+        {"major", 1},
+        {"Major", 1},
+        {"m", 0},
+        {"min", 0},
+        {"minor", 0},
+        {"Minor", 0},
+    };
+    for (unsigned i = 0; i < sizeof modes / sizeof modes[0]; ++i)
+        if (!strcmp(text, modes[i].text)) {
+            *major = modes[i].major;
+            return 1;
+        }
+    return 0;
+}
+
+static int ds_pitch(const char *text, int *pitch, int *major) {
+    if (!text || !*text) return 0;
+    if (ds_camelot_pitch(text, pitch, major)) return 1;
+    static const unsigned note[] = {9, 11, 0, 2, 4, 5, 7}; /* A..G */
+    if (*text < 'A' || *text > 'G') return 0;
+    int n = note[*text++ - 'A'];
+    text = ds_accidental(text, &n);
+    while (*text == ' ') ++text;
+    if (!ds_key_mode(text, major)) return 0;
+    *pitch = (n + (*major ? 12 : 15)) % 12;
+    return 1;
+}
+static int ds_native_key_present(const struct ds_image *im) {
+    const struct ds_cell *actual = im->field[AZ_STATUS_KEY][AZ_STATUS_KEY_EFFECTIVE];
+    if (actual && actual->info.info.provenance == AZ_PROV_NATIVE &&
+        actual->info.scope_id == im->epoch && actual->info.info.availability != AZ_AVAIL_LOADING &&
+        actual->info.info.availability != AZ_AVAIL_UNSUPPORTED) return 1;
+    return 0;
+}
+
+static uint64_t ds_effective_key(struct ds_deck *d, uint64_t now, uint64_t *loss) {
+    const struct ds_image *im = &d->current;
+    if (ds_native_key_present(im)) return 0;
+    const char *original = ds_value(im, AZ_STATUS_KEY, AZ_STATUS_KEY_ORIGINAL);
+    const int32_t *shift = ds_value(im, AZ_STATUS_KEY, AZ_STATUS_KEY_SHIFT_SEMITONES);
+    const char *value = NULL;
+    char key[4];
+    int pitch, major;
+    if (shift && *shift >= -12 && *shift <= 12 && ds_integer_is(im, AZ_STATUS_SETTINGS, AZ_STATUS_SETTINGS_MASTER_TEMPO, 1) &&
+        ds_pitch(original, &pitch, &major)) {
+        ct_camelot((pitch + *shift + 12) % 12, major, key);
+        value = key;
+    }
+    return ds_derived(d, AZ_STATUS_KEY, AZ_STATUS_KEY_EFFECTIVE, now, value, value ? strlen(value) + 1 : 0, loss)
+               ? AZ_STATUS_TOPIC(AZ_STATUS_KEY)
+               : 0;
+}
+static double ds_remaining_overshoot(const struct ds_deck *d, const az_status_coord_v1 *head, const double *precision, long double difference) {
+    int ended = ds_integer_is(&d->current, AZ_STATUS_TRANSPORT, AZ_STATUS_TRANSPORT_STATE, AZ_PLAYBACK_ENDED);
+    double resolution = 0;
+    if (precision) {
+        int precision_order = compare_timestamps(*precision, 0., 1, d->head_window_rate, d->head_window_samples);
+        if (precision_order != AZ_TIME_INVALID && precision_order == AZ_TIME_AFTER) resolution = *precision;
+    }
+    if (ended && head->rate_hz) resolution += 1.0 / head->rate_hz;
+    int extent = compare_timestamps(-difference, resolution, 1,
+                                    d->head_window_rate, d->head_window_samples);
+    if (extent != AZ_TIME_INVALID && (extent == AZ_TIME_EQUAL || extent == AZ_TIME_BEFORE)) return 0;
+    return NAN;
+}
+static int ds_time_nonnegative(int order) {
+    return order != AZ_TIME_INVALID && (order == AZ_TIME_EQUAL || order == AZ_TIME_AFTER);
+}
+static double ds_remaining_value(const struct ds_deck *d, const double *duration, const double *precision, const az_status_coord_v1 *head, const struct ds_time_axis *clock, int exact) {
+    double remaining = NAN;
+    int order = exact ? ds_compare_source_times(clock->ticks[0], clock->units_per_second, head->samples, head->rate_hz,
+                                                d->head_window_rate, d->head_window_samples)
+                      : compare_timestamps(*duration, head->seconds, 1, d->head_window_rate, d->head_window_samples);
+    long double difference = (long double) *duration - head->seconds;
+    if (exact) {
+        __int128_t ticks = (__int128_t) clock->ticks[0] * head->rate_hz - (__int128_t) head->samples * clock->units_per_second;
+        difference = (long double) ticks / (clock->units_per_second * head->rate_hz);
+    }
+    if (order == AZ_TIME_EQUAL) remaining = 0;
+    else if (order == AZ_TIME_AFTER) remaining = (double) difference;
+    else if (order == AZ_TIME_BEFORE) {
+        remaining = ds_remaining_overshoot(d, head, precision, difference);
+    }
+    return remaining;
+}
+static int ds_duration_origin(const struct ds_deck *d, const double *duration, const struct ds_time_axis *clock, int exact) {
+    return exact ? ds_compare_source_times(clock->ticks[0], clock->units_per_second, 0, 1,
+                                           d->head_window_rate, d->head_window_samples)
+                 : compare_timestamps(*duration, 0., 1, d->head_window_rate, d->head_window_samples);
+}
+static double ds_remaining_time(const struct ds_deck *d, const double *duration, const double *precision, const az_status_coord_v1 *head) {
+    if (!duration || !head || !d->head_window_samples || !d->head_window_rate) return NAN;
+    const struct ds_cell *source = ds_ready(&d->current, AZ_STATUS_METADATA, AZ_STATUS_METADATA_DURATION_S);
+    const struct ds_time_axis *clock = &source->clock;
+    int exact = clock->ticks && head->rate_hz;
+    int duration_zero = ds_duration_origin(d, duration, clock, exact);
+    int head_zero = head->rate_hz ? compare_timestamps(head->samples, 0, head->rate_hz, d->head_window_rate, d->head_window_samples)
+                                  : compare_timestamps(head->seconds, 0., 1, d->head_window_rate, d->head_window_samples);
+    if (!ds_time_nonnegative(duration_zero) || !ds_time_nonnegative(head_zero)) return NAN;
+    /* INVALID leaves remaining unavailable rather than guessing a clock. */
+    return ds_remaining_value(d, duration, precision, head, clock, exact);
+}
+static double ds_estimated_time(const struct ds_image *im, double remaining, const double *rate) {
+    if (isfinite(remaining) && rate && isfinite(*rate) && *rate > 0 &&
+        ds_integer_is(im, AZ_STATUS_TRANSPORT, AZ_STATUS_TRANSPORT_STATE, AZ_PLAYBACK_PLAYING) &&
+        ds_integer_is(im, AZ_STATUS_TRANSPORT, AZ_STATUS_TRANSPORT_DIRECTION, AZ_STATUS_DIRECTION_FORWARD) &&
+        ds_integer_is(im, AZ_STATUS_LOOP, AZ_STATUS_LOOP_ENGAGED, 0) &&
+        ds_integer_is(im, AZ_STATUS_SETTINGS, AZ_STATUS_SETTINGS_SLIP, 0)) return remaining / *rate;
+    return NAN;
+}
+static int ds_estimate_same(const struct ds_deck *d, const double *rate, double estimated) {
+    const struct ds_image *im = &d->current;
+    const double *old_estimated = ds_value(im, AZ_STATUS_POSITION, AZ_STATUS_POSITION_ESTIMATED_S);
+    int same_estimate = 0;
+    if (old_estimated && isfinite(estimated)) {
+        /* Convert both wall-time estimates back to the measured source clock.
+         * Its current playback ratio determines this observation's window. */
+        int order = compare_timestamps((long double) *old_estimated * *rate, (long double) estimated * *rate,
+                                       1, d->head_window_rate, d->head_window_samples);
+        same_estimate = order != AZ_TIME_INVALID && order == AZ_TIME_EQUAL;
+    }
+    return same_estimate;
+}
+static uint64_t ds_times(struct ds_deck *d, uint64_t now, uint64_t *loss) {
+    const struct ds_image *im = &d->current;
+    const double *duration = ds_value(im, AZ_STATUS_METADATA, AZ_STATUS_METADATA_DURATION_S);
+    const double *precision = ds_value(im, AZ_STATUS_METADATA, AZ_STATUS_METADATA_DURATION_PRECISION_S);
+    const az_status_coord_v1 *head = ds_value(im, AZ_STATUS_POSITION, AZ_STATUS_POSITION_HEAD);
+    const double *rate = ds_value(im, AZ_STATUS_TRANSPORT, AZ_STATUS_TRANSPORT_RATE);
+    double remaining = ds_remaining_time(d, duration, precision, head);
+    double estimated = ds_estimated_time(im, remaining, rate);
+    int r = ds_derived(d, AZ_STATUS_POSITION, AZ_STATUS_POSITION_REMAINING_S, now,
+                       isfinite(remaining) ? &remaining : NULL, isfinite(remaining) ? sizeof remaining : 0, loss);
+    int same_estimate = ds_estimate_same(d, rate, estimated);
+    int e = same_estimate ? 0 : ds_derived(d, AZ_STATUS_POSITION, AZ_STATUS_POSITION_ESTIMATED_S, now, isfinite(estimated) ? &estimated : NULL, isfinite(estimated) ? sizeof estimated : 0, loss);
+    return (r || e) ? AZ_STATUS_TOPIC(AZ_STATUS_POSITION) : 0;
+}
+static int ds_bar_cached(const struct ds_deck *d, const struct ds_cell *grid, unsigned first) {
+    return d->bar_provider == grid->info.provider_id && d->bar_revision == grid->info.info.revision &&
+           d->bar_epoch == grid->info.scope_id && d->bar_begin == first && d->bar_end;
+}
+static void ds_find_bar(struct ds_deck *d, const struct ds_cell *grid, const az_beat *rows, unsigned first) {
+    if (ds_bar_cached(d, grid, first)) return;
+    unsigned end = first + 1;
+    while (end < grid->info.count && rows[end].beat_in_bar == end - first + 1) end++;
+    d->bar_provider = grid->info.provider_id;
+    d->bar_revision = grid->info.info.revision;
+    d->bar_epoch = grid->info.scope_id;
+    d->bar_begin = first;
+    d->bar_end = end < grid->info.count && rows[end].beat_in_bar == 1 ? end : UINT_MAX;
+}
+
+static double ds_bar_fraction(struct ds_deck *d, const struct ds_cell *grid, unsigned index, double beat) {
+    const az_beat *rows = (const void *) grid->data;
+    unsigned ordinal = rows[index].beat_in_bar;
+    if (!ordinal || ordinal - 1 > index) return NAN;
+    unsigned first = index - (ordinal - 1);
+    if (rows[first].beat_in_bar != 1) return NAN;
+    ds_find_bar(d, grid, rows, first);
+    if (d->bar_end == UINT_MAX || index >= d->bar_end) return NAN;
+    return (index - first + beat) / (d->bar_end - first);
+}
+static void ds_phase_bracket(const az_status_coord_v1 *head, const int64_t *ticks, uint64_t units, unsigned rate, unsigned window, unsigned *lo, unsigned *hi) {
+    while (*hi - *lo > 1) {
+        unsigned mid = *lo + (*hi - *lo) / 2;
+        int order = ds_compare_source_times(head->samples, head->rate_hz, ticks[mid], units, rate, window);
+        if (order == AZ_TIME_INVALID) break;
+        if (order == AZ_TIME_BEFORE) *hi = mid;
+        else *lo = mid;
+    }
+}
+static double ds_phase_interpolate(const az_status_coord_v1 *head, const int64_t *ticks, uint64_t units, unsigned lo, unsigned hi, int lower, int upper, unsigned *at) {
+    if (upper == AZ_TIME_EQUAL) {
+        *at = hi;
+        return 0;
+    } else if (lower == AZ_TIME_EQUAL) return 0;
+    else if (lower == AZ_TIME_AFTER && upper == AZ_TIME_BEFORE) {
+        __int128_t delta = (__int128_t) head->samples * units - (__int128_t) ticks[lo] * head->rate_hz;
+        __int128_t length = ((__int128_t) ticks[hi] - ticks[lo]) * head->rate_hz;
+        return (double) ((long double) delta / (long double) length);
+    }
+    return NAN;
+}
+static int ds_phase_within(int first, int last) {
+    return first != AZ_TIME_INVALID && last != AZ_TIME_INVALID &&
+           (first == AZ_TIME_EQUAL || first == AZ_TIME_AFTER) && (last == AZ_TIME_EQUAL || last == AZ_TIME_BEFORE);
+}
+static void ds_phase_from_grid(struct ds_deck *d, const struct ds_cell *grid, const az_status_coord_v1 *head, double *phase, double *bar) {
+    const int64_t *ticks = ds_clock_ticks(grid);
+    uint64_t units = grid->clock.units_per_second;
+    unsigned rate = d->head_window_rate, window = d->head_window_samples;
+    unsigned lo = 0, hi = grid->info.count - 1;
+    int first = ds_compare_source_times(head->samples, head->rate_hz, ticks[lo], units, rate, window);
+    int last = ds_compare_source_times(head->samples, head->rate_hz, ticks[hi], units, rate, window);
+    if (!ds_phase_within(first, last)) return;
+    ds_phase_bracket(head, ticks, units, rate, window, &lo, &hi);
+    int span = ds_compare_source_times(ticks[hi], units, ticks[lo], units, rate, window);
+    if (span == AZ_TIME_INVALID || span != AZ_TIME_AFTER) return;
+    unsigned at = lo;
+    int lower = ds_compare_source_times(head->samples, head->rate_hz, ticks[lo], units, rate, window);
+    int upper = ds_compare_source_times(head->samples, head->rate_hz, ticks[hi], units, rate, window);
+    if (lower == AZ_TIME_INVALID || upper == AZ_TIME_INVALID) return;
+    *phase = ds_phase_interpolate(head, ticks, units, lo, hi, lower, upper, &at);
+    if (isfinite(*phase) && *phase >= 0 && *phase < 1) *bar = ds_bar_fraction(d, grid, at, *phase);
+}
+static int ds_phase_inputs(const struct ds_deck *d, const struct ds_cell *grid, const az_status_coord_v1 *head) {
+    return grid && grid->clock.ticks && head && head->rate_hz && grid->info.count >= 2 &&
+           d->head_window_samples && d->head_window_rate;
+}
+static uint64_t ds_phase(struct ds_deck *d, uint64_t now, uint64_t *loss) {
+    const struct ds_image *im = &d->current;
+    const struct ds_cell *grid = ds_ready(im, AZ_STATUS_GRID, AZ_STATUS_GRID_CURRENT);
+    const az_status_coord_v1 *head = ds_value(im, AZ_STATUS_POSITION, AZ_STATUS_POSITION_HEAD);
+    double phase = NAN, bar = NAN;
+    if (ds_phase_inputs(d, grid, head)) ds_phase_from_grid(d, grid, head, &phase, &bar);
+    int beat_changed = ds_derived(d, AZ_STATUS_PHASE, AZ_STATUS_PHASE_BEAT, now, isfinite(phase) ? &phase : NULL,
+                                  isfinite(phase) ? sizeof phase : 0, loss);
+    int bar_changed = ds_derived(d, AZ_STATUS_PHASE, AZ_STATUS_PHASE_BAR, now, isfinite(bar) ? &bar : NULL,
+                                 isfinite(bar) ? sizeof bar : 0, loss);
+    return beat_changed || bar_changed ? AZ_STATUS_TOPIC(AZ_STATUS_PHASE) : 0;
+}
+static int ds_reference_edition(const struct ds_cell *cell, uint64_t epoch, uint64_t provider, uint64_t revision, unsigned provenance) {
+    return cell && cell->info.scope == AZ_STATUS_LOAD_SCOPE && cell->info.scope_id == epoch &&
+           provider && provider == cell->info.provider_id && revision == cell->info.info.revision &&
+           provenance == cell->info.info.provenance;
+}
+static int ds_grid_matches(const struct ds_image *im, const az_status_grid_ref_v1 *ref, unsigned field) {
+    if (ref->grid_field != field || !ref->load_epoch || ref->load_epoch != im->epoch) return 0;
+    return ds_reference_edition(ds_ready(im, AZ_STATUS_GRID, field), im->epoch, ref->provider_id, ref->revision, ref->provenance);
+}
+static uint64_t ds_withdraw(struct ds_image *im, unsigned topic, unsigned field, uint64_t now, uint64_t *loss) {
+    struct ds_cell **c = &im->field[topic][field];
+    if (!*c || (*c)->info.info.availability != AZ_AVAIL_READY) return 0;
+    struct ds_field p = {topic, field, (*c)->info, NULL, NULL};
+    p.info.info.availability = AZ_AVAIL_STALE;
+    p.info.info.observed_ns = now;
+    p.info.count = 0;
+    if (ds_set(im, &p, 0) == AZ_LIMIT) {
+        ds_clear_field(c);
+        *loss |= AZ_STATUS_TOPIC(topic);
+    }
+    return AZ_STATUS_TOPIC(topic);
+}
+/* The repository's memory-cue lookup compares the two whole-ms keys within
+ * a TrackID. Hot identity is the slot. Neither lookup is a recall witness. */
+static int ds_cue_key_same(const az_cue_entry *a, const int64_t *ak,
+                           const az_cue_entry *b, const int64_t *bk) {
+    if (a->type != b->type) return 0;
+    unsigned points = a->type == AZ_CUE_LOOP ? 2 : 1;
+    for (unsigned i = 0; i < points; ++i) {
+        int order = compare_timestamps(ak[i], bk[i], 1000, 1000, 1);
+        if (order == AZ_TIME_INVALID) return -1;
+        if (order != AZ_TIME_EQUAL) return 0;
+    }
+    return 1;
+}
+static int ds_cue_comment_modified(const az_cue_entry *live, const az_cue_entry *saved, unsigned color) {
+    /* Legacy rows may omit the comment. A decoded comment or the extended
+     * row's color encoding qualifies the storage representation here. */
+    int has_comment = !!(saved->valid & (AZ_CUE_COMMENT | color));
+    if (!has_comment) return -1;
+    if (strncmp(live->comment, saved->comment, sizeof live->comment)) return 1;
+    return strnlen(live->comment, sizeof live->comment) < sizeof live->comment - 4 ? 0 : -1;
+}
+static int ds_cue_color_modified(const az_cue_entry *live, const az_cue_entry *saved, unsigned color, int hot) {
+    if (!(live->valid & saved->valid & color) || (hot && !saved->rgb)) return -1;
+    return hot ? live->rgb != saved->rgb : live->color_id != saved->color_id;
+}
+static int ds_cue_auto_modified(const az_cue_entry *live, const az_cue_entry *saved) {
+    if (live->type != AZ_CUE_LOOP) return 0;
+    if (!(live->valid & saved->valid & AZ_CUE_AUTO_ACTIVE)) return -1;
+    return live->auto_active != saved->auto_active;
+}
+static int ds_cue_representation_modified(const az_cue_entry *live, const az_cue_entry *saved, int hot) {
+    unsigned color = hot ? AZ_CUE_COLOR : AZ_CUE_COLOR_ID;
+    int comment = ds_cue_comment_modified(live, saved, color);
+    int encoding = ds_cue_color_modified(live, saved, color, hot);
+    int automatic = ds_cue_auto_modified(live, saved);
+    if (comment > 0 || encoding > 0 || automatic > 0) return 1;
+    return comment < 0 || encoding < 0 || automatic < 0 ? -1 : 0;
+}
+static int ds_cue_modified(const az_cue_entry *live, const az_cue_entry *saved, int same_key, int hot) {
+    if (same_key < 0) return -1;
+    if (!same_key) return 1;
+    return ds_cue_representation_modified(live, saved, hot);
+}
+static int ds_cue_live_duplicate(const struct ds_cell *live, unsigned row) {
+    const az_cue_entry *rows = (const void *) live->data;
+    const int64_t *key = live->clock.stored_cue_ms + 2 * row;
+    for (unsigned i = 0; i < live->info.count; ++i)
+        if (i != row && ds_cue_key_same(&rows[row], key, &rows[i], live->clock.stored_cue_ms + 2 * i)) return 1;
+    return 0;
+}
+static int ds_cue_saved_row(const struct ds_cell *live, unsigned row, const struct ds_cell *saved, int hot) {
+    const az_cue_entry *rows = (const void *) live->data, *stored = (const void *) saved->data;
+    const int64_t *key = live->clock.stored_cue_ms + 2 * row;
+    if (!hot && ds_cue_live_duplicate(live, row)) return -2;
+    int found = -1;
+    for (unsigned i = 0; i < saved->info.count; ++i) {
+        int match = hot ? rows[row].slot == stored[i].slot
+                        : ds_cue_key_same(&rows[row], key, &stored[i], saved->clock.ticks + 2 * i);
+        if (match < 0 || (match && found >= 0)) return -2;
+        if (match) found = (int) i;
+    }
+    return found;
+}
+static int ds_saved_cues_available(const struct ds_cell *saved) {
+    if (saved->info.info.availability == AZ_AVAIL_EMPTY) return 1;
+    return saved->info.info.availability == AZ_AVAIL_READY && saved->clock.ticks && saved->clock.units_per_second == 1000;
+}
+static int ds_saved_cues_qualified(const struct ds_image *im, const struct ds_cell *saved) {
+    return ds_ready(im, AZ_STATUS_LOAD, AZ_STATUS_LOAD_TRACK) && saved && saved->info.provider_id &&
+           saved->info.info.revision && saved->info.info.provenance == AZ_PROV_FILE && saved->info.scope == AZ_STATUS_LOAD_SCOPE &&
+           saved->info.scope_id == im->epoch && ds_saved_cues_available(saved);
+}
+static void ds_cue_annotate(az_cue_entry *row, const struct ds_cell *live, unsigned i, const struct ds_cell *saved, int hot, int qualified) {
+    row->saved = row->modified = -1;
+    row->valid &= ~AZ_CUE_SAVED;
+    int found = qualified ? ds_cue_saved_row(live, i, saved, hot) : -2;
+    if (found < -1) return;
+    row->valid |= AZ_CUE_SAVED;
+    row->saved = found >= 0;
+    row->modified = 1;
+    if (found >= 0) {
+        const az_cue_entry *stored = (const void *) saved->data;
+        int same_key = ds_cue_key_same(row, live->clock.stored_cue_ms + 2 * i, &stored[found], saved->clock.ticks + 2 * found);
+        row->modified = ds_cue_modified(row, &stored[found], same_key, hot);
+    }
+}
+static int ds_cue_storage_rows(const struct ds_cell *live, const struct ds_cell *saved, int hot, int qualified, az_cue_entry *rows) {
+    const az_cue_entry *previous = (const void *) live->data;
+    memcpy(rows, live->data, live->bytes);
+    int changed = 0;
+    for (unsigned i = 0; i < live->info.count; ++i) {
+        ds_cue_annotate(&rows[i], live, i, saved, hot, qualified);
+        changed |= rows[i].valid != previous[i].valid || rows[i].saved != previous[i].saved || rows[i].modified != previous[i].modified;
+    }
+    return changed;
+}
+static uint64_t ds_cue_storage_flags(struct ds_deck *d, unsigned field, uint64_t now, uint64_t *loss) {
+    struct ds_image *im = &d->current;
+    const struct ds_cell *live = ds_ready(im, AZ_STATUS_CUES, field);
+    if (!live || !live->native_cue_revision || !live->clock.stored_cue_ms || live->info.count > AZ_NATIVE_CUE_LIMIT) return 0;
+    int hot = field == AZ_STATUS_CUES_LIVE_HOT;
+    const struct ds_cell *saved = im->field[AZ_STATUS_CUES][hot ? AZ_STATUS_CUES_SAVED_HOT : AZ_STATUS_CUES_SAVED_MEMORY];
+    az_cue_entry rows[AZ_NATIVE_CUE_LIMIT];
+    if (!ds_cue_storage_rows(live, saved, hot, ds_saved_cues_qualified(im, saved), rows)) return 0;
+    struct ds_field next = {AZ_STATUS_CUES, field, live->info, rows, &live->clock};
+    next.info.info.revision = live->native_cue_revision;
+    next.info.info.observed_ns = now;
+    if (ds_set_live_cues(d, &next, live->bytes, 1) == AZ_LIMIT) {
+        ds_clear_field(&im->field[AZ_STATUS_CUES][field]);
+        *loss |= AZ_STATUS_TOPIC(AZ_STATUS_CUES);
+    }
+    return AZ_STATUS_TOPIC(AZ_STATUS_CUES);
+}
+static const az_cue_entry *ds_cue_canonical_row(const struct ds_cell *collection, const az_cue_entry *entry) {
+    const az_cue_entry *rows = (const void *) collection->data, *found = NULL;
+    az_cue_entry expected = *entry;
+    expected.start_s = expected.end_s = 0;
+    for (unsigned i = 0; i < collection->info.count; ++i) {
+        az_cue_entry row = rows[i];
+        row.start_s = row.end_s = 0;
+        if (memcmp(&row, &expected, sizeof row)) continue;
+        if (found) return NULL;
+        found = &rows[i];
+    }
+    /* The producer's witnessed association names this exact immutable
+     * edition and row. Bounds neither prove identity nor resolve ambiguity.
+     * Publish the canonical row, including its coordinates, from this cut. */
+    return found;
+}
+static const az_cue_entry *ds_cue_reference_row(const struct ds_image *im, const az_status_cue_ref_v1 *ref) {
+    if (!ref || ref->cue_field < AZ_STATUS_CUES_LIVE_HOT || ref->cue_field > AZ_STATUS_CUES_SAVED_MEMORY) return NULL;
+    if (ref->entry.type != AZ_CUE_LOOP || !ref->load_epoch || ref->load_epoch != im->epoch) return NULL;
+    const struct ds_cell *collection = ds_ready(im, AZ_STATUS_CUES, ref->cue_field);
+    if (!ds_reference_edition(collection, im->epoch, ref->provider_id, ref->collection_revision, ref->provenance)) return NULL;
+    return ds_cue_canonical_row(collection, &ref->entry);
+}
+static int ds_phrase_bounds(const struct ds_cell *phrases, const struct ds_cell *grid) {
+    const az_phrase *rows = (const void *) phrases->data;
+    for (unsigned j = 0; j < phrases->info.count; j++)
+        if (rows[j].end_beat >= grid->info.count || rows[j].start_beat >= rows[j].end_beat ||
+            (j && rows[j].start_beat < rows[j - 1].end_beat)) return 0;
+    return 1;
+}
+static int ds_phrase_grid_valid(const struct ds_image *im, const az_status_grid_ref_v1 *ref, unsigned field) {
+    const struct ds_cell *phrases = ds_ready(im, AZ_STATUS_PHRASES, field);
+    if (!phrases || !ds_grid_matches(im, ref, field)) return 0;
+    return ds_phrase_bounds(phrases, ds_ready(im, AZ_STATUS_GRID, field));
+}
+static uint64_t ds_associations(struct ds_deck *d, uint64_t now, uint64_t *loss) {
+    struct ds_image *im = &d->current;
+    uint64_t changed = 0;
+    for (unsigned i = 0; i < 2; i++) {
+        unsigned field = i ? AZ_STATUS_PHRASES_SAVED_GRID : AZ_STATUS_PHRASES_CURRENT_GRID;
+        const az_status_grid_ref_v1 *ref = ds_value(im, AZ_STATUS_PHRASES, field);
+        if (ref && !ds_phrase_grid_valid(im, ref, i)) changed |= ds_withdraw(im, AZ_STATUS_PHRASES, field, now, loss);
+    }
+    const az_status_cue_ref_v1 *ref = ds_value(im, AZ_STATUS_LOOP, AZ_STATUS_LOOP_SAVED_ENTRY);
+    if (ref && !ds_cue_reference_row(im, ref)) changed |= ds_withdraw(im, AZ_STATUS_LOOP, AZ_STATUS_LOOP_SAVED_ENTRY, now, loss);
+    return changed;
+}
+/* A native copy witness names a bank edition and one hot slot. The copied
+ * row survives the lock, and ds_associations verifies it again in the actual
+ * publication in case a newer bank revision arrived in between. */
+static int ds_native_loop_identity(unsigned deck, uint64_t epoch, uint64_t provider, uint64_t revision, unsigned field, unsigned entry_id, const az_status_cue_ref_v1 *out) {
+    if (deck >= 4 || !epoch || !provider || !revision || !entry_id || !out) return 0;
+    if (field == AZ_STATUS_CUES_LIVE_HOT) return entry_id <= 8;
+    return field == AZ_STATUS_CUES_LIVE_MEMORY;
+}
+static int ds_native_cue_edition(const struct ds_image *im, const struct ds_cell *cell, uint64_t epoch, uint64_t provider, uint64_t revision) {
+    return im->epoch == epoch && cell && cell->info.scope == AZ_STATUS_LOAD_SCOPE && cell->info.scope_id == epoch &&
+           cell->info.provider_id == provider && cell->native_cue_revision == revision && cell->info.info.provenance == AZ_PROV_NATIVE;
+}
+static int ds_native_cue_reference(const struct ds_cell *cell, uint64_t epoch, uint64_t provider, unsigned field, unsigned entry_id, az_status_cue_ref_v1 *out) {
+    const az_cue_entry *rows = (const void *) cell->data;
+    for (unsigned i = 0; i < cell->info.count; i++)
+        if ((field == AZ_STATUS_CUES_LIVE_HOT ? rows[i].slot : rows[i].entry_id) == entry_id && rows[i].type == AZ_CUE_LOOP) {
+            *out = (az_status_cue_ref_v1) {.load_epoch = epoch, .provider_id = provider, .collection_revision = cell->info.info.revision, .provenance = AZ_PROV_NATIVE, .cue_field = field, .entry = rows[i]};
+            return 1;
+        }
+    return 0;
+}
+int ds_native_loop_ref(unsigned deck, uint64_t epoch, uint64_t provider, uint64_t revision,
+                              unsigned field, unsigned entry_id, az_status_cue_ref_v1 *out) {
+    if (!ds_native_loop_identity(deck, epoch, provider, revision, field, entry_id, out)) return 0;
+    pthread_mutex_lock(&ds.mu);
+    struct ds_image *im = &ds.deck[deck].current;
+    const struct ds_cell *c = ds_ready(im, AZ_STATUS_CUES, field);
+    int found = 0;
+    if (ds_native_cue_edition(im, c, epoch, provider, revision)) found = ds_native_cue_reference(c, epoch, provider, field, entry_id, out);
+    pthread_mutex_unlock(&ds.mu);
+    return found;
+}
+
+/* SPDX-License-Identifier: GPL-3.0-only */
+/* This private input is for a common writer fence. A current-value getter, a
+ * change in sign or a newer receipt timestamp cannot construct a ds_path. */
+struct ds_map {
+    const az_phrase *rows;
+    const struct ds_time_axis *clock;
+    unsigned count;
+    uint64_t provider, revision;
+    az_status_grid_ref_v1 grid;
+};
+static int ds_path_map_edition(const struct ds_cell *phrases, const az_status_grid_ref_v1 *grid, const struct ds_path *p) {
+    return phrases->info.provider_id == p->phrase_provider && phrases->info.info.revision == p->phrase_revision &&
+           p->phrase_provider && p->phrase_revision && !memcmp(grid, &p->grid, sizeof *grid);
+}
+static int ds_map_at(const struct ds_image *im, const struct ds_path *p, struct ds_map *map) {
+    const struct ds_cell *phrases = ds_ready(im, AZ_STATUS_PHRASES, AZ_STATUS_PHRASES_CURRENT);
+    const struct ds_cell *beats = ds_ready(im, AZ_STATUS_GRID, AZ_STATUS_GRID_CURRENT);
+    const az_status_grid_ref_v1 *grid = ds_value(im, AZ_STATUS_PHRASES, AZ_STATUS_PHRASES_CURRENT_GRID);
+    if (!phrases || !beats || !beats->clock.ticks || !grid || !ds_grid_matches(im, grid, AZ_STATUS_GRID_CURRENT) ||
+        !ds_path_map_edition(phrases, grid, p)) return 0;
+    *map = (struct ds_map) {(const void *) phrases->data, &beats->clock, phrases->info.count,
+                            p->phrase_provider, p->phrase_revision, *grid};
+    return 1;
+}
+static az_status_phrase_endpoint_v1 ds_endpoint(const struct ds_map *m, unsigned kind, unsigned index) {
+    az_status_phrase_endpoint_v1 e = {.kind = kind, .phrase_provider_id = m->provider, .phrase_revision = m->revision, .grid = m->grid};
+    if (kind == AZ_PHRASE_ITEM) {
+        e.index = index;
+        e.phrase = m->rows[index];
+    }
+    return e;
+}
+static az_status_coord_v1 ds_grid_point(const struct ds_map *m, unsigned index) {
+    return (az_status_coord_v1) {.samples = m->clock->ticks[index], .rate_hz = m->clock->units_per_second};
+}
+static int ds_coord_order(const az_status_coord_v1 *first, const az_status_coord_v1 *second,
+                          unsigned rate, unsigned window) {
+    return ds_compare_source_times(first->samples, first->rate_hz, second->samples, second->rate_hz, rate, window);
+}
+static int ds_opening_at(const struct ds_map *m, const az_status_coord_v1 *point, unsigned rate, unsigned window) {
+    az_status_coord_v1 zero = {.rate_hz = point->rate_hz}, first = ds_grid_point(m, m->rows[0].start_beat);
+    int at_zero = ds_coord_order(point, &zero, rate, window);
+    int at_first = ds_coord_order(point, &first, rate, window);
+    if (at_zero == AZ_TIME_INVALID || at_first == AZ_TIME_INVALID) return 0;
+    return at_zero == AZ_TIME_EQUAL || at_first == AZ_TIME_EQUAL;
+}
+static unsigned ds_phrase_at(const struct ds_map *m, const az_status_coord_v1 *point, unsigned rate, unsigned window) {
+    unsigned lo = 0, hi = m->count;
+    while (lo + 1 < hi) {
+        unsigned mid = lo + (hi - lo) / 2;
+        az_status_coord_v1 edge = ds_grid_point(m, m->rows[mid].start_beat);
+        int order = ds_coord_order(point, &edge, rate, window);
+        if (order == AZ_TIME_INVALID) return UINT_MAX;
+        if (order == AZ_TIME_BEFORE) hi = mid;
+        else lo = mid;
+    }
+    return lo;
+}
+static az_status_phrase_endpoint_v1 ds_at(const struct ds_map *m, const az_status_coord_v1 *point,
+                                          int opening, int ended, unsigned rate, unsigned window) {
+    az_status_coord_v1 edge = ds_grid_point(m, m->rows[0].start_beat);
+    int first = ds_coord_order(point, &edge, rate, window);
+    if (first == AZ_TIME_INVALID) return (az_status_phrase_endpoint_v1) {0};
+    if (ended) return ds_endpoint(m, AZ_PHRASE_END, 0);
+    if ((opening && ds_opening_at(m, point, rate, window)) || first == AZ_TIME_BEFORE) return ds_endpoint(m, AZ_PHRASE_START, 0);
+    unsigned lo = ds_phrase_at(m, point, rate, window);
+    if (lo == UINT_MAX) return (az_status_phrase_endpoint_v1) {0};
+    edge = ds_grid_point(m, m->rows[lo].end_beat);
+    int end = ds_coord_order(point, &edge, rate, window);
+    if (end == AZ_TIME_INVALID) return (az_status_phrase_endpoint_v1) {0};
+    if (end == AZ_TIME_BEFORE) return ds_endpoint(m, AZ_PHRASE_ITEM, lo);
+    return ds_endpoint(m, AZ_PHRASE_GAP, 0);
+}
+static int ds_terminal_edge(const struct ds_map *m, const struct ds_path *p, unsigned row) {
+    if (!p->defer_terminal || row + 1 != m->count) return 0;
+    az_status_coord_v1 edge = ds_grid_point(m, m->rows[row].end_beat);
+    int order = ds_coord_order(&edge, &p->terminal, p->observed_window_rate, p->observed_window_samples);
+    if (order == AZ_TIME_INVALID) return 0;
+    return order == AZ_TIME_EQUAL;
+}
+static int ds_endpoint_known(const struct ds_map *m, const az_status_phrase_endpoint_v1 *e) {
+    if (!e || e->kind < AZ_PHRASE_START || e->kind > AZ_PHRASE_GAP ||
+        (e->kind == AZ_PHRASE_ITEM && e->index >= m->count)) return 0;
+    az_status_phrase_endpoint_v1 expected = ds_endpoint(m, e->kind, e->index);
+    return !memcmp(&expected, e, sizeof expected);
+}
+static int ds_point_inside(int start, int end) {
+    return ds_time_nonnegative(start) && end != AZ_TIME_INVALID && end == AZ_TIME_BEFORE;
+}
+static int ds_inside_item(const struct ds_map *m, const az_status_phrase_endpoint_v1 *active, const struct ds_path *p) {
+    if (!active || active->kind != AZ_PHRASE_ITEM || active->index >= m->count || p->ended) return 0;
+    const az_phrase *row = &m->rows[active->index];
+    az_status_coord_v1 start = ds_grid_point(m, row->start_beat), end = ds_grid_point(m, row->end_beat);
+    int from_start = ds_coord_order(&p->from, &start, p->from_window_rate, p->from_window_samples);
+    int to_start = ds_coord_order(&p->to, &start, p->observed_window_rate, p->observed_window_samples);
+    int from_end = ds_coord_order(&p->from, &end, p->from_window_rate, p->from_window_samples);
+    int to_end = ds_coord_order(&p->to, &end, p->observed_window_rate, p->observed_window_samples);
+    return ds_point_inside(from_start, from_end) && ds_point_inside(to_start, to_end);
+}
+static void ds_classify_terminal(const struct ds_map *map, const struct ds_path *p, int from,
+                                 const az_status_coord_v1 *point, unsigned rate, unsigned window,
+                                 az_status_phrase_endpoint_v1 *out) {
+    if (out->kind != AZ_PHRASE_GAP || !ds_terminal_edge(map, p, map->count - 1)) return;
+    /* A terminal arrival can span consecutive native measurements.
+     * Its prior landing remains the last ITEM while the source reader
+     * refines/clamps the end. Classifying that same departure as GAP
+     * would invent a missing crossing inside the prior sample window. */
+    int terminal = ds_coord_order(point, &p->terminal, rate, window);
+    az_status_coord_v1 start = ds_grid_point(map, map->rows[map->count - 1].start_beat);
+    int final_start = ds_coord_order(point, &start, rate, window);
+    if (!from || (terminal != AZ_TIME_INVALID && terminal <= AZ_TIME_EQUAL &&
+                  final_start != AZ_TIME_INVALID && final_start >= AZ_TIME_EQUAL))
+        *out = ds_endpoint(map, AZ_PHRASE_ITEM, map->count - 1);
+}
+static int ds_path_point_observed(const struct ds_path *p, uint32_t bit, const az_status_coord_v1 *point, unsigned rate, unsigned window) {
+    az_status_coord_v1 origin = {.rate_hz = point->rate_hz};
+    int zero = ds_coord_order(point, &origin, rate, window);
+    return (p->endpoints & bit) && zero != AZ_TIME_INVALID && zero != AZ_TIME_BEFORE;
+}
+static int ds_classify_point(const struct ds_map *map, const struct ds_path *p, int from, az_status_phrase_endpoint_v1 *out) {
+    uint32_t bit = from ? AZ_STATUS_OCCURRENCE_FROM : AZ_STATUS_OCCURRENCE_TO;
+    const az_status_coord_v1 *point = from ? &p->from : &p->to;
+    unsigned rate = from ? p->from_window_rate : p->observed_window_rate;
+    unsigned window = from ? p->from_window_samples : p->observed_window_samples;
+    if (!ds_path_point_observed(p, bit, point, rate, window)) return 0;
+    *out = ds_at(map, point, !from && p->opening, !from && p->ended, rate, window);
+    ds_classify_terminal(map, p, from, point, rate, window, out);
+    return out->kind != 0;
+}
+static int ds_classify(const struct ds_map *map, const struct ds_path *p, int from, az_status_phrase_endpoint_v1 *out) {
+    const az_status_phrase_endpoint_v1 *known = from ? p->departure : p->landing;
+    if (known && ds_endpoint_known(map, known)) {
+        *out = *known;
+        return 1;
+    }
+    return ds_classify_point(map, p, from, out);
+}
+static void ds_cross(struct ds_deck *d, az_status_phrase_endpoint_v1 *active,
+                     const az_status_phrase_endpoint_v1 *to, uint64_t now, uint64_t *loss) {
+    if (!memcmp(active, to, sizeof *active)) return;
+    az_status_phrase_transition_v1 tr = {.size = sizeof tr, .version = AZ_DATA_VERSION, .from = *active, .to = *to};
+    ds_derived(d, AZ_STATUS_PHRASE_TRANSITION, AZ_STATUS_PHRASE_TRANSITION_ACTIVE, now, to, sizeof *to, loss);
+    if (!*loss) {
+        d->current.sequence++;
+        d->current.observed = now;
+        d->current.published = ds_now();
+        ds_append(d, 0, DS_PHRASE_ROUTE, NULL, &tr, 0, 0);
+    }
+    *active = *to;
+}
+/* Cross every proven boundary on a monotone leg, before applying the measured
+ * landing to POSITION. A half-open interval belongs to the later item. */
+struct ds_crossing_bounds {
+    az_status_coord_v1 start, end;
+    int start_from, start_to, end_from, end_to;
+};
+static int ds_crossing_bounds(const struct ds_map *m, const struct ds_path *p, unsigned i, struct ds_crossing_bounds *b) {
+    b->start = ds_grid_point(m, m->rows[i].start_beat);
+    b->end = ds_grid_point(m, m->rows[i].end_beat);
+    b->start_from = ds_coord_order(&b->start, &p->from, p->from_window_rate, p->from_window_samples);
+    b->start_to = ds_coord_order(&b->start, &p->to, p->observed_window_rate, p->observed_window_samples);
+    b->end_from = ds_coord_order(&b->end, &p->from, p->from_window_rate, p->from_window_samples);
+    b->end_to = ds_coord_order(&b->end, &p->to, p->observed_window_rate, p->observed_window_samples);
+    return b->start_from != AZ_TIME_INVALID && b->start_to != AZ_TIME_INVALID && b->end_from != AZ_TIME_INVALID && b->end_to != AZ_TIME_INVALID;
+}
+static int ds_forward_entry(const struct ds_crossing_bounds *b) {
+    return (b->start_from == AZ_TIME_EQUAL || b->start_from == AZ_TIME_AFTER) &&
+           (b->start_to == AZ_TIME_EQUAL || b->start_to == AZ_TIME_BEFORE);
+}
+static int ds_forward_exit(const struct ds_map *m, const struct ds_path *p, unsigned i, const struct ds_crossing_bounds *b) {
+    return b->end_from == AZ_TIME_AFTER && (b->end_to == AZ_TIME_EQUAL || b->end_to == AZ_TIME_BEFORE) && !ds_terminal_edge(m, p, i);
+}
+static void ds_cross_forward(struct ds_deck *d, const struct ds_map *m, const struct ds_path *p, unsigned i,
+                             const struct ds_crossing_bounds *b, az_status_phrase_endpoint_v1 *active, uint64_t now, uint64_t *loss) {
+    if (ds_forward_entry(b)) {
+        az_status_phrase_endpoint_v1 dest = ds_endpoint(m, AZ_PHRASE_ITEM, i);
+        ds_cross(d, active, &dest, now, loss);
+    }
+    if (ds_forward_exit(m, p, i, b)) {
+        az_status_phrase_endpoint_v1 dest = ds_at(m, &b->end, 0, p->ended && b->end_to == AZ_TIME_EQUAL,
+                                                  p->observed_window_rate, p->observed_window_samples);
+        if (dest.kind) ds_cross(d, active, &dest, now, loss);
+    }
+}
+static int ds_backward_exit(const struct ds_map *m, const struct ds_path *p, unsigned i,
+                            const struct ds_crossing_bounds *b, az_status_phrase_endpoint_v1 *dest) {
+    unsigned kind = AZ_PHRASE_START;
+    if (i) {
+        az_status_coord_v1 previous_end = ds_grid_point(m, m->rows[i - 1].end_beat);
+        int adjacent = ds_coord_order(&previous_end, &b->start, p->observed_window_rate, p->observed_window_samples);
+        if (adjacent == AZ_TIME_INVALID) return 0;
+        kind = adjacent == AZ_TIME_EQUAL ? AZ_PHRASE_ITEM : AZ_PHRASE_GAP;
+    }
+    *dest = ds_endpoint(m, kind, i ? i - 1 : 0);
+    return 1;
+}
+static int ds_cross_backward(struct ds_deck *d, const struct ds_map *m, const struct ds_path *p, unsigned i,
+                             const struct ds_crossing_bounds *b, az_status_phrase_endpoint_v1 *active, uint64_t now, uint64_t *loss) {
+    if ((b->end_from == AZ_TIME_BEFORE || b->end_from == AZ_TIME_EQUAL) && b->end_to == AZ_TIME_AFTER) {
+        az_status_phrase_endpoint_v1 dest = ds_endpoint(m, AZ_PHRASE_ITEM, i);
+        ds_cross(d, active, &dest, now, loss);
+    }
+    if ((b->start_from == AZ_TIME_BEFORE || b->start_from == AZ_TIME_EQUAL) && b->start_to == AZ_TIME_AFTER) {
+        az_status_phrase_endpoint_v1 dest;
+        if (!ds_backward_exit(m, p, i, b, &dest)) return 0;
+        ds_cross(d, active, &dest, now, loss);
+    }
+    return 1;
+}
+static int ds_cross_leg(struct ds_deck *d, const struct ds_map *m, const struct ds_path *p, int forward,
+                        az_status_phrase_endpoint_v1 *active, uint64_t now, uint64_t *loss) {
+    for (unsigned n = 0; n < m->count; ++n) {
+        unsigned i = forward ? n : m->count - n - 1;
+        struct ds_crossing_bounds b;
+        if (!ds_crossing_bounds(m, p, i, &b)) return 0;
+        if (forward) ds_cross_forward(d, m, p, i, &b, active, now, loss);
+        else if (!ds_cross_backward(d, m, p, i, &b, active, now, loss)) return 0;
+    }
+    return 1;
+}
+static void ds_crossings(struct ds_deck *d, const struct ds_map *m, const struct ds_path *p,
+                         az_status_phrase_endpoint_v1 *active, uint64_t now, uint64_t *loss) {
+    if (ds_inside_item(m, active, p)) return;
+    int direction = ds_coord_order(&p->to, &p->from, p->observed_window_rate, p->observed_window_samples);
+    if (direction == AZ_TIME_INVALID) return;
+    int forward = direction == AZ_TIME_EQUAL || direction == AZ_TIME_AFTER;
+    if (!ds_cross_leg(d, m, p, forward, active, now, loss)) return;
+    az_status_phrase_endpoint_v1 dest;
+    if (ds_classify(m, p, 0, &dest)) ds_cross(d, active, &dest, now, loss);
+}
+/* Discrete actions classify each endpoint independently. A qualified landing
+ * can seed active even without proof of departure. Only the phrase route loses
+ * continuity in that case. The action remains deliverable to its own routes. */
+struct ds_path_reduction {
+    const struct ds_path *path;
+    struct ds_map map;
+    const az_status_phrase_endpoint_v1 *previous;
+    az_status_phrase_endpoint_v1 from, to;
+    int mapped, has_from, has_to, endpoint_order;
+};
+static void ds_path_prepare(struct ds_deck *d, const struct ds_path *p, struct ds_path_reduction *r) {
+    r->path = p;
+    r->previous = ds_value(&d->current, AZ_STATUS_PHRASE_TRANSITION, AZ_STATUS_PHRASE_TRANSITION_ACTIVE);
+    r->mapped = r->has_from = r->has_to = 0;
+    r->endpoint_order = AZ_TIME_INVALID;
+    if (!p) return;
+    r->mapped = ds_map_at(&d->current, p, &r->map);
+    r->has_from = r->mapped && ds_classify(&r->map, p, 1, &r->from);
+    r->has_to = r->mapped && ds_classify(&r->map, p, 0, &r->to);
+    r->endpoint_order = ds_coord_order(&p->from, &p->to, p->observed_window_rate, p->observed_window_samples);
+}
+static int ds_path_travel_ready(const struct ds_path_reduction *r) {
+    return r->path && r->path->kind == DS_PATH_TRAVEL && r->has_from && r->has_to && r->previous &&
+           ds_endpoint_known(&r->map, r->previous);
+}
+static int ds_path_still_at_opening(const struct ds_path_reduction *r) {
+    const struct ds_path *p = r->path;
+    return !p->ended && r->previous->kind == AZ_PHRASE_START &&
+           ds_opening_at(&r->map, &p->to, p->observed_window_rate, p->observed_window_samples);
+}
+static void ds_path_confirm_terminal(struct ds_deck *d, const struct ds_path_reduction *r, uint64_t now,
+                                     az_status_phrase_transition_v1 *pair, uint64_t *routes, uint64_t *fail) {
+    if (!memcmp(r->previous, &r->to, sizeof r->to)) return;
+    *pair = (az_status_phrase_transition_v1) {.size = sizeof *pair, .version = AZ_DATA_VERSION, .from = *r->previous, .to = r->to};
+    *routes |= DS_PHRASE_ROUTE;
+    if (ds_derived(d, AZ_STATUS_PHRASE_TRANSITION, AZ_STATUS_PHRASE_TRANSITION_ACTIVE, now, &r->to, sizeof r->to, fail))
+        *routes |= DS_PHRASE_ROUTE;
+}
+static int ds_path_stationary(struct ds_deck *d, const struct ds_path_reduction *r, uint64_t now,
+                              az_status_phrase_transition_v1 *pair, uint64_t *routes, uint64_t *fail) {
+    if (!ds_path_travel_ready(r) || r->endpoint_order == AZ_TIME_INVALID || r->endpoint_order != AZ_TIME_EQUAL) return 0;
+    if (r->path->confirm_terminal) {
+        ds_path_confirm_terminal(d, r, now, pair, routes, fail);
+        return 1;
+    }
+    return !r->path->began_play && (!memcmp(r->previous, &r->to, sizeof r->to) || ds_path_still_at_opening(r));
+}
+static int ds_path_contiguous(const struct ds_path_reduction *r) {
+    if (!ds_path_travel_ready(r)) return 0;
+    const struct ds_path *p = r->path;
+    return !memcmp(r->previous, &r->from, sizeof r->from) || (r->previous->kind == AZ_PHRASE_START &&
+                                                              ds_opening_at(&r->map, &p->from, p->from_window_rate, p->from_window_samples));
+}
+static int ds_path_action_ready(const struct ds_path_reduction *r, const az_status_occurrence_v1 *action) {
+    return r->path && r->path->kind == DS_PATH_ACTION && action && r->has_from && r->has_to &&
+           r->previous && ds_endpoint_known(&r->map, r->previous) && memcmp(&r->from, &r->to, sizeof r->from);
+}
+static int ds_path_lost(const struct ds_path_reduction *r) {
+    if (!r->previous) return 0;
+    if (!r->path) return 1;
+    if (r->path->kind == DS_PATH_BASELINE) return 0;
+    if (!r->has_from || !r->has_to || !r->mapped || !ds_endpoint_known(&r->map, r->previous)) return 1;
+    return r->path->kind == DS_PATH_TRAVEL && memcmp(r->previous, &r->from, sizeof r->from);
+}
+static void ds_path_reduce(struct ds_deck *d, const struct ds_path *p, const az_status_occurrence_v1 *action,
+                           uint64_t now, az_status_phrase_transition_v1 *pair, uint64_t *routes, uint64_t *lost) {
+    struct ds_path_reduction r;
+    ds_path_prepare(d, p, &r);
+    uint64_t fail = 0;
+    if (ds_path_stationary(d, &r, now, pair, routes, &fail)) {
+        *lost |= fail;
+        return;
+    }
+    if (ds_path_contiguous(&r)) {
+        az_status_phrase_endpoint_v1 active = *r.previous;
+        ds_crossings(d, &r.map, p, &active, now, &fail);
+    } else if (ds_path_action_ready(&r, action)) {
+        *pair = (az_status_phrase_transition_v1) {.size = sizeof *pair, .version = AZ_DATA_VERSION, .discontinuity = action->kind, .from = r.from, .to = r.to};
+        *routes |= DS_PHRASE_ROUTE;
+    } else if (ds_path_lost(&r)) *lost |= DS_PHRASE_ROUTE;
+    if (ds_derived(d, AZ_STATUS_PHRASE_TRANSITION, AZ_STATUS_PHRASE_TRANSITION_ACTIVE, now,
+                   r.has_to ? &r.to : NULL, r.has_to ? sizeof r.to : 0, &fail)) *routes |= DS_PHRASE_ROUTE;
+    *lost |= fail;
+}
+
 
 struct ds_transaction {
     const struct ds_path *path;
@@ -1116,6 +1931,18 @@ static void ds_complete_routes(struct ds_transaction *t) {
     if (t->pair) t->routes |= DS_PHRASE_ROUTE;
 }
 
+static int ds_publish_notifications(struct ds_transaction *t, uint64_t cut) {
+    struct ds_cell *track = t->d->current.field[AZ_STATUS_LOAD][AZ_STATUS_LOAD_TRACK];
+    az_track_ref ref = {0};
+    if (t->bind && track && track->info.info.availability == AZ_AVAIL_READY) memcpy(&ref, track->data, sizeof ref);
+    struct ds_analysis_cut analysis = {0};
+    if (t->routes & AZ_STATUS_TOPIC(AZ_STATUS_LOAD)) analysis = ds_analysis_copy(&t->d->current);
+    pthread_mutex_unlock(&ds.mu);
+    az_status_host_wake();
+    if (t->bind) az_status_host_store_binding(t->deck, t->epoch, ref.source_id ? &ref : NULL, cut);
+    if (t->routes & AZ_STATUS_TOPIC(AZ_STATUS_LOAD)) ds_analysis_deliver(t->deck, &analysis);
+    return t->rc;
+}
 static int ds_commit_transaction(struct ds_transaction *t) {
     uint64_t cut = ++t->d->current.sequence;
     t->d->current.observed = t->observed;
@@ -1125,16 +1952,7 @@ static int ds_commit_transaction(struct ds_transaction *t) {
     ds_append(t->d, t->flags, t->routes, t->action, t->pair, t->lost, t->reason);
     ds_proof_cut(t->deck, t->epoch, t->expected, t->file_only, t->flags, t->input_lost, t->input_reason,
                  t->lost, t->reason, t->routes, t->fields, t->count, t->bind, 1);
-    struct ds_cell *track = t->d->current.field[AZ_STATUS_LOAD][AZ_STATUS_LOAD_TRACK];
-    az_track_ref ref = {0};
-    if (t->bind && track && track->info.info.availability == AZ_AVAIL_READY) memcpy(&ref, track->data, sizeof ref);
-    struct ds_analysis_cut analysis = {0};
-    if (t->routes & AZ_STATUS_TOPIC(AZ_STATUS_LOAD)) analysis = ds_analysis_copy(&t->d->current);
-    pthread_mutex_unlock(&ds.mu);
-    ds_wake();
-    if (t->bind) sdk_status_store_binding(t->deck, t->epoch, ref.source_id ? &ref : NULL, cut);
-    if (t->routes & AZ_STATUS_TOPIC(AZ_STATUS_LOAD)) ds_analysis_deliver(t->deck, &analysis);
-    return t->rc;
+    return ds_publish_notifications(t, cut);
 }
 
 static int ds_finish_transaction(struct ds_transaction *t) {
@@ -1142,7 +1960,7 @@ static int ds_finish_transaction(struct ds_transaction *t) {
         ds_proof_cut(t->deck, t->epoch, t->expected, t->file_only, t->flags, t->input_lost, t->input_reason,
                      t->lost, t->reason, t->routes, t->fields, t->count, t->bind, 0);
         pthread_mutex_unlock(&ds.mu);
-        if (t->path) ds_wake();
+        if (t->path) az_status_host_wake();
         return t->rc;
     }
     return ds_commit_transaction(t);
@@ -1199,19 +2017,200 @@ static int ds_apply(const struct ds_path *path, const az_track_ref *expected, in
     return ds_finish_transaction(&t);
 }
 
-#include "sdk_status_order.c"
+/* SPDX-License-Identifier: GPL-3.0-only */
+/* Map activation and motion may arrive on separate non-real-time lanes. Order
+ * is assigned at their common source, never inferred from arrival or time. */
+#define DS_PATH_FIELDS 72
+struct ds_pending_path {
+    struct ds_path path;
+    struct ds_image image;
+    struct ds_field fields[DS_PATH_FIELDS];
+    struct ds_time_axis clocks[DS_PATH_FIELDS];
+    size_t count;
+    az_status_occurrence_v1 action;
+    az_status_phrase_endpoint_v1 departure, landing;
+    unsigned flags;
+    uint64_t epoch, observed, lost;
+    unsigned reason;
+};
+static struct ds_pending_path ds_pending[4][DS_PATH_PENDING];
+static pthread_mutex_t ds_path_mu[4] = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
+                                        PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER};
 
-static int ds_publish(unsigned deck, uint64_t epoch, unsigned flags, uint64_t observed,
+static void ds_forget_path(struct ds_pending_path *pending) {
+    pthread_mutex_lock(&ds.mu);
+    ds_image_copy(&pending->image, NULL);
+    pthread_mutex_unlock(&ds.mu);
+    memset(pending, 0, sizeof *pending);
+}
+static struct ds_pending_path *ds_pending_slot(unsigned deck, uint64_t epoch, uint64_t order, int *duplicate) {
+    struct ds_pending_path *slot = NULL;
+    for (unsigned i = 0; i < DS_PATH_PENDING; i++) {
+        struct ds_pending_path *pending = &ds_pending[deck][i];
+        if (pending->epoch == epoch && pending->path.order == order) {
+            *duplicate = 1;
+            return pending;
+        }
+        if (!pending->path.order) slot = pending;
+    }
+    return slot;
+}
+static void ds_hold_endpoints(struct ds_pending_path *slot, const struct ds_path *path) {
+    slot->path = *path;
+    if (path->departure) {
+        slot->departure = *path->departure;
+        slot->path.departure = &slot->departure;
+    }
+    if (path->landing) {
+        slot->landing = *path->landing;
+        slot->path.landing = &slot->landing;
+    }
+}
+static int ds_hold_field(struct ds_pending_path *slot, size_t index, const struct ds_field *field) {
+    if (slot->image.field[field->topic][field->field] ||
+        ds_set(&slot->image, field, ds_extent(field, slot->epoch)) == AZ_LIMIT) return AZ_LIMIT;
+    struct ds_cell *cell = slot->image.field[field->topic][field->field];
+    slot->fields[index] = *field;
+    slot->fields[index].value = cell && cell->bytes ? cell->data : NULL;
+    slot->fields[index].clock = NULL;
+    if (cell && cell->clock.units_per_second) {
+        slot->clocks[index] = cell->clock;
+        slot->fields[index].clock = &slot->clocks[index];
+    }
+    return AZ_PENDING;
+}
+static int ds_hold_fields(struct ds_pending_path *slot, const struct ds_field *fields) {
+    int rc = AZ_PENDING;
+    pthread_mutex_lock(&ds.mu);
+    for (size_t i = 0; i < slot->count; i++) {
+        rc = ds_hold_field(slot, i, &fields[i]);
+        if (rc != AZ_PENDING) break;
+    }
+    pthread_mutex_unlock(&ds.mu);
+    return rc;
+}
+static int ds_hold_path(unsigned deck, const struct ds_path *p, uint64_t epoch, unsigned flags,
+                        uint64_t observed, const struct ds_field *fields, size_t count,
+                        const az_status_occurrence_v1 *action, uint64_t lost, unsigned reason) {
+    int duplicate = 0;
+    struct ds_pending_path *slot = ds_pending_slot(deck, epoch, p->order, &duplicate);
+    if (duplicate) return AZ_PENDING;
+    if (!slot || count > DS_PATH_FIELDS) return AZ_LIMIT;
+    ds_hold_endpoints(slot, p);
+    slot->epoch = epoch;
+    slot->observed = observed;
+    slot->lost = lost;
+    slot->reason = reason;
+    slot->flags = flags;
+    slot->count = count;
+    if (action) slot->action = *action;
+    int rc = ds_hold_fields(slot, fields);
+    if (rc != AZ_PENDING) ds_forget_path(slot);
+    az_status_host_wake(); /* budgeting pins can advance an eviction watermark */
+    return rc;
+}
+static void ds_drop_old_paths(unsigned deck, uint64_t epoch) {
+    for (unsigned i = 0; i < DS_PATH_PENDING; i++) {
+        struct ds_pending_path *pending = &ds_pending[deck][i];
+        if (pending->path.order && pending->epoch != epoch) ds_forget_path(pending);
+    }
+}
+static struct ds_pending_path *ds_next_path(unsigned deck, uint64_t epoch) {
+    struct ds_pending_path *next = NULL;
+    for (unsigned i = 0; i < DS_PATH_PENDING; i++) {
+        struct ds_pending_path *candidate = &ds_pending[deck][i];
+        if (candidate->epoch != epoch || !candidate->path.order) continue;
+        if (!next || candidate->path.order < next->path.order) next = candidate;
+    }
+    return next;
+}
+static void ds_flush_paths(unsigned deck, uint64_t epoch) {
+    for (;;) {
+        struct ds_pending_path *next = ds_next_path(deck, epoch);
+        if (!next) return;
+        int rc = ds_apply(&next->path, NULL, 0, deck, epoch, next->flags, next->observed,
+                          next->fields, next->count, next->action.ordinal ? &next->action : NULL, NULL,
+                          next->lost, next->reason);
+        if (rc == AZ_PENDING) return;
+        ds_forget_path(next);
+    }
+}
+static uint64_t ds_skipped_paths(unsigned deck, uint64_t epoch, const struct ds_path *path) {
+    uint64_t lost = 0;
+    if (!path || path->kind != DS_PATH_BASELINE) return 0;
+    for (unsigned i = 0; i < DS_PATH_PENDING; i++) {
+        const struct ds_pending_path *pending = &ds_pending[deck][i];
+        if (pending->epoch == epoch && pending->path.order && pending->path.order < path->order) {
+            lost |= DS_PHRASE_ROUTE | AZ_STATUS_TOPIC(AZ_STATUS_POSITION) | AZ_STATUS_TOPIC(AZ_STATUS_PHASE);
+            if (pending->action.ordinal) lost |= DS_ACTION_ROUTES;
+        }
+    }
+    return lost;
+}
+static int ds_path_committed(int rc, unsigned deck, uint64_t epoch, const struct ds_path *path) {
+    return rc == AZ_OK || (rc == AZ_LIMIT && path && ds.deck[deck].current.epoch == epoch &&
+                           ds.deck[deck].path_order == path->order);
+}
+static int ds_resolve_path(int rc, unsigned deck, uint64_t epoch, const struct ds_path *path,
+                           unsigned flags, uint64_t observed, const struct ds_field *fields, size_t count,
+                           const az_status_occurrence_v1 *action, uint64_t lost, unsigned reason) {
+    if (rc == AZ_PENDING && path && !path->first_order) {
+        rc = ds_hold_path(deck, path, epoch, flags, observed, fields, count, action, lost, reason);
+        if (rc == AZ_LIMIT) {
+            uint64_t mask = DS_PHRASE_ROUTE | DS_ACTION_ROUTES | AZ_STATUS_TOPIC(AZ_STATUS_PHASE);
+            ds_apply(NULL, NULL, 0, deck, epoch, 0, observed, NULL, 0, NULL, NULL, mask, AZ_STATUS_CAPTURE_GAP);
+        }
+    } else if (ds_path_committed(rc, deck, epoch, path)) {
+        ds_drop_old_paths(deck, epoch);
+        ds_flush_paths(deck, epoch);
+    }
+    return rc;
+}
+int ds_publish_ordered(const struct ds_path *path, const az_track_ref *expected, int file_only,
+                              unsigned deck, uint64_t epoch, unsigned flags, uint64_t observed,
+                              const struct ds_field *fields, size_t count,
+                              const az_status_occurrence_v1 *action, const az_status_phrase_transition_v1 *pair,
+                              uint64_t lost, unsigned reason, uint64_t *committed_order) {
+    if (deck >= 4) return AZ_INVALID;
+    if (!path && !(flags & DS_BOUNDARY))
+        return ds_apply(NULL, expected, file_only, deck, epoch, flags, observed, fields, count, action, pair, lost, reason);
+    pthread_mutex_lock(&ds_path_mu[deck]);
+    uint64_t skipped = lost ? ds_skipped_paths(deck, epoch, path) : 0;
+    if (skipped) {
+        lost |= skipped;
+        reason |= AZ_STATUS_CUT_SKIPPED;
+    }
+    int rc = ds_apply(path, expected, file_only, deck, epoch, flags, observed, fields, count, action, pair, lost, reason);
+    rc = ds_resolve_path(rc, deck, epoch, path, flags, observed, fields, count, action, lost, reason);
+    /* A parked successor can commit in this transaction. A limited receipt
+     * can also have been rejected before committing. Report the actual cut
+     * before another path or load boundary can change it. */
+    if (committed_order)
+        *committed_order = ds.deck[deck].current.epoch == epoch ? ds.deck[deck].path_order : 0;
+    pthread_mutex_unlock(&ds_path_mu[deck]);
+    return rc;
+}
+int ds_publish_checked(const struct ds_path *path, const az_track_ref *expected, int file_only,
+                              unsigned deck, uint64_t epoch, unsigned flags, uint64_t observed,
+                              const struct ds_field *fields, size_t count,
+                              const az_status_occurrence_v1 *action, const az_status_phrase_transition_v1 *pair,
+                              uint64_t lost, unsigned reason) {
+    return ds_publish_ordered(path, expected, file_only, deck, epoch, flags, observed, fields, count,
+                              action, pair, lost, reason, NULL);
+}
+
+
+int ds_publish(unsigned deck, uint64_t epoch, unsigned flags, uint64_t observed,
                       const struct ds_field *fields, size_t count, const az_status_occurrence_v1 *action,
                       const az_status_phrase_transition_v1 *pair, uint64_t lost, unsigned reason) {
     return ds_publish_checked(NULL, NULL, 0, deck, epoch, flags, observed, fields, count, action, pair, lost, reason);
 }
-static int ds_publish_file(unsigned deck, uint64_t epoch, const az_track_ref *expected, uint64_t observed,
+int ds_publish_file(unsigned deck, uint64_t epoch, const az_track_ref *expected, uint64_t observed,
                            const struct ds_field *fields, size_t count, uint64_t lost, unsigned reason) {
     if (!epoch || !expected) return AZ_INVALID;
     return ds_publish_checked(NULL, expected, 1, deck, epoch, 0, observed, fields, count, NULL, NULL, lost, reason);
 }
-static int ds_retire_file_binding(unsigned deck, uint64_t epoch, const az_track_ref *expected) {
+int ds_retire_file_binding(unsigned deck, uint64_t epoch, const az_track_ref *expected) {
     if (!expected || !epoch) return AZ_INVALID;
     uint64_t now = ds_now();
     struct ds_field stale[] = {
@@ -1259,9 +2258,9 @@ static void ds_watch_interest(const az_deck_watch_v1 *w) {
     for (unsigned d = 0; d < 4; d++)
         if (w->deck_mask & (1u << d)) {
             uint64_t needs = ds_dependencies(ds_interest(d) | w->topics);
-            ds_gui_interest(needs);
-            ds_native_interest(d, needs);
-            sdk_status_store_interest(d, needs);
+            az_status_host_gui_interest(needs);
+            az_status_host_native_interest(d, needs);
+            az_status_host_store_interest(d, needs);
         }
 }
 
@@ -1278,7 +2277,7 @@ static void ds_initial_cursors(struct ds_subscription *slot, const az_deck_watch
         }
 }
 
-static int ds_register(int owner, const az_deck_watch_v1 *w, az_deck_status_fn fn, void *user,
+int ds_register(int owner, const az_deck_watch_v1 *w, az_deck_status_fn fn, void *user,
                        az_deck_subscription *out) {
     if (owner < 0 || !fn || !out || !ds_watch_valid(w)) return AZ_INVALID;
     if (!ds.enabled) return AZ_UNSUPPORTED;
@@ -1295,7 +2294,7 @@ static int ds_register(int owner, const az_deck_watch_v1 *w, az_deck_status_fn f
     ds_initial_cursors(slot, w);
     *out = slot->handle;
     pthread_mutex_unlock(&ds.mu);
-    ds_wake();
+    az_status_host_wake();
     return AZ_OK;
 }
 static void ds_remove(struct ds_subscription *s) {
@@ -1307,11 +2306,11 @@ static void ds_remove(struct ds_subscription *s) {
     for (unsigned d = 0; d < 4; d++)
         if (decks & (1u << d)) {
             uint64_t needs = ds_dependencies(ds_interest(d));
-            ds_native_interest(d, needs);
-            sdk_status_store_interest(d, needs);
+            az_status_host_native_interest(d, needs);
+            az_status_host_store_interest(d, needs);
         }
 }
-static int ds_release(int owner, az_deck_subscription handle) {
+int ds_release(int owner, az_deck_subscription handle) {
     if (owner < 0 || !handle || handle > ds.handles) return AZ_INVALID;
     for (unsigned i = 0; i < DS_SUBS; i++)
         if (ds.sub[i].handle == handle) {
@@ -1321,7 +2320,7 @@ static int ds_release(int owner, az_deck_subscription handle) {
         }
     return AZ_STALE;
 }
-static void ds_retire(int owner) {
+void ds_retire(int owner) {
     for (unsigned i = 0; i < DS_SUBS; i++)
         if (ds.sub[i].handle && ds.sub[i].owner == owner) ds_remove(&ds.sub[i]);
 }
@@ -1533,7 +2532,7 @@ static void ds_pick_delivery(struct ds_delivery *call, uint64_t *deadline) {
     for (; n < 4 * DS_SUBS; n++) {
         unsigned pos = ds.rotation++ % (4 * DS_SUBS), deck = pos % 4;
         struct ds_subscription *s = &ds.sub[pos / 4];
-        if (!s->handle || !(s->watch.deck_mask & (1u << deck)) || !ds_live(s->owner)) continue;
+        if (!s->handle || !(s->watch.deck_mask & (1u << deck)) || !az_status_host_live(s->owner)) continue;
         if (ds_next(s, deck, call, ds_now(), deadline)) break;
     }
 }
@@ -1592,7 +2591,7 @@ static void ds_callback_latency(const struct ds_delivery *call, struct ds_metric
     }
 }
 
-static unsigned ds_drain(unsigned budget) {
+unsigned ds_drain(unsigned budget) {
     unsigned delivered = 0;
     uint64_t deadline = 0;
     while (delivered < budget) {
@@ -1614,7 +2613,134 @@ static unsigned ds_drain(unsigned budget) {
         pthread_mutex_unlock(&ds.mu);
         delivered++;
     }
-    if (delivered == budget && budget) ds_wake();
-    ds_deadline(deadline);
+    if (delivered == budget && budget) az_status_host_wake();
+    az_status_host_deadline(deadline);
     return delivered;
+}
+
+int sdk_status_analysis_bind(ds_core_load_fn observer) {
+    if (!ds.enabled) return AZ_UNSUPPORTED;
+    atomic_store_explicit(&ds_core_load, observer, memory_order_release);
+    uint64_t topics = AZ_STATUS_TOPIC(AZ_STATUS_LOAD);
+    az_status_host_gui_interest(topics);
+    for (unsigned deck = 0; deck < 4; ++deck) {
+        az_status_host_native_interest(deck, topics);
+        az_status_host_store_interest(deck, topics);
+        pthread_mutex_lock(&ds.mu);
+        struct ds_analysis_cut copy = ds_analysis_copy(&ds.deck[deck].current);
+        pthread_mutex_unlock(&ds.mu);
+        ds_analysis_deliver(deck, &copy);
+    }
+    return AZ_OK;
+}
+static int sa_load_cell_ready(const struct ds_cell *cell, uint64_t load) {
+    return cell && cell->info.info.availability == AZ_AVAIL_READY &&
+           cell->info.scope == AZ_STATUS_LOAD_SCOPE && cell->info.scope_id == load &&
+           cell->bytes == sizeof(az_track_ref);
+}
+int az_status_loaded_reference(unsigned deck, uint64_t load, az_track_ref *out) {
+    if (deck >= 4 || !load || !out) return AZ_INVALID;
+    int rc = AZ_BUSY;
+    pthread_mutex_lock(&ds.mu);
+    const struct ds_image *image = &ds.deck[deck].current;
+    const struct ds_cell *cell = image->field[AZ_STATUS_LOAD][AZ_STATUS_LOAD_TRACK];
+    if (image->epoch != load) rc = AZ_STALE;
+    else if (sa_load_cell_ready(cell, load)) {
+        memcpy(out, cell->data, sizeof *out);
+        rc = AZ_OK;
+    }
+    pthread_mutex_unlock(&ds.mu);
+    return rc;
+}
+
+int ds_enabled(void) { return ds.enabled != 0; }
+void ds_enable(void) { ds.enabled = 1; }
+void ds_read_stamp(unsigned deck, struct ds_deck_stamp *out) {
+    pthread_mutex_lock(&ds.mu);
+    *out = (struct ds_deck_stamp) {ds.deck[deck].current.epoch, ds.deck[deck].last_epoch, ds.deck[deck].motion_generation};
+    pthread_mutex_unlock(&ds.mu);
+}
+void ds_read_receipts(unsigned deck, struct ds_field *fields, size_t count, uint64_t *epoch) {
+    pthread_mutex_lock(&ds.mu);
+    if (epoch) *epoch = ds.deck[deck].current.epoch;
+    for (size_t i = 0; i < count; ++i) {
+        const struct ds_cell *cell = ds.deck[deck].current.field[fields[i].topic][fields[i].field];
+        fields[i].info = cell ? cell->info : (az_status_field_info_v1) {0};
+    }
+    pthread_mutex_unlock(&ds.mu);
+}
+void ds_set_stem_binding(void (*bind)(unsigned, uint64_t, uint64_t, const char *)) {
+    pthread_mutex_lock(&ds.mu);
+    ds_bind_stems = bind;
+    pthread_mutex_unlock(&ds.mu);
+}
+void ds_watch_stems(unsigned deck, int watch) {
+    pthread_mutex_lock(&ds.mu);
+    ds.deck[deck].watch_stems = watch;
+    ds_send_stem_binding(deck);
+    pthread_mutex_unlock(&ds.mu);
+}
+int ds_read_phrase_span(unsigned deck, uint64_t epoch, const struct ds_path *path, struct ds_phrase_span *span) {
+    int ready = 0;
+    struct ds_map map;
+    pthread_mutex_lock(&ds.mu);
+    const struct ds_image *im = &ds.deck[deck].current;
+    const az_status_phrase_endpoint_v1 *active = ds_value(im, AZ_STATUS_PHRASE_TRANSITION, AZ_STATUS_PHRASE_TRANSITION_ACTIVE);
+    if (im->epoch == epoch && ds_map_at(im, path, &map) && ds_endpoint_known(&map, active) && ds_inside_item(&map, active, path)) {
+        const az_phrase *row = &map.rows[active->index];
+        *span = (struct ds_phrase_span) {ds_grid_point(&map, row->start_beat), ds_grid_point(&map, row->end_beat)};
+        ready = 1;
+    }
+    pthread_mutex_unlock(&ds.mu);
+    return ready;
+}
+int ds_path_inside_span(const struct ds_phrase_span *span, const struct ds_path *p) {
+    int from_start = ds_coord_order(&p->from, &span->start, p->from_window_rate, p->from_window_samples);
+    int to_start = ds_coord_order(&p->to, &span->start, p->observed_window_rate, p->observed_window_samples);
+    int from_end = ds_coord_order(&p->from, &span->end, p->from_window_rate, p->from_window_samples);
+    int to_end = ds_coord_order(&p->to, &span->end, p->observed_window_rate, p->observed_window_samples);
+    return !p->ended && ds_point_inside(from_start, from_end) && ds_point_inside(to_start, to_end);
+}
+
+void ds_capture_metrics(struct ds_metrics_snapshot *snapshot) {
+    pthread_mutex_lock(&ds.mu);
+    memcpy(snapshot->deck, ds.metrics, sizeof snapshot->deck);
+    memcpy(snapshot->slow, ds.slow_callbacks, sizeof snapshot->slow);
+    memcpy(snapshot->longest, ds.max_callback_ns, sizeof snapshot->longest);
+    for (unsigned d = 0; d < 4; d++) snapshot->sequence[d] = ds.deck[d].current.sequence;
+    snapshot->bytes = ds.bytes;
+    snapshot->peak = ds.peak;
+    snapshot->proof_enabled = ds_proofs.enabled;
+    snapshot->proof_count = ds_proofs.count;
+    snapshot->proof_overflow = ds_proofs.overflow;
+    snapshot->fixed_bytes = sizeof ds + sizeof ds_pending + sizeof ds_proofs;
+    snapshot->proof_bytes = sizeof ds_proofs;
+    snapshot->proof_touched = offsetof(__typeof__(ds_proofs), record) + snapshot->proof_count * sizeof ds_proofs.record[0];
+    snapshot->proof = ds_proofs.record;
+    memcpy(snapshot->capture_base, ds_proofs.capture_base, sizeof snapshot->capture_base);
+    memcpy(snapshot->revision_base, ds_proofs.revision_base, sizeof snapshot->revision_base);
+    memcpy(snapshot->resync_base, ds_proofs.resync_base, sizeof snapshot->resync_base);
+    memcpy(snapshot->sequence_base, ds_proofs.sequence_base, sizeof snapshot->sequence_base);
+    pthread_mutex_unlock(&ds.mu);
+}
+void ds_enable_proofs(void) {
+    pthread_mutex_lock(&ds.mu);
+    for (unsigned d = 0; d < 4; d++) {
+        ds_proofs.capture_base[d] = ds.metrics[d].capture_gaps;
+        ds_proofs.revision_base[d] = ds.metrics[d].revision_losses;
+        ds_proofs.resync_base[d] = ds.metrics[d].resyncs;
+        ds_proofs.sequence_base[d] = ds.deck[d].current.sequence;
+    }
+    ds_proofs.enabled = 1;
+    atomic_store_explicit(&ds_proof_enabled, 1, memory_order_release);
+    pthread_mutex_unlock(&ds.mu);
+}
+
+unsigned ds_owner_subscriptions(int owner) {
+    unsigned count = 0;
+    pthread_mutex_lock(&ds.mu);
+    for (unsigned i = 0; i < DS_SUBS; ++i)
+        if (ds.sub[i].handle && ds.sub[i].owner == owner) ++count;
+    pthread_mutex_unlock(&ds.mu);
+    return count;
 }

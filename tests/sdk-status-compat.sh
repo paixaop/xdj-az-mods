@@ -19,7 +19,7 @@ for provider in old new; do
     src=$new
     if [[ $provider == old ]]; then src=$old; fi
     policy=()
-    if [[ $provider == new ]]; then policy=("$src/sdk_command_engine.c"); fi
+    if [[ $provider == new ]]; then policy=("$src/sdk_command_engine.c" "$src/sdk_command_service.c" "$src/sdk_status_engine.c"); fi
     headers=(-include stdatomic.h)
     if [[ $provider == old ]] && ! grep -q 'static int bpmstate_current' "$src/test/community/harness.c"; then
         # This baseline's standalone loader harness omits the optional GUI BPM owner.

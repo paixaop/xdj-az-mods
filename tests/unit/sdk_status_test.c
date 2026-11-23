@@ -2,26 +2,26 @@
 #include <assert.h>
 #include <stdio.h>
 #include "sdk_status_engine.c"
-static void ds_gui_interest(uint64_t topics) { (void) topics; }
+void az_status_host_gui_interest(uint64_t topics) { (void) topics; }
 static unsigned wakes;
 static uint64_t due;
-static void ds_wake(void) { wakes++; }
-static void ds_deadline(uint64_t ns) { due = ns; }
-static void ds_native_interest(unsigned d, uint64_t mask) {
+void az_status_host_wake(void) { wakes++; }
+void az_status_host_deadline(uint64_t ns) { due = ns; }
+void az_status_host_native_interest(unsigned d, uint64_t mask) {
     (void) d;
     (void) mask;
 }
-static void sdk_status_store_interest(unsigned d, uint64_t mask) {
+void az_status_host_store_interest(unsigned d, uint64_t mask) {
     (void) d;
     (void) mask;
 }
-static void sdk_status_store_binding(unsigned d, uint64_t e, const az_track_ref *r, uint64_t c) {
+void az_status_host_store_binding(unsigned d, uint64_t e, const az_track_ref *r, uint64_t c) {
     (void) d;
     (void) e;
     (void) r;
     (void) c;
 }
-static int ds_live(int owner) { return owner >= 0; }
+int az_status_host_live(int owner) { return owner >= 0; }
 struct trace {
     uint64_t sequence, lost;
     unsigned initial, changes, recoveries, actions;

@@ -21,6 +21,7 @@ static int cm_running(const cm_mod *c) { return __atomic_load_n(&c->state, __ATO
 static cm_mod g_cm[2] = {{AZCM_LOADED, 1, UINTPTR_MAX}, {0, 1, UINTPTR_MAX}};
 static int __attribute__((unused)) master_state_supported(void) { return 0; }
 static int g_cm_loading, g_st_enabled = 1;
+static int track_service_enabled(void) { return g_st_enabled; }
 static cm_mod *cm_self(const char *id, void *ra, const char *fn) {
     (void) ra;
     (void) fn;
