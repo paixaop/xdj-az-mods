@@ -57,9 +57,12 @@ native notification. Retimed/replacement/populated maps are refused. Native mood
 populated PVDI, including all-zero instrumental maps. Vocal-only publication does
 not write DAT/EXT or invoke a native phrase refresh.
 
-Beatport uses four bounded per-deck settings caches, keyed by full native TrackID
-and audio fingerprint. Replacement clears DAT, EXT and 2EX together. Audio,
-credentials and the private model are not copied into those settings caches.
+Beatport shares 32 cache slots across the decks. The SHA-256 of the completed
+audio identifies a recording across loads, downloads and restarts. A slot
+collision replaces the previous recording when no job owns the slot. If the
+native beat grid changes, only the cached phrase and grid data are rebuilt.
+The older per-deck cache entries lack a content digest and need one fresh
+analysis. The cache stores analysis maps and their digest.
 Stored vocal readers return caller-owned intervals, preserve old spectral versus
 LSTM provenance, and use the PVDI clock and exact-duration metadata. Loaded readers
 validate the current audio-keyed cache without creating or evicting it.

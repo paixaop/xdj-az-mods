@@ -24,6 +24,7 @@ struct st_resolution {
 
 uint64_t st_stat_sig(const struct stat *status);
 uint64_t st_disk_sig(const char *path);
+int st_hash_file(const char *path, uint64_t signature, char digest[65]);
 int st_source_read(int stick, struct st_source *out);
 int st_source_assign(struct st_source *source, uint64_t *generation, int stick, const char *mount, uint64_t mount_id, struct stat status);
 int st_source_path(const char *mount, const char *relative, char out[1024]);
