@@ -3,7 +3,7 @@
 Track Analysis is a built-in AZ-MODS feature. It fills independently missing
 phrases and vocal data for loaded USB OneLibrary and completed Beatport tracks.
 In **Extras**, **Phrase Extraction** and **Vocal Extraction** independently enable
-automatic processing. Both default to on; each pane shows all four deck outcomes.
+automatic processing. Both default to on and appear just above **Vocal Indicator**.
 There is no master switch. The services run when community mods are disabled.
 Migration applies the previous Track Analysis choice to both switches unless a
 new choice already exists. These switches do not restrict explicit SDK requests.
@@ -77,13 +77,11 @@ retirement suppresses delivery to that lifetime. See the SDK service contract.
 
 ## Execution and optimizations
 
-The original execution controls and defaults are retained:
-
 | Control | Values | Default |
 | --- | --- | --- |
-| `TRACK_ANALYSIS_STAGE_MODE` | `sequential`, `concurrent` | `sequential` |
+| `TRACK_ANALYSIS_STAGE_MODE` | `sequential`, `concurrent` | `concurrent` when both components are requested, `sequential` for a single component |
 | `TRACK_ANALYSIS_PHRASE_THREADS` | `1`, `2`, `3` | `1` |
-| `TRACK_ANALYSIS_PVDI_THREADS` | `1`, `2`, `3` | `1`; `2` for combined concurrent work |
+| `TRACK_ANALYSIS_PVDI_THREADS` | `1`, `2`, `3` | `2` for combined concurrent work, `1` for sequential work |
 
 Concurrent combined work accepts phrase/vocal splits 1/1, 1/2 and 2/1.
 Sequential stages each accept up to three threads. Invalid counts or an

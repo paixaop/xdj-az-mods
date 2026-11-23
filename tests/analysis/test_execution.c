@@ -148,6 +148,13 @@ static void configuration_checks(void)
     unsetenv("TRACK_ANALYSIS_PHRASE_THREADS");
     unsetenv("TRACK_ANALYSIS_PVDI_THREADS");
     assert(!ta_execution_environment(both, &execution, error, sizeof error));
+    assert(execution.mode == TA_STAGES_CONCURRENT && execution.phrase_threads == 1 && execution.vocal_threads == 2);
+    assert(!ta_execution_environment(AZ_DATA_PHRASES, &execution, error, sizeof error));
+    assert(execution.mode == TA_STAGES_SEQUENTIAL && execution.phrase_threads == 1);
+    assert(!ta_execution_environment(AZ_ANALYSIS_VOCALS, &execution, error, sizeof error));
+    assert(execution.mode == TA_STAGES_SEQUENTIAL && execution.vocal_threads == 1);
+    setenv("TRACK_ANALYSIS_STAGE_MODE", "sequential", 1);
+    assert(!ta_execution_environment(both, &execution, error, sizeof error));
     assert(execution.mode == TA_STAGES_SEQUENTIAL && execution.phrase_threads == 1 && execution.vocal_threads == 1);
     setenv("TRACK_ANALYSIS_STAGE_MODE", "concurrent", 1);
     assert(!ta_execution_environment(both, &execution, error, sizeof error));

@@ -38,8 +38,6 @@ the table and `features.def` disagree.
 | `playlist-editing` | Playlist Editing | toggle | - | 0 = off, 1 = on |
 | `playlist-grab` | SHIFT + Hold to Move | choice | playlist-editing | 0 = "PRESS", 1 = "SHIFT + PRESS" |
 | `themes` | Themes | toggle | - | 0 = off, 1 = on |
-| `phrase-extraction` | Phrase Extraction | toggle | extras | 0 = off, 1 = on |
-| `vocal-extraction` | Vocal Extraction | toggle | extras | 0 = off, 1 = on |
 | `overlays` | Overlays | toggle | extras | 0 = off, 1 = on |
 | `overlay-fps` | FPS | toggle | overlays | 0 = off, 1 = on |
 | `overlay-cpu-temp` | CPU Temp | toggle | overlays | 0 = off, 1 = on |
@@ -57,6 +55,8 @@ the table and `features.def` disagree.
 | `bt-remember-channel` | Remember Selected Channel | toggle | extras | 0 = off, 1 = on |
 | `hide-track-title` | Hide Track Title | toggle | extras | 0 = off, 1 = on |
 | `deck-key-title` | Key in Track Title | toggle | extras | 0 = off, 1 = on |
+| `phrase-extraction` | Phrase Extraction | toggle | extras | 0 = off, 1 = on |
+| `vocal-extraction` | Vocal Extraction | toggle | extras | 0 = off, 1 = on |
 | `vocal-indicator` | Vocal Indicator | toggle | extras | 0 = off, 1 = on |
 | `vocal-indicator-waveform` | Above Waveform | toggle | vocal-indicator | 0 = off, 1 = on |
 | `vocal-indicator-preview` | Above Preview | toggle | vocal-indicator | 0 = off, 1 = on |

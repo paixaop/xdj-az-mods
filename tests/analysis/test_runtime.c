@@ -2,7 +2,6 @@
 #define _GNU_SOURCE 1
 #define _POSIX_C_SOURCE 200809L
 #include "../../src/azmod/analysis_runtime.h"
-#include "../../src/azmod/analysis_presentation.h"
 #include "../../src/azmod/analysis_events.h"
 #include <assert.h>
 #include <pthread.h>
@@ -356,7 +355,6 @@ static az_analysis_status_v1 scope_status(unsigned deck) {
 static void scope_idle(unsigned deck) {
     az_analysis_status_v1 status = scope_status(deck);
     assert(!status.state && !status.request_id && !status.completed_components);
-    assert(!strcmp(analysis_status_message(&status, AZ_OK), "Waiting for a USB or Beatport track"));
 }
 static void scope_same(unsigned deck, const az_analysis_status_v1 *before) {
     az_analysis_status_v1 after = scope_status(deck);

@@ -14,7 +14,7 @@ static unsigned thread_count(const char *value)
 }
 static bool concurrent_mode(const char *mode, bool phrases, bool vocals)
 {
-    return mode && !strcmp(mode, "concurrent") && phrases && vocals;
+    return phrases && vocals && (!mode || !strcmp(mode, "concurrent"));
 }
 static bool invalid_override(bool needed, const char *value, unsigned *threads)
 {
