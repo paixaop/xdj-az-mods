@@ -114,6 +114,10 @@ static int rejected(int rc) {
     return rc == -3 && exists(".rejected") && !exists("") && g_backups == 0 && untouched();
 }
 
+static int reject_commit(void *unused) {
+    (void) unused;
+    return 1;
+}
 int main(int argc, char **argv) {
     ut_suite = "spool apply";
     if (argc < 2)
@@ -213,6 +217,26 @@ int main(int argc, char **argv) {
     g_backup_rc = -1;
     rc = apply("INSERT INTO content VALUES(3,'x','/c');\n");
     CHECK("no backup of the library: nothing applied, .failed", rc == -4 && exists(".failed") && untouched());
+
+    fresh();
+    sqlite3_commit_hook(g_db, reject_commit, NULL);
+    rc = apply("INSERT INTO content VALUES(3,'x','/c');\n");
+    CHECK("a COMMIT failure is not reported applied or deleted",
+          rc == -4 && exists(".failed") && !exists("") && untouched() && !g_invalidates && !g_pdb_syncs);
+    sqlite3_commit_hook(g_db, NULL, NULL);
+    fresh();
+    sqlite3_exec(g_db, "ALTER TABLE content ADD COLUMN analysisDataFilePath TEXT; UPDATE content SET path='/a' WHERE content_id=1", NULL, NULL, NULL);
+    const char *link = "-- AZMOD analysis-link 1 2f61 2f62\n"
+                       "UPDATE content SET analysisDataFilePath='/b' WHERE content_id=1 AND path='/a' AND analysisDataFilePath IS NULL;\n";
+    rc = apply(link);
+    CHECK("analysis linking verifies the intended locator inside its transaction", rc == 0 && !exists(""));
+    sqlite3_exec(g_db, "UPDATE content SET analysisDataFilePath='/later' WHERE content_id=1", NULL, NULL, NULL);
+    rc = apply(link);
+    CHECK("a later locator edit is preserved and reported as a failed link",
+          rc == -4 && exists(".failed") && count("SELECT count(*) FROM content WHERE analysisDataFilePath='/later'") == 1);
+    fresh();
+    rc = apply("-- AZMOD analysis-link 1 2f61;DELETE 2f62\nUPDATE content SET title='bad' WHERE content_id=1;\n");
+    CHECK("malformed analysis verification metadata is rejected before mutation", rc == -3 && untouched() && !g_backups);
 
     /* ---- the size cap */
     fresh();

@@ -41,6 +41,7 @@
 #define _GNU_SOURCE
 #include "menu.h"
 #include "azconf.h"
+#include "analysis_host.h"
 #include "ep147addr.h" /* EP_<v130> -> this build's EP147 address (generated table) */
 #include "ep147png.h"  /* the PNG images in this build's .rodata: where stick art may go */
 #include "bus_cfg.h"   /* settings word, color words and LED blocks the bus threads read */
@@ -1388,7 +1389,9 @@ static int conf_pinned(const struct azconf *c, const char *key) {
     }
     return 0;
 }
-static void conf_apply(const struct azconf *c, azmod_state *s) {
+#include "analysis_settings.h"
+static void conf_apply(struct azconf *c, azmod_state *s) {
+    if (analysis_settings_migrate(c)) dbg("analysis: could not migrate the saved enable setting\n");
     char key[64];
     for (int i = 0; i < AZF_COUNT; i++)
         if (azf_conf_key(i, key, sizeof key))
@@ -2031,6 +2034,8 @@ static struct plsnap g_grab;
 static void drag_cancel(void);
 static int az_banner_strip(const char *text, int dur_ms); /* banner.c */
 static int az_banner_box(const char *l1, const char *l2, int dur_ms);
+static void analysis_banner(const char *text, int ms) { (void) az_banner_box(text, NULL, ms); }
+static void analysis_diagnostic(const char *text) { dbg("analysis: %s\n", text); }
 #define AZ_BANNER_HOLD INT_MIN /* banner.c: strip stays until replaced or cleared */
 enum {
     BN_NONE,
@@ -2500,9 +2505,10 @@ static void msg_tick(void) {
 #include "browse_columns.c" /* PREVIEW and the sub column remembered; Column Edit's columns */
 #include "clock_native.c" /* the Clock in the place of EP147's status bar readout */
 static void bf_tick(void); /* browse_fields.c */
-static void sdk_beatport_msg_tick(void); /* sdk_beatport.c */
+#include "beatport_service.h"
 static void calltimers_hook(void *self) {
     msg_tick();
+    analysis_host_notices(analysis_banner, analysis_diagnostic);
     bt_mods_tick();
     bc_tick();
     cn_tick();
@@ -2510,7 +2516,7 @@ static void calltimers_hook(void *self) {
     sk_tick();
     mp_anim_tick();
     cm_icons_tick();
-    sdk_beatport_msg_tick();
+    bp_login_message_tick();
     /* installed at run time from any thread: never branch to an original not yet visible */
     void (*o)(void *) = __atomic_load_n(&g_orig_calltimers, __ATOMIC_ACQUIRE);
     if (o)
@@ -2968,6 +2974,7 @@ static int sdk_passive_sources;
 #include "sdk_connections.c"
 #include "sdk_cache_startup.c"
 #include "sdk_slip_startup.c"
+#include "slip_diagnostic_startup.c"
 static void sdk_sources_configure_at_start(int b) {
     if (sdk_passive_sources || (access("/home/root/settings/azmod.track-data.on", F_OK) == 0 &&
                                 access("/home/root/settings/azmod.native-sources.on", F_OK) == 0)) {
@@ -3019,6 +3026,7 @@ static void azmod_bind_sources(void) {
     sdk_cache_at_start();
     sdk_source_capture_at_start(b);
     sdk_slip_at_start();
+    slip_diagnostic_at_start();
     msg_thread_note(); /* Constructor is EP147's main/JUCE message thread. */
     g_azm_inert = 0;
 }

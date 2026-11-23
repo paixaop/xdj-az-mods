@@ -4,23 +4,25 @@
 from pathlib import Path
 import sys
 
-source = Path(__file__).resolve().parents[2] / "src/azmod/sdk_track.c"
+source = Path(__file__).resolve().parents[2] / "src/azmod/track_storage.c"
 s = source.read_text()
-a = s.index("struct st_source {")
-b = s.index("\n};", a) + 3
+header = source.with_suffix(".h").read_text()
+a = header.index("struct st_source {")
+b = header.index("\n};", a) + 3
 functions = []
-for name in ("st_source_probe", "st_source_update", "st_source_read"):
-    start = s.index("static int " + name + "(")
+for name in ("st_source_probe", "st_source_assign", "st_source_read"):
+    signature = "static int " if name == "st_source_probe" else "int "
+    start = s.index(signature + name + "(")
     end = s.index("\n}", start) + 2
     functions.append(s[start:end])
 body = ("static pthread_mutex_t g_st_source_mu = PTHREAD_MUTEX_INITIALIZER;\n"
-        "static uint64_t g_st_generation;\n" + s[a:b] + "\n"
+        "static uint64_t g_st_generation;\n" + header[a:b] + "\n"
         "static struct st_source g_st_sources[2];\n" + "\n".join(functions) + "\n")
 root = Path(sys.argv[1])
 (root / "source-identity.inc").write_text(body)
 for name, old, new in [
     ("source-tuple", "s->device != (uint64_t) sb.st_dev || s->inode != (uint64_t) sb.st_ino", "s->ref.library_id != lib"),
-    ("source-wrap", "if (g_st_generation == UINT64_MAX)", "if (0)"),
+    ("source-wrap", "if (*generation == UINT64_MAX)", "if (0)"),
 ]:
     assert body.count(old) == 1
     (root / (name + ".inc")).write_text(body.replace(old, new))

@@ -17,7 +17,7 @@ asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-f
 tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer);;
 *) exit 2;;
 esac
-"${HOST_CC:-cc}" "${flags[@]}" tests/unit/sdkstatus_store_test.c src/azmod/sdk_command_engine.c "${libs[@]}" -o "$task_tmp/test"
+"${HOST_CC:-cc}" "${flags[@]}" tests/unit/sdkstatus_store_test.c src/azmod/sdk_command_engine.c src/azmod/track_storage.c "${libs[@]}" -o "$task_tmp/test"
 "$task_tmp/test" "$task_tmp"
 if [ "$(uname -s)" = Linux ] && [ "${SAN:-plain}" != tsan ]; then
     "$task_tmp/test" install

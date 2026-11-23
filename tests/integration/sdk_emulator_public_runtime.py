@@ -47,7 +47,7 @@ def run_public_runtime(ssh,package,source_root,output,firmware_sha256,seconds,co
     probe_manifest=Path(context['probe_manifest']);probe_binding=json.loads(probe_manifest.read_text())
     probe_id=context.get('probe_id','sdk-state-probe')
     if probe_id not in ('sdk-state-probe','sdk-slip-capture','sdk-loop-command-probe','sdk-cue-command-probe'):raise ValueError('reviewed normal probe id required')
-    probe_path=PROBE.replace('sdk-state-probe',probe_id);probe_log=LOG.replace('sdk-state-probe',probe_id)
+    probe_path=PROBE.replace('sdk-state-probe',probe_id);probe_log='/tmp/azmod-slip-capture.log' if probe_id == 'sdk-slip-capture' else LOG.replace('sdk-state-probe',probe_id)
     files=probe_archive(Path(context['probe_package']).read_bytes(),probe_binding,mod_id=probe_id)
     if digest(Path(source_root)/'src/azmod/azmod-mod.h')!=probe_binding['sha256']['include/azmod-mod.h']:
         raise ValueError('public SDK header differs from the core closure')

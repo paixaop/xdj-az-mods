@@ -80,6 +80,23 @@ static void sdk_status_start(void) {
     ds_native_start();
     ds_start_metrics();
 }
+/* Core consumers use the existing provider and source identities, without a
+ * subscription slot, mod identity, or public event marshaling. */
+static int sdk_status_analysis_bind(ds_core_load_fn observer) {
+    if (!ds.enabled) return AZ_UNSUPPORTED;
+    atomic_store_explicit(&ds_core_load, observer, memory_order_release);
+    uint64_t topics = AZ_STATUS_TOPIC(AZ_STATUS_LOAD);
+    ds_gui_interest(topics);
+    for (unsigned deck = 0; deck < 4; ++deck) {
+        ds_native_interest(deck, topics);
+        sdk_status_store_interest(deck, topics);
+        pthread_mutex_lock(&ds.mu);
+        struct ds_analysis_cut copy = ds_analysis_copy(&ds.deck[deck].current);
+        pthread_mutex_unlock(&ds.mu);
+        ds_analysis_deliver(deck, &copy);
+    }
+    return AZ_OK;
+}
 static int sdk_status_code(cm_mod *mod, uintptr_t address) {
     if (!cm_called_by(mod, address)) return 0;
     for (unsigned i = 0; i < mod->nsegments; ++i) {

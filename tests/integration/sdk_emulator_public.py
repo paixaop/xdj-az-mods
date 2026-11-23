@@ -18,7 +18,6 @@ FIELDS={'v','seq','deck','returned','query_ns','rc','valid','mt','mt_unit','mt_r
         'sync','sync_unit','sync_rev','sync_ns','raw'}
 STREAMS={'mt':(256,'mt','mastertempo'),'sync':(512,'sync','sync')}
 PROBE_IDS={'sdk-state-probe','sdk-slip-capture','sdk-loop-command-probe','sdk-cue-command-probe'}
-SLIP_FIRMWARE=['ep147-79d43e5de779fc1b','ep147-9e9454e357389ece']
 
 def read_script(pid,birth,body,cap):
     if type(cap) is not int or not 1<=cap<=1048576 or not isinstance(body,str) or len(body)>8192 or '\0' in body:
@@ -34,11 +33,12 @@ def stage_script(token,mod_id='sdk-state-probe'):
     if mod_id not in PROBE_IDS:raise ValueError('reviewed normal probe id required')
     root='/home/root/settings/az-usbload/community'
     target=root+'/'+mod_id;stage=root+'/.sdk-probe-'+token
+    diagnostic = 'touch /home/root/settings/azmod.slip-capture.on\n' if mod_id == 'sdk-slip-capture' else ''
     return ('set -e\numask 077\ntest ! -e '+target+'\nmkdir -p '+root+'\nmkdir '+stage+'\n'
             'tar -xf - -C '+stage+'\nmv '+stage+' '+target+'\n'
             'test -f '+root+'/enabled || : >'+root+'/enabled\n'
             'grep -qx '+mod_id+' '+root+'/enabled || printf \'%s\\n\' '+mod_id+' >>'+root+'/enabled\n'
-            'touch /home/root/settings/azmod-logs.on\nsha256sum '+
+            'touch /home/root/settings/azmod-logs.on\n'+diagnostic+'sha256sum '+
             ' '.join(target+'/'+name for name in ('azmod.json',mod_id+'.so','LICENSE','icon.png'))+'\n')
 
 def approved(text,mod_id,sha):
@@ -68,7 +68,7 @@ def probe_archive(data,binding,mod_id='sdk-state-probe'):
     if hashlib.sha256(files[mod_id+'.so']).hexdigest()!=binding['binary']['sha256']:
         raise ValueError('public probe binary hash mismatch')
     metadata=json.loads(files['azmod.json'])
-    if (metadata.get('id'),metadata.get('api'),metadata.get('hooks'),metadata.get('firmware'))!=(mod_id,1,mod_id=='sdk-slip-capture',SLIP_FIRMWARE if mod_id=='sdk-slip-capture' else ['any']) or metadata.get('version') not in (('0.1.0','0.1.1') if mod_id=='sdk-loop-command-probe' else ('0.1.0',)):
+    if (metadata.get('id'),metadata.get('api'),metadata.get('hooks'),metadata.get('firmware'))!=(mod_id,2,False,['any']) or metadata.get('version') not in (('0.1.0','0.1.1') if mod_id=='sdk-loop-command-probe' else ('0.1.0',)):
         raise ValueError('reviewed public probe identity required')
     return files
 

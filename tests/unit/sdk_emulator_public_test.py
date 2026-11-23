@@ -78,7 +78,7 @@ class PublicTests(unittest.TestCase):
         def archive(extra=False):
             stream=io.BytesIO()
             with zipfile.ZipFile(stream,'w') as z:
-                z.writestr('azmod.json',json.dumps(dict(id='sdk-state-probe',version='0.1.0',api=1,hooks=False,firmware=['any'])))
+                z.writestr('azmod.json',json.dumps(dict(id='sdk-state-probe',version='0.1.0',api=2,hooks=False,firmware=['any'])))
                 z.writestr('sdk-state-probe.so',b'bound binary');z.writestr('LICENSE',b'GPL');z.writestr('icon.png',b'icon')
                 if extra:z.writestr('../approved',b'forbidden')
             return stream.getvalue()
@@ -88,9 +88,9 @@ class PublicTests(unittest.TestCase):
         with self.assertRaises(ValueError):public.probe_archive(data+b'changed',binding)
         extra=archive(True);binding['package']['sha256']=hashlib.sha256(extra).hexdigest()
         with self.assertRaises(ValueError):public.probe_archive(extra,binding)
-    def test_raw_slip_package_keeps_exact_hook_tags_id_and_binary(self):
-        for change in ({},{'hooks':False},{'firmware':['any']},{'id':'other'}):
-            metadata=dict(id='sdk-slip-capture',version='0.1.0',api=1,hooks=True,firmware=list(public.SLIP_FIRMWARE));metadata.update(change)
+    def test_public_slip_package_refuses_native_hooks_and_enables_core_capture(self):
+        for change in ({},{'hooks':True},{'firmware':['ep147-79d43e5de779fc1b']},{'id':'other'},{'api':1}):
+            metadata=dict(id='sdk-slip-capture',version='0.1.0',api=2,hooks=False,firmware=['any']);metadata.update(change)
             stream=io.BytesIO()
             with zipfile.ZipFile(stream,'w') as z:
                 for name,data in {'azmod.json':json.dumps(metadata),'sdk-slip-capture.so':'binary','LICENSE':'GPL','icon.png':'icon'}.items():z.writestr(name,data)
@@ -101,6 +101,7 @@ class PublicTests(unittest.TestCase):
         plan=public.stage_script('a'*32,'sdk-slip-capture')
         self.assertIn('grep -qx sdk-slip-capture',plan);self.assertNotIn('sdk-state-probe',plan)
         self.assertNotIn('approved',plan)
+        self.assertIn('touch /home/root/settings/azmod.slip-capture.on',plan)
 
     def setting_case(self,publish=True):
         class Controller:

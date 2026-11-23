@@ -32,7 +32,7 @@ mod(){  # mod <id> <extra cflags...>
     $CC -O1 -fPIC -shared -fvisibility=hidden -I$A -DMOD_ID="\"$id\"" "$@" -o $W/root/az-usbload/community/$id/$id.so $T/mods.c ${MODLIBS:-} 2>>$W/cc.log || { echo "mod $id build failed"; cat $W/cc.log; exit 1; }
 }
 manifest(){  # manifest <id> <firmware-json> <hooks> [extra]
-    printf '{"azmod":1,"id":"%s","name":"Test %s","version":"1.0.0","author":"t","summary":"s","source":"https://example.com/x","api":1,"firmware":%s,"hooks":%s%s}\n' \
+    printf '{"azmod":1,"id":"%s","name":"Test %s","version":"1.0.0","author":"t","summary":"s","source":"https://example.com/x","api":2,"firmware":%s,"hooks":%s%s}\n' \
         "$1" "$1" "$2" "$3" "${4:-}" > $W/root/az-usbload/community/$1/azmod.json
 }
 # enable = turned on on the stick and approved on the deck (the deck's own list, section 8), so the
@@ -205,11 +205,11 @@ mod init-fail -DMOD_INITFAIL; manifest init-fail '["any"]' false
 mod id-mismatch; manifest id-mismatch '["any"]' false; sed -i 's/"id":"id-mismatch"/"id":"other"/' $W/root/az-usbload/community/id-mismatch/azmod.json
 mod lib-fw-differs -DFWTAG='"ep147-1111111111111111"'; manifest lib-fw-differs "[\"$TAG\"]" false
 mod no-source; manifest no-source '["any"]' false; sed -i 's/"source":"[^"]*",//' $W/root/az-usbload/community/no-source/azmod.json
-mod api-2; manifest api-2 '["any"]' false; sed -i 's/"api":1/"api":2/' $W/root/az-usbload/community/api-2/azmod.json
+mod api-1; manifest api-1 '["any"]' false; sed -i 's/"api":2/"api":1/' $W/root/az-usbload/community/api-1/azmod.json
 mod turned-off; manifest turned-off '["any"]' false; touch $W/root/az-usbload/community/turned-off/turned-off.off
 mkdir -p $W/root/az-usbload/community/x86-lib; printf '\177ELF\002\001\001\000\000\000\000\000\000\000\000\000\003\000\076\000' > $W/root/az-usbload/community/x86-lib/x86-lib.so; head -c 4000 /dev/zero >> $W/root/az-usbload/community/x86-lib/x86-lib.so; manifest x86-lib '["any"]' false
 mod missing-json; rm -f $W/root/az-usbload/community/missing-json/azmod.json
-enable good-any wrong-fw no-entry exports-read any-hooks init-fail id-mismatch lib-fw-differs no-source api-2 turned-off x86-lib missing-json "BAD/ID" not-installed
+enable good-any wrong-fw no-entry exports-read any-hooks init-fail id-mismatch lib-fw-differs no-source api-1 turned-off x86-lib missing-json "BAD/ID" not-installed
 $W/harness init > $W/out
 ok "control mod still loads beside 13 bad ones" '[ "$(st good-any)" = 1 ]'
 ok "wrong firmware refused"        '[ "$(st wrong-fw)" = 3 ] && rs wrong-fw | grep -q "Not made for this firmware"'
@@ -220,7 +220,7 @@ ok "init failure = FAILED, closed" '[ "$(st init-fail)" = 4 ] && rs init-fail | 
 ok "manifest id mismatch refused"  '[ "$(st id-mismatch)" = 3 ]'
 ok "library fw list must match"    '[ "$(st lib-fw-differs)" = 3 ] && rs lib-fw-differs | grep -q "library is not built"'
 ok "no source link refused"        '[ "$(st no-source)" = 3 ] && rs no-source | grep -q "source"'
-ok "api 2 refused"                 '[ "$(st api-2)" = 3 ] && rs api-2 | grep -q "API 2"'
+ok "api 1 refused"                 '[ "$(st api-1)" = 3 ] && rs api-1 | grep -q "API 1"'
 ok "per-mod off switch"            '[ "$(st turned-off)" = 2 ]'
 ok "x86 library refused (ELF)"     '[ "$(st x86-lib)" = 3 ] && rs x86-lib | grep -q "wrong CPU"'
 ok "missing azmod.json refused"    '[ "$(st missing-json)" = 3 ]'

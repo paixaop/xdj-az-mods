@@ -1,161 +1,99 @@
-# Track Analysis service
+# Core analysis service
 
-`sdk_analysis_service.c`, `sdk_analysis_loaded.c` and `sdk_analysis_typed.c` implement
-the public worker-only analysis services appended to `az_library_v1`:
-`analysis_open_v2`, `analysis_open_loaded_v2`, `analysis_grid`,
-`analysis_commit_result` and `analysis_close`. The public contract is documented in
-the SDK's `docs/18-track-analysis.md`. Keep the core and SDK public headers identical. Mods check
-each used entry with `AZ_LIB_HAS`; the core owns all private native calls and hooks.
+The core owns decoding, phrase/vocal computation, scheduling, source qualification,
+storage and native publication. Built-in work enters `analysis_runtime` through
+private typed operations; it does not register as a community mod or call a public
+service table. `az_analysis_v1`, discovered with `analysis_service`, is the external
+SDK boundary. It accepts copied requests, exposes completion/cancellation and
+copies results into caller-owned arrays. Producer leases and raw/typed public
+commit functions have been removed. Core and SDK headers must match.
 
-`analysis_open_v2` retains the file-only USB OneLibrary path. `analysis_open_loaded_v2`
-accepts a deck and an accepted LOAD generation. Phrase work requires a ready native
-grid and pins the exact native map edition. Its native publication and Beatport source
-providers are qualified only for firmware 2.00. Entry-point instruction checks and
-the required map-writer instrumentation gate the path; a matching public ABI alone
-does not enable it on another firmware profile.
+The SDK guide `docs/18-track-analysis.md` documents version checks, execution
+settings and request limits. [ANALYSIS.md](ANALYSIS.md) describes the retained
+engine, controls, build and private model provisioning.
 
-The loaded USB path combines the reducer's qualified current track reference with
-existing physical USB qualification, read-only library resolution and file signatures.
-The Beatport provider in `sdk_analysis_source.c` observes native completed/decrypted
-downloads, retains the genuine native Track resource and an open file descriptor,
-and checks load identity, source revision, file identity and completion state. It does
-not guess filenames or infer USB metadata for streamed tracks. Native resources remain
-private; the public record contains locators and an opaque owner-bound job ID.
+## Source and clock qualification
 
-## Native grid and result contract
+The loaded USB path combines the reducer's qualified native load generation and
+track reference with physical USB identity, read-only library resolution and file
+signatures. Beatport sources are completed/decrypted downloads observed through
+the native source provider. Native Track resources remain private. The owned input
+uses an already opened read-only descriptor and an opaque owner generation;
+retirement revokes publication without invalidating independent open readers.
+Native providers and publication remain gated by their firmware instruction and
+map-writer checks; a supported public ABI alone does not enable a new firmware.
 
-A loaded lease creates a private mode-0400 PMAI/PQTZ snapshot. It preserves native
-cell indexes, applies the holder's signed sample origin, converts using its actual
-sample rate, and rounds coordinates to whole milliseconds. `analysis_path` is this
-read-only snapshot; `audio_path` is a read-only input locator. Both are valid only for
-the retained job. The mod reads typed beats through `analysis_grid` and returns
-`az_analysis_result_v1` through `analysis_commit_result`, with no replacement beats
-for a loaded lease. The raw public `analysis_commit` entry is retired; its ABI slot
-is reserved and null. Internal `sa_commit` remains the shared publication engine.
-The core can save its own snapshot when disk PQTZ is absent; it never installs or
-retimes a native grid through this API.
+Phrase work captures the exact native grid edition and owns the copied typed
+rows until the joined computation finishes. The capture preserves cell indexes,
+the signed sample origin, actual sample rate and millisecond PQTZ rounding.
+There is no temporary grid file or public sizing/copy round trip. Vocal-only
+requests do not require a grid. Loaded phrase computation cannot replace or retime
+that grid. Existing saved/cached PQTZ must match its count, positions, tempos and
+timestamps before cached PSSI reuse. Timestamp checks use `compare_timestamps()`
+with the actual clock and PQTZ rounding allowance.
 
-Existing saved/cached PQTZ must match the captured grid's count, beat positions,
-tempos and timestamps before cached PSSI is refreshed or new PSSI is persisted.
-Timestamp checks use `compare_timestamps()` and a sample-rate-aware allowance for
-PQTZ rounding. Matching counts alone are insufficient. PSSI structure is validated
-before access, and a populated DAT PSSI takes precedence over an empty EXT placeholder.
-Conflicting populated DAT/EXT maps are refused.
+AAC decoding restores only FAAD's first suppressed 1024-frame overlap slot;
+remaining encoder priming is retained. MP4 edit metadata is explicit and is not
+silently applied as trimming. Clock/seek fixtures cover FFmpeg and Apple AAC and
+supported MP3. They do not certify every native resampling path.
 
-`sdk_analysis_write.h` supplies the bounded, format-only insertion/empty-tag replacement.
-The core encodes typed results as internal `TA03` packets, then validates packet
-sizes, allowed PCM rates, PQTZ/PSSI layouts, counts and
-phrase boundaries before staging. `sdk_status_map_analysis.inc` uses the firmware's
-native phrase parser and counted result, then verifies the current holder and installs
-it only into the unchanged empty phrase holder. Normal native notification publishes
-the new map edition; populated native phrases are never overwritten. The native reader
-converts the firmware's internal mood values 0/1/2 into the public PSSI values 1/2/3;
-unknown native values become 0. Publication tests verify this conversion as well as
-phrase counts, so default mood-specific Cues rules work on newly published maps.
+## Typed persistence and reuse
 
-The Track Analysis worker preserves encoded AAC timing. It restores only the first
-1024-frame slot suppressed by FAAD's overlap initialization; it retains remaining
-encoder priming and does not apply MP4 edit lists or iTunSMPB as implicit trimming.
-Container edit metadata remains explicit. Generated FFmpeg/Apple witnesses verify
-1024/2112-frame priming and exact seek replay. Source and native-grid clocks must be
-qualified together; decoder tests alone do not prove every native resampling path.
+Typed result validation directly builds native PQTZ/PSSI/PVDI/AZVD tags where
+storage requires them. No TA01/TA02/TA03 transport envelope remains. The merger
+preserves populated and unrelated tags and container bytes. Conflicting populated
+DAT/EXT maps, invalid layouts and malformed PSSI are refused. Populated DAT PSSI
+wins over an empty EXT placeholder. Source clocks, duration bounds, phrase fields,
+vocal provenance/counts and quantized activity are validated before staging.
 
-## Sources, caching and return values
+DAT and EXT writes are individually synced and renamed, DAT first when required;
+they are not an atomic pair. A later failure can leave durable reusable data.
+Native publication rechecks the load and exact holder edition under its mutation
+guard, installs only the unchanged empty phrase holder, and sends the normal
+native notification. Retimed/replacement/populated maps are refused. Native mood
+0/1/2 is converted to public PSSI mood 1/2/3. Generated LSTM data never replaces
+populated PVDI, including all-zero instrumental maps. Vocal-only publication does
+not write DAT/EXT or invoke a native phrase refresh.
 
-Successful loaded opens set `AZ_ANALYSIS_LOADED` and request only `AZ_DATA_PHRASES`.
-Beatport leases also set `AZ_ANALYSIS_STREAMING` and leave `track` empty. At most four
-jobs per mod and eight globally are retained; competing loaded leases prevent reuse
-of a deck's Beatport cache while a job owns it.
+Beatport uses four bounded per-deck settings caches, keyed by full native TrackID
+and audio fingerprint. Replacement clears DAT, EXT and 2EX together. Audio,
+credentials and the private model are not copied into those settings caches.
+Stored vocal readers return caller-owned intervals, preserve old spectral versus
+LSTM provenance, and use the PVDI clock and exact-duration metadata. Loaded readers
+validate the current audio-keyed cache without creating or evicting it.
 
-Streaming analysis occupies four fixed settings caches, one per deck, under
-`CM_STATE/analysis/beatport-0` through `beatport-3`. They contain DAT, EXT and an
-identity composed from the full native TrackID and audio stat fingerprint. A changed
-identity replaces that deck's old analysis. Container size bounds still apply. Audio
-and credentials are never copied into these settings caches.
+## Lifetimes and outcomes
 
-`AZ_NOT_FOUND` from the public loaded open means phrases are already available: native
-phrases are populated, or matching saved phrases have just been installed. It returns
-`job=0` and a versioned record. Native download-source `AZ_NOT_FOUND` is translated to
-`AZ_BUSY`, because source capture can arrive later. Empty/incomplete native grids also
-return `AZ_BUSY`. Mods retry busy/stale arrival conditions while the load remains;
-unsupported profiles or invalid grid layouts are not successful leases. Initial
-phrase-map read failures are propagated.
+Core automatic work and each mod lifetime have distinct owner identities. SDK
+workers must retain the generation inherited from their tracked worker; an old or
+unqualified worker cannot reopen admission after re-enable. Retirement revokes
+admission/publication immediately, signals asynchronous cleanup, and never waits
+for a mod tick. Inputs remain owned until all engine children join. Caller-owned
+result/interval copies survive request release and owner retirement.
 
-The community mod owns the algorithm and portable worker. The core owns source
-qualification, validation, persistence and native publication. Existing populated
-saved maps are preserved. Directory descriptors and no-follow component walks constrain
-creation and rename to the selected USB or settings root. Malformed/unsupported target
-tags fail closed; unrelated tags and container bytes survive verbatim.
+A qualified source with every requested component already populated yields
+COMPLETE with `AZ_NOT_FOUND`, indicating no new result array. Missing input/grid,
+source withdrawal and unavailable native services are failures or explicit retry
+conditions. A generic `AZ_NOT_FOUND` is not successful completion. The private
+source layer uses a separate completion outcome for validated reuse.
 
-Rows without ANLZ locators use a deterministic source-local path and
-`AZ_ANALYSIS_NEEDS_LINK`. Commit or successful saved-map recovery stages a conditional
-native library transaction; the mod retries `lib_spool_kick` on its worker. The update
-matches content ID and audio path and fills only an empty locator, preserving later
-DJ edits. Existing playback gates remain in force.
+When a USB row has no analysis locator, core queues a bounded conditional library
+transaction. The worker advances it without an SDK poll or mod spool kick. Playback
+can delay the transaction. Status stays SAVED/PENDING until COMMIT and the intended
+row outcome are verified. A zero-row update, conflicting locator, failed statement
+or failed COMMIT is not success. A failed later stage may leave reusable saved
+components; the existing later-open repair path remains supported. This is not a
+new persistent restart-recovery journal.
 
-## Races and resource release
+## Validation
 
-Commit rechecks load/map identity and source/file fingerprints before staging is
-published. DAT and EXT are individually synced and renamed, with DAT first when
-needed. They are not an atomic pair. Durable file publication precedes native refresh;
-a subsequent load/map change can therefore leave valid saved analysis while native
-publication returns stale. A later lease can reuse it only after the grid comparison.
-Stat fingerprints are freshness witnesses, not locks against every native editor.
+Run `tests/sdk-analysis.sh`, `tests/sdk-analysis-source.sh`, the native map tests,
+and `tests/analysis.mk` with their supported sanitizer configurations. Production
+engine tests retain all twelve execution configurations, complete typed output
+and feature/probability/kernel oracles. Runtime checks cover copied results,
+capacity, retirement, reordered loads, cancellation, visible automatic progress,
+source reuse versus failure and busy/pending/failed locator outcomes.
 
-Native publication revalidates the exact load and holder edition under the map
-mutation guard and compare/exchanges only the expected empty phrase content. Retimed
-grids, replacement loads and populated phrase holders are refused. Successful commit
-consumes the job. Other retained jobs must be closed; close releases both map pins and
-the Beatport source token, deletes the temporary grid snapshot, and frees its retained
-grid. Commit/close serialize under the service mutex. Close may return busy and must
-be retried; a consumed or already closed ID is stale. Close cannot undo completed
-publication. Native Track destruction runs outside the source registry mutex.
-
-Run `tests/sdk-analysis.sh` and `tests/sdk-analysis-source.sh` in their supported plain
-and sanitizer modes, plus the native map-analysis tests. Firmware 2.00 USB emulator acceptance exercised two AAC-LC M4A tracks with empty
-phrase banks: both received 17 native phrases, native phrase bars refreshed during
-the same load, and CUEs and Anchor reacted automatically. Original disk PQTZ tags
-remained byte-identical. Controlled Beatport source tests cover completion, resource
-lifetime and identity fences.
-
-Authenticated native Beatport catalog acceptance also passed on firmware 2.00.
-Two catalog loads generated 13 and 10 phrases during the same load; native grids
-retained their 448 and 401 rows and map versions. CUEs applied automatically, and
-Anchor used the refreshed phrase map for its countdown. Reload restored the saved
-ten-phrase map without launching another worker. Native CloudDirectPlay and Beatport
-login required matching private `cabinet/encryption/csdk.dat` and `bpck.dat` provisioning
-in the emulator; these files are not included in packages.
-
-Physical acceptance used the same qualified EP147 image on a deck
-reporting firmware 2.01. Six Beatport loads automatically generated native phrase
-maps and phrase-based Cues plans. The two fresh final-build witnesses generated
-15/13 phrases and 8/8 hot plus 10/5 memory cues without reloading; native grid
-counts 388/424 and revision 1 were preserved. Two USB loads recognized existing
-analysis and preserved their cue banks. SDK Play activated Anchor on both sources.
-Physical USB generation on an empty bank was not repeated in this run. Retained
-evidence is in the parent workspace's `temp/physical-auto-20261116/` directory.
-
-## Vocal analysis extension
-
-The append-only `analysis_open_v2` and `analysis_open_loaded_v2` independently
-request missing phrases and `AZ_ANALYSIS_VOCALS`. Legacy opens remain phrase-only.
-Typed publication supplies optional phrase/vocal maps, actual PCM rate and source
-frame count. The SDK's `docs/18-track-analysis.md` specifies every field and bound.
-The core validates the needed mask and PVDI coverage, saves `.2EX`, and records the
-heuristic method/exact duration in a hash-bound `AZVD` tag. It never replaces a
-populated PVDI, including valid all-zero instrumental analysis. A vocal-only commit
-writes neither DAT nor EXT and calls no native phrase publisher. Refreshing cached
-phrases before vocal work captures the new native map edition before retaining it.
-
-`sdk_vocals.h` derives half-open intervals from confidence >=3 using the PVDI header
-clock. `sdk_vocal_service.c` exposes copied worker reads through `vocal_intervals`
-and `vocal_intervals_loaded`, reusing OneLibrary resolution, owner checks, native
-load identity and source/file freshness checks. There is no new per-mod backend or
-native hook. Loaded Beatport reads check the audio-keyed per-deck cache without
-creating or evicting it. Cache replacement clears DAT, EXT and 2EX together.
-
-The worker runs the existing spectral heuristic on uniformly spaced windows for
-vocal-only work; it does not require the phrase classifier or beat model. Read-side
-provenance distinguishes existing PVDI from generated heuristic scores. Detection
-accuracy and native firmware rendering of generated PVDI are not established by
-format, timing or service tests. The feature exposes SDK data, not a new overlay.
+Historical native USB/Beatport and physical results from the previous mod pipeline
+do not certify the new core integration. Re-run applicable emulator cases and
+separately record physical idle/playback acceptance before claiming those results.

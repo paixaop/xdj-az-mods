@@ -13,9 +13,9 @@ static void changed(const az_deck_status_event_v1 *e, void *u) {
            (unsigned long long) (e->occurrence ? e->occurrence->ordinal : 0));
 }
 static int init(const az_core_v1 *core) {
-    if (!AZ_HAS(core, library_service)) return -1;
-    const az_library_v1 *lib = core->library_service(AZ_LIBRARY_ABI);
-    if (!AZ_LIB_HAS(lib, on_deck_status)) return -1;
+    if (!AZ_HAS(core, observation_service)) return -1;
+    const az_observation_v1 *lib = core->observation_service(AZ_OBSERVATION_ABI);
+    if (!AZ_OBSERVATION_HAS(lib, on_deck_status)) return -1;
     for (unsigned i = 0; i < 2; i++) {
         const az_deck_watch_v1 watch = {sizeof watch, AZ_DATA_VERSION, 4, rates[i], AZ_STATUS_TOPIC(AZ_STATUS_POSITION)};
         if (lib->on_deck_status(ID, &watch, changed, &rates[i], &handles[i]) != AZ_OK) return -1;

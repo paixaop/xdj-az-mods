@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <stdatomic.h>
 #define DS_HISTORY 256u
 #define DS_SUBS 32u
 #define DS_BYTES (16u * 1024u * 1024u)
@@ -45,6 +46,41 @@ struct ds_image {
     struct ds_cell *field[AZ_STATUS_TOPIC_COUNT][9];
     uint64_t epoch, sequence, observed, published;
 };
+/* A built-in consumer receives a copied reducer cut after ds.mu is released.
+ * The cut sequence lets the consumer reject notifications reordered by threads. */
+typedef void (*ds_core_load_fn)(unsigned, uint64_t, uint64_t, int, const az_track_ref *);
+static _Atomic(ds_core_load_fn) ds_core_load;
+struct ds_analysis_cut {
+    uint64_t order, epoch;
+    az_track_ref track;
+    int loaded;
+};
+static int ds_analysis_cell_ready(const struct ds_cell *cell, uint64_t epoch) {
+    if (!cell || cell->info.info.availability != AZ_AVAIL_READY) return 0;
+    return cell->info.scope == AZ_STATUS_UNIT ||
+           (cell->info.scope == AZ_STATUS_LOAD_SCOPE && cell->info.scope_id == epoch);
+}
+static int ds_analysis_loaded(const struct ds_image *image) {
+    const struct ds_cell *cell = image->field[AZ_STATUS_LOAD][AZ_STATUS_LOAD_STATE];
+    if (!image->epoch || !ds_analysis_cell_ready(cell, image->epoch)) return 0;
+    if (cell->info.info.provenance != AZ_PROV_NATIVE || cell->bytes != sizeof(uint32_t)) return 0;
+    uint32_t state;
+    memcpy(&state, cell->data, sizeof state);
+    return state == AZ_STATUS_LOAD_LOADED;
+}
+static struct ds_analysis_cut ds_analysis_copy(const struct ds_image *image) {
+    struct ds_analysis_cut copy = {.order = image->sequence, .epoch = image->epoch,
+                                   .loaded = ds_analysis_loaded(image)};
+    const struct ds_cell *track = image->field[AZ_STATUS_LOAD][AZ_STATUS_LOAD_TRACK];
+    if (!copy.loaded || !ds_analysis_cell_ready(track, image->epoch)) return copy;
+    if (track->info.scope == AZ_STATUS_LOAD_SCOPE && track->bytes == sizeof copy.track)
+        memcpy(&copy.track, track->data, sizeof copy.track);
+    return copy;
+}
+static void ds_analysis_deliver(unsigned deck, const struct ds_analysis_cut *copy) {
+    ds_core_load_fn observe = atomic_load_explicit(&ds_core_load, memory_order_acquire);
+    if (observe && copy->order) observe(deck, copy->order, copy->epoch, copy->loaded, &copy->track);
+}
 struct ds_record {
     struct ds_image image;
     uint64_t routes, lost;
@@ -1092,9 +1128,12 @@ static int ds_commit_transaction(struct ds_transaction *t) {
     struct ds_cell *track = t->d->current.field[AZ_STATUS_LOAD][AZ_STATUS_LOAD_TRACK];
     az_track_ref ref = {0};
     if (t->bind && track && track->info.info.availability == AZ_AVAIL_READY) memcpy(&ref, track->data, sizeof ref);
+    struct ds_analysis_cut analysis = {0};
+    if (t->routes & AZ_STATUS_TOPIC(AZ_STATUS_LOAD)) analysis = ds_analysis_copy(&t->d->current);
     pthread_mutex_unlock(&ds.mu);
     ds_wake();
     if (t->bind) sdk_status_store_binding(t->deck, t->epoch, ref.source_id ? &ref : NULL, cut);
+    if (t->routes & AZ_STATUS_TOPIC(AZ_STATUS_LOAD)) ds_analysis_deliver(t->deck, &analysis);
     return t->rc;
 }
 
@@ -1184,7 +1223,7 @@ static int ds_retire_file_binding(unsigned deck, uint64_t epoch, const az_track_
 /* UI owns registrations. The reducer mutex makes the INITIAL image and cursor
  * one cut even while a storage worker or native reducer is committing. */
 static uint64_t ds_interest(unsigned deck) {
-    uint64_t mask = 0;
+    uint64_t mask = atomic_load_explicit(&ds_core_load, memory_order_acquire) ? AZ_STATUS_TOPIC(AZ_STATUS_LOAD) : 0;
     for (unsigned i = 0; i < DS_SUBS; i++)
         if (ds.sub[i].handle && (ds.sub[i].watch.deck_mask & (1u << deck))) mask |= ds.sub[i].watch.topics;
     return mask;

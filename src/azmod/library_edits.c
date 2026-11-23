@@ -3045,107 +3045,134 @@ static void ls_source_hint(const char *buf, char *out, size_t n) {
     snprintf(out, n, "/media/usb/%.*s", (int) k, name);
 }
 #define LS_SPOOL_CAP (1 << 20) /* 1 MB cap per spool */
-/* One spool file, on the library thread, read into buf (LS_SPOOL_CAP bytes: per call, since
- * every stick's library thread applies its own). 0 = applied (deleted); <0 = not applied. */
-static int ls_apply_buf(void *conn, uintptr_t cache, const char *path, char *buf, FILE *lg) {
-    FILE *f = fopen(path, "re");
-    if (!f)
-        return -1;
-    size_t n = fread(buf, 1, LS_SPOOL_CAP - 1, f);
+struct ls_apply {
+    void *conn;
+    uintptr_t cache;
+    const char *path;
+    char *buf;
+    FILE *log;
+    size_t size;
+    int statements, done;
+    char hint[96], verify[6600];
+};
+static int ls_apply_fail(struct ls_apply *s, const char *suffix, int code) {
+    char bad[1100];
+    snprintf(bad, sizeof bad, "%s.%s", s->path, suffix);
+    if (rename(s->path, bad) && s->log) fprintf(s->log, "FAILED %s: could not record %s outcome\n", s->path, suffix);
+    return code;
+}
+static int ls_apply_read(struct ls_apply *s) {
+    FILE *f = fopen(s->path, "re");
+    if (!f) return -1;
+    s->size = fread(s->buf, 1, LS_SPOOL_CAP - 1, f);
+    int failed = ferror(f);
     fclose(f);
-    buf[n] = 0;
-    char bad[700], hint[96];
-    ls_source_hint(buf, hint, sizeof hint);
-    if (n >= LS_SPOOL_CAP - 1) {
-        snprintf(bad, sizeof bad, "%s.rejected", path);
-        rename(path, bad);
-        if (lg)
-            fprintf(lg, "REJECTED %s: over 1 MB\n", path);
-        return -2;
-    }
-    if (memchr(buf, 0, n)) { /* both passes stop at a NUL: what follows would be dropped unread */
-        snprintf(bad, sizeof bad, "%s.rejected", path);
-        rename(path, bad);
-        if (lg)
-            fprintf(lg, "REJECTED %s: a NUL byte\n", path);
-        return -3;
-    }
-    /* pass 1: every line must be allowed; nothing is written if one is not */
-    int nst = 0;
-    for (char *l = buf; l && *l;) {
-        char *e = strchr(l, '\n');
-        if (e)
-            *e = 0;
-        while (*l == ' ' || *l == '\t' || *l == '\r')
-            l++;
-        size_t k = strlen(l);
-        while (k && (l[k - 1] == '\r' || l[k - 1] == ' '))
-            k--; /* measured only: a NUL written here would end pass 2's line early (strchr) */
-        if (*l && strncmp(l, "--", 2)) {
-            /* 0x01 is pass 2's line mark: one inside a line would run what follows it unchecked */
-            if (!ls_allowed(l) || k < 2 || l[k - 1] != ';' || memchr(l, ';', k - 1) ||
-                memchr(l, 0x01, k)) {
-                if (lg)
-                    fprintf(lg, "REJECTED %s: not allowed: %.120s\n", path, l);
-                snprintf(bad, sizeof bad, "%s.rejected", path);
-                rename(path, bad);
-                return -3;
-            }
-            nst++;
-        }
-        if (e) {
-            *e = 0x01; /* mark the line end for pass 2 */
-            l = e + 1;
-        } else
-            break;
-    }
-    /* pass 2: one transaction, after the stick's backup (cross-USB paste lands here) */
-    if (g_sq.get_autocommit(conn) != 1)
-        return -4;              /* EP147 mid-transaction: the spool stays, next tick */
-    if (lib_backup(conn, lg)) { /* no backup = nothing applied; .failed reports it (cp_*) */
-        snprintf(bad, sizeof bad, "%s.failed", path);
-        rename(path, bad);
-        if (lg)
-            fprintf(lg, "FAILED %s: no backup of this library, nothing applied\n", path);
-        return -4;
-    }
-    int rc = lp_exec(conn, "BEGIN", 0), done = 0;
-    for (char *l = buf; !rc && l && *l;) {
-        char *e = strchr(l, 0x01);
-        if (e)
-            *e = 0;
-        while (*l == ' ' || *l == '\t' || *l == '\r')
-            l++;
-        if (*l && strncmp(l, "--", 2)) {
-            rc = lp_exec(conn, l, 0);
-            if (!rc)
-                done++;
-            else if (lg)
-                fprintf(lg, "FAILED rc=%d at: %.160s\n", rc, l);
-        }
-        l = e ? e + 1 : 0;
-    }
-    if (!rc) { /* a pasted track the stick already had: the copied art when its own is gone */
-        const char *cut = strstr(path, "/PIONEER/azspool/");
-        char root[600];
-        snprintf(root, sizeof root, "%.*s", cut ? (int) (cut - path) : 0, path);
-        if (cut && ls_art_fix(conn, root, buf, n, lg) < 0 && lg)
-            fprintf(lg, "  art: a statement failed; the rows before it and the spool's stand\n");
-    }
-    lp_exec(conn, rc ? "ROLLBACK" : "COMMIT", 0);
-    if (rc) {
-        snprintf(bad, sizeof bad, "%s.failed", path);
-        rename(path, bad);
-        if (lg)
-            fprintf(lg, "ROLLED BACK %s (%d/%d statements ran)\n", path, done, nst);
-        return -4;
-    }
-    if (lg)
-        fprintf(lg, "APPLIED %s: %d statement(s)\n", path, nst);
-    ls_pdb_sync(conn, path, hint, lg); /* before the unlink: that reports the paste done */
-    unlink(path);
-    lib_invalidate(cache, conn, lg);
+    if (failed) return -1;
+    s->buf[s->size] = 0;
+    if (s->size >= LS_SPOOL_CAP - 1) return ls_apply_fail(s, "rejected", -2);
+    if (memchr(s->buf, 0, s->size)) return ls_apply_fail(s, "rejected", -3);
+    ls_source_hint(s->buf, s->hint, sizeof s->hint);
     return 0;
+}
+static int ls_analysis_expectation(struct ls_apply *s) {
+    static const char prefix[] = "-- AZMOD analysis-link ";
+    if (strncmp(s->buf, prefix, sizeof prefix - 1)) return 0;
+    unsigned content = 0;
+    char audio[4096], analysis[2048];
+    int used = 0;
+    if (sscanf(s->buf + sizeof prefix - 1, "%u %4095[0-9a-f] %2047[0-9a-f]%n", &content, audio, analysis, &used) != 3 || !content) return -3;
+    if (s->buf[sizeof prefix - 1 + used] != '\n' || strlen(audio) % 2 || strlen(analysis) % 2) return -3;
+    int n = snprintf(s->verify, sizeof s->verify,
+                     "SELECT 1 FROM content WHERE content_id=%u AND path=CAST(X'%s' AS TEXT) AND analysisDataFilePath=CAST(X'%s' AS TEXT)", content, audio, analysis);
+    return n < 0 || n >= (int) sizeof s->verify ? -3 : 0;
+}
+static char *ls_line_start(char *line) {
+    while (*line == ' ' || *line == '\t' || *line == '\r') ++line;
+    return line;
+}
+static int ls_line_valid(char *l) {
+    size_t k = strlen(l);
+    while (k && (l[k - 1] == '\r' || l[k - 1] == ' '))
+        k--; /* measured only: preserve the marker search in pass 2 */
+    if (!ls_allowed(l) || k < 2 || l[k - 1] != ';' || memchr(l, ';', k - 1) ||
+        memchr(l, 0x01, k)) return 0;
+    return 1;
+}
+static int ls_apply_validate(struct ls_apply *s) {
+    for (char *line = s->buf; line && *line;) {
+        char *end = strchr(line, '\n');
+        if (end) *end = 0;
+        char *l = ls_line_start(line);
+        if (*l && strncmp(l, "--", 2)) {
+            if (!ls_line_valid(l)) return ls_apply_fail(s, "rejected", -3);
+            ++s->statements;
+        }
+        if (end) *end = 0x01;
+        line = end ? end + 1 : NULL;
+    }
+    return 0;
+}
+static int ls_apply_statements(struct ls_apply *s) {
+    for (char *line = s->buf; line && *line;) {
+        char *end = strchr(line, 0x01);
+        if (end) *end = 0;
+        char *l = ls_line_start(line);
+        if (*l && strncmp(l, "--", 2)) {
+            int rc = lp_exec(s->conn, l, 0);
+            if (rc) return rc;
+            ++s->done;
+        }
+        line = end ? end + 1 : NULL;
+    }
+    return 0;
+}
+static int ls_apply_verify(struct ls_apply *s) {
+    if (!s->verify[0]) return 0;
+    void *statement = NULL;
+    int rc = g_sq.prepare(s->conn, s->verify, -1, &statement, NULL);
+    if (rc || !statement) return rc ? rc : -1;
+    int step = g_sq.step(statement);
+    rc = g_sq.finalize(statement);
+    return rc ? rc : step == 100 ? 0 : -1;
+}
+static void ls_apply_art(struct ls_apply *s) {
+    const char *cut = strstr(s->path, "/PIONEER/azspool/");
+    if (!cut) return;
+    char root[600];
+    snprintf(root, sizeof root, "%.*s", (int) (cut - s->path), s->path);
+    if (ls_art_fix(s->conn, root, s->buf, s->size, s->log) < 0 && s->log)
+        fprintf(s->log, "  art: a statement failed; the rows before it and the spool's stand\n");
+}
+static int ls_apply_finish(struct ls_apply *s, int rc) {
+    if (!rc) rc = lp_exec(s->conn, "COMMIT", 0);
+    if (rc) {
+        int rollback = lp_exec(s->conn, "ROLLBACK", 0);
+        if (s->log) fprintf(s->log, "FAILED %s rc=%d rollback=%d (%d/%d statements ran)\n", s->path, rc, rollback, s->done, s->statements);
+        return ls_apply_fail(s, "failed", -4);
+    }
+    if (s->log) fprintf(s->log, "APPLIED %s: %d statement(s)\n", s->path, s->statements);
+    ls_pdb_sync(s->conn, s->path, s->hint, s->log);
+    if (unlink(s->path)) return -1;
+    lib_invalidate(s->cache, s->conn, s->log);
+    return 0;
+}
+static int ls_apply_transaction(struct ls_apply *s) {
+    if (g_sq.get_autocommit(s->conn) != 1) return -4;
+    if (lib_backup(s->conn, s->log)) return ls_apply_fail(s, "failed", -4);
+    int rc = lp_exec(s->conn, "BEGIN", 0);
+    if (!rc) rc = ls_apply_statements(s);
+    if (!rc) rc = ls_apply_verify(s);
+    if (!rc) ls_apply_art(s);
+    return ls_apply_finish(s, rc);
+}
+/* On the owning library thread. A queued file is never itself proof of success. */
+static int ls_apply_buf(void *conn, uintptr_t cache, const char *path, char *buf, FILE *lg) {
+    struct ls_apply state = {.conn = conn, .cache = cache, .path = path, .buf = buf, .log = lg};
+    int rc = ls_apply_read(&state);
+    if (rc) return rc;
+    if (ls_analysis_expectation(&state)) return ls_apply_fail(&state, "rejected", -3);
+    rc = ls_apply_validate(&state);
+    return rc ? rc : ls_apply_transaction(&state);
 }
 static int ls_apply_file(void *conn, uintptr_t cache, const char *path, FILE *lg) {
     char *buf = malloc(LS_SPOOL_CAP);

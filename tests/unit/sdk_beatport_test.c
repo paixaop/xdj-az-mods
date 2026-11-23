@@ -26,13 +26,13 @@ static cm_mod g_cm[2] = {{AZCM_LOADED}, {AZCM_LOADED}};
 static int g_cm_n = 2, g_cm_loading, g_sdk_in_init = 1;
 static _Thread_local int g_cm_on_ui = 1;
 static int g_ep147_build = EPB_V200, g_compdtor_ok = 1;
-static cm_mod *cm_self(const char *id, const void *ra, const char *op) {
+static cm_mod *cm_self(const char *id, uintptr_t ra, const char *op) {
     (void) ra;
     (void) op;
     return id && !strcmp(id, "beatport-remember") ? &g_cm[0] : id && !strcmp(id, "other") ? &g_cm[1]
                                                                                           : NULL;
 }
-#define CM_RA() NULL
+#define CM_RA() ((uintptr_t)0)
 static int message_thread = 1;
 static long fake_now;
 static int on_msg_thread(void) { return message_thread; }
@@ -126,6 +126,8 @@ static ssize_t storage_write(int fd, const void *buf, size_t len) {
 #define BPL_STRING_DTOR string_dtor_address
 #define BPL_EDITOR_SET editor_set_address
 #define ftok no_shared_memory
+#include "../../src/azmod/beatport_service.c"
+#define CM_STATE "/unused-settings"
 #include "../../src/azmod/sdk_beatport.c"
 #undef ftok
 
@@ -238,7 +240,7 @@ static void seed_saved(void) {
 }
 static void fill_fields(void) {
     fake_now += 500;
-    sdk_beatport_msg_tick();
+    bp_login_message_tick();
 }
 static void test_native_state(void) {
     /* A controller can be constructed minutes before its screen is opened.
@@ -246,25 +248,25 @@ static void test_native_state(void) {
     reset_state();
     seed_saved();
     widget_showing = 0;
-    sdk_beatport_msg_tick();
+    bp_login_message_tick();
     fake_now += 120000;
-    sdk_beatport_msg_tick();
+    bp_login_message_tick();
     assert(!writes && !dispatches && !bpl_filled && !bpl_presses);
     widget_showing = 1;
-    sdk_beatport_msg_tick();
+    bp_login_message_tick();
     fake_now += 399;
-    sdk_beatport_msg_tick();
+    bp_login_message_tick();
     assert(!writes);
     fake_now += 1;
-    sdk_beatport_msg_tick();
+    bp_login_message_tick();
     assert(writes == 2 && !dispatches);
     widget_showing = 0;
-    sdk_beatport_msg_tick();
+    bp_login_message_tick();
     user_editor[0] = pass_editor[0] = 0; /* native screen reopening resets fields */
     widget_showing = 1;
-    sdk_beatport_msg_tick();
+    bp_login_message_tick();
     fake_now += 400;
-    sdk_beatport_msg_tick();
+    bp_login_message_tick();
     assert(writes == 4 && !bpl_cancelled && !dispatches);
 
     reset_state();
@@ -272,7 +274,7 @@ static void test_native_state(void) {
     message_thread = 0;
     fake_now += 5000;
     sdk_beatport_owner_tick();
-    sdk_beatport_msg_tick();
+    bp_login_message_tick();
     bpl_dispatch_hook(&controller, &login_name);
     assert(reads == 0 && writes == 0 && bpl_serial == 0);
     assert(!bpl_filled);
@@ -280,30 +282,30 @@ static void test_native_state(void) {
     bpl_ctor_hook(&other_controller, &widget);
     assert(bpl_ctrl == &controller); /* background construction is not cached */
     message_thread = 1;
-    sdk_beatport_msg_tick();
+    bp_login_message_tick();
     assert(writes == 2 && !strcmp(user_editor, bpl_saved.user));
     assert(!strcmp(pass_editor, bpl_saved.pass));
     int before = dispatches;
     fake_now += 1001;
-    sdk_beatport_msg_tick();
-    sdk_beatport_msg_tick();
+    bp_login_message_tick();
+    bp_login_message_tick();
     assert(dispatches == before + 1); /* one attempt per screen */
 
     reset_state();
     seed_saved();
     fake_now += 399;
-    sdk_beatport_msg_tick();
+    bp_login_message_tick();
     assert(writes == 0);
     fake_now += 1;
-    sdk_beatport_msg_tick();
+    bp_login_message_tick();
     assert(writes == 2);
     strcpy(pass_editor, "changed by the DJ");
     fake_now += 2000;
-    sdk_beatport_msg_tick();
+    bp_login_message_tick();
     assert(bpl_cancelled && dispatches == 0);
     strcpy(pass_editor, bpl_saved.pass);
     fake_now += 9000;
-    sdk_beatport_msg_tick();
+    bp_login_message_tick();
     assert(dispatches == 0);
 
     reset_state();
@@ -348,7 +350,7 @@ static void test_native_state(void) {
         assert(writes == 2);
         secondary_hooks[i](controller.bytes + (i < 2 ? 8 : 0x30));
         fake_now += 10000;
-        sdk_beatport_msg_tick();
+        bp_login_message_tick();
         assert(!bpl_ctrl && !wref_get(&bpl_widget) && writes == 2 && !dispatches);
         assert(secondary_destructor_calls[i] == 1);
     }
@@ -417,11 +419,11 @@ static void test_accepted_cancellation(void) {
     bpl_worker_started = 1; /* only this deterministic configure uses no real worker */
     read_injection = 2;
     fake_now += 2000;
-    sdk_beatport_msg_tick();
+    bp_login_message_tick();
     bpl_worker_started = 0;
     assert(dispatches == 0 && !bpl_options.auto_login);
     fake_now += 10000;
-    sdk_beatport_msg_tick();
+    bp_login_message_tick();
     assert(dispatches == 0);
 
     reset_state();

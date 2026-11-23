@@ -51,7 +51,7 @@ class LoopRuntime(unittest.TestCase):
    driver=root/'driver';driver.write_bytes(b'fixture driver')
    receiver=root/'receiver';receiver.write_bytes(b'fixture receiver')
    probe=root/'probe.azmod'
-   files={'azmod.json':json.dumps(dict(id=loop.ID,version='0.1.0',api=1,hooks=False,firmware=['any'])).encode(),
+   files={'azmod.json':json.dumps(dict(id=loop.ID,version='0.1.0',api=2,hooks=False,firmware=['any'])).encode(),
           loop.ID+'.so':b'fixture normal module','LICENSE':b'GPL','icon.png':b'icon'}
    with zipfile.ZipFile(probe,'w') as archive:
     for name,data in files.items():archive.writestr(name,data)

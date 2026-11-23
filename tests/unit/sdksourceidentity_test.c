@@ -11,7 +11,7 @@
 #include <sys/stat.h>
 
 static uint64_t mounts[2] = {100, 200}, devices[2] = {1, 2}, inodes[2] = {19, 29};
-static int sdk_stick_mount(int stick, char *out, size_t capacity) {
+static int az_storage_stick_mount(int stick, char *out, size_t capacity) {
     return snprintf(out, capacity, "/%d", stick) < (int) capacity;
 }
 static uint64_t st_mount_id(const char *mount) { return mounts[mount[1] - '0']; }

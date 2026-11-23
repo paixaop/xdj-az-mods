@@ -600,3 +600,23 @@ and section 2 shows where this code applies them. Specific to this tree:
   `features.def` (`tests/unit/keys_test.c --print`), and the unit tests fail when the two
   disagree. A new row has no legacy `azmod.cfg` slot (`cfg` -1); a retired slot stays
   as `AZ_RETIRED` and is never reused.
+
+
+Beatport login state is private to `beatport_service.c`, linked once into
+`azmod.so`. It owns the options, credential worker, pending storage operation,
+message-thread controller reference, and attempt state. `sdk_beatport.c` only
+authenticates the external return address and forwards a qualified owner slot;
+it also supplies the operations declared in `beatport_host.h`. These use the
+existing weak-reference registry, native hook installer, message-thread clock,
+and thread trampoline. The service does not include host implementations or
+access loader globals. Hook installation still precedes firmware startup, and
+the loader samples owner activity on the overlay thread. The action mutex keeps
+accepted cancellation ordered against native login dispatch; credential I/O
+runs without either a host object or the service mutex held.
+
+Built-in analysis starts after settings and status initialization, independently
+of community package enablement. Its menu reads copied runtime status. Native
+message-thread notifications only present terminal observations; neither path
+advances computation. Configuration application migrates the retired package's
+enable preference before resolving the built-in row, with an explicit core
+preference taking precedence.

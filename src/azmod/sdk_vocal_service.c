@@ -76,9 +76,10 @@ static int sv_read(struct sa_job *j, az_vocal_snapshot_v1 *out, az_vocal_interva
 }
 static int sdk_vocal_intervals(const char *id, const az_track_ref *track, az_vocal_snapshot_v1 *out,
                                az_vocal_interval *intervals, uint32_t capacity) {
-    if (sa_owner(id, "vocal_intervals", CM_RA()) < 0 || !out || st_record_size(out) < sizeof *out ||
+    int owner = sa_owner(id, "vocal_intervals", CM_RA());
+    if (owner < 0 || !out || st_record_size(out) < sizeof *out ||
         (!intervals && capacity)) return AZ_INVALID;
-    struct sa_job j = {0};
+    struct sa_job j = {.owner = owner, .lifetime = sa_lifetime(owner), .reader_fd = -1};
     int rc = sv_location(track, &j);
     return rc ? rc : sv_read(&j, out, intervals, capacity);
 }
@@ -124,14 +125,15 @@ static int sv_loaded_read(struct sa_job *j, const struct azn_maps_api *maps, az_
 }
 static int sdk_vocal_intervals_loaded(const char *id, int deck, uint64_t load, az_vocal_snapshot_v1 *out,
                                       az_vocal_interval *intervals, uint32_t capacity) {
-    if (sa_owner(id, "vocal_intervals_loaded", CM_RA()) < 0 || deck < 0 || deck >= 4 || !load ||
+    int owner = sa_owner(id, "vocal_intervals_loaded", CM_RA());
+    if (owner < 0 || deck < 0 || deck >= 4 || !load ||
         !sv_output_valid(out, intervals, capacity)) return AZ_INVALID;
     const struct azstatus_native_v1 *api = sa_native();
     const struct azn_maps_api *maps = sv_loaded_maps(api);
     if (!maps) return AZ_UNSUPPORTED;
     struct azstatus_native_receipt receipt = {.size = sizeof receipt, .version = 1};
     if (sa_loaded_seed(api, deck, load, &receipt)) return AZ_STALE;
-    struct sa_job j = {.deck = deck, .load = load, .native_epoch = receipt.epoch, .vocals = 1};
+    struct sa_job j = {.owner = owner, .lifetime = sa_lifetime(owner), .reader_fd = -1, .deck = deck, .load = load, .native_epoch = receipt.epoch, .vocals = 1};
     int rc = sv_loaded_location(&j, api, receipt.source_kind);
     return rc ? rc : sv_loaded_read(&j, maps, out, intervals, capacity);
 }

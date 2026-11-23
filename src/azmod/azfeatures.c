@@ -6,6 +6,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+void (*azmod_analysis_enable)(int enabled);
+int (*azmod_analysis_status)(unsigned deck, az_analysis_status_v1 *out);
+void azf_analysis_changed(int value, void *user) {
+    (void) user;
+    if (azmod_analysis_enable) azmod_analysis_enable(value);
+}
+
 /* ---- the official rows ----------------------------------------------------------------- */
 /* clang-format off */
 /* GCC 7 false positive: every field below is designated, but a compound literal as a
