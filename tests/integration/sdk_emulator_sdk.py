@@ -206,7 +206,9 @@ def startup_script(baseline,stage):
     lines=baseline.splitlines()
     if len(baseline.encode())>65536 or lines.count(original)!=1 or sum('LD_PRELOAD' in line for line in lines)!=1:
         raise ValueError('one tested shim-only startup preload required')
-    preloads='/home/root/ep122_shim.so:'+':'.join(stage+'/'+name for name in FILES)
+    # Core interposers must see device opens/reads before the shim's direct syscalls.
+    # Their RTLD_NEXT delegation still reaches the shim's emulator device behavior.
+    preloads=':'.join(stage+'/'+name for name in FILES)+':/home/root/ep122_shim.so'
     replacement='export LD_PRELOAD='+preloads+'\nexport AZSDK_LOOP_PROBE=1\nexport AZSDK_SOURCE_PROBE=1'
     return '\n'.join(replacement if line==original else line for line in lines)+'\n'
 

@@ -71,6 +71,7 @@ struct State {
     _Atomic(unsigned) enabled, overflow, attempted;
     void *request_original, *handler_original;
     void *reply_original, *registered_original, *memory_original, *hot_original;
+    void *memory_notice_original;
 };
 static State persist_state = {.slots = {[0 ... 3] = {.native_result = -1}}, .receipts = {[0 ... 63] = {.result = -1, .deck = 4}}};
 #define state() (persist_state)
@@ -781,19 +782,38 @@ static Receipt *registered_receipt(uintptr_t p) {
     }
     return receipt;
 }
+static Slot *registered_slot(unsigned deck, uint64_t token) {
+    if (deck >= 4 || !token) return NULL;
+    Slot *slot = &(state().slots[deck]);
+    unsigned phase = atomic_load_explicit(&(slot->phase), memory_order_acquire);
+    if (phase != ACTIVE && phase != HELPING) return NULL;
+    return slot->request.identity.token == token ? slot : NULL;
+}
 static void settle_registered(Receipt *receipt) {
     if (!receipt) return;
     unsigned deck = receipt->deck;
     uint64_t token = receipt->token;
     int result = receipt->result;
     atomic_store_explicit(&(receipt->phase), FREE, memory_order_release);
-    if (deck >= 4 || !token) return;
-    Slot *slot = &(state().slots[deck]);
-    unsigned phase = atomic_load_explicit(&(slot->phase), memory_order_acquire);
-    if ((phase != ACTIVE && phase != HELPING) || slot->request.identity.token != token) return;
+    Slot *slot = registered_slot(deck, token);
+    if (!slot) return;
     atomic_store_explicit(&(slot->native_result), result, memory_order_relaxed);
     atomic_store_explicit(&(slot->receipt_seen), 1, memory_order_release);
     complete_receipt(slot);
+}
+static _Thread_local const void *quiet_memory_track;
+static void restore_memory_notice(const void **previous) { quiet_memory_track = *previous; }
+static void memory_notice_hook(void *self, const void *track) {
+    if (track && track == quiet_memory_track) return;
+    original(void (*)(void *, const void *), &state().memory_notice_original)(self, track);
+}
+static void call_registered(void *payload, const Receipt *receipt) {
+    const void *previous __attribute__((cleanup(restore_memory_notice))) = quiet_memory_track;
+    Slot *slot = receipt ? registered_slot(receipt->deck, receipt->token) : NULL;
+    /* The native registration task hands its TrackID at +0x10 to the
+     * success caution. Keep storage, observer updates and manual feedback. */
+    quiet_memory_track = slot && !slot->kind && creating(slot->request.operation) ? (char *) payload + 0x10 : NULL;
+    original(void (*)(void *), &state().registered_original)(payload);
 }
 static void registered_hook(void *payload) {
     if (!atomic_load_explicit(&(state().enabled), memory_order_acquire)) {
@@ -808,7 +828,7 @@ static void registered_hook(void *payload) {
     uint64_t diagnostic_token = receipt ? receipt->token : 0;
     if (diagnostic_deck < 4) PERSIST_DIAG(diagnostic_deck, diagnostic_token, "registered-enter", receipt->result);
 #endif
-    original(void (*)(void *), &state().registered_original)(payload);
+    call_registered(payload, receipt);
 #if defined(AZSDK_CUE_DIAGNOSTIC)
     if (diagnostic_deck < 4) PERSIST_DIAG(diagnostic_deck, diagnostic_token, "registered-return", receipt->result);
 #endif
@@ -831,6 +851,7 @@ static void install_call(void *opaque) {
         !install(profile->registered_task, ((void *) (registered_hook)), &state().registered_original) ||
         !install(profile->memory_helper, ((void *) (memory_hook)), &state().memory_original) ||
         !install(profile->hot_helper, ((void *) (hot_hook)), &state().hot_original)) return;
+    if (profile->memory_notice) (void) install(profile->memory_notice, (void *) memory_notice_hook, &state().memory_notice_original);
     c->result = true;
 }
 static bool persist_profile_ready(const struct azcuepersist_profile *p) {

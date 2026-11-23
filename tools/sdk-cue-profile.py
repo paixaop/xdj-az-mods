@@ -14,8 +14,8 @@ STORE = {
  '2.00': (0x850f30,0x8575e8,0x8577f0,0x154eba8,0x857278,0x850ad8,0x85c778,0x14a32d8,0x154e030,0x154eed0,0x8504a8,0x857b20,0x154e220,0x14a1780,0x14a9118),
 }
 PERSIST = {
- '1.30': (0x825ac8,0x8258d0,0x824e08,0x82b2d8,0x82ac18,0x825d48,0x2616d78,0x2616d00,0x2367d90,0x230f5c0,0x22fc600,0x23a5080,0x1735238,0x811c90,0x811e98,0x172e5d8,0x172e620,0x1734b38,0x1730710,0x1734f00,0x1734798,0x17303d8,0x80aee0,0x80b0f0),
- '2.00': (0x86b410,0x86b218,0x86a750,0x870c90,0x8705d0,0x86b690,0x2951208,0x2951190,0x24d5230,0x247ca60,0x2469aa0,0x2512520,0x1890808,0x8575e8,0x8577f0,0x1889c30,0x1889bd0,0x1890108,0x188bce0,0x18904d0,0x188fd68,0x188b9a8,0x8508c8,0x850ad8),
+ '1.30': (0x825ac8,0x8258d0,0x824e08,0x82b2d8,0x82ac18,0x825d48,0x2616d78,0x2616d00,0x2367d90,0x230f5c0,0x22fc600,0x23a5080,0x1735238,0x811c90,0x811e98,0x172e5d8,0x172e620,0x1734b38,0x1730710,0x1734f00,0x1734798,0x17303d8,0x80aee0,0x80b0f0,0x800560),
+ '2.00': (0x86b410,0x86b218,0x86a750,0x870c90,0x8705d0,0x86b690,0x2951208,0x2951190,0x24d5230,0x247ca60,0x2469aa0,0x2512520,0x1890808,0x8575e8,0x8577f0,0x1889c30,0x1889bd0,0x1890108,0x188bce0,0x18904d0,0x188fd68,0x188b9a8,0x8508c8,0x850ad8,0x845f48),
 }
 def secondary(image, primary_table, offset):
  typeinfo=struct.unpack('<Q',image.file_bytes(primary_table-8,8))[0]
@@ -57,9 +57,9 @@ def generate(folder):
   lines+=['     {']+['      {'+hex(a)+', '+x.byte_array(p)+'},' for a,p in stores]+['     },']
   persist=PERSIST[version]
   lines+=['     {'+', '.join(hex(a) for a in persist)+'},','     {']
-  lines+=['      {'+hex(a)+', '+x.byte_array(p)+'},' for a,p in (x.entry(image,a) for a in (*persist[2:6],persist[12],persist[19]))]+['     },','     {']
+  lines+=['      {'+hex(a)+', '+x.byte_array(p)+'},' for a,p in (x.entry(image,a) for a in (*persist[2:6],persist[12],persist[19],persist[24]))]+['     },','     {']
   lines+=['      {'+hex(a)+', '+x.byte_array(p)+'},' for a,p in (x.entry(image,a,require_inline=False) for a in actor[4:])]+['     },','     {']
-  lines+=['      {'+hex(a)+', '+x.byte_array(p)+'},' for a,p in (x.entry(image,a,require_inline=False) for a in persist[12:])]+['     }},']
+  lines+=['      {'+hex(a)+', '+x.byte_array(p)+'},' for a,p in (x.entry(image,a,require_inline=False) for a in persist[12:24])]+['     }},']
  return '\n'.join(lines+['};',''])
 if __name__=='__main__':
  p=argparse.ArgumentParser();p.add_argument('--firmware',type=Path,required=True);p.add_argument('--check',action='store_true');a=p.parse_args()

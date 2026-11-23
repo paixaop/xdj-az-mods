@@ -424,13 +424,21 @@ class RuntimeSDKTests(unittest.TestCase):
         for bad in ['/tmp/unowned','/tmp/az-sdk-runtime.;bad','/home/root/settings']:
             with self.assertRaises(ValueError):runtime.setup_script(bad)
 
-    def test_runtime_script_preserves_emulator_startup_exports_and_rejects_extra_preloads(self):
+    def test_runtime_script_orders_core_before_shim_preserves_exports_and_rejects_extra_preloads(self):
         stage='/tmp/az-sdk-runtime.'+'a'*32
         baseline='#!/bin/sh\nexport EMULATOR_STARTUP=1\nexport LD_PRELOAD=/home/root/ep122_shim.so\nexec /home/root/pdj/EP147\n'
         value=runtime.startup_script(baseline,stage)
         self.assertIn('export EMULATOR_STARTUP=1\n',value)
         self.assertIn('AZSDK_LOOP_PROBE=1',value)
-        self.assertIn('/home/root/ep122_shim.so:'+stage+'/azmod.so:',value)
+        preloads=[line[len('export LD_PRELOAD='):] for line in value.splitlines()
+                  if line.startswith('export LD_PRELOAD=')]
+        self.assertEqual(len(preloads),1)
+        self.assertEqual(preloads[0].split(':'),[
+            stage+'/azmod.so',stage+'/azstem.so',stage+'/loop-probe.so',
+            stage+'/source-probe.so','/home/root/ep122_shim.so'])
+        self.assertEqual([line for line in value.splitlines()
+                          if not line.startswith(('export LD_PRELOAD=','export AZSDK_'))],
+                         [line for line in baseline.splitlines() if not line.startswith('export LD_PRELOAD=')])
         self.assertLess(value.index('AZSDK_SOURCE_PROBE=1'),value.index('exec /home/root'))
         for script in [value,runtime.setup_script(stage),runtime.identity_script('123',stage)]:
             result=subprocess.run(['/bin/sh','-n'],input=script.encode(),stdout=subprocess.PIPE,stderr=subprocess.PIPE)
