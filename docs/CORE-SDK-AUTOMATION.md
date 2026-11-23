@@ -1,54 +1,27 @@
-# SDK automated acceptance
+# SDK integration tests
 
-Run the layers in this order: unit tests, isolated firmware emulators, then the
-physical deck. Each result describes its own scope. A skipped prerequisite or
-missing observation is incomplete coverage; it cannot establish a pass.
+Run host tests, isolated firmware emulation and physical acceptance as separate
+stages. Pair positive checks with a control that would fail if the implementation
+regressed. Identify the firmware, logical deck, source and process for each native
+result.
 
-## Reuse a loaded track for command tests
+## Loaded command fixtures
 
-Prepare the test track once per logical deck and keep the same firmware process
-and native load for ordinary command cases. Use public SDK requests and fresh
-source/storage observations to set up and restore each fixture. Browser navigation,
-track reloads and screenshots are not part of ordinary command-group boundaries.
-Capture the GUI for initial loading/approval or failure diagnosis only.
+Prepare a disposable track once per deck and keep its native load through
+ordinary command groups. Use public requests and independent observations to
+verify and restore each fixture. Exercise persistence across reload or restart
+as a separate test. Archive run logs and build identities outside the source
+checkout.
 
-In the current retained emulator, the existing runner supports:
+### Public loop-command probe
 
-```sh
-# All 26 commands on the already loaded track on logical Deck 2.
-python3 anchor/output/sdk-loop-emulator/runtime/current-cue-case.py all-commands 2
-
-# Focused behavior checks keep that track loaded and restore their fixture.
-python3 anchor/output/sdk-loop-emulator/runtime/current-cue-case.py memory-color 2
-
-# Request this separately when verifying persistence across a track reload.
-python3 anchor/output/sdk-loop-emulator/runtime/current-cue-case.py memory-color-reload 2
-```
-
-Run these commands from the workspace parent. The retained runner requires the
-existing owned VM, approved probe and loaded test track; it does not start a VM
-or prepare a missing load. `all-commands` composes the existing twelve loop and
-fourteen cue behavioral checks. It pins process birth, native load/unit, title
-and source rate, streams progress, and stops at the first failed or incomplete
-group. A group must return its actual complete per-deck operation coverage.
-The original target-side ten-second command deadlines remain in force.
-
-Ordinary `memory-color` reports reload persistence as `NOT_RUN`; it deletes only
-its new disposable point and verifies the original complete stored cue contents.
-Use `memory-color-reload` explicitly for the reload regression and test retained
-disk reboot persistence separately. Rebuilds of loaded native code still require
-the established cold-start procedure. Use a focused selector while fixing one
-command; reserve `all-commands` for the relevant integration pass.
-
-## Public loop-command experiment
-
-`bash tests/sdk-loop-emulator.sh --sdk-root ../sdk` runs the native async fixtures,
+`bash tests/sdk-loop-emulator.sh --sdk-root ../az-mods-sdk` runs the native async fixtures,
 the command protocol/controller and normal-loader runtime unit tests, and the
 SDK's actual `examples/loop-command-probe` client fixture. `SAN=asan` or
 `SAN=tsan` selects the corresponding native fixture mode. These are unit gates;
 their synthetic results do not establish firmware execution.
 
-Build and package `sdk/examples/loop-command-probe` with the SDK tools. Supply
+Build and package `az-mods-sdk/examples/loop-command-probe` with the SDK tools. Supply
 its `dist/probe-binding.json` and `.azmod` package to
 `sdk_emulator_loop_runtime.run_loop_runtime`, along with a source-bound runtime
 package, pinned panel driver/receiver, owned loopback guest context, actual UI
@@ -83,43 +56,83 @@ audio timing and saved persistence retain separate reported acceptance scopes.
 
 ## 1. Unit tests
 
+Run the foundation and all delivery and safety regression suites on a compatible Linux kernel:
+
 ```sh
-SAN=plain bash tests/sdk-completion.sh --output /tmp/sdk-unit-plain
-SAN=asan bash tests/sdk-completion.sh --output /tmp/sdk-unit-asan
-SAN=tsan bash tests/sdk-completion.sh --output /tmp/sdk-unit-tsan
+SAN=plain bash tests/sdk-completion.sh
+SAN=asan bash tests/sdk-completion.sh
+SAN=tsan bash tests/sdk-completion.sh
 ```
 
-The aggregate requires the foundation and fifteen extensions. `sdk-automation.sh`
-tests the automation itself using temporary files and fake SSH, without contacting
-a target. It also runs the all-deck control, loaded-runtime, acknowledged panel
-transport and Linux position-publisher fixtures. Its regressions cover corrupt packets, changed source inputs, unsafe
-archive paths, timeouts, log recovery, process loss, emulator ownership, black
-screens and missing evidence. An observed failure remains a failure when a later
-check cannot complete.
+The extensions are `sdk-automation.sh`, `sdk-time.sh`, `sdk-command.sh`, `sdk-stored.sh`, `sdk-live.sh`, `sdk-sources.sh`,
+`sdk-native-commands.sh`, `sdk-load.sh`, `sdk-load-lifecycle.sh`, `sdk-vtable.sh`,
+`sdk-hook-install.sh`, `sdk-source-probe.sh`, `sdk-load-probe.sh`, `wave-overview.sh` and `wave-report.sh`.
+`--extensions-only` avoids repeating the foundation when another
+runner already covers it. Every required suite runs even if an earlier suite fails. Each
+log is retained in a fresh directory printed at startup; `--output NEW_DIRECTORY` selects
+it explicitly. Exit 1 means failure; exit 2 means incomplete required coverage. A missing
+suite fails, while exit 77 or a successful script containing a `SKIP` line is incomplete.
+Neither produces `SDK COMPLETION: OK`. The GNU ELF fixtures require Linux; their macOS
+skips cannot establish a full SDK pass.
 
-The timing tests use every deck, both native-shaped firmware profiles, multiple
-sample rates and long track coordinates. The acceptance bound is one source
-sample plus half a microsecond of cache rounding. Reported coordinates remain
-sample-derived. Separate controls restore the old strict comparison on each deck
-and must fail. Clock failures, backward clocks, frequency conversion, malformed
-beat grids and playback interval underflow also have regressions.
+`tests/run-linux.sh` retains the complete existing unit suite and adds the SDK extension suites
+in each plain, ASan/UBSan and TSan pass. It first proves sanitizer readiness. Use
+`bash tests/run-linux.sh --preflight-only` to test readiness without running the long suites.
+The pinned ARM image builds the modules and fixtures with the GNU C compiler. On a Linux host the same standalone
+scripts can run directly with `HOST_CC` selecting the C compiler.
+Both the Linux driver and native package builder run the controller/integrity regression
+tests before their main workloads.
 
-The command matrix checks every operation on all four decks, all quantization
-modes and both persistence choices. Production native capabilities must remain
-unsupported. Synthetic successful dispatch checks per-deck result isolation.
-Reconnect tests retain old snapshots across repeated source epochs, reject stale
-and foreign handles, preserve peer consumers and exercise journal overflow.
+## Sanitizer readiness is a separate result
 
-Load/live probe tests reject every short size prefix on all four decks without
-reading the version or changing history/output. The initial GNU7 ASan run caught
-an eight-byte load from a four-byte input; the size guard now uses a bounded
-volatile prefix read. The concurrent command fixture keeps 400 applied commands
-and its 45-second watchdog, while yielding between pending polls so it can run
-under full-system emulation without starving its owner thread.
+```sh
+bash tests/sanitizer-preflight.sh
+bash tests/sanitizer-preflight.sh --output /tmp/new-preflight plain
+HOST_CC=gcc bash tests/sanitizer-preflight.sh \
+  --output /tmp/new-arm-preflight --compile-only --static-runtimes
+```
 
-GNU ELF and Linux process-map fixtures require Linux. macOS results alone cannot
-close the aggregate. `bash tests/run-linux.sh` also requires a successful
-unsuppressed sanitizer preflight before the complete existing Linux unit suite.
+The preflight requires clean threaded heap workloads in plain, ASan/UBSan/LSan and TSan
+modes. It then requires five opposite outcomes: an intentional ordinary failure, ASan
+heap overflow, UBSan signed overflow, an unreachable 64-byte LSan allocation and a TSan
+race. Every control needs a nonzero exit and its own diagnostic. A timeout, launcher
+failure, unrelated crash or successful uninstrumented binary cannot count as detection.
+The clean marker must be reached. `--compile-only` records compiler and SHA256 evidence
+and explicitly reports runtime `NOT RUN`.
+
+The runner replaces inherited sanitizer options, removes inherited LSan options and uses
+`detect_leaks=1`; it uses no suppression file. A small unsanitized POSIX launcher bounds
+each owned process group without requiring a target-installed `timeout`. Its default
+preflight bound is 15 seconds; `AZ_SAN_PREFLIGHT_TIMEOUT` may select a bound up to 300
+seconds. Runtime startup limitations return 2 and block the full Linux run. A finding in
+a clean workload or a broken planted-fault control returns 1. Logs and binary/source
+hashes remain available for investigation.
+
+### Stored file checks
+
+Run the asset-independent parser and waveform checks on a Linux host:
+
+```sh
+SAN=plain bash tests/sdk-stored.sh
+SAN=asan bash tests/sdk-stored.sh
+SAN=tsan bash tests/sdk-stored.sh
+```
+
+To compare against a user-owned export, pass `ANLZ_SAMPLE_DIR` containing
+`ANLZ0000.DAT`, `ANLZ0000.EXT` and, when available, `ANLZ0000.2EX`.
+For example, run `ANLZ_SAMPLE_DIR=/path/to/samples SAN=asan bash tests/sdk-stored.sh`.
+The fixtures compare raw fields and window boundaries using the supplied files.
+Keep those inputs and results outside the checkout.
+
+### Standalone checks on the native kernel
+
+Build the packet with `tests/sdk-data-deck.sh --compile-only`, or run
+`bash tests/sdk-data-deck.sh HOST SSH_KEY KNOWN_HOSTS NEW_LOG_DIRECTORY`
+to use the same checks on a deck. Use the pinned host key. The runner stages
+its package into a scratch directory, verifies the package checksum and checks
+EP147 process identity before and after the run. Standalone tests establish
+parser, dispatch and owner behavior in the fixture. The in-process checks
+below exercise the firmware services.
 
 ## 2. Emulator
 
@@ -148,13 +161,8 @@ to loopback; the original EP147 service is masked. Cleanup checks a fresh
 ownership label before removing a VM. Logs and overlays remain local.
 
 The packet validates its complete checksum inventory and current compiled source
-closure before upload. The qualified v2 packet contains 75 clean extension
-runs and 116 diagnostic controls, plus the foundation and separate static/shared
-sanitizer preflights (99 successful runs and 145 controls observed per kernel).
-It covers command, stored, live, sources, native-command policy, time, mono
-preview and public MT/Sync setting families. The other aggregate extensions retain their own unit
-entry points and separately qualified native packets; this packet does not
-implicitly include them.
+closure before upload. Inspect the packet manifest for the included test families. Run omitted
+suites through their own entry points.
 
 After the standalone tests, a shim-only stock firmware baseline checks process
 health and a nonblank display. The firmware SHA must match the selected profile.
@@ -307,13 +315,8 @@ load identity, saved-loop persistence, beat-grid acceptance or audio validation.
 The emulator's native packet uses a 120-second bound for each sanitizer
 preflight process; the standalone runner defaults to 15 seconds and exposes
 `--preflight-timeout` for integer values from 1 through 300. The selected bound
-is recorded in its report. The first 2.00 attempt on a previous test timed out in the
-shared ASan leak control at 15 seconds, while the same control passed at that
-bound on 1.30. The larger emulator bound accommodates the observed intermittent
-TCG delay; it does not establish the cause of the leak-scanner delay. Timeouts
-remain failures, genuine expected diagnostics remain required, and reruns must
-retain the failed attempt and run the complete packet. Individual passing
-controls cannot replace a failed packet result.
+is recorded in its report. Use a timeout suited to the test target. Timed-out controls fail and a
+rerun must complete the full packet.
 
 ### Read-only runtime scheduling evidence
 
@@ -341,38 +344,6 @@ and end times beside the raw records because thread reads are sequential. A wait
 channel is a point-in-time observation; neither it nor high runqueue delay proves
 which native operation caused a stall. These diagnostics do not relax heartbeat
 freshness, position binding, control deadlines or feature acceptance.
-
-### Controlled CPU/RAM startup comparison
-
-```sh
-python3 tests/integration/sdk_emulator_resources.py /tmp/sdk-resource-comparison \
-  --base /path/to/fw200 --profile 200 --port 2370 --qmp-port 4470
-# Analyze retained evidence without Docker or starting a VM:
-python3 tests/integration/sdk_emulator_resources.py /tmp/sdk-resource-comparison \
-  --analyze-only
-```
-
-The new output freezes the runner and QEMU image identity. Six sequential boots
-cover four/six CPUs and 2 GiB/4,038,197,248 bytes of guest RAM, repeating the low
-and normal endpoints. Each boot uses fresh overlays, identical firmware/driver/
-shim/ALSA inputs and the same startup procedure, without a preceding SDK test
-workload. Observation lasts up to 120 seconds and ends early after confirmed
-service failure. PCM state, guest memory/load, cgroup OOM and CPU quota counters,
-startup logs and a display capture are retained. Guest boot logs must confirm the
-requested CPU count and memory; missing metrics, an unloaded audio driver, changed
-inputs or failed cleanup invalidate a resource-only conclusion.
-
-The a previous test firmware 2.00 comparison reproduced the identical preview-mixer
-assertion in all six boots, with no OOM or quota-throttling events. Six CPUs
-removed the CPU-5 affinity warning. The embedded driver SHA was
-`83e452fb18a506a5bbff8f1b0c84b44e0a18c07d6133424ebcaec93cfcf0648d`
-in every case. Normal resource allocation did not clear the failure; TCG timing,
-driver logic and other guest configuration remain possible causes. This is not
-acceptance of the repaired-driver artifact or of firmware 1.30.
-
-SSH boot discovery ignores banner-only keyscan output and pins only structurally
-valid keys for the owned loopback endpoint. Strict checking remains enabled, and
-a valid pinned key is never replaced during that boot.
 
 ### Public settings under an owned emulator reload adapter
 
@@ -439,8 +410,7 @@ The health sampler only reads process/service state. Neither tool changes
 settings, preload, services, USB contents or playback.
 
 The capture validator checks independent stream revisions, owner generations,
-receipt clocks, scalar validity and source-derived loop coordinates. It detects
-the old quantization-consistent range rejection on every deck. Missing deck
+receipt clocks, scalar validity and source-derived loop coordinates. Missing deck
 observations remain incomplete; a quiet log cannot establish callback freshness.
 
 Automated health checks describe the currently loaded runtime. Accepting a new
@@ -461,7 +431,7 @@ incomplete attempts alongside successful reruns.
 `sdk-wave-layer-probe` v1 grammar, exact package and owned normal-loader context.
 It performs no target I/O. Use `wave_probe_archive` before RAM staging and
 `wave_approved` only on approval records created by the actual Allow UI. The
-future adapter must retain one apply consumption, absence of the old process,
+adapter must retain one apply consumption, absence of the old process,
 a distinct pinned new PID/birth and exact mapped core/probe hashes before
 passing a capture to `validate_wave_capture`. Its context is separate from the
 untrusted mod log. The existing settings probe is a different mod and result.

@@ -1,10 +1,5 @@
 # SDK native command boundary
 
-Current work follows [the command plan](../../anchor/CORE_SDK_IMPLEMENTATION_PLAN.md).
-Use the existing native adapters for all 26 IDs and prove actual command behavior.
-No evidence ledger/dossier is a deliverable. Historical research below records
-how paths were discovered; it does not reopen superseded implementation tasks.
-
 Transient loop operations 1–12 use the shared asynchronous native backend for
 both firmware profiles and start by default. Explicit `azmod.track-data.off` or
 `azmod.native-load.off` disables the command backend at startup.
@@ -42,7 +37,7 @@ this side effect. These are transient native edits, not verified saved-track
 persistence. Native operations can reposition playback.
 
 All operations share per-deck FIFO ordering, load/lifetime checks, deadlines,
-cancellation and correlated Slip/BeatSync/Quantize descendant tracking. Poll
+cancellation and correlated Slip/BeatSync/Quantize descendant tracking.
 Use `command_submit_async`, acknowledge the validated terminal callback, then await
 `RELEASED`; legacy `command_poll`/`command_release` remain compatibility-only. `ACCEPTED` can span
 processing frames. `APPLIED` requires settled descendants and the operation's
@@ -51,8 +46,7 @@ cannot count as successful exact edits. Its revision is the shared transient
 confirmation counter, independent of deck, loop and database revisions.
 Cancellation after dispatch cannot undo an audible operation. Native command
 behavior is exercised through the public SDK in the firmware emulator; see the
-current coverage in [the support matrix](CORE-SDK-SUPPORT.md#commands). Physical
-hardware acceptance is a separate stage.
+[SDK integration tests](CORE-SDK-AUTOMATION.md). Qualify physical behavior separately.
 
 The backend exchanges copied scalars through four bounded mailboxes. Dispatch
 runs after successful native preProcess thread binding. A separate hook holds
@@ -222,18 +216,7 @@ match. MEMORY_RECALL and SAVED_RECALL retain their separate CueLoadFacade checks
 HOT_CLEAR accepts an optional exact native-cue-ID revision fence before its
 first DSP stage. Existing callers without that optional fence remain valid.
 
-## Retired generic adapter
-
-`azsdk_native_commands_adapter` is an unsupported fixture stub, and its separate
-capabilities function returns zero. It is not the production route and must not
-be enabled or developed as a parallel command backend. The `az_owner_gate` C structure in
-the same source file is used by the production asynchronous backend and remains
-required. Keep existing ownership and deferred-completion protections.
-
-`src/common/aznativecommands.h` is a private C boundary. Mods use the versioned
-public library service; firmware objects and entry points stay inside the core.
-
-## Implemented admission primitive
+## Owner lifetime lease
 
 `az_owner_gate` supplies the owner-thread lifetime lease used by the native backend:
 
@@ -263,84 +246,20 @@ cannot turn a stored pointer into native ownership. Destruction of a held lease
 on a foreign thread, or destruction of a gate inside its own lease, terminates
 instead of silently losing the release handle or freeing active storage.
 
-The primitive does not certify the supplied thread predicate, native queue
-lifetime, load identity, native argument encodings, or application completion.
-It is intentionally disconnected from the disabled production adapter.
+The backend validates the thread predicate, native queue lifetime, load identity,
+argument encodings and operation completion separately from the lease.
 
-## Native evidence and remaining obligations
+## Binding maintenance
 
-The detailed historical research notes below record the earlier general-command
-investigation. The loop/cue implementation above supersedes its candidate-only
-status; firmware behavior and persistence results are summarized in
-[the support matrix](CORE-SDK-SUPPORT.md#commands). Paired loop
-slot/ABI evidence is retained in `anchor/output/sdk-completion-command-map/`,
-with additional selected/working property and quantization disassembly in
-`anchor/output/sdk-completion-command-owner/loop-*-research-*.asm`.
-
-
-Evidence is scoped to these exact ELF artifacts:
-
-| Build | SHA-256 |
-| --- | --- |
-| 1.30 | `736bdc9322c00e5770af459c92cace33d8680825c07f00f909f74dfc473a77a6` |
-| 2.00 | `6577f42532375936c7e3fa830efa35b7daa9cde8e0a265c1fc7143f824321925` |
-
-Cached read-only provider output in `/private/tmp/az-sdk-rea/` establishes the
-unit-owned facade bundle at `DjPlayerUnit+0x190`, the composite cue facade at
-bundle `+0x40`, and Set/Load subobjects at composite `+0xc8/+0x190`. Unit teardown
-frees this bundle before the PlayerCore task boxes. An arbitrary-thread wrapper
-can enqueue a task containing the raw facade. Keeping the facade alive only
-until that wrapper returns is insufficient. Availability bytes and two epoch
-checks do not pin queued work.
-
-The control facade's `loopExit()` is slot 3: `0x136fe48` on 1.30 and `0x142b198`
-on 2.00. It has no argument and returns void. Slot 6 (`0x136ae80` / `0x14261d0`)
-is `jump(CueKind, HotCueBehavior, SlipBehavior)`. EXIT's task retains the raw
-facade and does not repeat availability/load checks. A task number indicates
-queue progress; `lastStarted` is written before execution and cannot acknowledge
-application. Cancellation is a pre-execution skip, without a completion fence.
-
-`reloop(SlipBehavior)` is slot 4: `0x1367b68` / `0x1422eb8`. It returns void
-and forwards through the checked slot 6 `jump` with kind 0, behavior 0 and the
-supplied 32-bit SlipBehavior. This backend selects native SlipBehavior 0; it
-does not map SDK quantization values into that enum. Both facade entries and
-their original nominal table are checked. The generated verification profiles
-come from `tools/sdk-exit-profile.py` against the two exact stock ELFs.
-
-An owner-thread route remains a research candidate. The verified PlayerCore
-primary vtable slot 3 is `0x135b780` / `0x1416ae8`. It directly calls
-`preProcess` at `0x135b7cc -> 0x13583e0` /
-`0x1416b34 -> 0x1413750`. Cached `task-native-entry-200.c` shows `preProcess`
-binding the native task-box thread identity and draining its queues. The full
-slot-3 assembly is retained in
-`anchor/output/sdk-completion-native-commands/player-core-slot3.asm` in the
-workspace. An outer vtable interception does not prove that native direct calls
-will pass through it. Resolving a code-hook target from a checked owned object
-would still require safe installation before concurrent execution, exact build
-and signature guards, and a verified borrowed owner lifetime.
-
-Custom `IAsyncTask` construction also remains unsupported. Its base token is a
-lazy process value; its diagnostic method returns a nontrivial native String
-through AArch64 X8. Native allocation, destruction without execution, posting
-failure ownership, and execution-before-post-return must all be matched. The
-retained absolute addresses are evidence anchors, not newly callable entries.
-
-Even an inline facade wrapper can submit lower-level engine work. The loop
-backend now correlates the verified descendants; this does not establish a
-general acknowledgement path for other operations. Working-property notifications cannot
-prove which SDK request caused a matching value. Saving cues also needs the
-separate native persistence request/reply path; setters do not prove saving.
-Slip/quantization/loop/minimum-length enums and RGB channel packing require
-individual validation. No command is enabled by this document.
-
-The graph project was not indexed for the relevant core scopes; graph lookups
-and coverage returned `project_not_found`. These are bounded source/binary
-findings, without an exhaustive graph or a runtime certification claim. The
-original Ghidra project was not opened or changed for this work.
+Regenerate the cue and EXIT/RELOOP verification tables against the exact
+supported stock ELFs with `tools/sdk-cue-profile.py` and
+`tools/sdk-exit-profile.py`. Validate lifetime, owning-thread dispatch and
+the resulting native postcondition for each operation. A queued task number
+or a generic state notification cannot establish application.
 
 ## Regression fixtures
 
-Run from the core repository:
+Run these checks from the core repository.
 
 ```sh
 bash tests/sdk-native-commands.sh
@@ -348,9 +267,7 @@ SAN=asan bash tests/sdk-native-commands.sh
 SAN=tsan bash tests/sdk-native-commands.sh
 ```
 
-All three passed on the development host. ASan includes UBSan. The runner also
-supports `SAN=ubsan` for a standalone UBSan run. ASan/UBSan and TSan transcripts
-are retained under `anchor/output/sdk-completion-native-commands/`.
+The runner also supports `SAN=ubsan` for a standalone UBSan run.
 
 Each run checks both the production compilation and a compilation with private
 fixture inspection enabled. The fixture covers all 26 operation IDs with and

@@ -3,8 +3,8 @@
  * unit+0x1a0 -> UnitStateServer+0x1f28 -> StateNotificationServer. Virtual slots 15/19/21/2
  * select play-with-state, quantize, key-lock and Sync observers on both supported builds.
  * Only borrowed notification bytes are copied; no native object or source pointer is kept.
- * Signatures/layout evidence and unresolved semantic normalization are documented in
- * CORE-SDK-LIVE-READERS.md. Registration and receipt never establish committed load identity. */
+ * See CORE-SDK-STATUS-NATIVE.md for scalar notification ownership and projection.
+ * Registration and receipt never establish committed load identity. */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif

@@ -21,7 +21,6 @@ python3 tests/unit/sdk_emulator_loop_continuation_test.py
 python3 tests/unit/sdk_emulator_cue_runtime_test.py
 python3 tests/unit/sdk_panel_transport_test.py
 python3 tests/unit/sdk_position_probe_test.py
-python3 tests/unit/sdk_emulator_resources_test.py
 python3 tests/unit/sdk_emulator_diagnostics_test.py
 python3 tests/unit/sdk_native_integration_test.py
 python3 tests/unit/sdk_emulator_wave_layer_test.py

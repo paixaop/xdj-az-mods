@@ -11,7 +11,7 @@ The passive producer runs in azstem on the identified EP147 ELF profiles. It sha
 
 These six concrete methods increment the property's 32-bit revision at `+8`. A seventh method commits kind after the nested copy at `0x13e6340` / `0x14a1780`. The installer checks all seven prologues before patching. The original code for 2.00 shows the concrete subclass copy delegating to the base implementation at `0x14a9c78`. The reset increments the revision after writing the two empty coordinates at `0x14a62c0..0x14a62d4`. The color writer increments the same revision at `0x14a7650..0x14a7660`. The original 1.30 executable has the corresponding implementations and argument registers. The Ghidra project for the matching 2.00 image was reused read-only with full-image reanalysis disabled.
 
-The owner validates the unit, PlayerCore, facade, embedded task box and setter bindings before reading. The facade's CueContext pointer at `+0x68` identifies its working property at context `+0x160` and its independent kind-zero pointer at context `+0x18`. On 2.00, the helpers at `0x149ef50` and `0x149f098` establish these respective indexed-retained and working routes. The EXIT helper at `0x149f058` clears the working member. Equivalent helpers on 1.30 are `0x13e3c58`, `0x13e3da0` and `0x13e3d60`. Each captured writer calls its original and copies values inside the existing owner frame. A load receipt must survive on both sides of that copy. Unexplained revision movement or owner replacement issues scoped loss and a new baseline. The SDK does not assume this list intercepts every write in every execution context. [Native property and engagement evidence](CORE-SDK-NATIVE-EVIDENCE.md) · [Command owner and point decoder](CORE-SDK-NATIVE-COMMANDS.md)
+The owner validates the unit, PlayerCore, facade, embedded task box and setter bindings before reading. The facade's CueContext pointer at `+0x68` identifies its working property at context `+0x160` and its independent kind-zero pointer at context `+0x18`. On 2.00, the helpers at `0x149ef50` and `0x149f098` establish these respective indexed-retained and working routes. The EXIT helper at `0x149f058` clears the working member. Equivalent helpers on 1.30 are `0x13e3c58`, `0x13e3da0` and `0x13e3d60`. Each captured writer calls its original and copies values inside the existing owner frame. A load receipt must survive on both sides of that copy. Unexplained revision movement or owner replacement issues scoped loss and a new baseline. The SDK does not assume this list intercepts every write in every execution context. [Command owner and point decoder](CORE-SDK-NATIVE-COMMANDS.md)
 
 For a complete, source-matched working loop, `AZ_STATUS_LOOP_MODE_TIME` identifies a sample-length loop. The native set-loop writer stores zero at property `+0xc8` and the OUT−IN sample span at `+0xd0`. `AZ_STATUS_LOOP_MODE_BEAT` identifies a beat-fraction loop. The beat writer stores one at `+0xc8` and the explicit fraction at `+0xd8`. Both set the loop property kind to 3 or 4. EXIT makes the working mode empty. A foreign source, incomplete interval or invalid fraction makes it stale. Unidentified active kinds and modes remain unsupported.
 
@@ -129,7 +129,33 @@ In 2.00, `PlayPauseFunctionHandler::onStopped` at `0x146b7c8` asserts that its P
 | Native property commits | LOOP retained IN/OUT, defined, engagement, working IN/OUT and working mode, CUES.main and CUES.live_hot. Live hot rows copy owned comments and loop auto-active state. A copied hot or memory loop identifies its precise collection revision and entry. Re-entry requires two resident, source-matched retained endpoints. Coordinates preserve source samples, rate and seconds. | Storage flags and a FILE loop association require independent witnesses. |
 | MemoryCueSet commits | CUES.live_memory in native order, with point or loop, source-time coordinates, RGB, supported palette ID, auto-active bit and copied comment. Holder replacement changes the provider identity. | The committed FILE edition qualifies storage flags. Current row position alone cannot associate a retained/working loop with a stored row. |
 | LoadedTrackInfo update and retirement | METADATA title, artist and the 32-bit content ID at TrackID `+8` share the owned LoadState incarnation. Replacement and destruction withdraw the display observation. | The scope remains UNIT. The original 16-byte identity does not join this record to a file or a matched load. |
-| StateNotificationServer play/loop notifications | The older snapshot service can report a sampled native receipt. | `checkPlayState` tests the play/pause latch before dispatch and can miss changes in the two context bytes. `checkLoopPlay` can coalesce working-property edits. Neither establishes a lossless writer feed. [Live reader evidence](CORE-SDK-LIVE-READERS.md) |
+| StateNotificationServer play/loop notifications | The older snapshot service can report a sampled native receipt. | `checkPlayState` tests the play/pause latch before dispatch and can miss changes in the two context bytes. `checkLoopPlay` can coalesce working-property edits. The [scalar notification rules](#native-scalar-notifications) describe how these receipts are published. |
 | PlayerCore position | POSITION.head from the continuous writer and the explicit setter, with integer sample, actual engine rate, owner/load stamps and a motion generation. Confirmed cue/beat JUMPs and stock interval WRAPs carry independent occurrence ordinals. | The existing render getter cannot qualify these receipts. A paused load can await a verified writer. A generic setter does not distinguish every physical seek or jump. Current-map identity and monotone intra-block path are still required to certify phrase crossings. |
 
 Run `tests/sdk-status-native.sh` on Linux for the owner, receipt lane and reducer fixtures, and repeat with `SAN=asan`. The fixtures exercise typed cue/beat jumps, a true stock interval wrap, wrong callback/source and stale generation, repeated equal-coordinate jumps, zero IN, retained OUT, EXIT and RELOOP before draining, a missed-revision excursion, overflow, and a writer stalled across final loss while an independent stream remains drainable. Reducer checks cover installed-field readiness, per-field revisions, matching load epochs and stale metadata. These are synthetic ARM tests. Earlier physical measurements of the older working-loop observer are recorded separately from hardware tests of this producer.
+
+
+## Native scalar notifications
+
+The native bridge keeps its own weak listeners and copies borrowed scalar
+payloads while the callback owns them. Keep callbacks bounded and allocation
+free. They use one writer claim and record receipt time on the monotonic clock.
+Owner retirement prevents a late callback from publishing into a replacement
+unit. Registration does not establish initial state, source identity or a
+committed load.
+
+The play notification follows changes to the play/pause latch. Its mode and
+auxiliary bytes carry context for that receipt. Use the current status reducer
+for normalized playback state. Quantize and KeyLock accept only 0 or 1. The
+native Master Tempo setter maps the strict KeyLock receipt to the enabled
+setting. Sync accepts native mode 0 for off and 2 for on. Other modes clear
+validity while preserving the raw receipt. Sync enabled, tempo following,
+master selection and beat lock each have their own evidence.
+
+Receipt revisions, clocks and unit generations are specific to each producer.
+Malformed input clears that producer's current validity. Keep independent
+valid observations from the other streams. The legacy live and Sync exports
+preserve their size-checked record layouts.
+
+Run `bash tests/sdk-live.sh` and `bash tests/sdk-status-native.sh` for ownership,
+scalar admission, retirement, prefix and malformed-payload regression checks.

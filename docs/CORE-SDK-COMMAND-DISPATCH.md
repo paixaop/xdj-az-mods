@@ -4,13 +4,9 @@
 tests. It contains no EP147 addresses, native pointer registry, hook, worker, or advertised
 native capability. The transient loop adapter in `sdk_command_service.c` and `sdk_exit.c`
 connects this engine to the native loop mailbox. Cue operations use the same public
-queue and the native cue control/actor, collection and persistence adapters. All 26
-public operation IDs have development implementation paths; functional correctness
-is established by actual command tests, not capability bits or source presence.
-Operation arguments and native side effects are described in
-[the native contract](CORE-SDK-NATIVE-COMMANDS.md). Follow
-[the current execution plan](../../anchor/CORE_SDK_IMPLEMENTATION_PLAN.md) for
-scope and efficient test selection; no evidence ledger is required.
+queue and the native cue control/actor, collection and persistence adapters. Run the [SDK integration tests](CORE-SDK-AUTOMATION.md) to qualify behavior.
+The [native command guide](CORE-SDK-NATIVE-COMMANDS.md) describes the native
+providers and their side effects.
 
 ## Storage, ownership and retry contract
 
