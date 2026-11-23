@@ -22,6 +22,9 @@ void (*request_entry)(void *, const void *);
 bool (*handler_entry)(void *);
 void (*reply_entry)(void *, const void *, const void *, const void *, const void *, const int *);
 void (*registered_entry)(void *);
+static void (*notice_entry)(void *, const void *);
+static unsigned matching_notices, other_notices;
+static bool show_memory_notice;
 uintptr_t handler_table[4] = {0}, receiver_table[3] = {0};
 unsigned producer_calls, request_calls, handler_calls, task_calls, ready_calls, confirm_calls, allocations, destructions;
 bool identity_valid = true, effect_confirmed = true, invalidate_in_producer = false, publication_checks = false;
@@ -288,7 +291,11 @@ void native_request(void *owner, const void *record) {
     unsigned kind = ((const unsigned char *) (record))[4];
     uintptr_t c = getword(kind ? hot_set.bytes : memory_set.bytes, 0x28), row = getword(((void *) (c)), 0x28) + (kind ? kind - 1 : 0) * 0x80;
     free(((void *) (getword(handler.bytes, 0xa8))));
-    copy_row(handler.bytes + 0x38, ((void *) (row)));
+    if (row) copy_row(handler.bytes + 0x38, (void *) row);
+    else {
+        memset(handler.bytes + 0x38, 0, 0x80);
+        memcpy(handler.bytes + 0x3c, (const char *) record + 0x68, sizeof(uint32_t));
+    }
     uint32_t serial = 1234;
     memcpy(handler.bytes + 0x30, &serial, 4);
     memcpy(helper_request.bytes + 8, &serial, 4);
@@ -336,10 +343,19 @@ void native_reply(void *self, const void *unused_1, const void *track, const voi
     memcpy(payload.bytes + 12, ((unsigned char *) (self)) + 8, 4);
     memcpy(payload.bytes + 16, track, 16);
 }
+static void native_memory_notice(void *self, const void *track) {
+    assert(self);
+    if (track == payload.bytes + 0x10) ++matching_notices;
+    else ++other_notices;
+}
 void native_registered(void *self) {
     assert(self == payload.bytes);
     ++task_calls;
     if (getword(self, 0) != ((uintptr_t) (maintainer.bytes))) return;
+    if (show_memory_notice) {
+        notice_entry(self, payload.bytes + 0x10);
+        notice_entry(self, property.bytes);
+    }
     if (getword(maintainer.bytes, 0x160)) {
         free(((void *) (getword(handler.bytes, 0xa8))));
         setword(handler.bytes, 0xa8, 0);
@@ -359,6 +375,7 @@ void *install(uintptr_t address, void *hook, void **original) {
         assert(task_calls == before + 1 && !ready_calls && !azsdk_cue_persist_capabilities());
     } else if (address == ((uintptr_t) (native_memory))) memory_entry = ((Helper) (hook));
     else if (address == ((uintptr_t) (native_hot))) hot_entry = ((Helper) (hook));
+    else if (address == (uintptr_t) native_memory_notice) notice_entry = (typeof(notice_entry)) hook;
     else assert(false);
     return hook;
 }
@@ -453,6 +470,7 @@ static void *response_worker(void *opaque) {
 static void *task_worker(void *opaque) {
     (void) opaque;
     registered_entry(payload.bytes);
+    if (show_memory_notice) notice_entry(payload.bytes, payload.bytes + 0x10);
     return NULL;
 }
 void finish(struct azexit_cue_request *r, unsigned outcome, int native_result) {
@@ -506,6 +524,7 @@ int main() {
     profile.handler_request = ((uintptr_t) (native_handler));
     profile.reception_reply = ((uintptr_t) (native_reply));
     profile.registered_task = ((uintptr_t) (native_registered));
+    profile.memory_notice = (uintptr_t) native_memory_notice;
     profile.handler_table = ((uintptr_t) (handler_table));
     profile.reception_table = ((uintptr_t) (receiver_table));
     profile.string_allocate = ((uintptr_t) (allocate));
@@ -920,6 +939,27 @@ int main() {
     publication_checks = true;
     finish(&r, AZ_COMMAND_APPLIED, 0);
     publication_checks = false;
+
+    r = request(AZ_CMD_CUE_POINT_SET, token++);
+    r.entry_id = 0;
+    r.classification = AZ_CUE_MEMORY;
+    r.flags |= AZ_COMMAND_NATIVE_CUE_IDS;
+    struct azcuepersist_witness empty_memory = witness();
+    current_operation = r.operation;
+    assert(azsdk_cue_persist_submit(&r, maintainer.bytes, maintainer.bytes, 0, property.bytes, 7, &empty_memory) == AZ_PENDING);
+    create_native_cue = true;
+    helper_pending = true;
+    before_calls = helper_calls;
+    run_helper(0);
+    create_native_cue = false;
+    assert(helper_calls == before_calls + 1);
+    show_memory_notice = true;
+    publication_checks = true;
+    finish(&r, AZ_COMMAND_APPLIED, 0);
+    publication_checks = false;
+    assert(matching_notices == 1 && other_notices == 1);
+    registered_entry(payload.bytes); /* unowned native registration keeps its notice */
+    assert(matching_notices == 2 && other_notices == 2);
     if (helper_cue_owned) destroy_row(helper_cue.bytes);
     for (size_t i = 0; i < owned_count; ++i) {
         unsigned char *content = owned_contents[i];

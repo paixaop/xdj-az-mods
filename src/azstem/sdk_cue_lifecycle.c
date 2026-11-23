@@ -121,7 +121,8 @@ static bool rebase_persist(struct azcue_profile *p, uintptr_t bias) {
                             &p->persist.string_allocate, &p->persist.string_assign, &p->persist.string_destroy, &p->persist.color_construct,
                             &p->persist.memory_helper, &p->persist.content_copy, &p->persist.content_release,
                             &p->persist.vector_append, &p->persist.vector_destroy, &p->persist.content_from_vector, &p->persist.content_publish, &p->persist.hot_helper,
-                            &p->persist.hot_content_from_vector, &p->persist.hot_content_publish, &p->persist.cue_copy, &p->persist.cue_destroy};
+                            &p->persist.hot_content_from_vector, &p->persist.hot_content_publish, &p->persist.cue_copy, &p->persist.cue_destroy,
+                            &p->persist.memory_notice};
     for (unsigned i = 0; i < sizeof persist / sizeof *persist; ++i)
         if (!rebase(persist[i], bias)) return 0;
     return true;

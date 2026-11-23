@@ -12,6 +12,7 @@ struct azcuepersist_profile {
     uintptr_t memory_helper, content_copy, content_release, vector_append, vector_destroy, content_from_vector, content_publish;
     uintptr_t hot_helper, hot_content_from_vector, hot_content_publish;
     uintptr_t cue_copy, cue_destroy;
+    uintptr_t memory_notice;
 };
 /* Called from the actor's owned CueCallManager thread. validate only examines
  * core-owned identity/lifetime state and must work on native callback threads.

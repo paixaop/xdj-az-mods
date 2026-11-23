@@ -15,6 +15,7 @@
  * The message thread starts it (fc_request), shows the progress and the result (fc_tick).
  * One copy at a time, and never beside the playlist copy (shared exclusion: cp_busy). */
 #include <dirent.h>
+#include <errno.h>
 #include <sys/statvfs.h>
 #include "folder_copy.h"
 
@@ -64,15 +65,22 @@ static int fcr_list(void *ctx, const char *rel, int (*each)(void *, const char *
     DIR *d = opendir(p);
     if (!d)
         return -1;
-    struct dirent *e;
-    while ((e = readdir(d))) {
+    int result = 0;
+    for (;;) {
+        /* Callbacks can leave errno set, including through recursive walks. */
+        errno = 0;
+        struct dirent *e = readdir(d);
+        if (!e) {
+            result = errno ? -1 : 0;
+            break;
+        }
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
             continue;
         if (each(arg, e->d_name))
             break;
     }
     closedir(d);
-    return 0;
+    return result;
 }
 
 static int fc_still_mounted(const char *mount) {

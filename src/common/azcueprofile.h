@@ -12,7 +12,7 @@ struct azcue_profile {
     struct azcue_entry ctor, complete_dtor, deleting_dtor;
     struct azcue_entry store[15];
     struct azcuepersist_profile persist;
-    struct azcue_entry persist_hooks[6];
+    struct azcue_entry persist_hooks[7];
     struct azcue_entry actor_entries[4];
     struct azcue_entry persist_metadata[12];
 };

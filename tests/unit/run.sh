@@ -1707,6 +1707,14 @@ for v in real ctl-dotdot ctl-junk ctl-overwrite ctl-merge ctl-depth ctl-room; do
     $CC "${CFLAGS[@]}" -I"$d/$v" -I$T -o "$d/$v/t" $T/foldercopy_test.c
 done
 suite "folder copy" "$d/real/t"
+awk -v source="$ROOT/guest/azmod/folder_copy.c" '
+    /^static int fc_abs\(/ { active=1; printf "#line %d \"%s\"\n", NR, source }
+    /^static int fc_still_mounted\(/ { active=0 }
+    active { print }
+' guest/azmod/folder_copy.c > "$d/filesystem.inc"
+$CC "${CFLAGS[@]}" -Iguest/azmod -I$T -DFOLDERLIST_INC="\"$d/filesystem.inc\"" \
+    -o "$d/list" $T/folderlist_test.c
+suite "folder enumeration" "$d/list" "$d"
 # fcopy_wiring: EP147's folder re-read is called only on an object whose vtable is checked, then
 # the cached lists are dropped; PASTE of copied files goes to fc_request; the FOLDER menu has no
 # UNDO; the library thread services the refresh and every mount cleans an interrupted copy.
