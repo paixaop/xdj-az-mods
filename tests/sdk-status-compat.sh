@@ -18,6 +18,8 @@ cc -O2 -fPIC -shared -fvisibility=hidden -I"$new" "$new/test/community/status_mo
 for provider in old new; do
     src=$new
     if [[ $provider == old ]]; then src=$old; fi
+    policy=()
+    if [[ $provider == new ]]; then policy=("$src/sdk_command_engine.c"); fi
     headers=(-include stdatomic.h)
     if [[ $provider == old ]] && ! grep -q 'static int bpmstate_current' "$src/test/community/harness.c"; then
         # This baseline's standalone loader harness omits the optional GUI BPM owner.
@@ -35,7 +37,7 @@ for provider in old new; do
         printf '%s %s\n' "$id" "$(sha256sum < "$work/$id.so" | cut -d' ' -f1)" >> "$trust/approved"
     done
     cc -O2 -no-pie "${headers[@]}" -I"$src" "-DCM_ROOT=\"$work/$provider\"" "-DCM_LOGDIR=\"$work/log-$provider\"" \
-        "$src/test/community/harness.c" -pthread -ldl -lm -rdynamic -o "$work/host"
+        "$src/test/community/harness.c" "${policy[@]}" -pthread -ldl -lm -rdynamic -o "$work/host"
     "$work/host" init > "$work/$provider.trace"
     if ! grep -q '^LEGACY setting round trip$' "$work/$provider.trace"; then
         cat "$work/$provider.trace" >&2

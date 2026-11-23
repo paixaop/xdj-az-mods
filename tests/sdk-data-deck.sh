@@ -105,7 +105,7 @@ docker run --rm --platform=linux/arm64 -v "$PWD:/src:ro" -v "$tmp:/work" "$image
         gcc "${flags[@]}" "${san[@]}" /src/tests/unit/sdkdata_test.c -lm -o /work/bin/data-$pass
         gcc "${flags[@]}" "${san[@]}" /src/tests/unit/sdkwaveform_test.c -o /work/bin/waveform-$pass
         gcc "${flags[@]}" "${san[@]}" -DSOURCE_IDENTITY_INC=\"/work/source-identity.inc\" /src/tests/unit/sdksourceidentity_test.c -o /work/bin/source-identity-$pass
-        gcc "${flags[@]}" "${san[@]}" -rdynamic -DLIB_INC=\"sdk_lib.c\" /src/tests/unit/sdktrack_test.c \
+        gcc "${flags[@]}" "${san[@]}" -rdynamic -DLIB_INC=\"sdk_lib.c\" /src/tests/unit/sdktrack_test.c /src/src/azmod/sdk_command_engine.c \
             /usr/lib/aarch64-linux-gnu/libsqlite3.a -ldl -lm -o /work/bin/provider-$pass
         gcc "${flags[@]}" "${san[@]}" /src/tests/unit/sdkrealanlz_probe.c -lm -o /work/bin/real-$pass
         gcc "${flags[@]}" "${san[@]}" /src/tests/unit/sdkwaveprovider_probe.c -lm -o /work/bin/range-$pass
@@ -128,7 +128,7 @@ docker run --rm --platform=linux/arm64 -v "$PWD:/src:ro" -v "$tmp:/work" "$image
         gcc "${flags[@]}" -I/work/review/$control -DST_ENGINE_HEADER=\"/work/review/$control/sdk_data_engine.h\" -fsanitize=address,undefined -static-libasan -static-libubsan -fno-sanitize-recover=all /src/tests/unit/sdkdata_test.c -lm -o /work/bin/review-$control-control
     done
     for control in database-alias database-uri missing-parent wave-errors analysis-binding track-fifo wave-fifo analysis-path-limit preview-extension; do
-        gcc -I/work/review/$control "${flags[@]}" -Wno-unused-function -Wno-missing-field-initializers -rdynamic -DLIB_INC=\"sdk_lib.c\" /src/tests/unit/sdktrack_test.c /usr/lib/aarch64-linux-gnu/libsqlite3.a -ldl -lm -o /work/bin/review-$control-control
+        gcc -I/work/review/$control "${flags[@]}" -Wno-unused-function -Wno-missing-field-initializers -rdynamic -DLIB_INC=\"sdk_lib.c\" /src/tests/unit/sdktrack_test.c /src/src/azmod/sdk_command_engine.c /usr/lib/aarch64-linux-gnu/libsqlite3.a -ldl -lm -o /work/bin/review-$control-control
     done
     gcc "${flags[@]}" -DDECK_DATA_INC=\"/work/deck-control.inc\" /src/tests/unit/sdkdeckdata_test.c -o /work/bin/prefix-control
     for control in player generation byte-zero zero-time reason numeric; do

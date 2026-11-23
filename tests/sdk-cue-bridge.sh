@@ -11,5 +11,5 @@ asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-f
 tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 *) exit 2 ;;
 esac
-"${HOST_CC:-cc}" "${flags[@]}" tests/unit/sdkcue_bridge_test.c -lm -o "$work/test"
+"${HOST_CC:-cc}" "${flags[@]}" tests/unit/sdkcue_bridge_test.c src/azmod/sdk_command_engine.c -lm -o "$work/test"
 "$work/test"

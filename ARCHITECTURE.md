@@ -82,6 +82,22 @@ Apart from the crash reports and the hook table, each is written at most about o
 or once per track or stem change. All are under `/tmp` (cleared on reboot); none is written
 to the settings partition.
 
+### Command policy module
+
+`src/azmod/sdk_command_engine.c` compiles as a hidden production object linked
+into `azmod.so`. Its private header declares copied request/result records and
+bounded admission, execution, notification and retirement operations. It has no
+host globals, native firmware calls, constructors or mutable global state. The
+host command service owns the single `scmd_engine` instance and authenticates
+external callers before passing owner identities into the policy module.
+
+The engine mutex protects request and lifetime state. Native adapters supply
+qualified targets; execution callbacks run outside that mutex and retain the
+existing load, revision, deadline and completion checks. Command fixtures link
+the same production object. Fault controls compile separate mutated objects and
+do not supply production coverage. Native command providers retain their
+existing `azstem.so` ownership and cross-library discovery interface.
+
 ## 3. Source layout
 
 ### `src/azmod/`

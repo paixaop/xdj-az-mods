@@ -15,9 +15,9 @@ tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 esac
 compiler=${HOST_CC:-cc}
 "${HOST_CC:-cc}" -std=c11 -Wall -Wextra -Werror -Isrc/common -x c -fsyntax-only src/common/aznativecommands.h
-"$compiler" "${flags[@]}" src/azstem/sdk_native_commands.c tests/unit/sdknativecommands_test.c tests/unit/native_unwind.c -lstdc++ -ldl -lm -o "$task_tmp/production"
+"$compiler" "${flags[@]}" src/azstem/sdk_native_commands.c tests/unit/sdknativecommands_test.c src/azmod/sdk_command_engine.c tests/unit/native_unwind.c -lstdc++ -ldl -lm -o "$task_tmp/production"
 "$task_tmp/production"
-"$compiler" "${flags[@]}" -DAZSDK_NATIVE_COMMANDS_TESTING src/azstem/sdk_native_commands.c tests/unit/sdknativecommands_test.c tests/unit/native_unwind.c -lstdc++ -ldl -lm -o "$task_tmp/real"
+"$compiler" "${flags[@]}" -DAZSDK_NATIVE_COMMANDS_TESTING src/azstem/sdk_native_commands.c tests/unit/sdknativecommands_test.c src/azmod/sdk_command_engine.c tests/unit/native_unwind.c -lstdc++ -ldl -lm -o "$task_tmp/real"
 "$task_tmp/real"
 # The real fixture above uses the requested sanitizer; controls use a plain build.
 control_flags=(-std=gnu11 -fexceptions -fasynchronous-unwind-tables -O1 -g -Wall -Wextra -Werror -pthread -DAZSDK_NATIVE_COMMANDS_TESTING -Isrc/common -Isrc/azmod -fvisibility=hidden)
@@ -43,7 +43,7 @@ for name, old, new in variants:
     (Path(sys.argv[1]) / (name + '.c')).write_text(source.replace(old, new))
 PY
 for control in capability owner-thread foreign-release generation retirement-wait reentrant-close predicate-release exhaustion thread-reuse; do
-    "$compiler" "${control_flags[@]}" "$task_tmp/$control.c" tests/unit/sdknativecommands_test.c tests/unit/native_unwind.c -lstdc++ -ldl -lm -o "$task_tmp/$control"
+    "$compiler" "${control_flags[@]}" "$task_tmp/$control.c" tests/unit/sdknativecommands_test.c src/azmod/sdk_command_engine.c tests/unit/native_unwind.c -lstdc++ -ldl -lm -o "$task_tmp/$control"
     if ( ulimit -c 0; "$task_tmp/$control" >"$task_tmp/$control.log" 2>&1 ) 2>/dev/null; then
         echo "FAIL: native command $control control was not caught" >&2; exit 1
     fi

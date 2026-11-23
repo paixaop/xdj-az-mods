@@ -17,7 +17,7 @@ tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer);;
 *) echo 'SAN must be plain, asan or tsan' >&2;exit 2;;
 esac
 command=("${HOST_CC:-gcc}" "${flags[@]}" '-DLIB_INC="sdk_lib.c"'
-         -Itests/unit -Isrc/azmod tests/unit/sdktrack_test.c -lsqlite3 -ldl -lm -o "$task_tmp/provider")
+         -Itests/unit -Isrc/azmod tests/unit/sdktrack_test.c src/azmod/sdk_command_engine.c -lsqlite3 -ldl -lm -o "$task_tmp/provider")
 python3 - "$task_tmp/command.json" "${command[@]}" <<'PY'
 from pathlib import Path
 import hashlib,json,sys
