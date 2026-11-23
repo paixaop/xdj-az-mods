@@ -188,6 +188,35 @@ uint8_t *st_read_file_checked(const char *path, size_t *size,
 uint8_t *st_read_file(const char *path, size_t *size) {
     return st_read_file_checked(path, size, 0, 0, 0);
 }
+static int st_hash_bytes(int fd, off_t bytes, char digest[65]) {
+    unsigned char buffer[16384];
+    azsha256_ctx hash;
+    azsha256_init(&hash);
+    while (bytes > 0) {
+        size_t chunk = bytes < (off_t) sizeof buffer ? (size_t) bytes : sizeof buffer;
+        if (!st_read_complete(fd, buffer, chunk)) return 0;
+        azsha256_update(&hash, buffer, chunk);
+        bytes -= (off_t) chunk;
+    }
+    azsha256_final_hex(&hash, digest);
+    return 1;
+}
+static int st_hash_input(int fd, struct stat *status, uint64_t signature) {
+    /* The Beatport reader accepts AAC containers up to 128 MiB. */
+    return !fstat(fd, status) && status->st_size > 0 && status->st_size <= 128 * 1024 * 1024 &&
+           st_stat_sig(status) == signature;
+}
+int st_hash_file(const char *path, uint64_t signature, char digest[65]) {
+    if (!signature) return 0;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return 0;
+    struct stat status;
+    int ok = st_hash_input(fd, &status, signature);
+    if (ok) ok = st_hash_bytes(fd, status.st_size, digest) &&
+                 st_read_recheck(fd, status.st_dev, status.st_ino, signature);
+    close(fd);
+    return ok;
+}
 int st_resolution_source_equal(const struct st_source *a, const struct st_source *b) {
     return st_ref_equal(&a->ref, &b->ref) && a->mount_id == b->mount_id &&
            a->device == b->device && a->inode == b->inode && !strcmp(a->mount, b->mount);

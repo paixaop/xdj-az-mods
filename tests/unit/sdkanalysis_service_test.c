@@ -39,14 +39,19 @@ static void mountinfo(const char *root, int mid) {
 static az_track_ref fixture_loaded_ref;
 static unsigned fixture_source_kind = AZ_STATUS_SOURCE_USB1;
 static int fixture_source_ready = 1, fixture_source_closed;
+static int fixture_second_stream_deck, fixture_grid_shift;
+static unsigned char fixture_stream_id = 23;
 static char fixture_source_path[1024], st_test_state[PATH_MAX];
+static int fixture_loaded_deck(unsigned deck) {
+    return !deck || (deck == 1 && fixture_second_stream_deck);
+}
 static int fixture_source_open(unsigned deck, uint64_t epoch, uint64_t load, struct azn_analysis_source *out) {
     if (!fixture_source_ready) return AZ_NOT_FOUND;
-    assert(!deck && epoch == 9 && load == 44);
+    assert(fixture_loaded_deck(deck) && epoch == 9 && load == 44);
     *out = (struct azn_analysis_source) {.size = sizeof *out, .version = 1, .token = 7, .epoch = epoch, .load = load, .source_kind = AZ_STATUS_SOURCE_STREAMING};
     out->track_id[0] = 1;
     out->track_id[4] = 6;
-    out->track_id[8] = 23;
+    out->track_id[8] = fixture_stream_id;
     memcpy(out->audio_path, fixture_source_path, sizeof out->audio_path);
     return AZ_OK;
 }
@@ -98,7 +103,7 @@ int az_status_loaded_reference(unsigned deck, uint64_t load, az_track_ref *out) 
     return AZ_OK;
 }
 static int fixture_capture(unsigned deck, uint64_t load, struct aznm_packet *out) {
-    if (deck || load != 44) return AZ_STALE;
+    if (!fixture_loaded_deck(deck) || load != 44) return AZ_STALE;
     memset(out, 0, sizeof *out);
     out->owner = 1;
     out->grid.content = 1;
@@ -113,7 +118,7 @@ static int fixture_valid(unsigned deck, uint64_t load, const struct aznm_packet 
         atomic_store(&fixture_current_entered, 1);
         while (!atomic_load(&fixture_resume_current)) usleep(1000);
     }
-    return !deck && load == 44 && map->owner == 1 && fixture_current ? AZ_OK : AZ_STALE;
+    return fixture_loaded_deck(deck) && load == 44 && map->owner == 1 && fixture_current ? AZ_OK : AZ_STALE;
 }
 static int fixture_read(const struct aznm_component *c, unsigned kind, void *rows, uint32_t cap, uint32_t *count) {
     (void) c;
@@ -121,6 +126,8 @@ static int fixture_read(const struct aznm_component *c, unsigned kind, void *row
     if (rows && kind == AZNM_GRID) {
         assert(cap >= 2);
         az_beat beats[2] = {{0, 120, 1, 0}, {0.5, 120, 2, 0}};
+        beats[0].time_s += fixture_grid_shift / 44100.0;
+        beats[1].time_s += fixture_grid_shift / 44100.0;
         memcpy(rows, beats, sizeof beats);
     }
     return AZ_OK;
@@ -130,8 +137,8 @@ static int fixture_samples(const struct aznm_component *c, int64_t *ticks, uint3
     assert(cap >= 2);
     *count = 2;
     *rate = 44100;
-    ticks[0] = 0;
-    ticks[1] = 22050;
+    ticks[0] = fixture_grid_shift;
+    ticks[1] = 22050 + fixture_grid_shift;
     return AZ_OK;
 }
 static void fixture_release(const struct aznm_packet *map) {
@@ -175,7 +182,7 @@ static const struct azn_maps_api *fixture_maps(void) {
     return &api;
 }
 static int fixture_seed(unsigned deck, struct azstatus_native_receipt *out) {
-    if (deck || out->version != 1 || out->size < sizeof *out) return 0;
+    if (!fixture_loaded_deck(deck) || out->version != 1 || out->size < sizeof *out) return 0;
     out->epoch = 9;
     out->load_generation = 44;
     out->source_kind = fixture_source_kind;
@@ -936,6 +943,54 @@ static void failed_refresh_releases_link(az_track_ref ref, const az_analysis_res
     analysis_source_release(&input);
 }
 
+static void beatport_reload_cache(const char *root, const az_analysis_result_v1 *phrases,
+                                 const az_analysis_result_v1 *combined) {
+    const uint32_t both = AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS;
+    analysis_source_input job = {0}, other = {0};
+    char original[1024], reload[1024], different[1024], collision[1024];
+    memcpy(original, fixture_source_path, sizeof original);
+    snprintf(reload, sizeof reload, "%s/reloaded.m4a", root);
+    snprintf(different, sizeof different, "%s/different.m4a", root);
+    snprintf(collision, sizeof collision, "%s/collision.m4a", root);
+    analysis_write(reload, "native-completed-audio", 22);
+    analysis_write(different, "different-beatport-audio", 24);
+    analysis_write(collision, "collision-audio-24", 18);
+    assert(st_disk_sig(original) != st_disk_sig(reload));
+
+    fixture_native_phrases = 0;
+    fixture_second_stream_deck = 1;
+    assert(acquire_loaded(0, both, 0, 44, &job) == AZ_OK && job.needed == AZ_DATA_PHRASES);
+    assert(publish_result(0, &job, phrases) == AZ_OK);
+    int publishes = fixture_published;
+    memcpy(fixture_source_path, reload, sizeof reload);
+    ++fixture_stream_id;
+    assert(acquire_loaded(0, both, 1, 44, &job) == ANALYSIS_SOURCE_COMPLETE && !job.lease && !job.needed);
+    assert(fixture_published == publishes + 1);
+
+    memcpy(fixture_source_path, different, sizeof different);
+    assert(acquire_loaded(0, both, 0, 44, &job) == AZ_OK && job.needed == both);
+    assert(publish_result(0, &job, combined) == AZ_OK);
+    memcpy(fixture_source_path, reload, sizeof reload);
+    assert(acquire_loaded(0, both, 0, 44, &job) == ANALYSIS_SOURCE_COMPLETE && !job.lease);
+
+    /* Grid changes invalidate only PSSI/PQTZ. A colliding source cannot displace
+     * the slot while this job has it pinned, including during a read-only probe. */
+    fixture_grid_shift = 4410;
+    assert(acquire_loaded(0, both, 0, 44, &job) == AZ_OK && job.needed == AZ_DATA_PHRASES);
+    memcpy(fixture_source_path, collision, sizeof collision);
+    az_vocal_snapshot_v1 vocals = {.size = sizeof vocals};
+    assert(analysis_vocal_intervals_loaded(owner_at(0), 1, 44, &vocals, NULL, 0) == AZ_NOT_FOUND);
+    assert(acquire_loaded(0, both, 1, 44, &other) == AZ_BUSY && !other.lease);
+    memcpy(fixture_source_path, reload, sizeof reload);
+    assert(publish_result(0, &job, phrases) == AZ_OK);
+    assert(acquire_loaded(0, both, 0, 44, &job) == ANALYSIS_SOURCE_COMPLETE && !job.lease);
+    memcpy(fixture_source_path, collision, sizeof collision);
+    assert(acquire_loaded(0, both, 1, 44, &job) == AZ_OK && job.needed == both);
+    analysis_source_release(&job);
+    fixture_grid_shift = 0;
+    fixture_second_stream_deck = 0;
+    memcpy(fixture_source_path, original, sizeof original);
+}
 int main(void) {
     analysis_owner_thread_bind(analysis_owner_begin(0));
     typed_grid_result_validation();
@@ -1176,7 +1231,7 @@ int main(void) {
     memcpy(malformed + 28, "PSSI", 4);
     sa_put32(malformed + 32, 12);
     sa_put32(malformed + 36, 12);
-    snprintf(path, sizeof path, "%s/analysis/beatport-0/analysis.EXT", st_test_state);
+    snprintf(path, sizeof path, "%s/analysis/beatport-v2-70/analysis.EXT", st_test_state);
     analysis_write(path, malformed, sizeof malformed);
     assert(acquire_loaded(0, AZ_DATA_PHRASES, 0, 44, &job) == AZ_FAILED);
     puts("Shifted grids, empty EXT placeholders and short framed PSSI regression checks passed");
@@ -1315,12 +1370,14 @@ int main(void) {
     assert(analysis_vocal_intervals(owner_at(0), &ref, &vocals, intervals, 4) == AZ_OK && vocals.method == AZ_VOCAL_PVDI);
     /* Streaming vocal-only output is readable through the loaded API. */
     fixture_source_kind = AZ_STATUS_SOURCE_STREAMING;
-    snprintf(path, sizeof path, "%s/analysis/beatport-0/analysis.EXT", st_test_state);
+    snprintf(path, sizeof path, "%s/analysis/beatport-v2-70/analysis.EXT", st_test_state);
     assert(!unlink(path));
     assert(acquire_loaded(0, AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS, 0, 44, &job) == AZ_OK && job.needed == AZ_ANALYSIS_VOCALS);
     assert(publish_result(0, &job, &vocal_result) == AZ_OK);
     assert(analysis_vocal_intervals_loaded(owner_at(0), 0, 44, &vocals, NULL, 0) == AZ_OK && !vocals.interval_count);
     display_read(AZ_OK, 22); /* Beatport, even with automatic analysis disabled. */
+    beatport_reload_cache(root, &phrase_result, &combined);
+    puts("Beatport cache: redownload, deck change, intervening track, grid change and slot collision passed");
     az_analysis_result_v1 reused = baseline_result;
     reused.vocals = vocal_result.vocals;
     for (int scenario = 0; scenario < 5; scenario++) loaded_link_reuse(ref, &reused, scenario);

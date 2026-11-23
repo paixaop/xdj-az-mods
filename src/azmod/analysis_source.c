@@ -41,6 +41,7 @@ struct sa_job {
     char reader_path[1024];
     struct st_source source;
     char database[1024], audio[1024], dat[1024], ext[1024], ex2[1024];
+    char stream_identity[1024], stream_digest[65];
     char relative_audio[2048], relative_dat[1024];
     uint64_t signatures[5];
     uint32_t needed;
@@ -101,7 +102,8 @@ static int sa_source_signatures_match(const struct sa_job *j, const struct st_so
            st_disk_sig(j->database) == j->signatures[0] && sa_disk_files_match(j);
 }
 static int sa_source_current(const struct sa_job *j) {
-    if (j->streaming) return sa_disk_files_match(j);
+    if (j->streaming)
+        return st_disk_sig(j->stream_identity) == j->signatures[0] && sa_disk_files_match(j);
     struct st_source source;
     if (st_source_read((int) j->source.ref.source_id - 1, &source)) return 0;
     source.ref.track_id = j->source.ref.track_id;
@@ -727,12 +729,17 @@ static int sa_capture_grid(struct sa_job *j) {
     sa_grid_capture_drop(&capture);
     return rc;
 }
+static int sa_stream_create_dir(const char *path, int read_only) {
+    return read_only || !mkdir(path, 0700) || errno == EEXIST;
+}
 static int sa_stream_directory(struct sa_job *j, int read_only) {
     char base[1024];
     if (snprintf(base, sizeof base, "%s/analysis", az_analysis_state_dir()) >= (int) sizeof base ||
-        (!read_only && mkdir(base, 0700) && errno != EEXIST)) return AZ_FAILED;
-    if (snprintf(j->source.mount, sizeof j->source.mount, "%s/beatport-%d", base, j->deck) >= (int) sizeof j->source.mount ||
-        (!read_only && mkdir(j->source.mount, 0700) && errno != EEXIST)) return AZ_FAILED;
+        !sa_stream_create_dir(base, read_only)) return AZ_FAILED;
+    /* 32 bounded slots shared by all decks. Verify the entire digest on a hit. */
+    if (snprintf(j->source.mount, sizeof j->source.mount, "%s/beatport-v2-%c%c", base,
+                 j->stream_digest[0], j->stream_digest[1] > '7' ? '1' : '0') >= (int) sizeof j->source.mount ||
+        !sa_stream_create_dir(j->source.mount, read_only)) return AZ_FAILED;
     return AZ_OK;
 }
 static int sa_stream_read_directory(const struct sa_job *j) {
@@ -740,47 +747,64 @@ static int sa_stream_read_directory(const struct sa_job *j) {
     if (lstat(j->source.mount, &directory)) return errno == ENOENT ? AZ_NOT_FOUND : AZ_FAILED;
     return S_ISDIR(directory.st_mode) ? AZ_OK : AZ_FAILED;
 }
-static int sa_stream_file_paths(struct sa_job *j, char identity[1024]) {
+static int sa_stream_file_paths(struct sa_job *j) {
     return st_source_path(j->source.mount, "/analysis.DAT", j->dat) &&
            st_source_path(j->source.mount, "/analysis.EXT", j->ext) &&
            st_source_path(j->source.mount, "/analysis.2EX", j->ex2) &&
-           st_source_path(j->source.mount, "/identity", identity);
+           st_source_path(j->source.mount, "/identity", j->stream_identity);
 }
-static void sa_stream_key(const struct sa_job *j, const unsigned char track[12], char key[96]) {
-    for (unsigned i = 0; i < 12; i++) snprintf(key + i * 2, 3, "%02x", track[i]);
-    snprintf(key + 24, 72, "-%016llx", (unsigned long long) j->signatures[1]);
-}
-static void sa_stream_read_key(const char *identity, char old[96]) {
-    int fd = open(identity, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) return;
-    if (read(fd, old, 95) < 0) old[0] = 0;
+static int sa_stream_key_matches(const struct sa_job *j) {
+    char old[65];
+    int fd = open(j->stream_identity, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return 0;
+    ssize_t bytes = read(fd, old, sizeof old);
     close(fd);
+    return bytes == 64 && !memcmp(old, j->stream_digest, 64);
 }
-static int sa_stream_replace(struct sa_job *j, const char *identity, const char *key) {
-    if ((unlink(j->dat) && errno != ENOENT) || (unlink(j->ext) && errno != ENOENT) || (unlink(j->ex2) && errno != ENOENT)) return AZ_FAILED;
+static int sa_stream_unlink(const char *path) {
+    return !unlink(path) || errno == ENOENT;
+}
+static int sa_stream_clear_phrases(struct sa_job *j) {
+    if (!sa_stream_unlink(j->ext) || !sa_stream_unlink(j->dat)) return AZ_FAILED;
+    j->signatures[2] = j->signatures[3] = 0;
+    return AZ_OK;
+}
+static int sa_stream_replace(struct sa_job *j) {
+    if (sa_stream_clear_phrases(j) || !sa_stream_unlink(j->ex2)) return AZ_FAILED;
     struct sa_staged staged = {.dir = -1};
-    int ok = sa_stage(j, identity, (const uint8_t *) key, strlen(key), &staged) && sa_publish(&staged);
+    int ok = sa_stage(j, j->stream_identity, (const uint8_t *) j->stream_digest, 64, &staged) && sa_publish(&staged);
     sa_stage_drop(&staged);
     return ok ? AZ_OK : AZ_FAILED;
 }
-/* Four per-deck caches; a new audio fingerprint replaces only its own deck. */
-static int sa_stream_paths(struct sa_job *j, const unsigned char track[12], int read_only) {
-    int rc = sa_stream_directory(j, read_only);
+/* sa_mutex serializes writers and protects leases in other decks sharing a slot. */
+static int sa_stream_slot_busy(const struct sa_job *j) {
+    for (unsigned i = 0; i < 8; i++)
+        if (sa_jobs[i].id && sa_jobs[i].streaming &&
+            !strcmp(j->source.mount, sa_jobs[i].source.mount)) return 1;
+    return 0;
+}
+static int sa_stream_bind_key(struct sa_job *j, int read_only) {
+    j->signatures[0] = st_disk_sig(j->stream_identity);
+    if (sa_stream_key_matches(j)) return AZ_OK;
+    if (read_only) return AZ_NOT_FOUND;
+    int rc = sa_stream_replace(j);
+    j->signatures[0] = st_disk_sig(j->stream_identity);
+    return rc;
+}
+static int sa_stream_bind_files(struct sa_job *j, int read_only) {
+    int rc = sa_stream_bind_key(j, read_only);
     if (rc) return rc;
-    if (read_only && (rc = sa_stream_read_directory(j))) return rc;
-    char key[96], old[96] = {0}, identity[1024];
-    if (!sa_stream_file_paths(j, identity)) return AZ_FAILED;
-    sa_stream_key(j, track, key);
-    sa_stream_read_key(identity, old);
-    if (strcmp(key, old)) {
-        if (read_only) return AZ_NOT_FOUND;
-        rc = sa_stream_replace(j, identity, key);
-        if (rc) return rc;
-    }
     j->signatures[2] = st_disk_sig(j->dat);
     j->signatures[3] = st_disk_sig(j->ext);
     j->signatures[4] = st_disk_sig(j->ex2);
-    return AZ_OK;
+    return j->signatures[0] && st_disk_sig(j->stream_identity) == j->signatures[0] ? AZ_OK : AZ_STALE;
+}
+static int sa_stream_paths(struct sa_job *j, int read_only) {
+    int rc = sa_stream_directory(j, read_only);
+    if (!rc) rc = sa_stream_read_directory(j);
+    if (rc) return rc;
+    if (!read_only && sa_stream_slot_busy(j)) return AZ_BUSY;
+    return sa_stream_file_paths(j) ? sa_stream_bind_files(j, read_only) : AZ_FAILED;
 }
 static const uint8_t *sa_find_tag(const uint8_t *data, size_t n, const char tag[4], uint32_t *length) {
     if (!data || !sa_framed(data, n)) return NULL;
@@ -821,14 +845,20 @@ static int sa_saved_phrases_publish(struct sa_job *j, const uint8_t *grid, uint3
     rc = j->maps->publish_phrases((unsigned) j->deck, j->load, &j->native_map, phrase, phrase_size);
     return rc ? rc : AZ_NOT_FOUND;
 }
+static int sa_saved_stream_grid(struct sa_job *j, const uint8_t *grid, uint32_t size) {
+    if (!j->streaming || !grid || sa_grid_same(j, grid, size)) return AZ_NOT_FOUND;
+    return sa_current(j) ? sa_stream_clear_phrases(j) : AZ_STALE;
+}
 static int sa_saved_phrases(struct sa_job *j, const uint8_t *dat, size_t dat_size, const uint8_t *ext, size_t ext_size) {
     int grid_count = sa_tag_count(dat, dat_size, "PQTZ");
     int dat_phrases = sa_tag_count(dat, dat_size, "PSSI"), ext_phrases = sa_tag_count(ext, ext_size, "PSSI");
     if (grid_count < 0 || dat_phrases < 0 || ext_phrases < 0 || (dat_phrases && ext_phrases)) return AZ_FAILED;
     uint32_t grid_size = 0, phrase_size = 0;
     const uint8_t *grid = sa_find_tag(dat, dat_size, "PQTZ", &grid_size);
-    const uint8_t *phrase = ext_phrases ? sa_find_tag(ext, ext_size, "PSSI", &phrase_size) : dat_phrases ? sa_find_tag(dat, dat_size, "PSSI", &phrase_size)
-                                                                                                         : NULL;
+    int rc = sa_saved_stream_grid(j, grid, grid_size);
+    if (rc != AZ_NOT_FOUND) return rc;
+    const uint8_t *phrase = ext_phrases ? sa_find_tag(ext, ext_size, "PSSI", &phrase_size)
+                                       : sa_find_tag(dat, dat_size, "PSSI", &phrase_size);
     return sa_saved_phrases_publish(j, grid, grid_size, phrase, phrase_size);
 }
 /* Saved phrase indexes are usable only against the captured native grid. */
@@ -954,17 +984,49 @@ static int sa_usb_open(struct sa_job *j, uint32_t phrases, struct sa_open_result
     }
     return sa_usb_register(j, phrases, result);
 }
-static int sa_stream_capture(struct sa_job *j, const struct azstatus_native_v1 *api, struct azn_analysis_source *source) {
-    j->streaming = 1;
-    j->audio_api = api->analysis_source ? api->analysis_source() : NULL;
-    if (!j->audio_api || j->audio_api->size < sizeof *j->audio_api || !j->audio_api->open) return AZ_UNSUPPORTED;
-    int rc = j->audio_api->open((unsigned) j->deck, j->native_epoch, j->load, source);
-    if (rc == AZ_NOT_FOUND) rc = AZ_BUSY; /* Completion capture has not arrived yet. */
-    if (rc) return rc;
-    j->audio_token = source->token;
-    memcpy(j->audio, source->audio_path, sizeof j->audio);
+static pthread_mutex_t sa_digest_mutex = PTHREAD_MUTEX_INITIALIZER;
+static struct sa_digest_entry {
+    uint64_t signature;
+    char digest[65];
+} sa_digests[4];
+
+static int sa_digest_cached(struct sa_job *j) {
+    pthread_mutex_lock(&sa_digest_mutex);
+    const struct sa_digest_entry *entry = &sa_digests[j->deck];
+    int hit = entry->signature == j->signatures[1];
+    if (hit) memcpy(j->stream_digest, entry->digest, sizeof entry->digest);
+    pthread_mutex_unlock(&sa_digest_mutex);
+    return hit;
+}
+static void sa_digest_remember(const struct sa_job *j) {
+    pthread_mutex_lock(&sa_digest_mutex);
+    struct sa_digest_entry *entry = &sa_digests[j->deck];
+    entry->signature = j->signatures[1];
+    memcpy(entry->digest, j->stream_digest, sizeof entry->digest);
+    pthread_mutex_unlock(&sa_digest_mutex);
+}
+static int sa_stream_fingerprint(struct sa_job *j) {
     j->signatures[1] = st_disk_sig(j->audio);
-    return j->signatures[1] ? AZ_OK : AZ_STALE;
+    if (!j->signatures[1]) return AZ_STALE;
+    if (sa_digest_cached(j)) return AZ_OK;
+    if (!st_hash_file(j->audio, j->signatures[1], j->stream_digest)) return AZ_STALE;
+    sa_digest_remember(j);
+    return AZ_OK;
+}
+static const struct azn_analysis_source_api *sa_stream_api(const struct azstatus_native_v1 *api) {
+    const struct azn_analysis_source_api *source = api->analysis_source ? api->analysis_source() : NULL;
+    return source && source->size >= sizeof *source && source->open && source->current && source->close ? source : NULL;
+}
+static int sa_stream_capture(struct sa_job *j, const struct azstatus_native_v1 *api) {
+    j->streaming = 1;
+    j->audio_api = sa_stream_api(api);
+    if (!j->audio_api) return AZ_UNSUPPORTED;
+    struct azn_analysis_source source = {.size = sizeof source, .version = 1};
+    int rc = j->audio_api->open((unsigned) j->deck, j->native_epoch, j->load, &source);
+    if (rc) return rc;
+    j->audio_token = source.token;
+    memcpy(j->audio, source.audio_path, sizeof j->audio);
+    return sa_stream_fingerprint(j);
 }
 static int sa_stream_deck_busy(int deck) {
     for (unsigned i = 0; i < 8; i++)
@@ -985,11 +1047,12 @@ static int sa_stream_slot(const struct sa_job *job, unsigned *slot) {
     if (!sa_owner_live(job)) return AZ_STALE;
     return sa_stream_capacity(*slot, owned) ? AZ_OK : AZ_LIMIT;
 }
-static int sa_stream_prepare(struct sa_job *j, uint32_t phrases, const unsigned char track[12], unsigned *slot) {
+static int sa_stream_prepare(struct sa_job *j, uint32_t phrases, unsigned *slot) {
     int rc = sa_stream_slot(j, slot);
     if (rc) return rc;
+    if (!sa_loaded_current(j)) return AZ_STALE;
     j->id = ++sa_serial;
-    rc = sa_stream_paths(j, track, 0);
+    rc = sa_stream_paths(j, 0);
     return rc ? rc : sa_loaded_needs(j, phrases);
 }
 static void sa_stream_retain(const struct sa_job *j, unsigned slot, struct sa_open_result *result) {
@@ -997,13 +1060,13 @@ static void sa_stream_retain(const struct sa_job *j, unsigned slot, struct sa_op
     result->job = j->id;
     memcpy(result->audio_path, j->reader_path, sizeof result->audio_path);
 }
-static int sa_stream_register(struct sa_job *j, uint32_t phrases, const unsigned char track[12], struct sa_open_result *result) {
+static int sa_stream_register(struct sa_job *j, uint32_t phrases, struct sa_open_result *result) {
     if (pthread_mutex_trylock(&sa_mutex)) {
         sa_job_drop(j);
         return AZ_BUSY;
     }
     unsigned slot = 8;
-    int rc = sa_stream_prepare(j, phrases, track, &slot);
+    int rc = sa_stream_prepare(j, phrases, &slot);
     result->needed = j->needed;
     if (!rc && !sa_current(j)) rc = AZ_STALE;
     if (!rc) rc = sa_reader_open(j);
@@ -1013,13 +1076,12 @@ static int sa_stream_register(struct sa_job *j, uint32_t phrases, const unsigned
     return rc;
 }
 static int sa_stream_open(struct sa_job *j, const struct azstatus_native_v1 *api, uint32_t phrases, struct sa_open_result *result) {
-    struct azn_analysis_source source = {.size = sizeof source, .version = 1};
-    int rc = sa_stream_capture(j, api, &source);
+    int rc = sa_stream_capture(j, api);
     if (rc) {
         sa_job_drop(j);
-        return rc;
+        return rc == AZ_NOT_FOUND ? AZ_BUSY : rc; /* Wait for the native download. */
     }
-    return sa_stream_register(j, phrases, source.track_id, result);
+    return sa_stream_register(j, phrases, result);
 }
 static int sa_loaded_seed(const struct azstatus_native_v1 *api, int deck, uint64_t load, struct azstatus_native_receipt *receipt) {
     return api->load_seed && api->load_seed((unsigned) deck, receipt) && receipt->load_generation == load ? AZ_OK : AZ_STALE;
@@ -1181,18 +1243,9 @@ static const struct azn_maps_api *sv_loaded_maps(const struct azstatus_native_v1
     return maps && maps->capture && maps->current && maps->release && api->load_seed ? maps : NULL;
 }
 static int sv_stream_open(struct sa_job *j, const struct azstatus_native_v1 *api) {
-    j->streaming = 1;
-    j->audio_api = api->analysis_source ? api->analysis_source() : NULL;
-    if (!j->audio_api || j->audio_api->size < sizeof *j->audio_api || !j->audio_api->open ||
-        !j->audio_api->current || !j->audio_api->close) return AZ_UNSUPPORTED;
-    struct azn_analysis_source source = {.size = sizeof source, .version = 1};
-    int rc = j->audio_api->open((unsigned) j->deck, j->native_epoch, j->load, &source);
-    if (rc) return rc;
-    j->audio_token = source.token;
-    memcpy(j->audio, source.audio_path, sizeof j->audio);
-    j->signatures[1] = st_disk_sig(j->audio);
     /* Reads never evict another load's cache or create settings files. */
-    rc = sa_stream_paths(j, source.track_id, 1);
+    int rc = sa_stream_capture(j, api);
+    if (!rc) rc = sa_stream_paths(j, 1);
     if (rc) sa_job_drop(j);
     return rc;
 }
