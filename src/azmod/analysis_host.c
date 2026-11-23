@@ -42,6 +42,7 @@ static void analysis_notice(unsigned deck, const az_analysis_status_v1 *status,
                             void (*banner)(const char *, int), void (*diagnostic)(const char *)) {
     char text[256];
     announced[deck] = status->request_id;
+    if (status->state == AZ_ANALYSIS_COMPLETE && status->result == AZ_NOT_FOUND) return;
     snprintf(text, sizeof text, "Deck %u: %s", deck + 1, analysis_result_message(status->result));
     if (status->state == AZ_ANALYSIS_COMPLETE && status->result == AZ_OK && banner) banner(text, 3000);
     if (status->result != AZ_OK && diagnostic) {

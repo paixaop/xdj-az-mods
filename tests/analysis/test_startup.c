@@ -6,11 +6,21 @@
 #include <string.h>
 static int available, enabled, start_result, bind_result;
 static unsigned logs, started, bound, phase;
+static char last_diagnostic[128];
 static void (*azmod_analysis_enable)(int);
 static int (*azmod_analysis_status)(unsigned, az_analysis_status_v1 *);
-enum { AZF_TRACK_ANALYSIS = 1 };
-static int az_on(int id) { assert(id == AZF_TRACK_ANALYSIS); return enabled; }
-static void dbg(const char *format, ...) { assert(format); ++logs; }
+enum {
+    AZF_TRACK_ANALYSIS = 1
+};
+static int az_on(int id) {
+    assert(id == AZF_TRACK_ANALYSIS);
+    return enabled;
+}
+static void analysis_diagnostic(const char *text) {
+    assert(text);
+    snprintf(last_diagnostic, sizeof last_diagnostic, "%s", text);
+    ++logs;
+}
 static int usbmods_find(char *out, size_t size) {
     if (!available) return 0;
     assert(snprintf(out, size, "/media/usb2/MODS") > 0);
@@ -23,31 +33,53 @@ int analysis_host_start(const char *assets, int on) {
 }
 void analysis_host_enable(int on) { enabled = on; }
 void analysis_runtime_load(unsigned d, uint64_t o, uint64_t e, int l, const az_track_ref *t) {
-    (void)d; (void)o; (void)e; (void)l; (void)t;
+    (void) d;
+    (void) o;
+    (void) e;
+    (void) l;
+    (void) t;
 }
-int analysis_runtime_deck_status(unsigned d, az_analysis_status_v1 *s) { (void)d; (void)s; return AZ_OK; }
+int analysis_runtime_deck_status(unsigned d, az_analysis_status_v1 *s) {
+    (void) d;
+    (void) s;
+    return AZ_OK;
+}
 static int sdk_status_analysis_bind(void (*observer)(unsigned, uint64_t, uint64_t, int, const az_track_ref *)) {
     assert(observer == analysis_runtime_load);
     ++bound;
     return bind_result;
 }
-static void sdk_status_start(void) { assert(phase == 0); phase = 1; }
-static void cm_services_start(void) { assert(phase == 1); phase = 2; }
+static void sdk_status_start(void) {
+    assert(phase == 0);
+    phase = 1;
+}
+static void cm_services_start(void) {
+    assert(phase == 1);
+    phase = 2;
+}
 #include "../../src/azmod/analysis_startup.c"
 int main(void) {
     char path[128];
     assert(core_analysis_assets(path, sizeof path) == AZ_NOT_FOUND);
     core_analysis_start();
     assert(logs == 1 && !started && !bound && !azmod_analysis_status);
+    assert(strstr(last_diagnostic, "core startup failed"));
     available = 1;
     assert(core_analysis_assets(path, 3) == AZ_LIMIT);
     start_result = AZ_FAILED;
     core_analysis_start();
     assert(logs == 2 && started == 1 && !bound && !azmod_analysis_enable);
+    assert(strstr(last_diagnostic, "core startup failed"));
+    char result_text[32];
+    snprintf(result_text, sizeof result_text, "(%d)", AZ_FAILED);
+    assert(strstr(last_diagnostic, result_text));
     start_result = AZ_OK;
     bind_result = AZ_UNSUPPORTED;
     core_analysis_start();
     assert(logs == 3 && bound == 1 && azmod_analysis_enable && !azmod_analysis_status);
+    assert(strstr(last_diagnostic, "automatic load observation failed"));
+    snprintf(result_text, sizeof result_text, "(%d)", AZ_UNSUPPORTED);
+    assert(strstr(last_diagnostic, result_text));
     bind_result = AZ_OK;
     enabled = 1;
     core_services_init();

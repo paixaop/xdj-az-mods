@@ -22,9 +22,18 @@ release. Busy/stale automatic work retries; permanent failures wait for another
 load or an off/on toggle. Status distinguishes saved analysis awaiting a locator
 transaction from successfully linked completion.
 
+Temporary native contention keeps the same request pending. Core retains the
+original encoded publication and resumes native refresh without rewriting
+successfully saved files. Each retry still validates the owner, source and load;
+changed results or saved files are refused. Retained publication bytes are
+released on completion or retirement.
+
 Phrase work requires and preserves the loaded native grid. Vocal-only work does
 not need a grid. Populated phrase/vocal maps are preserved, including valid
 all-zero instrumental timelines. Errors remain visible in status and core logs.
+With normal core logging enabled, startup and request failures are written to
+`/tmp/azmod-analysis.log` under the existing core log size cap; debug tracing is
+not required.
 
 ## Execution and optimizations
 

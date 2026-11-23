@@ -21,73 +21,64 @@ static unsigned threads, claims, captures, sleeps, missing_record;
 static uint64_t produced;
 void *azdiag_slip_entry_originals[AZCE_KIND_COUNT];
 void azdiag_slip_entry_0(void) {}
-int fixture_images(int (*fn)(struct dl_phdr_info *, size_t, void *), void *user)
-{
+int fixture_images(int (*fn)(struct dl_phdr_info *, size_t, void *), void *user) {
     if (omit_image) return 0;
     ElfW(Phdr) segments[] = {
-        { .p_type = PT_NOTE },
-        { .p_type = PT_LOAD, .p_flags = PF_R },
-        { .p_type = PT_LOAD, .p_flags = PF_R | PF_X, .p_memsz = sizeof executable },
+        {.p_type = PT_NOTE},
+        {.p_type = PT_LOAD, .p_flags = PF_R},
+        {.p_type = PT_LOAD, .p_flags = PF_R | PF_X, .p_memsz = sizeof executable},
     };
-    struct dl_phdr_info image = { .dlpi_addr = (uintptr_t)executable, .dlpi_name = "shared.so", .dlpi_phdr = segments, .dlpi_phnum = 3 };
+    struct dl_phdr_info image = {.dlpi_addr = (uintptr_t) executable, .dlpi_name = "shared.so", .dlpi_phdr = segments, .dlpi_phnum = 3};
     assert(!fn(&image, sizeof image, user));
     image.dlpi_name = "";
     return fn(&image, sizeof image, user);
 }
-int fixture_sleep(const struct timespec *delay, struct timespec *remaining)
-{
+int fixture_sleep(const struct timespec *delay, struct timespec *remaining) {
     assert(compare_timestamps(delay->tv_sec, 0, 1, 1000000000, 1) == AZ_TIME_EQUAL &&
            compare_timestamps(delay->tv_nsec, 100000000, 1000000000, 1000000000, 1) == AZ_TIME_EQUAL && !remaining);
     ++sleeps;
     errno = EIO;
     return sleep_error ? -1 : 0;
 }
-int slip_capture_arm(uintptr_t caller)
-{
-    assert(caller == (uintptr_t)executable + 1);
+int slip_capture_arm(uintptr_t caller) {
+    assert(caller == (uintptr_t) executable + 1);
     return !arm_error;
 }
-void slip_capture_get_stats(struct slip_capture_stats *out)
-{
-    *out = (struct slip_capture_stats){ .saved = produced };
+void slip_capture_get_stats(struct slip_capture_stats *out) {
+    *out = (struct slip_capture_stats) {.saved = produced};
 }
-int slip_capture_read(uint64_t sequence, struct slip_capture_record *out)
-{
+int slip_capture_read(uint64_t sequence, struct slip_capture_record *out) {
     assert(sequence && sequence <= produced);
     if (sequence == missing_record) return 0;
-    *out = (struct slip_capture_record){ .sequence = sequence, .observed_ns = sequence, .raw = 7 };
+    *out = (struct slip_capture_record) {.sequence = sequence, .observed_ns = sequence, .raw = 7};
     return 1;
 }
-static void log_line(const char *format, ...)
-{
+static void log_line(const char *format, ...) {
     char line[1024];
     va_list args;
     va_start(args, format);
     int n = vsnprintf(line, sizeof line, format, args);
     va_end(args);
-    assert(n > 0 && (size_t)n < sizeof line);
+    assert(n > 0 && (size_t) n < sizeof line);
     if (strstr(line, "SDK_SLIP_CAPTURE v=1")) ++captures;
     const char *reason = strstr(line, "reason=");
     if (reason) snprintf(last_reason, sizeof last_reason, "%s", reason + 7);
 }
-static int start(void *(*fn)(void *), void *user)
-{
+static int start(void *(*fn)(void *), void *user) {
     assert(fn == slip_worker && !user);
     ++threads;
     return thread_error;
 }
-static int claim(uintptr_t target, void *replacement, void **original)
-{
-    assert(target == (uintptr_t)executable && replacement == (void *)azdiag_slip_entry_0);
+static int claim(uintptr_t target, void *replacement, void **original) {
+    assert(target == (uintptr_t) executable && replacement == (void *) azdiag_slip_entry_0);
     assert(original == &azdiag_slip_entry_originals[0]);
     ++claims;
     return claim_error;
 }
-int main(void)
-{
+int main(void) {
     azsha256_hex(executable, sizeof executable, digest);
-    slip_profiles[0] = (struct slip_profile){ .name = "test", .fw_tag = "fixture", .callback = { 0, sizeof executable, digest }, .dispatcher = { 0, sizeof executable, digest }, .caller = 1 };
-    const struct az_slip_diagnostic_host host = { .log = log_line, .install = claim, .start_worker = start };
+    slip_profiles[0] = (struct slip_profile) {.name = "test", .fw_tag = "fixture", .callback = {0, sizeof executable, digest}, .dispatcher = {0, sizeof executable, digest}, .caller = 1};
+    const struct az_slip_diagnostic_host host = {.log = log_line, .install = claim, .start_worker = start};
     assert(az_slip_diagnostic_start("fixture", NULL) == -1);
     omit_image = 1;
     assert(az_slip_diagnostic_start("fixture", &host) == -1);
@@ -121,8 +112,8 @@ int main(void)
     sleeps = 0;
     slip_worker(NULL);
     assert(sleeps == SLIP_MAX_TICKS && !strcmp(last_reason, "time_limit"));
-    struct slip_image image = { .base = UINTPTR_MAX };
-    ElfW(Phdr) segment = { .p_vaddr = 1, .p_memsz = 2 };
+    struct slip_image image = {.base = UINTPTR_MAX};
+    ElfW(Phdr) segment = {.p_vaddr = 1, .p_memsz = 2};
     assert(!slip_image_segment(&image, &segment));
     image.base = UINTPTR_MAX - 1;
     segment.p_vaddr = 0;

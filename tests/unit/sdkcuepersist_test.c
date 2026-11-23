@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #include "../../src/common/azcuepersist.h"
+#include "../../src/common/aznative_calls.h"
 #include "../../src/azmod/azmod-mod.h"
 #include <assert.h>
 #include <unistd.h>
@@ -238,14 +239,14 @@ uint64_t deadline() {
 typedef struct {
     void *data;
 } NativeString;
-extern void allocate(void);
-void allocate_body(void *out, const void *size) {
+extern struct native_result_storage allocate(size_t size);
+void allocate_body(void *out, size_t size) {
     ++allocations;
-    void *data = malloc((uintptr_t) size);
+    void *data = malloc(size);
     assert(data);
     memcpy(out, &data, sizeof data);
 }
-void assign(void *dest, const void *source) {
+void assign(struct az_native_string *dest, const struct az_native_string *source) {
     void *pointer;
     memcpy(&pointer, source, sizeof pointer);
     free(((void *) (getword(dest, 0))));
@@ -253,7 +254,7 @@ void assign(void *dest, const void *source) {
     assert(copy);
     setword(dest, 0, ((uintptr_t) (copy)));
 }
-void destroy(void *string) {
+void destroy(struct az_native_string *string) {
     ++destructions;
     free(((void *) (getword(string, 0))));
 }
@@ -351,8 +352,12 @@ void *install(uintptr_t address, void *hook, void **original) {
     if (address == ((uintptr_t) (native_request))) request_entry = ((__typeof__(request_entry)) (hook));
     else if (address == ((uintptr_t) (native_handler))) handler_entry = ((__typeof__(handler_entry)) (hook));
     else if (address == ((uintptr_t) (native_reply))) reply_entry = ((__typeof__(reply_entry)) (hook));
-    else if (address == ((uintptr_t) (native_registered))) registered_entry = ((__typeof__(registered_entry)) (hook));
-    else if (address == ((uintptr_t) (native_memory))) memory_entry = ((Helper) (hook));
+    else if (address == ((uintptr_t) (native_registered))) {
+        registered_entry = ((__typeof__(registered_entry)) (hook));
+        unsigned before = task_calls;
+        registered_entry(payload.bytes); /* callback can arrive before configure publishes enabled */
+        assert(task_calls == before + 1 && !ready_calls && !azsdk_cue_persist_capabilities());
+    } else if (address == ((uintptr_t) (native_memory))) memory_entry = ((Helper) (hook));
     else if (address == ((uintptr_t) (native_hot))) hot_entry = ((Helper) (hook));
     else assert(false);
     return hook;

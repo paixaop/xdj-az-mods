@@ -14,8 +14,15 @@
 #include <string.h>
 #include <time.h>
 #include <stdatomic.h>
-_Thread_local struct ds_proof_context ds_proof_context;
-_Atomic unsigned ds_proof_enabled;
+static _Thread_local struct ds_proof_context ds_proof_context;
+static _Atomic unsigned ds_proof_enabled;
+int ds_proof_is_enabled(void) { return atomic_load_explicit(&ds_proof_enabled, memory_order_acquire); }
+struct ds_proof_context ds_proof_enter(const struct ds_proof_context *next) {
+    struct ds_proof_context previous = ds_proof_context;
+    ds_proof_context = *next;
+    return previous;
+}
+void ds_proof_restore(const struct ds_proof_context *previous) { ds_proof_context = *previous; }
 #define DS_HISTORY 256u
 #define DS_ACTION_ROUTES (AZ_STATUS_TOPIC(AZ_STATUS_TRANSPORT) | AZ_STATUS_TOPIC(AZ_STATUS_POSITION))
 #define DS_PHRASE_ROUTE AZ_STATUS_TOPIC(AZ_STATUS_PHRASE_TRANSITION)
@@ -62,8 +69,7 @@ static int ds_analysis_loaded(const struct ds_image *image) {
     return state == AZ_STATUS_LOAD_LOADED;
 }
 static struct ds_analysis_cut ds_analysis_copy(const struct ds_image *image) {
-    struct ds_analysis_cut copy = {.order = image->sequence, .epoch = image->epoch,
-                                   .loaded = ds_analysis_loaded(image)};
+    struct ds_analysis_cut copy = {.order = image->sequence, .epoch = image->epoch, .loaded = ds_analysis_loaded(image)};
     const struct ds_cell *track = image->field[AZ_STATUS_LOAD][AZ_STATUS_LOAD_TRACK];
     if (!copy.loaded || !ds_analysis_cell_ready(track, image->epoch)) return copy;
     if (track->info.scope == AZ_STATUS_LOAD_SCOPE && track->bytes == sizeof copy.track)
@@ -325,7 +331,7 @@ static int ds_duration_field(unsigned topic, unsigned field) {
            (topic == AZ_STATUS_POSITION && field >= AZ_STATUS_POSITION_REMAINING_S);
 }
 int ds_payload_same(unsigned topic, unsigned field, const void *before, const void *after,
-                           size_t bytes, const struct ds_time_axis *a, const struct ds_time_axis *b) {
+                    size_t bytes, const struct ds_time_axis *a, const struct ds_time_axis *b) {
     if (!before || !after) return 0;
     unsigned type = ds_layout[topic].field[field].type;
     if (ds_coordinate_field(topic, field)) {
@@ -822,7 +828,7 @@ static int ds_key_mode(const char *text, int *major) {
 static int ds_pitch(const char *text, int *pitch, int *major) {
     if (!text || !*text) return 0;
     if (ds_camelot_pitch(text, pitch, major)) return 1;
-    static const unsigned note[] = {9, 11, 0, 2, 4, 5, 7}; /* A..G */
+    static const int note[] = {9, 11, 0, 2, 4, 5, 7}; /* A..G */
     if (*text < 'A' || *text > 'G') return 0;
     int n = note[*text++ - 'A'];
     text = ds_accidental(text, &n);
@@ -1229,7 +1235,7 @@ static int ds_native_cue_reference(const struct ds_cell *cell, uint64_t epoch, u
     return 0;
 }
 int ds_native_loop_ref(unsigned deck, uint64_t epoch, uint64_t provider, uint64_t revision,
-                              unsigned field, unsigned entry_id, az_status_cue_ref_v1 *out) {
+                       unsigned field, unsigned entry_id, az_status_cue_ref_v1 *out) {
     if (!ds_native_loop_identity(deck, epoch, provider, revision, field, entry_id, out)) return 0;
     pthread_mutex_lock(&ds.mu);
     struct ds_image *im = &ds.deck[deck].current;
@@ -1523,8 +1529,8 @@ static int ds_path_contiguous(const struct ds_path_reduction *r) {
     return !memcmp(r->previous, &r->from, sizeof r->from) || (r->previous->kind == AZ_PHRASE_START &&
                                                               ds_opening_at(&r->map, &p->from, p->from_window_rate, p->from_window_samples));
 }
-static int ds_path_action_ready(const struct ds_path_reduction *r, const az_status_occurrence_v1 *action) {
-    return r->path && r->path->kind == DS_PATH_ACTION && action && r->has_from && r->has_to &&
+static int ds_path_action_ready(const struct ds_path_reduction *r) {
+    return r->path && r->path->kind == DS_PATH_ACTION && r->has_from && r->has_to &&
            r->previous && ds_endpoint_known(&r->map, r->previous) && memcmp(&r->from, &r->to, sizeof r->from);
 }
 static int ds_path_lost(const struct ds_path_reduction *r) {
@@ -1546,7 +1552,7 @@ static void ds_path_reduce(struct ds_deck *d, const struct ds_path *p, const az_
     if (ds_path_contiguous(&r)) {
         az_status_phrase_endpoint_v1 active = *r.previous;
         ds_crossings(d, &r.map, p, &active, now, &fail);
-    } else if (ds_path_action_ready(&r, action)) {
+    } else if (action && ds_path_action_ready(&r)) {
         *pair = (az_status_phrase_transition_v1) {.size = sizeof *pair, .version = AZ_DATA_VERSION, .discontinuity = action->kind, .from = r.from, .to = r.to};
         *routes |= DS_PHRASE_ROUTE;
     } else if (ds_path_lost(&r)) *lost |= DS_PHRASE_ROUTE;
@@ -2167,10 +2173,10 @@ static int ds_resolve_path(int rc, unsigned deck, uint64_t epoch, const struct d
     return rc;
 }
 int ds_publish_ordered(const struct ds_path *path, const az_track_ref *expected, int file_only,
-                              unsigned deck, uint64_t epoch, unsigned flags, uint64_t observed,
-                              const struct ds_field *fields, size_t count,
-                              const az_status_occurrence_v1 *action, const az_status_phrase_transition_v1 *pair,
-                              uint64_t lost, unsigned reason, uint64_t *committed_order) {
+                       unsigned deck, uint64_t epoch, unsigned flags, uint64_t observed,
+                       const struct ds_field *fields, size_t count,
+                       const az_status_occurrence_v1 *action, const az_status_phrase_transition_v1 *pair,
+                       uint64_t lost, unsigned reason, uint64_t *committed_order) {
     if (deck >= 4) return AZ_INVALID;
     if (!path && !(flags & DS_BOUNDARY))
         return ds_apply(NULL, expected, file_only, deck, epoch, flags, observed, fields, count, action, pair, lost, reason);
@@ -2191,22 +2197,22 @@ int ds_publish_ordered(const struct ds_path *path, const az_track_ref *expected,
     return rc;
 }
 int ds_publish_checked(const struct ds_path *path, const az_track_ref *expected, int file_only,
-                              unsigned deck, uint64_t epoch, unsigned flags, uint64_t observed,
-                              const struct ds_field *fields, size_t count,
-                              const az_status_occurrence_v1 *action, const az_status_phrase_transition_v1 *pair,
-                              uint64_t lost, unsigned reason) {
+                       unsigned deck, uint64_t epoch, unsigned flags, uint64_t observed,
+                       const struct ds_field *fields, size_t count,
+                       const az_status_occurrence_v1 *action, const az_status_phrase_transition_v1 *pair,
+                       uint64_t lost, unsigned reason) {
     return ds_publish_ordered(path, expected, file_only, deck, epoch, flags, observed, fields, count,
                               action, pair, lost, reason, NULL);
 }
 
 
 int ds_publish(unsigned deck, uint64_t epoch, unsigned flags, uint64_t observed,
-                      const struct ds_field *fields, size_t count, const az_status_occurrence_v1 *action,
-                      const az_status_phrase_transition_v1 *pair, uint64_t lost, unsigned reason) {
+               const struct ds_field *fields, size_t count, const az_status_occurrence_v1 *action,
+               const az_status_phrase_transition_v1 *pair, uint64_t lost, unsigned reason) {
     return ds_publish_checked(NULL, NULL, 0, deck, epoch, flags, observed, fields, count, action, pair, lost, reason);
 }
 int ds_publish_file(unsigned deck, uint64_t epoch, const az_track_ref *expected, uint64_t observed,
-                           const struct ds_field *fields, size_t count, uint64_t lost, unsigned reason) {
+                    const struct ds_field *fields, size_t count, uint64_t lost, unsigned reason) {
     if (!epoch || !expected) return AZ_INVALID;
     return ds_publish_checked(NULL, expected, 1, deck, epoch, 0, observed, fields, count, NULL, NULL, lost, reason);
 }
@@ -2278,7 +2284,7 @@ static void ds_initial_cursors(struct ds_subscription *slot, const az_deck_watch
 }
 
 int ds_register(int owner, const az_deck_watch_v1 *w, az_deck_status_fn fn, void *user,
-                       az_deck_subscription *out) {
+                az_deck_subscription *out) {
     if (owner < 0 || !fn || !out || !ds_watch_valid(w)) return AZ_INVALID;
     if (!ds.enabled) return AZ_UNSUPPORTED;
     struct ds_subscription *slot = ds_subscription_slot(owner);

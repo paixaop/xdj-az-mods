@@ -6,21 +6,57 @@ Reads `make -n -B azmod azstem azhandoff CC=gcc` (run in guest/) on stdin and wr
 per C translation unit to stdout. Each entry keeps the line's preprocessor and code-generation
 flags (-I, -D, -O, -f, -std=) and drops what only the link or the warning policy needs (-W, -w, -o,
 -shared, -static*, -l, -Wl): the analyzers report their own findings, and a compiler warning is
-already an error in the real build. Vendored code (stb_vorbis.c) has no entry.
+already an error in the real build. Vendored stb_vorbis and analysis dependencies
+have no entry. Recursive make directories are rebased onto the source directory,
+so both analyzers use the same paths for sources and local include directories.
 
   compdb.py <guest-dir> < make-n-output > compile_commands.json
 """
 import json
+import os
+from pathlib import Path
+import re
 import shlex
 import sys
 
 SKIP_SOURCES = {"azstem/stb_vorbis.c"}  # vendored, kept as upstream wrote it
+MAKE_DIRECTORY = re.compile(r"^make(?:\[\d+\])?: (Entering|Leaving) directory [`'](.*)'$")
 
 
-def main():
-    guest = sys.argv[1]
+def logical_lines(lines):
+    pending = ""
+    for line in lines:
+        line = line.rstrip("\n")
+        if line.endswith("\\"):
+            pending += line[:-1] + " "
+            continue
+        yield pending + line
+        pending = ""
+    if pending:
+        raise ValueError("unterminated make command continuation")
+
+
+def rebase(path, directory, guest):
+    return os.path.relpath((directory / path).resolve(), guest)
+
+
+def compilation_entries(guest, lines):
+    guest = Path(guest).resolve()
+    directory = guest
+    parents = []
     entries = []
-    for line in sys.stdin:
+    for line in logical_lines(lines):
+        change = MAKE_DIRECTORY.match(line)
+        if change:
+            location = Path(change.group(2)).resolve()
+            if change.group(1) == "Entering":
+                parents.append(directory)
+                directory = location
+            else:
+                if location != directory or not parents:
+                    raise ValueError("unbalanced make directory: " + line)
+                directory = parents.pop()
+            continue
         toks = shlex.split(line)
         if not toks or toks[0] != "gcc":
             continue
@@ -32,13 +68,23 @@ def main():
             if t == "-o":
                 skip_next = True
             elif t.endswith(".c"):
-                srcs.append(t)
-            elif t.startswith(("-I", "-D", "-O", "-f", "-std=")):
+                srcs.append(rebase(t, directory, guest))
+            elif t.startswith("-I"):
+                flags.append(t if os.path.isabs(t[2:]) else "-I" + rebase(t[2:], directory, guest))
+            elif t.startswith(("-D", "-O", "-f", "-std=")):
                 flags.append(t)
-        for s in srcs:
-            if s in SKIP_SOURCES:
+        for source in srcs:
+            if source in SKIP_SOURCES or source.startswith("../vendor/analysis/"):
                 continue
-            entries.append({"directory": guest, "file": s, "arguments": ["gcc"] + flags + ["-c", s]})
+            entries.append({"directory": str(guest), "file": source,
+                            "arguments": ["gcc"] + flags + ["-c", source]})
+    if parents:
+        raise ValueError("unterminated make directory")
+    return entries
+
+
+def main():
+    entries = compilation_entries(sys.argv[1], sys.stdin)
     if not entries:
         sys.exit("compdb.py: no gcc compile lines in the input")
     json.dump(entries, sys.stdout, indent=1)

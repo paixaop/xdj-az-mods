@@ -168,7 +168,7 @@ static int st_read_recheck(int fd, uint64_t device, uint64_t inode, uint64_t sig
     return !fstat(fd, &sb) && st_read_matches(&sb, device, inode, signature);
 }
 uint8_t *st_read_file_checked(const char *path, size_t *size,
-                                     uint64_t device, uint64_t inode, uint64_t signature) {
+                              uint64_t device, uint64_t inode, uint64_t signature) {
     /* Establish regular-file ownership before any read can wait for a FIFO writer. */
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) return NULL;
@@ -205,7 +205,7 @@ static void st_row_text(void *stmt, az_track_metadata *metadata) {
 }
 static void st_row_timing(void *stmt, struct st_resolution *row) {
     az_track_metadata *metadata = &row->metadata;
-    metadata->original_bpm = az_storage_sql()->col_int64(stmt, 5) / 100.0;
+    metadata->original_bpm = (double) az_storage_sql()->col_int64(stmt, 5) / 100.0;
     row->duration_ticks = az_storage_sql()->col_int64(stmt, 6);
     metadata->duration_s = (double) row->duration_ticks;
     if (metadata->original_bpm > 0) metadata->valid |= AZ_META_TEMPO;

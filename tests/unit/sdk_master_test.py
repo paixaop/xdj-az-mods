@@ -4,6 +4,7 @@
 from pathlib import Path
 from sdk_deck_extract import projection, mapped
 import os
+import sys
 import re
 import subprocess
 import tempfile
@@ -26,11 +27,12 @@ with tempfile.TemporaryDirectory(prefix='az-sdk-master-') as tmp:
     track = (root / 'src/azmod/sdk_track.c').read_text()
     (out / 'deck.inc').write_text(projection(deck) + fn(track, 'sdk_data_capabilities'))
     command = [os.environ.get('HOST_CC', os.environ.get('CC', 'cc')), '-std=c11', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
-               '-Wno-unused-function', '-Wno-unused-variable', '-pthread',
+               '-Wno-unused-function', '-Wno-unused-variable', '-pthread', '-ffunction-sections', '-fdata-sections',
                '-I' + str(root / 'src/azmod'),
                '-DMASTER_INC="' + str(out / 'master.inc') + '"',
                '-DDECK_DATA_INC="' + str(out / 'deck.inc') + '"',
-               str(root / 'tests/unit/sdkmaster_test.c'), '-o', str(out / 'master')]
+               str(root / 'tests/unit/sdkmaster_test.c'), str(root / 'src/azmod/track_service.c'),
+               '-Wl,-dead_strip' if sys.platform == 'darwin' else '-Wl,--gc-sections', '-o', str(out / 'master')]
     san = os.environ.get('SAN', 'plain')
     if san == 'asan':
         command += ['-fsanitize=address,undefined', '-fno-sanitize-recover=all', '-fno-omit-frame-pointer']

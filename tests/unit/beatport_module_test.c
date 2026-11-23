@@ -15,24 +15,37 @@ static unsigned hooks, threads;
 int bp_host_message_thread(void) { return message_thread; }
 long bp_host_now_ms(void) { return 0; }
 uintptr_t bp_host_weak_get(_Atomic uintptr_t *slot) { return atomic_load(slot); }
-int bp_host_weak_set(_Atomic uintptr_t *slot, uintptr_t value) { atomic_store(slot, value); return 1; }
+int bp_host_weak_set(_Atomic uintptr_t *slot, uintptr_t value) {
+    atomic_store(slot, value);
+    return 1;
+}
 int bp_host_weak_track(_Atomic uintptr_t *slot, int count, int offset) {
     assert(slot && count == 1 && !offset);
     return allow_track;
 }
-int bp_host_showing(uintptr_t widget) { (void)widget; return 0; }
-int bp_host_install_tick(const char *name) { assert(name); return allow_tick; }
+int bp_host_showing(uintptr_t widget) {
+    (void) widget;
+    return 0;
+}
+int bp_host_install_tick(const char *name) {
+    assert(name);
+    return allow_tick;
+}
 int bp_host_install_hook(uintptr_t target, void *hook, void **original) {
     assert(target && hook && original);
     ++hooks;
-    *original = (void *)target;
+    *original = (void *) target;
     return allow_hook;
 }
 int bp_host_thread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*fn)(void *), void *user) {
     ++threads;
     return thread_error ? thread_error : pthread_create(thread, attr, fn, user);
 }
-key_t ftok(const char *path, int id) { (void)path; (void)id; return (key_t)-1; }
+key_t ftok(const char *path, int id) {
+    (void) path;
+    (void) id;
+    return (key_t) -1;
+}
 static az_beatport_login_status await_storage(void) {
     for (unsigned i = 0; i < 1000; ++i) {
         az_beatport_login_status status = {.size = sizeof status};
@@ -41,7 +54,7 @@ static az_beatport_login_status await_storage(void) {
         usleep(1000);
     }
     assert(!"credential storage failed to finish");
-    return (az_beatport_login_status){0};
+    return (az_beatport_login_status) {0};
 }
 static void installation(const char *path) {
     bp_login_install(0, path);

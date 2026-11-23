@@ -11,7 +11,9 @@ struct slip_capture_record {
     uintptr_t receiver, caller;
     uint32_t raw, reserved;
 };
-struct slip_capture_stats { uint64_t saved, dropped, rejected; };
+struct slip_capture_stats {
+    uint64_t saved, dropped, rejected;
+};
 /* One nonzero exact native return PC, armed once for this process lifetime.
  * Records contain opaque copied scalars, never enabled/deck/owner semantics.
  * Sequences1..512; the128-slot ring retains only the latest saved128 records.

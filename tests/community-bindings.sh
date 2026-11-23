@@ -21,5 +21,5 @@ tsan) flags+=(-fsanitize=thread -fno-omit-frame-pointer) ;;
 *) exit 2 ;;
 esac
 "${HOST_CC:-cc}" "${flags[@]}" -DCM_ROOT="\"$task_tmp/root\"" -DCM_LOGDIR="\"$task_tmp/log\"" -DCM_USB_ROOT="\"$task_tmp/usb\"" \
- tests/unit/community_bindings_test.c -ldl -lm -o "$task_tmp/test"
+ tests/unit/community_bindings_test.c src/azmod/sdk_status_engine.c -ldl -lm -o "$task_tmp/test"
 "$task_tmp/test"

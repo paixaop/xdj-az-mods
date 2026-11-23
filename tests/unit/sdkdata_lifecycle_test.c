@@ -4,6 +4,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "sdk_data_engine.h"
 #include "analysis_source.h"
+#include "analysis_runtime.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -46,9 +47,16 @@ static const az_track_snapshot *held;
 static const az_wave_snapshot *held_wave;
 static unsigned status_retired[CM_MAX];
 static unsigned analysis_retired[CM_MAX];
+static az_analysis_owner runtime_retired[CM_MAX];
+void analysis_runtime_retire(az_analysis_owner owner) {
+    assert(owner.slot < CM_MAX && owner.kind == AZ_ANALYSIS_OWNER_MOD && owner.generation);
+    assert(!analysis_owner_current(owner));
+    runtime_retired[owner.slot] = owner;
+}
 void analysis_source_retire(az_analysis_owner owner) {
     assert(owner.slot < CM_MAX && owner.kind == AZ_ANALYSIS_OWNER_MOD && owner.generation);
     assert(!analysis_owner_current(owner));
+    assert(runtime_retired[owner.slot].generation == owner.generation);
     ++analysis_retired[owner.slot];
 }
 static void ds_retire(int owner) {
@@ -98,6 +106,7 @@ static void reset_lifecycle(void) {
     memset(owned, 0, sizeof owned);
     memset(status_retired, 0, sizeof status_retired);
     memset(analysis_retired, 0, sizeof analysis_retired);
+    memset(runtime_retired, 0, sizeof runtime_retired);
     held = NULL;
     held_wave = NULL;
     fail_init = borrow_data = wave_data = g_cm_live = 0;

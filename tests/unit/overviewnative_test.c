@@ -60,7 +60,9 @@ static void profile_and_stack(void) {
     profile.setter = (uintptr_t) &profile;
     assert(!azov_profile_verified(&profile, release_owner));
     assert(azov_prepare_stack());
-    uintptr_t here = (uintptr_t) &profile;
+    /* ASan may put local objects on a fake stack. Check the native stack itself. */
+    uintptr_t here;
+    __asm__("mov %0, sp" : "=r"(here));
     assert(azov_stack_lo < here && here < azov_stack_hi && azov_stack_hi - azov_stack_lo >= 0xd8);
     for (int build = 1; build <= 2; ++build) {
         azov_profile = NULL;

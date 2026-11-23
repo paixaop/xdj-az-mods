@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <errno.h>
+#include <dirent.h>
 #include <stdatomic.h>
 #include <sys/wait.h>
 static char st_test_mountinfo[PATH_MAX];
@@ -61,9 +62,36 @@ static const struct azn_analysis_source_api *fixture_source(void) {
     static const struct azn_analysis_source_api api = {.size = sizeof api, .version = 1, .open = fixture_source_open, .current = fixture_source_current, .close = fixture_source_close};
     return &api;
 }
-static int fixture_current = 1, fixture_published, fixture_released, fixture_native_phrases;
+static int fixture_current = 1, fixture_published, fixture_native_phrases;
+static int fixture_publish_busy, fixture_publish_calls;
+static _Atomic int fixture_released;
 static uint32_t fixture_grid_count = 2;
 static _Atomic int fixture_pause_current, fixture_current_entered, fixture_resume_current;
+static _Atomic int fixture_skip_current;
+static _Atomic int fixture_pause_admission, fixture_admission_entered, fixture_resume_admission;
+static _Atomic int fixture_fail_input_beats;
+static _Thread_local int fixture_publication_busy;
+int __real_pthread_mutex_trylock(pthread_mutex_t *mutex);
+int __wrap_pthread_mutex_trylock(pthread_mutex_t *mutex) {
+    if (fixture_publication_busy) {
+        fixture_publication_busy = 0;
+        return EBUSY;
+    }
+    return __real_pthread_mutex_trylock(mutex);
+}
+void *__real_calloc(size_t count, size_t size);
+void *__wrap_calloc(size_t count, size_t size) {
+    if (count == 2 && size == sizeof(az_beat) && atomic_exchange(&fixture_fail_input_beats, 0)) return NULL;
+    return __real_calloc(count, size);
+}
+int __real_az_storage_sql_ready(void);
+int __wrap_az_storage_sql_ready(void) {
+    if (atomic_exchange(&fixture_pause_admission, 0)) {
+        atomic_store(&fixture_admission_entered, 1);
+        while (!atomic_load(&fixture_resume_admission)) usleep(1000);
+    }
+    return __real_az_storage_sql_ready();
+}
 int az_status_loaded_reference(unsigned deck, uint64_t load, az_track_ref *out) {
     if (deck || load != 44) return AZ_STALE;
     *out = fixture_loaded_ref;
@@ -79,7 +107,9 @@ static int fixture_capture(unsigned deck, uint64_t load, struct aznm_packet *out
     return AZ_OK;
 }
 static int fixture_valid(unsigned deck, uint64_t load, const struct aznm_packet *map) {
-    if (atomic_exchange(&fixture_pause_current, 0)) {
+    int skip = atomic_load(&fixture_skip_current);
+    if (skip) atomic_fetch_sub(&fixture_skip_current, 1);
+    if (!skip && atomic_exchange(&fixture_pause_current, 0)) {
         atomic_store(&fixture_current_entered, 1);
         while (!atomic_load(&fixture_resume_current)) usleep(1000);
     }
@@ -108,9 +138,35 @@ static void fixture_release(const struct aznm_packet *map) {
     assert(map->owner == 1);
     fixture_released++;
 }
+static uint32_t fixture_spool_track;
+static uint64_t fixture_spool_after, fixture_spool_signature;
+static char fixture_spool_path[PATH_MAX];
+static void fixture_saved_link(void) {
+    if (!fixture_spool_track) return;
+    char directory[PATH_MAX], prefix[64];
+    snprintf(directory, sizeof directory, "%s/sdb1/PIONEER/azspool", g_media);
+    snprintf(prefix, sizeof prefix, "track-analysis-%08x-", fixture_spool_track);
+    DIR *dir = opendir(directory);
+    assert(dir);
+    struct dirent *entry;
+    unsigned found = 0;
+    while ((entry = readdir(dir))) {
+        if (strncmp(entry->d_name, prefix, strlen(prefix))) continue;
+        if (strtoull(entry->d_name + strlen(prefix), NULL, 10) <= fixture_spool_after) continue;
+        snprintf(fixture_spool_path, sizeof fixture_spool_path, "%s/%s", directory, entry->d_name);
+        fixture_spool_signature = st_disk_sig(fixture_spool_path);
+        assert(fixture_spool_signature);
+        found++;
+    }
+    closedir(dir);
+    assert(found == 1);
+}
 static int fixture_publish(unsigned deck, uint64_t load, const struct aznm_packet *map, const void *bytes, uint32_t n) {
     if (fixture_valid(deck, load, map)) return AZ_STALE;
     assert(n == 56 && !memcmp(bytes, "PSSI", 4));
+    fixture_publish_calls++;
+    if (fixture_publish_busy) return AZ_BUSY;
+    fixture_saved_link();
     fixture_published++;
     return AZ_OK;
 }
@@ -140,14 +196,17 @@ const char *az_analysis_state_dir(void) { return st_test_state; }
 int az_analysis_thread_create(pthread_t *t, const pthread_attr_t *a, void *(*f)(void *), void *x) {
     return pthread_create(t, a, f, x);
 }
-static void sa_put16(uint8_t *p, unsigned n) { p[0] = n >> 8; p[1] = n; }
+static void sa_put16(uint8_t *p, unsigned n) {
+    p[0] = n >> 8;
+    p[1] = n;
+}
 static uint8_t *read_analysis(const char *path, size_t *size, int *failed) {
     uint8_t *bytes = st_read_file(path, size);
     if (!bytes || !sa_framed(bytes, *size)) *failed = 1;
     return bytes;
 }
 static az_analysis_owner owner_at(int slot) {
-    return slot < 0 ? (az_analysis_owner){0} : analysis_owner_get((unsigned) slot);
+    return slot < 0 ? (az_analysis_owner) {0} : analysis_owner_get((unsigned) slot);
 }
 static int acquire_track(int slot, uint32_t components, const az_track_ref *track, analysis_source_input *input) {
     analysis_source_request request = {.components = components, .track = *track};
@@ -162,7 +221,14 @@ static int acquire_loaded(int slot, uint32_t components, int deck, uint64_t load
     return rc;
 }
 static int publish_result(int slot, analysis_source_input *input, const az_analysis_result_v1 *result) {
-    int rc = analysis_source_publish(owner_at(slot), input, result);
+    az_analysis_owner owner = owner_at(slot);
+    int rc = AZ_BUSY;
+    /* General fixture callers want the admitted outcome; BUSY is a documented
+     * try-lock refusal. Continuation tests call the service directly. */
+    for (unsigned i = 0; i < 1000 && rc == AZ_BUSY; i++) {
+        rc = analysis_source_publish(owner, input, result);
+        if (rc == AZ_BUSY) usleep(1000);
+    }
     if (rc == AZ_OK) analysis_source_release(input);
     return rc;
 }
@@ -172,6 +238,9 @@ static void analysis_write(const char *path, const void *bytes, size_t n) {
     assert(f && fwrite(bytes, 1, n, f) == n && !fclose(f));
 }
 static void typed_grid_result_validation(void) {
+    az_analysis_result_v1 empty = {0};
+    struct sa_tags empty_tags = {0};
+    assert(!sa_result_valid(&empty) && !sa_encode_native(&empty, &empty_tags));
     az_beat beats[2] = {{.time_s = 0, .bpm = 120, .beat_in_bar = 1},
                         {.time_s = 0.5, .bpm = 120, .beat_in_bar = 2}};
     az_analysis_phrase_v1 phrase = {.start_beat = 1, .kind = 1};
@@ -208,18 +277,20 @@ static void typed_grid_result_validation(void) {
     beats[1].reserved = 1;
     assert(!sa_result_valid(&result));
 }
-static void await_retirement(analysis_source_input *input) {
-    for (unsigned i = 0; i < 1000 && !access(input->audio_path, F_OK); ++i) usleep(1000);
-    assert(access(input->audio_path, F_OK));
+static void input_reader_close(analysis_source_input *input) {
+    char locator[1024];
+    memcpy(locator, input->audio_path, sizeof locator);
+    analysis_source_release(input);
+    assert(!input->lease && !input->audio_path[0] && !input->beats);
+    assert(access(locator, F_OK));
+    analysis_source_release(input); /* runtime shutdown may repeat cleanup */
 }
 static void owner_lifecycle(const az_track_ref *track) {
     az_analysis_owner before = analysis_owner_get(0);
-    analysis_source_input jobs[8];
-    memset(jobs, 0, sizeof jobs);
+    analysis_source_input jobs[8] = {0}, replacement[4] = {0};
     analysis_owner_begin(1);
-    for (unsigned i = 0; i < 8; ++i) {
+    for (unsigned i = 0; i < 8; ++i)
         assert(acquire_track((int) (i / 4), AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS, track, &jobs[i]) == AZ_OK);
-    }
     analysis_source_input overflow = {0};
     assert(acquire_track(0, AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS, track, &overflow) == AZ_LIMIT);
     int reader = open(jobs[0].audio_path, O_RDONLY);
@@ -229,25 +300,46 @@ static void owner_lifecycle(const az_track_ref *track) {
     pid_t child = fork();
     assert(child >= 0);
     if (!child) {
-        close(ready[0]); close(resume[1]);
-        int own = open(jobs[0].audio_path, O_RDONLY);
-        char mark = own >= 0, bytes[17];
-        assert(write(ready[1], &mark, 1) == 1 && mark);
+        close(ready[0]);
+        close(resume[1]);
+        char mark = 1, bytes[17];
+        assert(write(ready[1], &mark, 1) == 1);
         assert(read(resume[0], &mark, 1) == 1);
-        assert(read(own, bytes, sizeof bytes) == sizeof bytes);
+        /* A decoder child is allowed to open its borrowed locator after the
+         * owner retires, provided the runtime has not released the input. */
+        int own = open(jobs[0].audio_path, O_RDONLY);
+        assert(own >= 0 && read(own, bytes, sizeof bytes) == sizeof bytes);
         assert(!memcmp(bytes, "audio-placeholder", sizeof bytes));
-        close(own); _exit(0);
+        close(own);
+        _exit(0);
     }
-    close(ready[1]); close(resume[0]);
+    close(ready[1]);
+    close(resume[0]);
     char mark;
     assert(read(ready[0], &mark, 1) == 1 && mark);
-    /* Retirement revokes admission and physically closes retained locators. */
     analysis_source_retire(analysis_owner_retire(0));
     assert(!analysis_owner_current(before));
-    await_retirement(&jobs[0]);
-    assert(!access(jobs[4].audio_path, F_OK));
     assert(acquire_track(0, AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS, track, &overflow) == AZ_STALE);
-    assert(open(jobs[0].audio_path, O_RDONLY) < 0);
+    char audio[PATH_MAX], changed[PATH_MAX];
+    snprintf(audio, sizeof audio, "%s/sdb1/audio.wav", g_media);
+    snprintf(changed, sizeof changed, "%s/sdb1/replacement.wav", g_media);
+    analysis_write(changed, "replacement-audio", 17);
+    assert(!rename(changed, audio));
+    az_analysis_owner after = analysis_owner_begin(0);
+    assert(!analysis_owner_current(analysis_owner_for_caller(0)));
+    analysis_owner_thread_bind(after);
+    assert(after.generation != before.generation && !analysis_owner_current(before));
+    for (unsigned i = 0; i < 4; ++i) {
+        int rc = AZ_LIMIT;
+        for (unsigned attempt = 0; attempt < 1000 && (rc == AZ_LIMIT || rc == AZ_BUSY); ++attempt) {
+            rc = acquire_track(0, AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS, track, &replacement[i]);
+            if (rc != AZ_OK) usleep(1000);
+        }
+        assert(rc == AZ_OK && replacement[i].lease > jobs[7].lease);
+    }
+    /* Reused capacity proves native reclamation ran. The input owns its
+     * descriptor independently, so no descriptor-number reuse can redirect it. */
+    assert(!access(jobs[0].audio_path, F_OK) && !access(jobs[4].audio_path, F_OK));
     char bytes[17];
     assert(read(reader, bytes, sizeof bytes) == sizeof bytes);
     assert(!memcmp(bytes, "audio-placeholder", sizeof bytes));
@@ -255,23 +347,98 @@ static void owner_lifecycle(const az_track_ref *track) {
     assert(write(resume[1], "x", 1) == 1);
     int status;
     assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && !WEXITSTATUS(status));
-    close(ready[0]); close(resume[1]);
-    az_analysis_owner after = analysis_owner_begin(0);
-    assert(!analysis_owner_current(analysis_owner_for_caller(0)));
-    analysis_owner_thread_bind(after);
-    assert(after.generation != before.generation && !analysis_owner_current(before));
-    analysis_source_release(&jobs[0]);
-    for (unsigned i = 0; i < 4; ++i) {
-        assert(acquire_track(0, AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS, track, &jobs[i]) == AZ_OK);
-        assert(jobs[i].lease > jobs[7].lease);
-    }
+    close(ready[0]);
+    close(resume[1]);
+    for (unsigned i = 0; i < 4; ++i) input_reader_close(&jobs[i]);
     analysis_source_retire(analysis_owner_retire(0));
     analysis_source_retire(analysis_owner_retire(1));
-    await_retirement(&jobs[0]); await_retirement(&jobs[4]);
-    for (unsigned i = 0; i < 8; ++i) analysis_source_release(&jobs[i]);
+    for (unsigned i = 4; i < 8; ++i) input_reader_close(&jobs[i]);
+    for (unsigned i = 0; i < 4; ++i) input_reader_close(&replacement[i]);
     analysis_owner_thread_bind(analysis_owner_begin(0));
+    analysis_write(audio, "audio-placeholder", 17);
+    puts("Analysis input readers: paused subprocess opens retained audio after retirement, source replacement and capacity reuse");
 }
-struct retirement_request { az_analysis_owner owner; int result; };
+static unsigned reader_count(void) {
+    DIR *directory = opendir("/proc/self/fd");
+    assert(directory);
+    unsigned count = 0;
+    while (readdir(directory)) ++count;
+    assert(!closedir(directory));
+    return count;
+}
+static void acquisition_failure_cleanup(const az_track_ref *track) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof path, "%s/sdb1/analysis.EXT", g_media);
+    size_t bytes = 0;
+    uint8_t *saved = st_read_file(path, &bytes);
+    assert(saved && bytes);
+    analysis_write(path, "", 0);
+    unsigned readers = reader_count();
+    atomic_store(&fixture_fail_input_beats, 1);
+    analysis_source_input input = {0};
+    assert(acquire_track(0, AZ_DATA_PHRASES, track, &input) == AZ_FAILED);
+    assert(!atomic_load(&fixture_fail_input_beats) && !input.lease && !input.audio_path[0]);
+    assert(reader_count() == readers);
+    analysis_source_release(&input);
+    assert(acquire_track(0, AZ_DATA_PHRASES, track, &input) == AZ_OK);
+    input_reader_close(&input);
+    analysis_write(path, saved, bytes);
+    free(saved);
+    puts("Analysis input failure: allocation refusal closes opened audio and releases admission capacity");
+}
+struct pending_request {
+    az_analysis_owner owner;
+    az_track_ref track;
+    analysis_source_input input;
+    int result;
+};
+static void *acquire_pending_after_replacement(void *opaque) {
+    struct pending_request *request = opaque;
+    analysis_source_request source = {.components = AZ_DATA_PHRASES, .track = request->track};
+    request->result = analysis_source_acquire(request->owner, &source, &request->input);
+    return NULL;
+}
+static void pending_admission_lifetime(const az_track_ref *track, int core) {
+    struct pending_request request = {.owner = core ? analysis_owner_core_begin() : analysis_owner_begin(1), .track = *track};
+    atomic_store(&fixture_admission_entered, 0);
+    atomic_store(&fixture_resume_admission, 0);
+    atomic_store(&fixture_pause_admission, 1);
+    pthread_t worker;
+    assert(!pthread_create(&worker, NULL, acquire_pending_after_replacement, &request));
+    while (!atomic_load(&fixture_admission_entered)) usleep(1000);
+    if (core) analysis_owner_core_retire();
+    else analysis_owner_retire(1);
+    az_analysis_owner replacement = core ? analysis_owner_core_begin() : analysis_owner_begin(1);
+    analysis_source_input no_link = {.lease = UINT64_MAX};
+    int available = AZ_BUSY;
+    for (unsigned i = 0; i < 1000 && available == AZ_BUSY; ++i) {
+        available = analysis_source_outcome(request.owner, &no_link);
+        if (available == AZ_BUSY) usleep(1000);
+    }
+    assert(available == AZ_STALE);
+    atomic_store(&fixture_resume_admission, 1);
+    assert(!pthread_join(worker, NULL));
+    if (request.result != AZ_STALE) fprintf(stderr, "pending admission core=%d rc=%d lease=%llu\n", core, request.result, (unsigned long long) request.input.lease);
+    assert(request.result == AZ_STALE && !request.input.lease);
+    analysis_source_retire(request.owner);
+    analysis_source_release(&request.input);
+    analysis_source_request source = {.components = AZ_DATA_PHRASES, .track = *track};
+    int rc = AZ_BUSY;
+    for (unsigned i = 0; i < 1000 && rc == AZ_BUSY; ++i) {
+        rc = analysis_source_acquire(replacement, &source, &request.input);
+        if (rc == AZ_BUSY) usleep(1000);
+    }
+    assert(rc == AZ_PENDING && request.input.lease);
+    analysis_source_release(&request.input);
+    if (core) analysis_owner_core_retire();
+    else analysis_owner_retire(1);
+    analysis_source_retire(replacement);
+    puts(core ? "Core pending-link admission: old generation refused, replacement usable" : "Mod pending-link admission: old generation refused, replacement usable");
+}
+struct retirement_request {
+    az_analysis_owner owner;
+    int result;
+};
 static void *acquire_during_retirement(void *opaque) {
     struct retirement_request *request = opaque;
     analysis_source_request source = {.loaded = 1, .deck = 0, .load = 44, .components = AZ_DATA_PHRASES};
@@ -305,12 +472,21 @@ static void core_source_lifetime(const az_analysis_result_v1 *result) {
     analysis_source_input input = {0};
     assert(analysis_source_acquire(old, &request, &input) == AZ_OK);
     assert(input.beat_count == 2 && input.beats[1].beat_in_bar == 2);
+    int releases_before = atomic_load(&fixture_released);
     analysis_owner_core_retire();
+    analysis_source_retire(old);
     az_analysis_owner replacement = analysis_owner_core_begin();
     assert(replacement.generation != old.generation);
     assert(analysis_source_publish(old, &input, result) == AZ_STALE && !fixture_published);
     assert(input.beats[1].beat_in_bar == 2); /* copied input remains caller-owned */
-    analysis_source_release(&input);
+    for (unsigned i = 0; i < 1000 && atomic_load(&fixture_released) == releases_before; ++i) usleep(1000);
+    assert(atomic_load(&fixture_released) > releases_before);
+    int reader = open(input.audio_path, O_RDONLY);
+    char bytes[17];
+    assert(reader >= 0 && read(reader, bytes, sizeof bytes) == sizeof bytes);
+    assert(!memcmp(bytes, "audio-placeholder", sizeof bytes));
+    close(reader);
+    input_reader_close(&input);
     int rc = AZ_BUSY;
     for (unsigned i = 0; i < 1000 && rc == AZ_BUSY; ++i) {
         rc = analysis_source_acquire(replacement, &request, &input);
@@ -321,7 +497,175 @@ static void core_source_lifetime(const az_analysis_result_v1 *result) {
     analysis_owner_core_retire();
     fixture_released = 0;
 }
-static int refuse_commit(void *unused) { (void) unused; return 1; }
+struct publication_request {
+    az_analysis_owner owner;
+    analysis_source_input input;
+    const az_analysis_result_v1 *result;
+    int outcome;
+};
+static void *publish_during_retirement(void *opaque) {
+    struct publication_request *request = opaque;
+    request->outcome = analysis_source_publish(request->owner, &request->input, request->result);
+    return NULL;
+}
+static void nonblocking_publication_retirement(const az_analysis_result_v1 *result, int core) {
+    struct publication_request request = {.owner = core ? analysis_owner_core_begin() : owner_at(0), .result = result};
+    analysis_source_request source = {.loaded = 1, .deck = 0, .load = 44, .components = AZ_DATA_PHRASES};
+    assert(analysis_source_acquire(request.owner, &source, &request.input) == AZ_OK);
+    char dat[PATH_MAX], ext[PATH_MAX];
+    snprintf(dat, sizeof dat, "%s/sdb1/DJ.DAT", g_media);
+    snprintf(ext, sizeof ext, "%s/sdb1/DJ.EXT", g_media);
+    uint64_t before_dat = st_disk_sig(dat), before_ext = st_disk_sig(ext);
+    /* Pause the final validation after staging, not the initial validation. */
+    atomic_store(&fixture_skip_current, 1);
+    atomic_store(&fixture_current_entered, 0);
+    atomic_store(&fixture_resume_current, 0);
+    atomic_store(&fixture_pause_current, 1);
+    pthread_t worker;
+    assert(!pthread_create(&worker, NULL, publish_during_retirement, &request));
+    while (!atomic_load(&fixture_current_entered)) usleep(1000);
+    if (core) analysis_owner_core_retire();
+    else analysis_owner_retire(0);
+    analysis_source_retire(request.owner);
+    atomic_store(&fixture_resume_current, 1);
+    assert(!pthread_join(worker, NULL));
+    assert(request.outcome == AZ_STALE && !fixture_published);
+    assert(st_disk_sig(dat) == before_dat && st_disk_sig(ext) == before_ext);
+    analysis_source_release(&request.input);
+    for (unsigned i = 0; i < 1000 && !atomic_load(&fixture_released); i++) usleep(1000);
+    assert(atomic_load(&fixture_released) == 1);
+    if (!core) analysis_owner_thread_bind(analysis_owner_begin(0));
+    fixture_released = 0;
+    puts(core ? "Core publication: retirement during native validation prevents file/native writes" : "Mod publication: retirement during native validation prevents file/native writes");
+}
+static void external_analysis_edit(const char *path) {
+    size_t size = 0;
+    int failed = 0;
+    uint8_t *file = read_analysis(path, &size, &failed);
+    uint8_t tag[12] = {'E', 'D', 'I', 'T', 0, 0, 0, 12, 0, 0, 0, 12};
+    size_t updated_size = size + sizeof tag;
+    uint8_t *updated = malloc(updated_size);
+    assert(file && !failed && updated);
+    memcpy(updated, file, size);
+    memcpy(updated + size, tag, sizeof tag);
+    sa_put32(updated + 8, (uint32_t) updated_size);
+    analysis_write(path, updated, updated_size);
+    free(updated);
+    free(file);
+}
+static void edit_during_native_validation(az_analysis_owner owner, const analysis_source_input *input,
+                                          const az_analysis_result_v1 *result, const char *path, unsigned skip, int calls) {
+    struct publication_request publication = {.owner = owner, .input = *input, .result = result};
+    atomic_store(&fixture_skip_current, (int) skip);
+    atomic_store(&fixture_current_entered, 0);
+    atomic_store(&fixture_resume_current, 0);
+    atomic_store(&fixture_pause_current, 1);
+    pthread_t worker;
+    assert(!pthread_create(&worker, NULL, publish_during_retirement, &publication));
+    while (!atomic_load(&fixture_current_entered)) usleep(1000);
+    /* The vocal signature was checked before this native validation callback.
+     * Publishing a different component must not adopt this later edit. */
+    external_analysis_edit(path);
+    atomic_store(&fixture_resume_current, 1);
+    assert(!pthread_join(worker, NULL));
+    assert(publication.outcome == AZ_BUSY && fixture_publish_calls == calls);
+}
+static void busy_publication(const az_analysis_result_v1 *phrases, int scenario) {
+    az_analysis_owner owner = scenario == 3 ? analysis_owner_core_begin() : owner_at(0);
+    az_vocal_frame_v1 frames[22] = {0};
+    az_analysis_result_v1 result = *phrases;
+    result.vocals = (az_analysis_vocal_map_v1) {.sample_rate = 22050, .hop_samples = 1024, .method = AZ_VOCAL_LSTM, .count = 22, .frames = frames};
+    analysis_source_request request = {.loaded = 1, .deck = 0, .load = 44, .components = AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS};
+    char paths[3][PATH_MAX];
+    const char *suffix[3] = {"DAT", "EXT", "2EX"};
+    for (unsigned i = 0; i < 3; i++) snprintf(paths[i], sizeof paths[i], "%s/sdb1/DJ.%s", g_media, suffix[i]);
+    if (scenario == 6) {
+        /* Native instrumental data already exists; this request needs phrases
+         * only and must preserve the original vocal file's identity. */
+        struct sa_tags tags = {0};
+        uint8_t *encoded = sa_encode_native(&result, &tags);
+        size_t size = 0;
+        uint8_t *file = sa_merge(NULL, 0, tags.vocal, tags.vn, &size);
+        assert(encoded && file);
+        analysis_write(paths[2], file, size);
+        free(file);
+        free(encoded);
+        memset(&result.vocals, 0, sizeof result.vocals);
+    }
+    analysis_source_input input = {0};
+    assert(analysis_source_acquire(owner, &request, &input) == AZ_OK);
+    uint64_t lease = input.lease;
+    fixture_publish_busy = 1;
+    fixture_publish_calls = 0;
+    if (scenario == 6) {
+        assert(input.needed == AZ_DATA_PHRASES);
+        edit_during_native_validation(owner, &input, &result, paths[2], 1, 1);
+    } else assert(analysis_source_publish(owner, &input, &result) == AZ_BUSY);
+    assert(input.lease == lease && fixture_publish_calls == 1 && !fixture_published);
+    uint64_t saved[3];
+    for (unsigned i = 0; i < 3; i++) assert((saved[i] = st_disk_sig(paths[i])) != 0);
+    if (scenario == 0) {
+        /* Encoding identity includes all components and source provenance. */
+        az_analysis_result_v1 changed = result;
+        changed.source_frames++;
+        assert(analysis_source_publish(owner, &input, &changed) == AZ_STALE);
+        az_analysis_phrase_v1 phrase = *result.phrases.entries;
+        phrase.kind = 2;
+        changed = result;
+        changed.phrases.entries = &phrase;
+        assert(analysis_source_publish(owner, &input, &changed) == AZ_STALE);
+        frames[0].activity = 4;
+        int retry = analysis_source_publish(owner, &input, &result);
+        if (retry != AZ_STALE) fprintf(stderr, "Native publication scenario %d: expected STALE, got %d\n", scenario, retry);
+        assert(retry == AZ_STALE);
+        frames[0].activity = 0;
+        assert(fixture_publish_calls == 1);
+        assert(analysis_source_publish(owner, &input, &result) == AZ_BUSY);
+        assert(input.lease == lease && fixture_publish_calls == 2 && !fixture_published);
+        fixture_publish_busy = 0;
+        assert(analysis_source_publish(owner, &input, &result) == AZ_OK);
+        assert(fixture_publish_calls == 3 && fixture_published == 1);
+    } else {
+        if (scenario == 1) {
+            external_analysis_edit(paths[1]);
+            saved[1] = st_disk_sig(paths[1]);
+        } else if (scenario == 2) {
+            fixture_current = 0;
+        } else if (scenario == 5) {
+            edit_during_native_validation(owner, &input, &result, paths[2], 0, 2);
+            saved[2] = st_disk_sig(paths[2]);
+        } else if (scenario == 3 || scenario == 4) {
+            if (scenario == 3) analysis_owner_core_retire();
+            else analysis_owner_retire(0);
+            analysis_source_retire(owner);
+        }
+        fixture_publish_busy = 0;
+        int retry = analysis_source_publish(owner, &input, &result);
+        if (retry != AZ_STALE) fprintf(stderr, "Native publication scenario %d: expected STALE, got %d\n", scenario, retry);
+        assert(retry == AZ_STALE);
+        assert(fixture_publish_calls == (scenario == 5 ? 2 : 1) && !fixture_published);
+    }
+    for (unsigned i = 0; i < 3; i++) assert(st_disk_sig(paths[i]) == saved[i]);
+    int fd = open(input.audio_path, O_RDONLY);
+    char audio[17];
+    assert(fd >= 0 && read(fd, audio, sizeof audio) == sizeof audio);
+    assert(!memcmp(audio, "audio-placeholder", sizeof audio));
+    close(fd);
+    analysis_source_release(&input);
+    assert(!input.lease);
+    /* Retirement may detach the job before the cleaner releases native owners
+     * outside its lock. Observe that release before resetting fixture counts. */
+    for (unsigned i = 0; i < 1000 && !atomic_load(&fixture_released); i++) usleep(1000);
+    assert(atomic_load(&fixture_released) == 1);
+    if (scenario == 4) analysis_owner_thread_bind(analysis_owner_begin(0));
+    fixture_current = 1;
+    for (unsigned i = 0; i < 3; i++) assert(!unlink(paths[i]));
+    fixture_released = fixture_published = 0;
+}
+static int refuse_commit(void *unused) {
+    (void) unused;
+    return 1;
+}
 static void link_failure_case(az_track_ref ref, const az_analysis_result_v1 *result, int later_edit) {
     char database[PATH_MAX], audio[PATH_MAX], statement[1024], spool[PATH_MAX];
     snprintf(database, sizeof database, "%s/sdb1/PIONEER/rekordbox/exportLibrary.db", g_media);
@@ -359,6 +703,207 @@ static void link_failure_case(az_track_ref ref, const az_analysis_result_v1 *res
     assert(st_disk_sig(saved) == durable_grid);
     analysis_source_release(&input);
 }
+struct loaded_reuse {
+    az_track_ref ref;
+    uint64_t seed_lease;
+    char database[PATH_MAX], paths[3][PATH_MAX];
+};
+static int reuse_request(az_analysis_owner owner, const analysis_source_request *request, analysis_source_input *input) {
+    int rc = AZ_BUSY;
+    for (unsigned i = 0; i < 1000 && rc == AZ_BUSY; i++) {
+        rc = analysis_source_acquire(owner, request, input);
+        if (rc == AZ_BUSY) usleep(1000);
+    }
+    return rc;
+}
+static int reuse_outcome(const analysis_source_input *input) {
+    int rc = AZ_BUSY;
+    for (unsigned i = 0; i < 1000 && rc == AZ_BUSY; i++) {
+        rc = analysis_source_outcome(input->owner, input);
+        if (rc == AZ_BUSY) usleep(1000);
+    }
+    return rc;
+}
+static _Atomic unsigned reuse_wakes;
+static void reuse_wake(void) { atomic_fetch_add(&reuse_wakes, 1); }
+static struct loaded_reuse loaded_reuse_seed(az_track_ref ref, const az_analysis_result_v1 *complete, unsigned track) {
+    struct loaded_reuse fixture = {.ref = ref};
+    fixture.ref.track_id = track;
+    char audio[PATH_MAX], statement[1024];
+    snprintf(fixture.database, sizeof fixture.database, "%s/sdb1/PIONEER/rekordbox/exportLibrary.db", g_media);
+    snprintf(audio, sizeof audio, "%s/sdb1/reuse-%u.wav", g_media, track);
+    analysis_write(audio, "audio-placeholder", 17);
+    sqlite3 *db = NULL;
+    assert(!sqlite3_open(fixture.database, &db));
+    snprintf(statement, sizeof statement, "INSERT INTO content(content_id,path) VALUES(%u,'/reuse-%u.wav')", track, track);
+    sql(db, statement);
+    struct st_resolution row = {0};
+    assert(st_read_row(db, track, &row) == AZ_OK && row.analysis_generated);
+    assert(!sqlite3_close(db));
+    const char *suffix[3] = {"DAT", "EXT", "2EX"};
+    for (unsigned i = 0; i < 3; i++) {
+        snprintf(fixture.paths[i], sizeof fixture.paths[i], "%s/sdb1%s", g_media, row.analysis);
+        memcpy(fixture.paths[i] + strlen(fixture.paths[i]) - 3, suffix[i], 4);
+    }
+    analysis_source_input initial = {0};
+    analysis_source_request seed = {.track = fixture.ref, .components = AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS};
+    assert(reuse_request(owner_at(0), &seed, &initial) == AZ_OK);
+    assert(publish_result(0, &initial, complete) == AZ_PENDING);
+    fixture.seed_lease = initial.lease;
+    analysis_source_release(&initial);
+    fixture_source_kind = AZ_STATUS_SOURCE_USB1;
+    fixture_loaded_ref = fixture.ref;
+    fixture_native_phrases = 1;
+    return fixture;
+}
+static void reuse_spool_path(const struct loaded_reuse *fixture, uint64_t lease, char path[PATH_MAX]) {
+    snprintf(path, PATH_MAX, "%s/sdb1/PIONEER/azspool/track-analysis-%08x-%llu.sql", g_media,
+             fixture->ref.track_id, (unsigned long long) lease);
+}
+static void reuse_commit_without_polling(const struct loaded_reuse *fixture, analysis_source_input *input) {
+    char spool[PATH_MAX];
+    reuse_spool_path(fixture, input->lease, spool);
+    assert(!access(spool, F_OK));
+    atomic_store(&reuse_wakes, 0);
+    analysis_source_set_wake(reuse_wake);
+    sqlite3 *db = NULL;
+    assert(!sqlite3_open(fixture->database, &db));
+    assert(apply_analysis_spool(db, spool) == 0);
+    assert(!sqlite3_close(db));
+    /* No outcome/status call drives progress: wait only for the service's wake. */
+    for (unsigned i = 0; i < 3000 && !atomic_load(&reuse_wakes); i++) usleep(1000);
+    assert(atomic_load(&reuse_wakes));
+    await_link(input, AZ_OK);
+    analysis_source_set_wake(NULL);
+    analysis_source_release(input);
+}
+static void loaded_link_reuse(az_track_ref ref, const az_analysis_result_v1 *complete, int scenario) {
+    struct loaded_reuse fixture = loaded_reuse_seed(ref, complete, (unsigned) (40 + scenario));
+    if (scenario == 1 || scenario == 2 || scenario == 4) fixture_native_phrases = 0;
+    if (scenario == 2 || scenario == 4) assert(!unlink(fixture.paths[2]));
+    if (scenario == 3) assert(!unlink(fixture.paths[0]) && !unlink(fixture.paths[1]));
+    if (scenario == 1) {
+        fixture_spool_track = fixture.ref.track_id;
+        fixture_spool_after = fixture.seed_lease;
+        fixture_spool_signature = 0;
+    }
+    int published = fixture_published;
+    __atomic_store_n(&g_ls_leftover, 0, __ATOMIC_RELEASE);
+    analysis_source_input input = {0};
+    analysis_source_request request = {.loaded = 1, .deck = 0, .load = 44, .components = AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS};
+    int rc = reuse_request(owner_at(0), &request, &input);
+    fprintf(stderr, "Loaded link reuse: scenario=%d acquire=%d lease=%llu\n", scenario, rc, (unsigned long long) input.lease);
+    if (scenario == 1) {
+        fixture_spool_track = 0;
+        assert(fixture_spool_signature && st_disk_sig(fixture_spool_path) == fixture_spool_signature);
+    }
+    if (scenario == 3) {
+        assert(rc == ANALYSIS_SOURCE_COMPLETE && !input.lease);
+        assert(!st_disk_sig(fixture.paths[0]) && !st_disk_sig(fixture.paths[1]));
+        return; /* Native PSSI plus a vocal file is not complete durable ANLZ. */
+    }
+    assert(rc == (scenario == 2 || scenario == 4 ? AZ_OK : AZ_PENDING) && input.lease);
+    if (scenario == 2 || scenario == 4) {
+        assert(input.needed == AZ_ANALYSIS_VOCALS);
+        char spool[PATH_MAX];
+        reuse_spool_path(&fixture, input.lease, spool);
+        assert(access(spool, F_OK) && errno == ENOENT);
+        assert(!__atomic_load_n(&g_ls_leftover, __ATOMIC_ACQUIRE));
+        /* A commit cannot race the remaining computation: no native transaction
+         * is submitted until its vocal file has been durably published. */
+        az_analysis_result_v1 vocal = *complete;
+        vocal.beats = NULL;
+        vocal.beat_count = 0;
+        memset(&vocal.phrases, 0, sizeof vocal.phrases);
+        if (scenario == 4) {
+            sqlite3 *external = NULL;
+            assert(!sqlite3_open(fixture.database, &external));
+            sql(external, "UPDATE content SET title='external edit' WHERE content_id=44");
+            assert(!sqlite3_close(external));
+            assert(publish_result(0, &input, &vocal) == AZ_STALE);
+            assert(!st_disk_sig(fixture.paths[2]) && !st_disk_sig(spool));
+            analysis_source_release(&input);
+            return;
+        }
+        assert(publish_result(0, &input, &vocal) == AZ_PENDING);
+        assert(st_disk_sig(spool));
+    }
+    assert(fixture_published == published + (scenario == 1 || scenario == 2));
+    int outcome = reuse_outcome(&input);
+    fprintf(stderr, "Loaded link reuse: initial outcome=%d\n", outcome);
+    assert(outcome == AZ_PENDING);
+    reuse_commit_without_polling(&fixture, &input);
+}
+static void native_only_phrase_reuse(az_track_ref ref) {
+    fixture_loaded_ref = ref;
+    fixture_loaded_ref.track_id = 99999; /* No USB row or persistent files. */
+    fixture_native_phrases = 1;
+    for (unsigned streaming = 0; streaming < 2; streaming++) {
+        fixture_source_kind = streaming ? AZ_STATUS_SOURCE_STREAMING : AZ_STATUS_SOURCE_USB1;
+        analysis_source_input input = {0};
+        assert(acquire_loaded(0, AZ_DATA_PHRASES, 0, 44, &input) == ANALYSIS_SOURCE_COMPLETE && !input.lease);
+    }
+}
+struct reuse_admission {
+    az_analysis_owner owner;
+    analysis_source_input input;
+    int rc;
+};
+static void *reuse_acquire(void *opaque) {
+    struct reuse_admission *admission = opaque;
+    analysis_source_request request = {.loaded = 1, .deck = 0, .load = 44, .components = AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS};
+    admission->rc = reuse_request(admission->owner, &request, &admission->input);
+    return NULL;
+}
+static void loaded_reuse_freshness(az_track_ref ref, const az_analysis_result_v1 *complete, int scenario) {
+    struct loaded_reuse fixture = loaded_reuse_seed(ref, complete, (unsigned) (50 + scenario));
+    struct reuse_admission admission = {.owner = scenario == 1 ? analysis_owner_core_begin() : owner_at(0)};
+    int published = fixture_published;
+    if (scenario == 3) fixture_native_phrases = 0;
+    atomic_store(&fixture_skip_current, scenario == 3 ? 0 : 1); /* Before refresh, or final validation before first enqueue. */
+    atomic_store(&fixture_current_entered, 0);
+    atomic_store(&fixture_resume_current, 0);
+    atomic_store(&fixture_pause_current, 1);
+    pthread_t worker;
+    assert(!pthread_create(&worker, NULL, reuse_acquire, &admission));
+    while (!atomic_load(&fixture_current_entered)) usleep(1000);
+    if (scenario == 0) analysis_source_retire(analysis_owner_retire(0));
+    else if (scenario == 1) {
+        analysis_owner_core_retire();
+        analysis_source_retire(admission.owner);
+    } else if (scenario == 3) analysis_write(fixture.paths[2], "malformed", 9);
+    else external_analysis_edit(fixture.paths[0]);
+    atomic_store(&fixture_resume_current, 1);
+    assert(!pthread_join(worker, NULL));
+    assert(admission.rc == (scenario == 3 ? AZ_FAILED : AZ_STALE) && !admission.input.lease);
+    assert(fixture_published == published);
+    analysis_source_release(&admission.input);
+    if (scenario == 0) analysis_owner_thread_bind(analysis_owner_begin(0));
+}
+
+static void failed_refresh_releases_link(az_track_ref ref, const az_analysis_result_v1 *complete) {
+    (void) loaded_reuse_seed(ref, complete, 60);
+    fixture_native_phrases = 0;
+    fixture_publish_busy = 1;
+    az_analysis_owner owner = owner_at(0);
+    analysis_source_request request = {.loaded = 1, .deck = 0, .load = 44, .components = AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS};
+    for (unsigned attempt = 0; attempt < 12; attempt++) {
+        analysis_source_input input = {0};
+        int calls = fixture_publish_calls, rc = AZ_BUSY;
+        for (unsigned i = 0; i < 1000 && rc == AZ_BUSY && fixture_publish_calls == calls; i++) {
+            rc = analysis_source_acquire(owner, &request, &input);
+            if (rc == AZ_BUSY && fixture_publish_calls == calls) usleep(1000);
+        }
+        fprintf(stderr, "Native refresh refusal: attempt=%u rc=%d published_calls=%d\n", attempt, rc, fixture_publish_calls - calls);
+        assert(rc == AZ_BUSY && fixture_publish_calls == calls + 1 && !input.lease);
+        analysis_source_release(&input);
+    }
+    fixture_publish_busy = 0;
+    analysis_source_input input = {0};
+    assert(reuse_request(owner, &request, &input) == AZ_PENDING);
+    analysis_source_release(&input);
+}
+
 int main(void) {
     analysis_owner_thread_bind(analysis_owner_begin(0));
     typed_grid_result_validation();
@@ -395,7 +940,8 @@ int main(void) {
     ref.track_id = 10;
     owner_lifecycle(&ref);
     analysis_source_input missing = {0};
-    az_track_ref absent = ref; absent.track_id = 999;
+    az_track_ref absent = ref;
+    absent.track_id = 999;
     assert(acquire_track(0, AZ_DATA_PHRASES, &absent, &missing) == AZ_NOT_FOUND);
     analysis_source_input job = {0};
     assert(acquire_track(-1, AZ_DATA_PHRASES, &ref, &job) == AZ_STALE);
@@ -424,17 +970,19 @@ int main(void) {
     phrase[35] = 1;
     phrase[37] = 1;
     az_beat baseline_beats[2] = {{.time_s = 0, .bpm = 120, .beat_in_bar = 1},
-                                  {.time_s = 0.5, .bpm = 120, .beat_in_bar = 2}};
+                                 {.time_s = 0.5, .bpm = 120, .beat_in_bar = 2}};
     az_analysis_phrase_v1 baseline_phrase = {.start_beat = 1, .kind = 1};
-    az_analysis_result_v1 baseline_result = {.size = sizeof baseline_result, .version = AZ_DATA_VERSION,
-        .source_rate = 44100, .source_frames = 44100, .beats = baseline_beats, .beat_count = 2,
-        .phrases = {.mood = 1, .end_beat = 2, .count = 1, .entries = &baseline_phrase}};
+    az_analysis_result_v1 baseline_result = {.size = sizeof baseline_result, .version = AZ_DATA_VERSION, .source_rate = 44100, .source_frames = 44100, .beats = baseline_beats, .beat_count = 2, .phrases = {.mood = 1, .end_beat = 2, .count = 1, .entries = &baseline_phrase}};
     az_analysis_result_v1 loaded_result = baseline_result;
-    loaded_result.beats = NULL; loaded_result.beat_count = 0;
+    loaded_result.beats = NULL;
+    loaded_result.beat_count = 0;
     assert(publish_result(-1, &job, &baseline_result) == AZ_STALE);
     /* A mutated audio file invalidates the lease without writing either container. */
     analysis_write(path, "changed-audio-placeholder", 25);
-    assert(publish_result(0, &job, &baseline_result) == AZ_STALE);
+    fixture_publication_busy = 1; /* Explicitly exercise the bounded admission retry. */
+    int changed_audio = publish_result(0, &job, &baseline_result);
+    if (changed_audio != AZ_STALE) fprintf(stderr, "Changed audio: expected STALE, got %d\n", changed_audio);
+    assert(!fixture_publication_busy && changed_audio == AZ_STALE);
     analysis_source_release(&job);
     assert(acquire_track(0, AZ_DATA_PHRASES, &ref, &job) == AZ_OK);
     assert(publish_result(0, &job, &baseline_result) == AZ_OK);
@@ -450,8 +998,14 @@ int main(void) {
     file = read_analysis(path, &n, &failed);
     assert(file && !failed && sa_tag_count(file, n, "PSSI") == 1);
     free(file);
+    /* Cached-file reuse publishes to native maps during acquisition. It must
+     * observe retirement at that publication boundary too. */
+    fixture_loaded_ref = ref;
+    nonblocking_retirement(0);
+    nonblocking_retirement(1);
+    acquisition_failure_cleanup(&ref);
     az_analysis_result_v1 short_result = {.size = 4, .version = AZ_DATA_VERSION};
-    assert(publish_result(0, &(analysis_source_input){.lease = 1, .owner = owner_at(0)}, &short_result) == AZ_INVALID);
+    assert(publish_result(0, &(analysis_source_input) {.lease = 1, .owner = owner_at(0)}, &short_result) == AZ_INVALID);
     /* A row without an analysis location gets complete files and a conditional
      * native-spool update. Apostrophes in audio paths remain literal SQL data. */
     snprintf(path, sizeof path, "%s/sdb1/PIONEER/rekordbox/exportLibrary.db", g_media);
@@ -464,7 +1018,9 @@ int main(void) {
     assert(acquire_track(0, AZ_DATA_PHRASES, &ref, &job) == AZ_OK);
     assert(publish_result(0, &job, &baseline_result) == AZ_PENDING);
     analysis_source_input saved_link = job;
-    job = (analysis_source_input){0};
+    pending_admission_lifetime(&ref, 0);
+    pending_admission_lifetime(&ref, 1);
+    job = (analysis_source_input) {0};
     int reopened;
     do { reopened = acquire_track(0, AZ_DATA_PHRASES, &ref, &job); } while (reopened == AZ_BUSY);
     assert(reopened == AZ_PENDING && job.lease);
@@ -503,6 +1059,10 @@ int main(void) {
     nonblocking_retirement(0);
     nonblocking_retirement(1);
     core_source_lifetime(&loaded_result);
+    nonblocking_publication_retirement(&loaded_result, 0);
+    nonblocking_publication_retirement(&loaded_result, 1);
+    for (int scenario = 0; scenario < 7; scenario++) busy_publication(&loaded_result, scenario);
+    puts("Native publication continuation: durable files retained through BUSY; same lease completes without rewrites; changed result, files, load and owners refused");
     assert(acquire_loaded(-1, AZ_DATA_PHRASES, 0, 44, &job) == AZ_STALE);
     assert(acquire_loaded(0, AZ_DATA_PHRASES, 0, 43, &job) == AZ_STALE);
     assert(acquire_loaded(0, AZ_DATA_PHRASES, 0, 44, &job) == AZ_OK);
@@ -566,7 +1126,7 @@ int main(void) {
     assert(acquire_loaded(0, AZ_DATA_PHRASES, 0, 44, &job) == AZ_OK);
     assert(!job.track.track_id && !job.track.source_id);
     analysis_source_input streaming_job = job;
-    job = (analysis_source_input){0};
+    job = (analysis_source_input) {0};
     assert(acquire_loaded(0, AZ_DATA_PHRASES, 0, 44, &job) == AZ_BUSY);
     fixture_source_ready = 0;
     assert(publish_result(0, &streaming_job, &loaded_result) == AZ_STALE);
@@ -612,10 +1172,7 @@ int main(void) {
     memset(pvdi + 24 + 20, 4, 2);
     az_vocal_frame_v1 vocal_frames[22] = {0};
     for (unsigned i = 0; i < 22; i++) vocal_frames[i].activity = pvdi[24 + i];
-    az_analysis_result_v1 vocal_result = {.size = sizeof vocal_result, .version = AZ_DATA_VERSION,
-        .source_rate = 44100, .source_frames = 44100,
-        .vocals = {.sample_rate = 22050, .hop_samples = 1024, .method = AZ_VOCAL_LSTM,
-                   .count = 22, .frames = vocal_frames}};
+    az_analysis_result_v1 vocal_result = {.size = sizeof vocal_result, .version = AZ_DATA_VERSION, .source_rate = 44100, .source_frames = 44100, .vocals = {.sample_rate = 22050, .hop_samples = 1024, .method = AZ_VOCAL_LSTM, .count = 22, .frames = vocal_frames}};
     char vocals_path[1024], saved_dat[1024], saved_ext[1024];
     snprintf(vocals_path, sizeof vocals_path, "%s/sdb1/DJ.2EX", g_media);
     snprintf(saved_dat, sizeof saved_dat, "%s/sdb1/DJ.DAT", g_media);
@@ -725,6 +1282,13 @@ int main(void) {
     assert(acquire_loaded(0, AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS, 0, 44, &job) == AZ_OK && job.needed == AZ_ANALYSIS_VOCALS);
     assert(publish_result(0, &job, &vocal_result) == AZ_OK);
     assert(analysis_vocal_intervals_loaded(owner_at(0), 0, 44, &vocals, NULL, 0) == AZ_OK && !vocals.interval_count);
+    az_analysis_result_v1 reused = baseline_result;
+    reused.vocals = vocal_result.vocals;
+    for (int scenario = 0; scenario < 5; scenario++) loaded_link_reuse(ref, &reused, scenario);
+    for (int scenario = 0; scenario < 4; scenario++) loaded_reuse_freshness(ref, &reused, scenario);
+    native_only_phrase_reuse(ref);
+    failed_refresh_releases_link(ref, &reused);
+    puts("Loaded saved reuse: autonomous link completion, deferred partial linkage, native-only availability and owner/source refusal passed");
     link_failure_case(ref, &baseline_result, 0);
     link_failure_case(ref, &baseline_result, 1);
     puts("Link outcomes: real transaction commit failure and later row edit preserve saved files without false success");

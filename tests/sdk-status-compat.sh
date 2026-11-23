@@ -48,7 +48,8 @@ for provider in old new; do
     else
         if grep -q '^LEGACY setting round trip$' "$work/$provider.trace"; then exit 1; fi
         if grep -q '^MOD legacy-status-client state=1' "$work/$provider.trace"; then exit 1; fi
-        grep '^MOD legacy-status-client ' "$work/$provider.trace" | grep -i 'api\|abi'
+        grep '^MOD legacy-status-client state=3 ' "$work/$provider.trace" | grep -i 'api\|abi'
+        grep -Fx 'ABI1 library rejected' "$work/$provider.trace"
         grep '^MOD status-watch state=1' "$work/$provider.trace"
     fi
 done

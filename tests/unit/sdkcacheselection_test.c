@@ -697,8 +697,46 @@ static void exact_alias_owner_and_root_aba(void) {
     refused(&c, &before);
     observed_drop(&w.a);
 }
+#ifdef AZSDK_HAVE_CACHE_SELECTION
+static void bounded_fences(void) {
+    struct azsel_state state;
+    struct azsel_invocation first, refused;
+    azsel_state_init(&state, 1, 1, 0);
+    azsel_invocation_init(&first, &state);
+    REQUIRE(azsel_ready(&first) && atomic_load(&state.active) == 1, "first bounded invocation owns one active slot");
+    azsel_invocation_init(&refused, &state);
+    REQUIRE(!refused.entered && atomic_load(&state.saturated) && !azsel_ready(&first), "depth exhaustion invalidates existing observations instead of reusing a slot");
+    azsel_invocation_drop(&first);
+    azsel_invocation_drop(&refused);
+    REQUIRE(!atomic_load(&state.active), "refused invocation does not release another caller's slot");
+
+    azsel_state_init(&state, 1, 1, UINT64_MAX);
+    azsel_invocation_init(&refused, &state);
+    REQUIRE(!refused.entered && !refused.id && !atomic_load(&state.active) && atomic_load(&state.saturated), "exhausted invocation identities never wrap and release admission custody");
+
+    struct azsel_mutation outer, nested;
+    azsel_state_init(&state, 1, 1, 0);
+    azsel_mutation_init(&outer, &state, AZSEL_SELECTION_CHANGE);
+    azsel_mutation_init(&nested, &state, AZSEL_SCOPE_LOSS);
+    REQUIRE(outer.entered && !nested.entered && atomic_load(&state.saturated), "nested mutation overflow stays fail closed while outer owner remains live");
+    azsel_mutation_drop(&nested);
+    REQUIRE(atomic_load(&state.mutating) == 1, "unadmitted mutation does not release outer writer");
+    azsel_mutation_drop(&outer);
+    REQUIRE(!atomic_load(&state.mutating) && !azsel_stamp_is(&state, 3), "writer retirement cannot restore proof after mutation overflow");
+
+    azsel_state_init(&state, 2, UINT64_MAX, 0);
+    azsel_mutation_init(&outer, &state, AZSEL_SELECTION_CHANGE);
+    REQUIRE(outer.entered && atomic_load(&state.saturated) && atomic_load(&state.revision) == UINT64_MAX, "mutation revision exhaustion does not wrap into an old proof");
+    azsel_mutation_drop(&outer);
+    azsel_state_init(&state, 2, 1, 0);
+    azsel_mutation_init(&outer, &state, 99);
+    REQUIRE(outer.entered && atomic_load(&state.saturated), "unknown mutation kind withdraws proof while preserving writer custody");
+    azsel_mutation_drop(&outer);
+}
+#endif
 int main(int argc, char **argv) {
 #ifdef AZSDK_HAVE_CACHE_SELECTION
+    bounded_fences();
     struct azsel_vector empty = {0};
     uintptr_t count = 123;
     REQUIRE(!azsel_count(&empty, 0, &count) && count == 123, "zero element width refuses without output");

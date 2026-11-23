@@ -3,16 +3,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "../../src/azmod/slip_diagnostic/binding.h"
-int main(void)
-{
+int main(void) {
     unsigned char bytes[128];
-    for (size_t i = 0; i < sizeof bytes; i++) bytes[i] = (unsigned char)(i * 7 + 3);
+    for (size_t i = 0; i < sizeof bytes; i++) bytes[i] = (unsigned char) (i * 7 + 3);
     char a[65], b[65];
     azsha256_hex(bytes + 16, 32, a);
     azsha256_hex(bytes + 64, 48, b);
-    struct slip_profile p = { "test", "ep147-0123456789abcdef", { 16, 32, a }, { 64, 48, b }, 88 };
-    uintptr_t base = (uintptr_t)bytes;
-    struct slip_rx rx = { base, base + sizeof bytes };
+    struct slip_profile p = {"test", "ep147-0123456789abcdef", {16, 32, a}, {64, 48, b}, 88};
+    uintptr_t base = (uintptr_t) bytes;
+    struct slip_rx rx = {base, base + sizeof bytes};
     assert(slip_profile_matches(&p, p.fw_tag, base, &rx, 1));
     assert(!slip_profile_matches(&p, "ep147-1123456789abcdef", base, &rx, 1));
     bytes[20] ^= 1;

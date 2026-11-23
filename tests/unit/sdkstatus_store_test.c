@@ -11,8 +11,17 @@ static unsigned shared_count;
 #include "sdktrack_fixture.h"
 #include "sdk_status_layout.h"
 #include "sdk_status_proof.h"
-_Thread_local struct ds_proof_context ds_proof_context;
-_Atomic unsigned ds_proof_enabled;
+static _Thread_local struct ds_proof_context ds_proof_context;
+static _Atomic unsigned ds_proof_enabled;
+/* This fixture intercepts publication, so its matching context port owns the
+ * copied diagnostic state consumed by that synthetic reducer boundary. */
+int ds_proof_is_enabled(void) { return atomic_load_explicit(&ds_proof_enabled, memory_order_acquire); }
+struct ds_proof_context ds_proof_enter(const struct ds_proof_context *next) {
+    struct ds_proof_context previous = ds_proof_context;
+    ds_proof_context = *next;
+    return previous;
+}
+void ds_proof_restore(const struct ds_proof_context *previous) { ds_proof_context = *previous; }
 static unsigned proof_database, proof_other, proof_baselines;
 static unsigned publications[4], loss[4], retired[4];
 static unsigned ready[4][AZ_STATUS_TOPIC_COUNT][8], sent[4][AZ_STATUS_TOPIC_COUNT];
@@ -23,7 +32,7 @@ static az_status_grid_ref_v1 saved_map[4];
 static pthread_mutex_t test_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t test_cv = PTHREAD_COND_INITIALIZER;
 int ds_publish_file(unsigned deck, uint64_t epoch, const az_track_ref *ref, uint64_t observed,
-                           const struct ds_field *fields, size_t count, uint64_t lost, unsigned reason) {
+                    const struct ds_field *fields, size_t count, uint64_t lost, unsigned reason) {
     assert(ref->source_id && observed);
     pthread_mutex_lock(&test_mu);
     last_epoch[deck] = epoch;
@@ -113,7 +122,7 @@ int ds_retire_file_binding(unsigned deck, uint64_t epoch, const az_track_ref *re
 static unsigned bindings;
 static az_track_ref bound_ref;
 int ds_publish(unsigned deck, uint64_t epoch, unsigned flags, uint64_t now, const struct ds_field *fields, size_t count,
-                      const az_status_occurrence_v1 *occ, const az_status_phrase_transition_v1 *phrase, uint64_t lost, unsigned reason) {
+               const az_status_occurrence_v1 *occ, const az_status_phrase_transition_v1 *phrase, uint64_t lost, unsigned reason) {
     assert(deck < 4 && epoch && !flags && now && count == 2 && !occ && !phrase && !lost && !reason);
     assert(fields[0].topic == AZ_STATUS_LOAD && fields[0].field == AZ_STATUS_LOAD_TRACK);
     bound_ref = *(const az_track_ref *) fields[0].value;

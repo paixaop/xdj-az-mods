@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #ifndef SDK_STATUS_PROOF_H
 #define SDK_STATUS_PROOF_H
-#include <stdatomic.h>
+#include "azmod-mod.h"
 /* Private, optional diagnostics. Context is copied synchronously by the reducer;
  * it never changes admission, publication, or source ownership. */
 enum {
@@ -24,6 +24,11 @@ struct ds_proof_context {
     uint64_t device, inode, mount_id, file_device[2], file_inode[2], file_signature[2];
     uint64_t topics, providers[4], revisions[AZ_STATUS_TOPIC_COUNT];
 };
-extern _Thread_local struct ds_proof_context ds_proof_context;
-extern _Atomic unsigned ds_proof_enabled;
+/* Context scopes are synchronous and nested on one thread. Enter returns a
+ * copied previous context; restore accepts that copy and retains no pointer. */
+#pragma GCC visibility push(hidden)
+int ds_proof_is_enabled(void);
+struct ds_proof_context ds_proof_enter(const struct ds_proof_context *next);
+void ds_proof_restore(const struct ds_proof_context *previous);
+#pragma GCC visibility pop
 #endif
