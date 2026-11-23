@@ -6,11 +6,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-void (*azmod_analysis_enable)(int enabled);
+void (*azmod_analysis_configure)(uint32_t components);
 int (*azmod_analysis_status)(unsigned deck, az_analysis_status_v1 *out);
+uint32_t azf_analysis_components(void) {
+    return (az_on(AZF_PHRASE_EXTRACTION) ? AZ_DATA_PHRASES : 0) |
+           (az_on(AZF_VOCAL_EXTRACTION) ? AZ_ANALYSIS_VOCALS : 0);
+}
 void azf_analysis_changed(int value, void *user) {
+    (void) value;
     (void) user;
-    if (azmod_analysis_enable) azmod_analysis_enable(value);
+    if (azmod_analysis_configure) azmod_analysis_configure(azf_analysis_components());
 }
 
 /* ---- the official rows ----------------------------------------------------------------- */

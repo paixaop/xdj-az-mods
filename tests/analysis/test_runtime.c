@@ -3,6 +3,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "../../src/azmod/analysis_runtime.h"
 #include "../../src/azmod/analysis_presentation.h"
+#include "../../src/azmod/analysis_events.h"
 #include <assert.h>
 #include <pthread.h>
 #include <signal.h>
@@ -13,7 +14,7 @@
 #include <time.h>
 void analysis_fixture_fail_thread_start(void);
 static const char *audio;
-static atomic_int clock_offset, jump_at_acquire, blocked_deck;
+static atomic_int clock_offset, jump_at_acquire, blocked_deck, needed_override;
 /* Controlled monotonic passage for the real coordinator deadline wait. */
 int fixture_clock_gettime(clockid_t clock, struct timespec *out) {
     int rc = clock_gettime(clock, out);
@@ -45,6 +46,7 @@ int analysis_source_acquire(az_analysis_owner owner, const analysis_source_reque
            (request->loaded && atomic_load(&blocked_deck) == request->deck + 1)) pause_ms();
     if (!analysis_owner_current(owner)) return AZ_STALE;
     *input = (analysis_source_input) {.lease = 1, .owner = owner, .needed = request->components, .deck = (unsigned) request->deck, .load_epoch = request->load, .track = request->track};
+    if (atomic_load(&needed_override)) input->needed &= (unsigned) atomic_load(&needed_override);
     snprintf(input->audio_path, sizeof input->audio_path, "%s", audio);
     if (atomic_load(&with_grid) && (request->components & AZ_DATA_PHRASES)) {
         input->beat_count = 26;
@@ -505,6 +507,75 @@ static void scope_cases(const char *only) {
 }
 
 #include "test_api.inc"
+static void completion_noop(const az_analysis_complete_v1 *event, void *user) {
+    (void) event;
+    (void) user;
+}
+static void completion_contract(az_analysis_owner owner) {
+    struct analysis_listener listener = {0};
+    assert(analysis_events_listen(&listener, completion_noop, NULL) == AZ_OK);
+    az_analysis_complete_v1 event;
+    az_analysis_request_v1 r = request(1);
+    r.components = AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS;
+    atomic_store(&needed_override, AZ_ANALYSIS_VOCALS);
+    atomic_store(&pending, 1);
+    atomic_store(&link_result, AZ_PENDING);
+    uint64_t id;
+    assert(submit(owner, &r, &id) == AZ_OK);
+    wait_state(owner, id, AZ_ANALYSIS_SAVED);
+    assert(analysis_events_take(&listener, &event) == AZ_NOT_FOUND);
+    atomic_store(&link_result, AZ_OK);
+    source_wake();
+    wait_state(owner, id, AZ_ANALYSIS_COMPLETE);
+    assert(analysis_events_take(&listener, &event) == AZ_OK);
+    assert(event.request_id == id && event.load_epoch == r.load_epoch && event.source_kind == AZ_ANALYSIS_DECK);
+    assert(event.available_components == r.components && event.generated_components == AZ_ANALYSIS_VOCALS);
+    release_request(owner, id);
+    assert(analysis_events_take(&listener, &event) == AZ_NOT_FOUND);
+    atomic_store(&pending, 0);
+    atomic_store(&needed_override, 0);
+    acquisition_outcomes(owner);
+    assert(analysis_events_take(&listener, &event) == AZ_OK && !event.generated_components);
+    assert(event.available_components == AZ_ANALYSIS_VOCALS);
+    assert(analysis_events_take(&listener, &event) == AZ_NOT_FOUND);
+    pending_link(owner);
+    cancel_publication_collection(owner);
+    assert(analysis_events_take(&listener, &event) == AZ_NOT_FOUND);
+    puts("Completion events: generated/reused masks, delayed publication, failure and cancellation passed");
+}
+static void extraction_settings(void) {
+    scope_unload_all();
+    atomic_store(&acquire_result, AZ_OK);
+    atomic_store(&pending, 0);
+    atomic_store(&with_grid, 1);
+    az_analysis_owner core = analysis_owner_core_begin();
+    struct analysis_listener listener = {0};
+    assert(analysis_events_listen(&listener, completion_noop, NULL) == AZ_OK);
+    analysis_runtime_components(AZ_ANALYSIS_VOCALS);
+    analysis_runtime_enable(core, 1);
+    analysis_runtime_load(0, ++scope_order, 800, 1, NULL);
+    assert(wait_deck(0, AZ_ANALYSIS_COMPLETE).completed_components == AZ_ANALYSIS_VOCALS);
+    az_analysis_complete_v1 event;
+    assert(analysis_events_take(&listener, &event) == AZ_OK && event.generated_components == AZ_ANALYSIS_VOCALS);
+    analysis_runtime_components(AZ_DATA_PHRASES);
+    assert(wait_deck(0, AZ_ANALYSIS_COMPLETE).completed_components == AZ_DATA_PHRASES);
+    assert(analysis_events_take(&listener, &event) == AZ_OK && event.generated_components == AZ_DATA_PHRASES);
+    analysis_runtime_components(0);
+    int before = atomic_load(&acquisitions);
+    analysis_runtime_load(0, ++scope_order, 801, 1, NULL);
+    for (int i = 0; i < 30; ++i) pause_ms();
+    assert(!scope_status(0).state && atomic_load(&acquisitions) == before);
+    /* The Extras choices govern automatic work, not explicitly requested SDK work. */
+    az_analysis_owner mod = analysis_owner_begin(7);
+    computation(mod);
+    analysis_owner_retire(7);
+    analysis_runtime_enable(core, 0);
+    analysis_owner_core_retire();
+    analysis_runtime_retire(core);
+    analysis_runtime_components(AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS);
+    atomic_store(&with_grid, 0);
+    puts("Independent extraction: vocals, phrases, neither and explicit SDK work passed");
+}
 int main(int argc, char **argv) {
     assert(argc == 3 || argc == 4);
     audio = argv[1];
@@ -521,6 +592,7 @@ int main(int argc, char **argv) {
     }
     az_analysis_owner owner = analysis_owner_begin(0);
     public_contract(owner);
+    completion_contract(owner);
     invalid_requests(owner);
     acquisition_outcomes(owner);
     busy_publication(owner);
@@ -532,6 +604,7 @@ int main(int argc, char **argv) {
     core_publication_retirement();
     automatic_operation();
     scope_cases(NULL);
+    extraction_settings();
     analysis_runtime_shutdown();
     assert(atomic_load(&releases) <= atomic_load(&acquisitions));
     puts("Core runtime computation, copied results, owner retirement, capacity and link outcomes passed");

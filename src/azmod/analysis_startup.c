@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #include "analysis_host.h"
+#include "analysis_vocals.h"
 /* Host lifecycle: core services start even when the community loader has no
  * enabled packages. Source observation and automatic analysis are core work. */
 #ifndef SDK_PROC_IMPL
@@ -16,13 +17,15 @@ static void core_analysis_error(const char *stage, int result) {
 }
 static void core_analysis_start(void) {
     char assets[1200];
+    uint32_t components = azf_analysis_components();
+    analysis_runtime_components(components);
     int rc = core_analysis_assets(assets, sizeof assets);
-    if (rc == AZ_OK) rc = analysis_host_start(assets, az_on(AZF_TRACK_ANALYSIS));
+    if (rc == AZ_OK) rc = analysis_host_start(assets, components != 0);
     if (rc != AZ_OK) {
         core_analysis_error("core startup", rc);
         return;
     }
-    azmod_analysis_enable = analysis_host_enable;
+    azmod_analysis_configure = analysis_host_configure;
     rc = sdk_status_analysis_bind(analysis_runtime_load);
     if (rc == AZ_OK) azmod_analysis_status = analysis_runtime_deck_status;
     else core_analysis_error("automatic load observation", rc);
@@ -33,5 +36,6 @@ static void core_services_init(void) {
     cm_services_start();
 #ifndef SDK_PROC_IMPL
     core_analysis_start();
+    vocal_indicator_events_init();
 #endif
 }

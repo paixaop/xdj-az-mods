@@ -2,9 +2,11 @@
 
 Track Analysis is a built-in AZ-MODS feature. It fills independently missing
 phrases and vocal data for loaded USB OneLibrary and completed Beatport tracks.
-Enable **Track Analysis** in the core menu; the pane shows all four deck outcomes.
-It runs when community mods are disabled. The one-time settings migration retains
-the previous Track Analysis enable choice.
+In **Extras**, **Phrase Extraction** and **Vocal Extraction** independently enable
+automatic processing. Both default to on; each pane shows all four deck outcomes.
+There is no master switch. The services run when community mods are disabled.
+Migration applies the previous Track Analysis choice to both switches unless a
+new choice already exists. These switches do not restrict explicit SDK requests.
 
 One core coordinator owns automatic and SDK-requested computation. It calls the
 private source, engine and publication interfaces directly. External mods use
@@ -34,6 +36,44 @@ all-zero instrumental timelines. Errors remain visible in status and core logs.
 With normal core logging enabled, startup and request failures are written to
 `/tmp/azmod-analysis.log` under the existing core log size cap; debug tracing is
 not required.
+
+## Vocal Indicator
+
+The upstream 1.2.9 Vocal Indicator paints the preview and scrolling waveform.
+Enable it in Extras and choose Above Preview and/or Above Waveform. The preview
+uses upstream's dashed intensity strip where the layout has room. The separate
+consolidated Vocal Lines renderer, merge-gap setting and below-phrases placement
+have been removed. Saved Vocal Lines display choices migrate to the upstream
+switches; Below Phrases becomes Above Preview.
+
+The worker reads raw PVDI through the shared, current-load USB/Beatport resolver
+and upstream's parser, including masked rekordbox exports. A valid existing PVDI
+map always wins, including an all-zero instrumental map. With no usable PVDI:
+
+- Vocal Extraction enabled: wait while analysis is queued, running or awaiting
+  publication. Successful publication wakes the indicator to read the new PVDI.
+- Vocal Extraction disabled, unavailable or unsuccessful: use upstream's vocal
+  stem-envelope detection when stems are available.
+
+Changing tracks hides the old display immediately. Pending or stale reads do not
+select another load's data. The worker retries missing data and notices stems
+that appear later. File access and extraction never run in the paint callback.
+
+## Analysis completion events
+
+The core publishes one copied success record after final publication and library
+link completion, for automatic and SDK-requested work. The record identifies the
+request, source, track and loaded-deck generation. `generated_components` reports
+what was computed; `available_components` reports the requested components now
+available. Validated reuse has a zero generated mask. Failed, cancelled and
+saved-but-unlinked requests never emit successful completion.
+
+Core consumers register with `analysis_events_core_listen`; community mods use
+`az_analysis_v1.on_complete`. Delivery is on the UI thread, outside provider
+locks, with independent cursors and at most 16 events per listener per turn. The
+64-entry journal reports overflow using `missed`; consumers must reacquire state.
+Listeners must validate load identity before acting on queued events. SDK owner
+retirement suppresses delivery to that lifetime. See the SDK service contract.
 
 ## Execution and optimizations
 
@@ -117,6 +157,15 @@ codec clocks/seeks, cancellation, bounded allocation and joined child behavior.
 The runtime tests use the production engine with controlled source dependencies.
 Native source and publication tests remain separate. Host and container checks
 do not establish physical playback or four-deck interference acceptance.
+
+The display workflow and callback regressions run against production C:
+
+```sh
+SAN=asan bash tests/vocal-workflow.sh
+bash tests/sdk-data-callbacks.sh
+SAN=asan bash tests/analysis-host.sh
+SAN=asan bash tests/sdk-analysis.sh
+```
 
 ## Private model provisioning
 

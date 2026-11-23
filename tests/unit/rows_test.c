@@ -119,10 +119,33 @@ static int select_row(azmod_state *s, int item) {
     return 0;
 }
 
+static uint32_t extraction_mask;
+static void extraction_changed(uint32_t mask) { extraction_mask = mask; }
+static void extraction_rows(void) {
+    CHECK("phrase and vocal extraction are independent Extras rows",
+          az_row(AZF_PHRASE_EXTRACTION)->parent == AZF_EXTRAS && az_row(AZF_VOCAL_EXTRACTION)->parent == AZF_EXTRAS);
+    azmod_analysis_configure = extraction_changed;
+    az_set(AZF_PHRASE_EXTRACTION, 0);
+    az_set(AZF_VOCAL_EXTRACTION, 1);
+    azf_analysis_changed(0, NULL);
+    CHECK("only vocals enabled", extraction_mask == AZ_ANALYSIS_VOCALS);
+    az_set(AZF_PHRASE_EXTRACTION, 1);
+    az_set(AZF_VOCAL_EXTRACTION, 0);
+    azf_analysis_changed(0, NULL);
+    CHECK("only phrases enabled", extraction_mask == AZ_DATA_PHRASES);
+    az_set(AZF_PHRASE_EXTRACTION, 0);
+    azf_analysis_changed(0, NULL);
+    CHECK("both extraction settings off", extraction_mask == 0);
+    az_defaults();
+    azf_analysis_changed(0, NULL);
+    CHECK("both extraction settings default on", extraction_mask == (AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS));
+    azmod_analysis_configure = NULL;
+}
 int main(void) {
     ut_suite = "registered rows";
     azf_log = logf_;
     az_defaults();
+    extraction_rows();
     az_feature_v2 f;
 #define ROW(...) (f = (az_feature_v2) {.size = sizeof f, __VA_ARGS__}, azf_register("testmod", &f))
     int fx = ROW(.key = "fx", .label = "FX Bus", .kind = AZ_ROW_TOGGLE, .help = "A test switch.", .on_change = changed);

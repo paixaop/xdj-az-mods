@@ -18,6 +18,10 @@ int analysis_vocal_intervals_loaded(az_analysis_owner owner, int deck, uint64_t 
     (void)owner; (void)deck; (void)epoch; (void)out; (void)intervals; (void)capacity;
     return AZ_UNSUPPORTED;
 }
+/* Callback ownership is exercised by the dedicated production callback suite. */
+static int sdk_on_analysis_complete(const char *id, az_analysis_complete_fn fn, void *user) {
+    (void) id; (void) fn; (void) user; return AZ_UNSUPPORTED;
+}
 #include "../../src/azmod/analysis_api.c"
 static uint64_t public_submit(const az_analysis_v1 *service, az_analysis_request_v1 *request) {
     uint64_t id = 0;

@@ -190,6 +190,7 @@ const struct azstatus_native_v1 *azstem_status_service_v1(void) {
 #endif
 #include "analysis_source.h"
 #include "analysis_encoding.h"
+#include "analysis_vocals.h"
 #include "analysis_native_adapter.h"
 #include "sdk_analysis_write.h"
 const char *az_analysis_state_dir(void) { return st_test_state; }
@@ -236,6 +237,37 @@ static int publish_result(int slot, analysis_source_input *input, const az_analy
 static void analysis_write(const char *path, const void *bytes, size_t n) {
     FILE *f = fopen(path, "wb");
     assert(f && fwrite(bytes, 1, n, f) == n && !fclose(f));
+}
+static void display_read(int expected, unsigned frames) {
+    struct vd_track track = {0};
+    unsigned length = 99;
+    assert(!analysis_owner_current(analysis_owner_core()));
+    assert(analysis_vocal_track_loaded(0, 44, &track, &length) == expected);
+    if (expected == AZ_OK) {
+        assert(track.n == frames && track.rate == 22050 && track.hop == 1024 && length);
+        free(track.v);
+    } else assert(!track.v && length == 99);
+}
+static void display_masked(const char *path) {
+    int failed = 0;
+    size_t size = 0;
+    uint8_t *bytes = read_analysis(path, &size, &failed);
+    assert(bytes && !failed);
+    uint8_t *masked = malloc(size);
+    assert(masked);
+    memcpy(masked, bytes, size);
+    size_t at = sa_u32(masked + 4);
+    assert(!memcmp(masked + at, "PVDI", 4));
+    masked[at + 12] |= 0x80;
+    for (unsigned i = 0; i < sa_u32(masked + at + 20); ++i) masked[at + 24 + i] ^= VD_KEY[i % 19];
+    analysis_write(path, masked, size);
+    display_read(AZ_OK, 22);
+    masked[at + 24] = (uint8_t) (5 ^ VD_KEY[0]);
+    analysis_write(path, masked, size);
+    display_read(AZ_FAILED, 0);
+    analysis_write(path, bytes, size);
+    free(masked);
+    free(bytes);
 }
 static void typed_grid_result_validation(void) {
     az_analysis_result_v1 empty = {0};
@@ -1158,6 +1190,7 @@ int main(void) {
     az_vocal_snapshot_v1 vocals = {.size = sizeof vocals};
     az_vocal_interval intervals[4];
     assert(analysis_vocal_intervals(owner_at(0), &ref, &vocals, intervals, 4) == AZ_NOT_FOUND);
+    display_read(AZ_NOT_FOUND, 0);
     assert(acquire_loaded(0, AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS, 0, 44, &job) == AZ_OK);
     assert(job.needed == AZ_ANALYSIS_VOCALS);
     uint8_t pvdi[46] = {0};
@@ -1189,6 +1222,11 @@ int main(void) {
     assert(vocals.method == AZ_VOCAL_LSTM && vocals.interval_count == 2);
     assert(compare_timestamps(intervals[0].start_s, 3072.0 / 22050, 1, 22050, 1) == AZ_TIME_EQUAL);
     assert(compare_timestamps(intervals[1].stop_s, 1.0, 1, 44100, 1) == AZ_TIME_EQUAL);
+    display_read(AZ_OK, 22);
+    display_masked(vocals_path);
+    fixture_current = 0;
+    display_read(AZ_STALE, 0);
+    fixture_current = 1;
     /* Typed LSTM output floors resampled length before hop rounding. */
     for (int source = 0; source < 2; source++) {
         assert(!unlink(vocals_path));
@@ -1282,6 +1320,7 @@ int main(void) {
     assert(acquire_loaded(0, AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS, 0, 44, &job) == AZ_OK && job.needed == AZ_ANALYSIS_VOCALS);
     assert(publish_result(0, &job, &vocal_result) == AZ_OK);
     assert(analysis_vocal_intervals_loaded(owner_at(0), 0, 44, &vocals, NULL, 0) == AZ_OK && !vocals.interval_count);
+    display_read(AZ_OK, 22); /* Beatport, even with automatic analysis disabled. */
     az_analysis_result_v1 reused = baseline_result;
     reused.vocals = vocal_result.vocals;
     for (int scenario = 0; scenario < 5; scenario++) loaded_link_reuse(ref, &reused, scenario);
