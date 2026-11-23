@@ -23,13 +23,13 @@ esac
 awk '/^static int st_mod_owner\(/,/^}/' src/azmod/sdk_track.c > "$task_tmp/owner.inc"
 awk '/^static int sdk_command_submit\(/,/^}/' src/azmod/sdk_track.c > "$task_tmp/submit.inc"
 awk '
-/^static const az_library_v1 g_sdk_library =/ { table = 1; print; next }
+/^static const az_commands_v1 g_sdk_command_service =/ { table = 1; print; next }
 table && /^};/ { table = 0; print; next }
 table && /^[ ]+\.(abi|size|command_[a-z_]+) =/ { print }
-/^static const az_library_v1 \*sdk_library_service\(/,/^}/ { print }
+/^static const az_commands_v1 \*sdk_command_service\(/,/^}/ { print }
 /^static const az_core_v1 g_cm_core =/ { core = 1; print; next }
 core && /^};/ { core = 0; print; next }
-core && /^[ ]+\.(abi|size|library_service|command_submit) =/ { print }
+core && /^[ ]+\.(abi|size|command_service) =/ { print }
 ' src/azmod/community.c > "$task_tmp/library.inc"
 awk -v source="$PWD/src/azmod/mod_menu_overlay.c" '/^\/\* X input can start an early frame/ {p=1; printf "#line %d \"%s\"\n", NR, source} /^static void ov_frame\(/ {p=0} p' src/azmod/mod_menu_overlay.c > "$task_tmp/overlay.inc"
 "${HOST_CC:-cc}" -std=gnu11 "${flags[@]}" \

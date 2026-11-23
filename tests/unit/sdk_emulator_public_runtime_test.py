@@ -37,15 +37,15 @@ class PublicRuntimeTests(unittest.TestCase):
             driver=root/'driver';driver.write_bytes(b'fixture driver')
             receiver=root/'receiver';receiver.write_bytes(b'fixture receiver')
             probe=root/'probe.azmod'
-            probe_path=public.PROBE.replace('sdk-state-probe',probe_id);probe_log=public.LOG.replace('sdk-state-probe',probe_id)
-            files={'azmod.json':json.dumps(dict(id=probe_id,version='0.1.0',api=1,hooks=probe_id=='sdk-slip-capture',firmware=['ep147-79d43e5de779fc1b','ep147-9e9454e357389ece'] if probe_id=='sdk-slip-capture' else ['any'])).encode(),
+            probe_path=public.PROBE.replace('sdk-state-probe',probe_id);probe_log='/tmp/azmod-slip-capture.log' if probe_id == 'sdk-slip-capture' else public.LOG.replace('sdk-state-probe',probe_id)
+            files={'azmod.json':json.dumps(dict(id=probe_id,version='0.1.0',api=2,hooks=False,firmware=['any'])).encode(),
                    probe_id+'.so':b'fixture normal module','LICENSE':b'GPL','icon.png':b'icon'}
             with zipfile.ZipFile(probe,'w') as z:
                 for name,data in files.items():z.writestr(name,data)
             probe_sha=hashlib.sha256(files[probe_id+'.so']).hexdigest()
             binding=root/'probe-manifest.json';binding.write_text(json.dumps(dict(package={'sha256':public.digest(probe)},binary={'sha256':probe_sha},sha256={'include/azmod-mod.h':hashlib.sha256(b'header').hexdigest()})))
             wave_package=root/'wave.azmod'
-            wave_files={'azmod.json':json.dumps(dict(azmod=1,id='sdk-wave-layer-probe',version='0.1.0',api=1,hooks=False,firmware=['any'])).encode(), 'sdk-wave-layer-probe.so':b'wave fixture','LICENSE':b'GPL','icon.png':b'icon'}
+            wave_files={'azmod.json':json.dumps(dict(azmod=1,id='sdk-wave-layer-probe',version='0.1.0',api=2,hooks=False,firmware=['any'])).encode(), 'sdk-wave-layer-probe.so':b'wave fixture','LICENSE':b'GPL','icon.png':b'icon'}
             with zipfile.ZipFile(wave_package,'w') as z:
                 for name,data in wave_files.items():z.writestr(name,data)
             wave_sha=hashlib.sha256(wave_files['sdk-wave-layer-probe.so']).hexdigest()

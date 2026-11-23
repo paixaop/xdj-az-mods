@@ -32,23 +32,23 @@ for provider in old new; do
     touch "$trust/.approved-init"
     for id in legacy-status-client status-watch; do
         mkdir "$stage/$id"; cp "$work/$id.so" "$stage/$id/$id.so"
-        printf '{"azmod":1,"id":"%s","name":"%s","version":"1.0.0","api":1,"author":"test","summary":"ABI test","source":"https://example.com/x","firmware":["any"],"hooks":false}\n' "$id" "$id" > "$stage/$id/azmod.json"
+        api=1
+        if [[ $id == status-watch ]]; then api=2; fi
+        printf '{"azmod":1,"id":"%s","name":"%s","version":"1.0.0","api":%s,"author":"test","summary":"ABI test","source":"https://example.com/x","firmware":["any"],"hooks":false}\n' "$id" "$id" "$api" > "$stage/$id/azmod.json"
         printf '%s\n' "$id" >> "$stage/enabled"
         printf '%s %s\n' "$id" "$(sha256sum < "$work/$id.so" | cut -d' ' -f1)" >> "$trust/approved"
     done
     cc -O2 -no-pie "${headers[@]}" -I"$src" "-DCM_ROOT=\"$work/$provider\"" "-DCM_LOGDIR=\"$work/log-$provider\"" \
         "$src/test/community/harness.c" "${policy[@]}" -pthread -ldl -lm -rdynamic -o "$work/host"
     "$work/host" init > "$work/$provider.trace"
-    if ! grep -q '^LEGACY setting round trip$' "$work/$provider.trace"; then
-        cat "$work/$provider.trace" >&2
-        exit 1
-    fi
-    grep -Fx 'LEGACY setting round trip' "$work/$provider.trace"
-    grep '^MOD legacy-status-client state=1' "$work/$provider.trace"
     if [[ $provider == old ]]; then
-        grep '^MOD status-watch ' "$work/$provider.trace" | grep -i 'init'
+        grep -Fx 'LEGACY setting round trip' "$work/$provider.trace"
+        grep '^MOD legacy-status-client state=1' "$work/$provider.trace"
         if grep -q '^MOD status-watch state=1' "$work/$provider.trace"; then exit 1; fi
     else
+        if grep -q '^LEGACY setting round trip$' "$work/$provider.trace"; then exit 1; fi
+        if grep -q '^MOD legacy-status-client state=1' "$work/$provider.trace"; then exit 1; fi
+        grep '^MOD legacy-status-client ' "$work/$provider.trace" | grep -i 'api\|abi'
         grep '^MOD status-watch state=1' "$work/$provider.trace"
     fi
 done

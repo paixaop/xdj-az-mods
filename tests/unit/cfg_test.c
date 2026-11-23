@@ -379,5 +379,15 @@ int main(int argc, char **argv) {
         CHECK("a malformed stick file is kept as .bad, not deleted", access(bad, F_OK) == 0 && has(bad, "stems = on"));
         unlink(bad);
     }
+    /* Analysis became a built-in row. Preserve its saved mod preference at
+     * the same configuration boundary used by early startup and the overlay. */
+    put(conf_path, "version = 1\ntrack-analysis:enabled = off\n");
+    boot(&s);
+    CHECK("analysis migration preserves disabled automatic work", !az_on(AZF_TRACK_ANALYSIS));
+    CHECK("analysis migration writes the core key and retires the old key",
+          has(conf_path, "track-analysis = off") && !has(conf_path, "track-analysis:enabled"));
+    put(conf_path, "version = 1\ntrack-analysis = on\ntrack-analysis:enabled = off\n");
+    boot(&s);
+    CHECK("explicit built-in analysis preference wins", az_on(AZF_TRACK_ANALYSIS));
     return ut_summary();
 }

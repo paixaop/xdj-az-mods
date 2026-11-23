@@ -24,7 +24,7 @@ Path(sys.argv[1]).write_text(owner_init+'\n'+retire+'\n'+init+'\n')
 PY
 flags=(-std=c11 -O1 -g -Wall -Wextra -Werror -pthread -Isrc/azmod)
 case ${SAN:-plain} in plain|'') ;; asan)flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer);;tsan)flags+=(-fsanitize=thread);;*)exit 2;;esac
-"${HOST_CC:-cc}" "${flags[@]}" "-DSDK_DATA_LIFECYCLE_INC=\"$work/lifecycle.inc\"" tests/unit/sdkdata_lifecycle_test.c -lm -o "$work/test"
+"${HOST_CC:-cc}" "${flags[@]}" "-DSDK_DATA_LIFECYCLE_INC=\"$work/lifecycle.inc\"" tests/unit/sdkdata_lifecycle_test.c src/azmod/analysis_owner.c -lm -o "$work/test"
 status=0
 python3 - "$work/test" >"$work/run.log" 2>&1 <<'PY' || status=$?
 import resource, subprocess, sys

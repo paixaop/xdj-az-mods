@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* Public worker-only source leases and ANLZ publication. Included by community.c. */
 #include "sdk_analysis_write.h"
+#include "analysis_source.h"
 #include "sdk_vocals.h"
 #include "../common/azstatus_maps.h"
 #include "../common/azstatus_native.h"
@@ -8,6 +9,9 @@
 struct sa_job {
     uint64_t id;
     int owner, needs_link;
+    az_analysis_owner lifetime;
+    int reader_fd;
+    char reader_path[1024];
     struct st_source source;
     char database[1024], audio[1024], dat[1024], ext[1024], ex2[1024];
     char relative_audio[2048], relative_dat[1024];
@@ -26,13 +30,24 @@ struct sa_job {
 static struct sa_job sa_jobs[8];
 static uint64_t sa_serial;
 static pthread_mutex_t sa_mutex = PTHREAD_MUTEX_INITIALIZER;
-static int sa_link_analysis(const struct sa_job *job);
+static int sa_link_analysis(struct sa_job *job);
+static int sa_link_enqueue(struct sa_job *job, const char *path);
+static void sa_link_wake(void);
+static int sa_cleaner_start(void);
+static az_analysis_owner sa_lifetime(int owner) {
+    return owner == 32 ? analysis_owner_core() : analysis_owner_get((unsigned) owner);
+}
+static int sa_owner_live(const struct sa_job *job) {
+    return analysis_owner_current(job->lifetime);
+}
 static int sa_loaded_current(const struct sa_job *job);
 static void sa_job_drop(struct sa_job *job);
 static int sa_grid_same(const struct sa_job *, const uint8_t *, uint32_t);
 static const uint8_t *sa_find_tag(const uint8_t *, size_t, const char[4], uint32_t *);
 static int sa_owner(const char *id, const char *name, uintptr_t caller) {
-    return (g_cm_on_ui || g_sdk_on_tap_thread) ? -1 : st_mod_owner(id, caller, name);
+    if (g_cm_on_ui || g_sdk_on_tap_thread) return -1;
+    int owner = st_mod_owner(id, caller, name);
+    return analysis_owner_current(analysis_owner_for_caller((unsigned) owner)) ? owner : -1;
 }
 static int sa_disk_files_match(const struct sa_job *j) {
     return st_disk_sig(j->audio) == j->signatures[1] && st_disk_sig(j->dat) == j->signatures[2] &&
@@ -60,6 +75,7 @@ static int sa_source_signatures_match(const struct sa_job *j, const struct st_so
            st_disk_sig(j->database) == j->signatures[0] && sa_disk_files_match(j);
 }
 static int sa_current(const struct sa_job *j) {
+    if (!sa_owner_live(j)) return 0;
     if (j->vocals && st_disk_sig(j->ex2) != j->signatures[4]) return 0;
     if (j->loaded && !sa_loaded_current(j)) return 0;
     if (j->streaming) return sa_disk_files_match(j);
@@ -84,7 +100,7 @@ static uint8_t *sa_read(const char *path, size_t *size, int *failed) {
     }
     return bytes;
 }
-static int sa_open_request_valid(int owner, const az_track_ref *track, const az_analysis_job_v1 *out) {
+static int sa_open_request_valid(int owner, const az_track_ref *track, const analysis_source_lease *out) {
     return owner >= 0 && track && out && st_record_size(out) >= sizeof *out &&
            st_record_size(track) >= sizeof *track && track->version == AZ_DATA_VERSION &&
            track->track_id && track->source_id >= 1 && track->source_id <= 2;
@@ -153,38 +169,51 @@ static int sa_open_needed(struct sa_job *j) {
     if ((j->needed & AZ_DATA_PHRASES) && !beats) j->needed |= AZ_DATA_GRID;
     return AZ_OK;
 }
-static int sa_open_link_existing(struct sa_job *j, const az_track_ref *track, az_analysis_job_v1 *out) {
+static int sa_open_link_existing(struct sa_job *j, const az_track_ref *track, analysis_source_lease *out) {
     if (j->needs_link && (!sa_current(j) || !sa_link_analysis(j))) return AZ_FAILED;
-    az_analysis_job_v1 linked = {.size = out->size, .version = AZ_DATA_VERSION, .flags = j->needs_link ? AZ_ANALYSIS_NEEDS_LINK : 0, .track = *track};
+    analysis_source_lease linked = {.size = out->size, .version = AZ_DATA_VERSION, .flags = j->needs_link ? AZ_ANALYSIS_NEEDS_LINK : 0, .job = j->id, .track = *track};
     memcpy(out, &linked, sizeof linked);
-    return AZ_NOT_FOUND;
+    return j->needs_link ? AZ_PENDING : AZ_NOT_FOUND;
 }
-static void sa_open_publish(struct sa_job *j, const az_track_ref *track, az_analysis_job_v1 *out,
+static int sa_reader_open(struct sa_job *j) {
+    j->reader_fd = open(j->audio, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (j->reader_fd < 0) return AZ_STALE;
+    snprintf(j->reader_path, sizeof j->reader_path, "/proc/%ld/fd/%d", (long) getpid(), j->reader_fd);
+    return AZ_OK;
+}
+static void sa_open_publish(struct sa_job *j, const az_track_ref *track, analysis_source_lease *out,
                             unsigned slot, double bpm) {
     j->id = ++sa_serial;
     sa_jobs[slot] = *j;
-    az_analysis_job_v1 result = {.size = out->size, .version = AZ_DATA_VERSION, .needed = j->needed, .job = j->id, .flags = j->needs_link ? AZ_ANALYSIS_NEEDS_LINK : 0, .track = *track, .original_bpm = bpm};
-    memcpy(result.audio_path, j->audio, sizeof result.audio_path);
+    analysis_source_lease result = {.size = out->size, .version = AZ_DATA_VERSION, .needed = j->needed, .job = j->id, .flags = j->needs_link ? AZ_ANALYSIS_NEEDS_LINK : 0, .track = *track, .original_bpm = bpm};
+    memcpy(result.audio_path, j->reader_path, sizeof result.audio_path);
     memcpy(result.analysis_path, j->dat, sizeof result.analysis_path);
     memcpy(out, &result, sizeof result);
 }
-static int sa_open_reserved(int owner, const az_track_ref *track, az_analysis_job_v1 *out,
-                            int loaded, int vocals, unsigned slot) {
-    struct sa_job j = {.owner = owner, .vocals = vocals};
-    struct st_resolution row = {0};
-    int rc = sa_open_row(track, &j, &row);
+static int sa_open_prepare(const az_track_ref *track, struct sa_job *job, struct st_resolution *row) {
+    int rc = sa_open_row(track, job, row);
     if (rc != AZ_OK) return rc;
-    if (!sa_open_paths(&j, &row)) return AZ_UNSUPPORTED;
-    if (!j.signatures[0] || !j.signatures[1]) return AZ_STALE;
-    rc = sa_open_needed(&j);
+    if (!sa_open_paths(job, row)) return AZ_UNSUPPORTED;
+    if (!job->signatures[0] || !job->signatures[1]) return AZ_STALE;
+    return sa_open_needed(job);
+}
+static int sa_open_reserved(int owner, const az_track_ref *track, analysis_source_lease *out,
+                            int loaded, int vocals, unsigned slot) {
+    struct sa_job j = {.owner = owner, .lifetime = sa_lifetime(owner), .reader_fd = -1, .vocals = vocals};
+    struct st_resolution row = {0};
+    int rc = sa_open_prepare(track, &j, &row);
     if (rc != AZ_OK) return rc;
     if (!loaded && !j.needed) return sa_open_link_existing(&j, track, out);
     if (!sa_current(&j)) return AZ_STALE;
+    rc = sa_reader_open(&j);
+    if (rc) return rc;
     sa_open_publish(&j, track, out, slot, row.metadata.original_bpm);
     return AZ_OK;
 }
-static int sa_open(int owner, const az_track_ref *track, az_analysis_job_v1 *out, int loaded, int vocals) {
+static int sa_open(int owner, const az_track_ref *track, analysis_source_lease *out, int loaded, int vocals) {
     if (!sa_open_request_valid(owner, track, out)) return AZ_INVALID;
+    if (!analysis_owner_current(sa_lifetime(owner))) return AZ_STALE;
+    if (sa_cleaner_start()) return AZ_FAILED;
     if (!sdk_sq_resolve()) return AZ_UNSUPPORTED;
     if (pthread_mutex_trylock(&sa_mutex)) return AZ_BUSY;
     unsigned slot;
@@ -193,10 +222,10 @@ static int sa_open(int owner, const az_track_ref *track, az_analysis_job_v1 *out
     pthread_mutex_unlock(&sa_mutex);
     return rc;
 }
-static int sdk_analysis_open(const char *id, const az_track_ref *track, az_analysis_job_v1 *out) {
+static int sdk_analysis_open(const char *id, const az_track_ref *track, analysis_source_lease *out) {
     return sa_open(sa_owner(id, "analysis_open", CM_RA()), track, out, 0, 0);
 }
-static int sdk_analysis_open_v2(const char *id, const az_track_ref *track, az_analysis_job_v1 *out) {
+static int sdk_analysis_open_v2(const char *id, const az_track_ref *track, analysis_source_lease *out) {
     return sa_open(sa_owner(id, "analysis_open_v2", CM_RA()), track, out, 0, 1);
 }
 /* Directory descriptors bind staging/publication to the validated USB tree.
@@ -294,83 +323,35 @@ static int sa_sql_hex(const char *input, char *out, size_t cap) {
 }
 /* Only the core's existing native transaction spool writes library metadata.
  * Its playback gate defers application while a source is in use. */
-static int sa_link_analysis(const struct sa_job *job) {
-    char audio[4096], analysis[2048], sql[6500], relative[128], path[1024];
+static int sa_link_sql(const struct sa_job *job, char sql[13000]) {
+    char audio[4096], analysis[2048];
     if (!sa_sql_hex(job->relative_audio, audio, sizeof audio) ||
         !sa_sql_hex(job->relative_dat, analysis, sizeof analysis)) return 0;
-    int n = snprintf(sql, sizeof sql,
+    int n = snprintf(sql, 13000,
+                     "-- AZMOD analysis-link %u %s %s\n"
                      "UPDATE content SET analysisDataFilePath=CAST(X'%s' AS TEXT) WHERE content_id=%u AND path=CAST(X'%s' AS TEXT) "
                      "AND (analysisDataFilePath IS NULL OR analysisDataFilePath='');\n",
-                     analysis, job->source.ref.track_id, audio);
-    if (n < 0 || n >= (int) sizeof sql) return 0;
-    snprintf(relative, sizeof relative, "/PIONEER/azspool/track-analysis-%08x.sql", job->source.ref.track_id);
+                     job->source.ref.track_id, audio, analysis, analysis, job->source.ref.track_id, audio);
+    return n > 0 && n < 13000 ? n : 0;
+}
+static int sa_link_analysis(struct sa_job *job) {
+    char sql[13000], relative[128], path[1024];
+    int n = sa_link_sql(job, sql);
+    if (!n) return 0;
+    if (!job->id) job->id = ++sa_serial;
+    snprintf(relative, sizeof relative, "/PIONEER/azspool/track-analysis-%08x-%llu.sql", job->source.ref.track_id, (unsigned long long) job->id);
     if (!st_source_path(job->source.mount, relative, path)) return 0;
     struct sa_staged spool = {.dir = -1};
     int ok = sa_stage(job, path, (const uint8_t *) sql, (size_t) n, &spool) && sa_publish(&spool);
     sa_stage_drop(&spool);
+    if (ok && !sa_link_enqueue(job, path)) { unlink(path); ok = 0; }
     return ok;
 }
-static uint32_t sdk_analysis_formats(void) {
-    return AZ_ANALYSIS_FORMAT_TA01 | AZ_ANALYSIS_FORMAT_TA02 | AZ_ANALYSIS_FORMAT_TA03;
-}
-/* Decode the bounded publication packet before taking a lease lock. */
-struct sa_packet {
-    uint32_t header, gn, pn, vn, rate, frames, method;
-    int v2, v3;
+/* Encoded native persistence tags, borrowed during one publication. */
+struct sa_tags {
+    uint32_t gn, pn, vn, rate, frames, method;
     const uint8_t *grid, *phrase, *vocal;
 };
-static int sa_packet_version(struct sa_packet *p, const uint8_t *bytes, uint32_t size) {
-    p->v3 = !memcmp(bytes, "TA03", 4);
-    p->v2 = p->v3 || !memcmp(bytes, "TA02", 4);
-    p->header = p->v3 ? 28 : p->v2 ? 24
-                                   : 16;
-    if (size < p->header || (!p->v2 && memcmp(bytes, "TA01", 4))) return 0;
-    return 1;
-}
-static void sa_packet_header(struct sa_packet *p, const uint8_t *bytes) {
-    p->gn = sa_u32(bytes + 4);
-    p->pn = sa_u32(bytes + 8);
-    p->vn = p->v2 ? sa_u32(bytes + 12) : 0;
-    p->rate = sa_u32(bytes + (p->v2 ? 16 : 12));
-    p->frames = p->v2 ? sa_u32(bytes + 20) : 0;
-    p->method = p->v3 ? sa_u32(bytes + 24) : AZ_VOCAL_SPECTRAL;
-}
-static int sa_packet_lengths_valid(const struct sa_packet *p, uint32_t size) {
-    return p->gn <= size - p->header && p->pn <= size - p->header - p->gn &&
-           p->vn == size - p->header - p->gn - p->pn && (p->pn || p->vn);
-}
-static int sa_packet_clock_valid(const struct sa_packet *p) {
-    if (p->rate != 44100 && p->rate != 48000) return 0;
-    if (p->v2 && (!p->frames || p->frames > p->rate * 1200u)) return 0;
-    return !p->v3 || (p->vn ? p->method == AZ_VOCAL_LSTM : p->method == AZ_VOCAL_PVDI);
-}
-static int sa_packet_phrase_valid(const struct sa_packet *p) {
-    if (!p->pn) return 1;
-    const uint8_t *phrase = p->phrase;
-    return p->pn >= 32 && !memcmp(phrase, "PSSI", 4) && sa_u32(phrase + 4) == 32 &&
-           sa_u32(phrase + 8) == p->pn && sa_u16(phrase + 12) == 0 &&
-           sa_u16(phrase + 14) == 24 && sa_u16(phrase + 16);
-}
-static int sa_packet_grid_valid(const struct sa_packet *p) {
-    if (!p->gn) return 1;
-    return p->gn >= 24 && !memcmp(p->grid, "PQTZ", 4) && sa_u32(p->grid + 4) == 24 && sa_u32(p->grid + 8) == p->gn;
-}
-static int sa_packet_vocal_valid(const struct sa_packet *p) {
-    if (!p->vn) return 1;
-    az_vocal_snapshot_v1 v = {0};
-    if (sv_tag(p->vocal, p->vn, &v)) return 0;
-    if (p->method == AZ_VOCAL_LSTM && (v.sample_rate != 22050 || v.hop_samples != 1024 || v.frame_count < 9)) return 0;
-    return v.frame_count == sv_expected_count(p->frames, p->rate, v.sample_rate, v.hop_samples, p->method);
-}
-static int sa_packet_decode(struct sa_packet *p, const void *data, uint32_t size) {
-    if (!sa_packet_version(p, data, size)) return 0;
-    sa_packet_header(p, data);
-    if (!sa_packet_lengths_valid(p, size) || !sa_packet_clock_valid(p)) return 0;
-    p->grid = (const uint8_t *) data + p->header;
-    p->phrase = p->grid + p->gn;
-    p->vocal = p->phrase + p->pn;
-    return sa_packet_phrase_valid(p) && sa_packet_grid_valid(p) && sa_packet_vocal_valid(p);
-}
 static struct sa_job *sa_find_job(int owner, uint64_t job) {
     struct sa_job *found = NULL;
     for (unsigned i = 0; i < 8; i++)
@@ -378,15 +359,15 @@ static struct sa_job *sa_find_job(int owner, uint64_t job) {
     return found;
 }
 struct sa_publication {
-    struct sa_packet packet;
+    struct sa_tags packet;
     struct sa_job *job;
     uint8_t *dat, *ext, *ex2, *newdat, *newext, *newex2;
     size_t dn, en, vfn, ndn, nen, nvn;
     struct sa_staged td, te, tv;
 };
 static int sa_publication_matches(const struct sa_publication *s) {
-    const struct sa_packet *p = &s->packet;
-    return p->v2 == s->job->vocals && !!p->pn == !!(s->job->needed & AZ_DATA_PHRASES) &&
+    const struct sa_tags *p = &s->packet;
+    return !!p->pn == !!(s->job->needed & AZ_DATA_PHRASES) &&
            !!p->vn == !!(s->job->needed & AZ_ANALYSIS_VOCALS) && (!p->gn || (s->job->needed & AZ_DATA_GRID));
 }
 static int sa_publication_read(struct sa_publication *s) {
@@ -397,7 +378,7 @@ static int sa_publication_read(struct sa_publication *s) {
     return failed ? AZ_FAILED : AZ_OK;
 }
 static int sa_publication_loaded_grid(struct sa_publication *s, int existing) {
-    struct sa_packet *p = &s->packet;
+    struct sa_tags *p = &s->packet;
     const struct sa_job *j = s->job;
     if (p->gn || !j->native_grid || !j->native_grid_bytes) return AZ_INVALID;
     if (!existing) {
@@ -425,7 +406,7 @@ static int sa_publication_parse_grid(const struct sa_publication *s, struct st_d
     const uint8_t *saved = sa_find_tag(s->dat, s->dn, "PQTZ", &saved_size);
     return saved ? st_section(parsed, saved, sa_u32(saved + 4), saved_size, AZ_DATA_GRID) : AZ_FAILED;
 }
-static int sa_publication_dimensions_valid(const struct sa_packet *p, const struct st_data *parsed) {
+static int sa_publication_dimensions_valid(const struct sa_tags *p, const struct st_data *parsed) {
     return parsed->view.beat_count && parsed->view.phrase_count &&
            sa_u16(p->phrase + 26) <= parsed->view.beat_count && p->pn == 32 + parsed->view.phrase_count * 24 &&
            (!p->gn || p->gn == 24 + parsed->view.beat_count * 8);
@@ -447,7 +428,7 @@ static int sa_publication_parse_phrases(const struct sa_publication *s) {
     return rc;
 }
 static int sa_publication_phrases(struct sa_publication *s) {
-    struct sa_packet *p = &s->packet;
+    struct sa_tags *p = &s->packet;
     if (!p->pn) return p->gn ? AZ_INVALID : AZ_OK;
     int rc = sa_publication_grid(s);
     if (rc != AZ_OK) return rc;
@@ -458,7 +439,7 @@ static int sa_publication_phrases(struct sa_publication *s) {
     return s->newext && (!p->gn || s->newdat) ? AZ_OK : AZ_FAILED;
 }
 static int sa_publication_vocals(struct sa_publication *s) {
-    const struct sa_packet *p = &s->packet;
+    const struct sa_tags *p = &s->packet;
     if (!p->vn) return AZ_OK;
     if (sa_tag_count(s->ex2, s->vfn, "PVDI") != 0) return AZ_STALE;
     s->newex2 = sa_merge(s->ex2, s->vfn, p->vocal, p->vn, &s->nvn);
@@ -490,6 +471,7 @@ static int sa_publication_publish(struct sa_publication *s) {
 }
 static int sa_publication_notify(struct sa_publication *s) {
     struct sa_job *j = s->job;
+    if (!sa_owner_live(j)) return AZ_STALE;
     j->signatures[2] = st_disk_sig(j->dat);
     j->signatures[3] = st_disk_sig(j->ext);
     j->signatures[4] = st_disk_sig(j->ex2);
@@ -498,8 +480,9 @@ static int sa_publication_notify(struct sa_publication *s) {
         if (rc) return rc;
     }
     if (j->needs_link && !sa_link_analysis(j)) return AZ_FAILED;
+    int rc = j->needs_link ? AZ_PENDING : AZ_OK;
     sa_job_drop(j);
-    return AZ_OK;
+    return rc;
 }
 static int sa_publication_run(struct sa_publication *s) {
     if (!sa_publication_matches(s)) return AZ_INVALID;
@@ -525,25 +508,10 @@ static void sa_publication_drop(struct sa_publication *s) {
     free(s->newext);
     free(s->newex2);
 }
-static int sa_commit_request_valid(int owner, uint64_t job, const void *data, uint32_t size) {
-    return owner >= 0 && job && data && size >= 16 &&
-           size <= 28 + 24 + 32768 * 8 + 32 + 1024 * 24 + 24 + SV_FRAMES_MAX;
-}
-static int sa_commit(int owner, uint64_t job, const void *data, uint32_t size) {
-    if (!sa_commit_request_valid(owner, job, data, size)) return AZ_INVALID;
-    struct sa_publication state = {.td = {.dir = -1}, .te = {.dir = -1}, .tv = {.dir = -1}};
-    if (!sa_packet_decode(&state.packet, data, size)) return AZ_INVALID;
-    if (pthread_mutex_trylock(&sa_mutex)) return AZ_BUSY;
-    state.job = sa_find_job(owner, job);
-    int rc = AZ_STALE;
-    if (state.job && sa_current(state.job)) rc = sa_publication_run(&state);
-    sa_publication_drop(&state);
-    pthread_mutex_unlock(&sa_mutex);
-    return rc;
-}
 #include "sdk_analysis_typed.c"
 static int sdk_analysis_close(const char *id, uint64_t job) {
-    int owner = sa_owner(id, "analysis_close", CM_RA());
+    if (g_cm_on_ui || g_sdk_on_tap_thread) return AZ_INVALID;
+    int owner = st_mod_owner(id, CM_RA(), "analysis_close");
     if (owner < 0 || !job) return AZ_INVALID;
     if (pthread_mutex_trylock(&sa_mutex)) return AZ_BUSY;
     int rc = AZ_STALE;
@@ -559,3 +527,6 @@ static int sdk_analysis_close(const char *id, uint64_t job) {
 
 #include "sdk_analysis_loaded.c"
 #include "sdk_vocal_service.c"
+
+#include "analysis_link.c"
+#include "analysis_source_adapter.c"

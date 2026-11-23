@@ -260,7 +260,7 @@ def wave_probe_archive(data,package_sha256,binary_sha256):
         if len({k for k,v in pairs})!=len(pairs):raise ValueError('duplicate package metadata')
         return dict(pairs)
     meta=json.loads(files['azmod.json'],object_pairs_hook=object_fields)
-    if (meta.get('id'),meta.get('version'),meta.get('firmware'))!=('sdk-wave-layer-probe','0.1.0',['any']) or type(meta.get('azmod')) is not int or meta['azmod']!=1 or type(meta.get('api')) is not int or meta['api']!=1 or meta.get('hooks') is not False:raise ValueError('reviewed wave mod identity/ABI/hooks required')
+    if (meta.get('id'),meta.get('version'),meta.get('firmware'))!=('sdk-wave-layer-probe','0.1.0',['any']) or type(meta.get('azmod')) is not int or meta['azmod']!=1 or type(meta.get('api')) is not int or meta['api']!=2 or meta.get('hooks') is not False:raise ValueError('reviewed wave mod identity/ABI/hooks required')
     return files
 
 def wave_approved(text,sha):

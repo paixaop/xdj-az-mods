@@ -1176,6 +1176,7 @@ static int install_drag_view(void);
 
 /* community.c: the community mod host (included near the end of azmod.c) */
 static int g_cm_live; /* mods with state LOADED: the LED-frame dispatch is skipped at 0 */
+static void core_services_init(void);
 static void community_init(void);
 static void community_tick(void);
 static int ds_event_fd, ds_timer_fd;

@@ -13,7 +13,7 @@ cc -O2 -no-pie -I"$src" "-DCM_ROOT=\"$work/root\"" "-DCM_LOGDIR=\"$work/log\"" \
   "$src/test/community/harness.c" "$src/sdk_command_engine.c" -pthread -ldl -lm -rdynamic -o "$work/host"
 cc -O2 -fPIC -shared -fvisibility=hidden -I"$sdk_include" "$src/test/community/status_mod.c" \
   -o "$stage/status-watch/status-watch.so"
-printf '%s\n' '{"azmod":1,"id":"status-watch","name":"Status watch","version":"1.0.0","author":"t","summary":"status test","source":"https://example.com/x","api":1,"firmware":["any"],"hooks":false}' > "$stage/status-watch/azmod.json"
+printf '%s\n' '{"azmod":1,"id":"status-watch","name":"Status watch","version":"1.0.0","author":"t","summary":"status test","source":"https://example.com/x","api":2,"firmware":["any"],"hooks":false}' > "$stage/status-watch/azmod.json"
 echo status-watch > "$stage/enabled"
 touch "$work/root/azmod-community/.approved-init"
 echo "status-watch $(sha256sum < "$stage/status-watch/status-watch.so" | cut -d' ' -f1)" > "$work/root/azmod-community/approved"

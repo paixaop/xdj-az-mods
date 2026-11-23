@@ -919,6 +919,7 @@ static void ov_load_state(void) {
     azmod_state_init(&g_state);
     load_config(&g_state);
     bus_cfg_publish();
+    core_services_init();
     community_init(); /* community mods: load the enabled ones (no-op with none enabled) */
     azm_hooks_dump(AZM_HOOKTABLE_PATH); /* again: community hooks (late, island only) */
     publish_mode_colors(&g_state); /* pad-mode picker: seed the LED interposer from saved colors */
