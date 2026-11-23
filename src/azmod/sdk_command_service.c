@@ -31,6 +31,22 @@ static int g_sdk_ui_fd = -1;
 static int g_sdk_timer_fd = -1;
 static pthread_t g_sdk_command_thread;
 static _Atomic int g_sdk_command_running;
+static _Atomic uint64_t g_sdk_cue_presentation[SCMD_DECKS];
+static _Atomic int g_sdk_cue_presentation_enabled;
+
+void sdk_command_cue_presentation_enable(void) {
+    atomic_store_explicit(&g_sdk_cue_presentation_enabled, 1, memory_order_release);
+}
+int sdk_command_cue_presentation_current(unsigned deck, uint64_t load) {
+    const struct azexit_service *api = atomic_load_explicit(&g_sdk_exit_service, memory_order_acquire);
+    uint64_t current;
+    return deck < SCMD_DECKS && load && api && api->target && api->target(deck, &current) == AZ_OK && current == load;
+}
+uint64_t sdk_command_cue_presentation_hold(unsigned deck) {
+    if (deck >= SCMD_DECKS) return 0;
+    uint64_t load = atomic_load_explicit(&g_sdk_cue_presentation[deck], memory_order_acquire);
+    return sdk_command_cue_presentation_current(deck, load) ? load : 0;
+}
 
 static int sdk_eventfd_create(void) {
 #if defined(__linux__)
@@ -203,9 +219,14 @@ static struct scmd_adapter sdk_exit_adapter(const struct azexit_service *api) {
     return (struct scmd_adapter) {(void *) api, sdk_exit_arguments, sdk_exit_begin, sdk_exit_dispatch, sdk_exit_end};
 }
 
+#include "sdk_command_batch.inc"
+
+static uint64_t sdk_exit_native_token(const struct scmd_record *record) {
+    return record->batch.plan.count ? record->batch.native_token : record->token;
+}
 static struct azexit_receipt sdk_exit_identity(const struct scmd_record *r, uint32_t kind) {
     return (struct azexit_receipt) {
-        .size = sizeof(struct azexit_receipt), .version = AZEXIT_DELIVERY_VERSION, .kind = kind, .deck = r->request.deck, .token = r->token, .load_generation = r->request.expected_load_generation, .lifetime_generation = r->native_lifetime};
+        .size = sizeof(struct azexit_receipt), .version = AZEXIT_DELIVERY_VERSION, .kind = kind, .deck = r->request.deck, .token = sdk_exit_native_token(r), .load_generation = r->request.expected_load_generation, .lifetime_generation = r->native_lifetime};
 }
 /* All receipt projection and reservation return is serialized with admission.
  * Terminal values, settlement and native resource retirement are independent. */
@@ -214,7 +235,7 @@ static int sdk_exit_receipt_lifetime(const struct scmd_record *record, const str
 }
 static int sdk_exit_receipt_identity(const struct scmd_record *record, const struct azexit_receipt *value) {
     return record && value->size >= sizeof *value && value->version == AZEXIT_DELIVERY_VERSION &&
-           value->deck == record->request.deck && value->token == record->token &&
+           value->deck == record->request.deck && value->token == sdk_exit_native_token(record) &&
            value->load_generation == record->request.expected_load_generation && value->settled <= 1 &&
            sdk_exit_receipt_lifetime(record, value);
 }
@@ -231,6 +252,11 @@ static int sdk_exit_terminal_valid(const struct scmd_record *record, const struc
 static int sdk_exit_terminal(struct scmd_record *record, const struct azexit_receipt *value) {
     int expired = sdk_exit_expired_receipt(value);
     if (!sdk_exit_terminal_valid(record, value, expired)) return 0;
+    if (record->batch.plan.count) {
+        if (!record->batch.terminal.kind) record->batch.terminal = *value;
+        record->settled |= value->settled;
+        return 1;
+    }
     if (record->phase != SCMD_FINAL) {
         record->settled |= value->settled;
         scmd_finish(&g_sdk_commands, record, value->outcome, value->reason, value->revision,
@@ -247,11 +273,64 @@ static void sdk_exit_project(struct scmd_record *record, const struct azexit_rec
     else return;
     if (value->lifetime_generation) record->native_lifetime = value->lifetime_generation;
 }
+static void sdk_batch_finish(struct scmd_record *record, unsigned outcome, int reason, uint64_t observed_ns) {
+    struct scmd_cue_batch *batch = &record->batch;
+    if (batch->changed && outcome != AZ_COMMAND_APPLIED) outcome = AZ_COMMAND_UNCERTAIN;
+    uint64_t revision = outcome == AZ_COMMAND_APPLIED ? batch->revision : 0;
+    unsigned deck = record->request.deck;
+    if (g_sdk_commands.active[deck] == record->token)
+        atomic_store_explicit(&g_sdk_cue_presentation[deck], 0, memory_order_release);
+    scmd_finish(&g_sdk_commands, record, outcome, reason, revision, SCMD_DETAIL_NONE, observed_ns, 0);
+}
+static int sdk_batch_reserve_next(struct scmd_record *record) {
+    struct scmd_engine *engine = &g_sdk_commands;
+    if (engine->next_token >= UINT64_MAX / UINT64_C(8)) return AZ_LIMIT;
+    const az_command_request *r = &record->request;
+    struct azexit_request next = {engine->next_token + 1, r->expected_load_generation, r->deadline_ns, r->deck, 0};
+    int rc = engine->delivery->reserve(&next);
+    if (rc != AZ_OK) return scmd_error_status(rc);
+    record->batch.native_token = ++engine->next_token;
+    return AZ_OK;
+}
+static void sdk_batch_requeue(struct scmd_record *record, uint64_t observed_ns) {
+    int rc = sdk_batch_reserve_next(record);
+    if (rc != AZ_OK) {
+        sdk_batch_finish(record, AZ_COMMAND_UNCERTAIN, rc, observed_ns);
+        return;
+    }
+    record->phase = SCMD_QUEUED;
+    record->batch.terminal = (struct azexit_receipt) {0};
+    record->native_lifetime = 0;
+    record->native_submitted = record->settled = record->native_retired = 0;
+    record->awaiting = 1;
+}
+static void sdk_batch_applied(struct scmd_record *record, const struct azexit_receipt *terminal) {
+    struct scmd_cue_batch *batch = &record->batch;
+    batch->revision = terminal->revision;
+    ++batch->changed;
+    batch->created += batch->creating;
+    if (batch->created == batch->plan.count)
+        sdk_batch_finish(record, AZ_COMMAND_APPLIED, AZ_OK, terminal->observed_ns);
+    else if (batch->stop)
+        sdk_batch_finish(record, AZ_COMMAND_UNCERTAIN, AZ_CANCELLED, terminal->observed_ns);
+    else
+        sdk_batch_requeue(record, terminal->observed_ns);
+}
+static void sdk_batch_join(struct scmd_record *record) {
+    const struct azexit_receipt *terminal = &record->batch.terminal;
+    if (!terminal->kind || record->pinned || !record->awaiting || !record->settled || !record->native_retired) return;
+    struct azexit_receipt identity = sdk_exit_identity(record, AZEXIT_RECEIPT_RESOURCES_RETIRED);
+    if (g_sdk_commands.delivery->reclaim(&identity) != AZ_OK) return;
+    record->awaiting = 0;
+    if (terminal->outcome == AZ_COMMAND_APPLIED) sdk_batch_applied(record, terminal);
+    else sdk_batch_finish(record, terminal->outcome, terminal->reason, terminal->observed_ns);
+}
 static int sdk_exit_reclaimable(const struct scmd_record *record) {
     return record->phase == SCMD_FINAL && !record->pinned && record->awaiting && record->settled && record->native_retired;
 }
 static void sdk_exit_join(struct scmd_record *record) {
-    if (sdk_exit_reclaimable(record)) {
+    if (record->batch.plan.count) sdk_batch_join(record);
+    else if (sdk_exit_reclaimable(record)) {
         struct azexit_receipt identity = sdk_exit_identity(record, AZEXIT_RECEIPT_RESOURCES_RETIRED);
         if (g_sdk_commands.delivery->reclaim(&identity) == AZ_OK) {
             record->awaiting = 0;
@@ -274,16 +353,25 @@ static void sdk_exit_close_local(struct scmd_record *r, int reason, uint64_t now
 }
 static int sdk_exit_control(struct scmd_record *r, uint32_t reasons, uint64_t now) {
     struct azexit_receipt winner = {.size = sizeof winner};
-    int rc = g_sdk_commands.delivery->control(r->request.deck, r->token, reasons, now, &winner);
+    if (r->batch.plan.count) r->batch.stop |= reasons;
+    int rc = g_sdk_commands.delivery->control(r->request.deck, sdk_exit_native_token(r), reasons, now, &winner);
     if (rc == AZ_OK) sdk_exit_project(r, &winner);
-    if (r->phase == SCMD_FINAL && !r->native_submitted && !r->pinned)
+    if ((r->phase == SCMD_FINAL || r->batch.terminal.kind) && !r->native_submitted && !r->pinned)
         sdk_exit_close_local(r, AZ_CANCELLED, now);
     return rc;
+}
+static struct scmd_record *sdk_exit_native_record(const struct azexit_receipt *value) {
+    struct scmd_engine *engine = &g_sdk_commands;
+    struct scmd_record *record = scmd_find_token(engine, value->token);
+    if (record) return record;
+    if (value->deck >= SCMD_DECKS) return NULL;
+    record = scmd_find_token(engine, engine->active[value->deck]);
+    return record && sdk_exit_native_token(record) == value->token ? record : NULL;
 }
 static void sdk_exit_collect_locked(void) {
     struct azexit_receipt value = {.size = sizeof value};
     while (g_sdk_commands.delivery->consume(&value) == AZ_OK) {
-        struct scmd_record *r = scmd_find_token(&g_sdk_commands, value.token);
+        struct scmd_record *r = sdk_exit_native_record(&value);
         if (r) {
             sdk_exit_project(r, &value);
             sdk_exit_join(r);
@@ -318,8 +406,7 @@ static void sdk_exit_service_pending(void) {
     sdk_exit_collect_locked();
     pthread_mutex_unlock(&g_sdk_commands.mu);
 }
-static struct scmd_record *sdk_exit_next_command(struct scmd_engine *engine, unsigned deck) {
-    if (engine->active[deck]) return NULL;
+static struct scmd_record *sdk_exit_first_queued(struct scmd_engine *engine, unsigned deck) {
     struct scmd_record *next = NULL;
     for (unsigned i = 0; i < SCMD_SLOTS; ++i) {
         struct scmd_record *candidate = &engine->records[i];
@@ -327,6 +414,11 @@ static struct scmd_record *sdk_exit_next_command(struct scmd_engine *engine, uns
             (!next || candidate->token < next->token)) next = candidate;
     }
     return next;
+}
+static struct scmd_record *sdk_exit_next_command(struct scmd_engine *engine, unsigned deck) {
+    if (!engine->active[deck]) return sdk_exit_first_queued(engine, deck);
+    struct scmd_record *active = scmd_find_token(engine, engine->active[deck]);
+    return active && active->phase == SCMD_QUEUED ? active : NULL;
 }
 static int sdk_exit_prepare(const struct scmd_adapter *adapter, const az_command_request *request) {
     struct scmd_target target = {0};
@@ -342,19 +434,34 @@ static int sdk_exit_dispatch_ready(struct scmd_record *record, uint64_t now, int
         record->deadline_fired = 1;
         (void) sdk_exit_control(record, AZEXIT_STOP_DEADLINE, now);
     }
-    int send = record->phase != SCMD_FINAL && !record->retired && now && result == AZ_OK;
+    int send = record->phase != SCMD_FINAL && !record->retired && !record->batch.stop && now && result == AZ_OK;
     if (send) record->phase = SCMD_DISPATCHED;
     return send;
+}
+static void sdk_exit_dispatch_declined(struct scmd_engine *engine, struct scmd_record *record, int result, uint64_t now) {
+    if (result == AZ_BUSY || result == AZ_PENDING) {
+        record->phase = SCMD_QUEUED;
+        if (!record->batch.plan.count) engine->active[record->request.deck] = 0;
+    } else sdk_exit_close_local(record, result < 0 ? result : AZ_FAILED, now);
 }
 static void sdk_exit_dispatch_result(struct scmd_engine *engine, struct scmd_record *record, int sent, int result, uint64_t now) {
     record->pinned = 0;
     if (sent && result == AZ_PENDING) record->native_submitted = 1;
-    else if (record->phase == SCMD_FINAL) sdk_exit_close_local(record, AZ_STALE, now);
+    else if (record->phase == SCMD_FINAL || record->batch.terminal.kind) sdk_exit_close_local(record, AZ_STALE, now);
     else if (record->retired) (void) sdk_exit_control(record, AZEXIT_STOP_RETIRE, now);
-    else if (result == AZ_BUSY || result == AZ_PENDING) {
-        record->phase = SCMD_QUEUED;
-        engine->active[record->request.deck] = 0;
-    } else sdk_exit_close_local(record, result < 0 ? result : AZ_FAILED, now);
+    else sdk_exit_dispatch_declined(engine, record, result, now);
+}
+static int sdk_exit_prepare_record(const struct scmd_adapter *adapter, const struct scmd_record *record,
+                                   az_command_request *request) {
+    if (record->batch.plan.count) {
+        int rc = sdk_batch_step(adapter->context, &record->batch, request);
+        if (rc != AZ_OK) return rc;
+    }
+    return sdk_exit_prepare(adapter, request);
+}
+static void sdk_batch_record_stage(struct scmd_record *record, const az_command_request *request) {
+    record->batch.creating = request->operation == AZ_CMD_CUE_POINT_SET || request->operation == AZ_CMD_CUE_LOOP_SET;
+    atomic_store_explicit(&g_sdk_cue_presentation[request->deck], request->expected_load_generation, memory_order_release);
 }
 static void sdk_exit_step(unsigned deck, const struct scmd_adapter *adapter) {
     struct scmd_engine *e = &g_sdk_commands;
@@ -366,15 +473,16 @@ static void sdk_exit_step(unsigned deck, const struct scmd_adapter *adapter) {
     }
     r->pinned = 1;
     r->phase = SCMD_PREPARING;
-    uint64_t token = r->token;
-    e->active[deck] = token;
+    uint64_t token = sdk_exit_native_token(r);
+    e->active[deck] = r->token;
     az_command_request request = r->request;
     pthread_mutex_unlock(&e->mu);
 
-    int rc = sdk_exit_prepare(adapter, &request);
+    int rc = sdk_exit_prepare_record(adapter, r, &request);
     pthread_mutex_lock(&e->mu);
     uint64_t now = scmd_now(e);
     int send = sdk_exit_dispatch_ready(r, now, rc);
+    if (send && r->batch.plan.count) sdk_batch_record_stage(r, &request);
     pthread_mutex_unlock(&e->mu);
     if (send) rc = adapter->dispatch(adapter->context, &request, token, NULL);
     pthread_mutex_lock(&e->mu);
@@ -581,6 +689,25 @@ int sdk_exit_submit_async(int owner, const az_command_request *r,
                           az_command_completion_fn callback, void *user,
                           az_command_result *out) {
     return sdk_exit_submit_common(owner, r, callback, user, out);
+}
+static int sdk_batch_available(const struct azexit_service *api) {
+    return atomic_load_explicit(&g_sdk_cue_presentation_enabled, memory_order_acquire) &&
+           api && api->size >= AZEXIT_SERVICE_CUE_SNAPSHOT_SIZE && api->native_cues &&
+           (sdk_exit_operations(api) & SDK_BATCH_WRITES) == SDK_BATCH_WRITES;
+}
+static int sdk_batch_valid(const az_cue_batch_request *batch) {
+    return sdk_batch_envelope(batch) && sdk_batch_identity(batch) && sdk_batch_entries(batch);
+}
+int sdk_exit_submit_batch(int owner, const az_cue_batch_request *batch, az_command_completion_fn callback,
+                          void *user, az_command_result *out) {
+    if (!scmd_owner_ok(owner) || !scmd_output_ok(out) || !callback) return AZ_INVALID;
+    if (!sdk_batch_valid(batch)) return AZ_INVALID;
+    const struct azexit_service *api = atomic_load_explicit(&g_sdk_exit_service, memory_order_acquire);
+    struct scmd_adapter adapter = sdk_exit_adapter(api);
+    const struct scmd_adapter *enabled = sdk_batch_available(api) ? &adapter : NULL;
+    int rc = scmd_admit_batch(&g_sdk_commands, owner, batch, callback, user, enabled, out);
+    if (rc == AZ_OK) sdk_command_wake();
+    return rc;
 }
 
 void sdk_cue_tick(void) {

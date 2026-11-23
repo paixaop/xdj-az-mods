@@ -1617,6 +1617,7 @@ static const az_commands_v1 g_sdk_command_service = {
     .on_command_complete = sdk_on_command_complete,
     .command_submit_async = sdk_command_submit_async,
     .command_acknowledge = sdk_command_acknowledge,
+    .cue_batch_submit_async = sdk_command_batch_submit_async,
 #endif
 };
 static const az_observation_v1 *sdk_observation_service(uint32_t abi) {
