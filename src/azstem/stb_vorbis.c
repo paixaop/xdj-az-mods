@@ -82,6 +82,9 @@
 #include <stdio.h>
 #endif
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 ///////////   THREAD SAFETY
 
@@ -404,6 +407,9 @@ enum STBVorbisError
 };
 
 
+#ifdef __cplusplus
+}
+#endif
 
 #endif // STB_VORBIS_INCLUDE_STB_VORBIS_H
 //

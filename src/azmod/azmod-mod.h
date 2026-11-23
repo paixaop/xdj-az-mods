@@ -23,6 +23,9 @@
 #include <stdarg.h>
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* clang-format off */
 #define AZ_MOD_ABI 2
@@ -1395,5 +1398,8 @@ typedef struct az_mod_v1 {
 AZ_MOD_EXPORT const az_mod_v1 *az_mod_v1_entry(void);
 /* clang-format on */
 
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* AZMOD_MOD_H */
