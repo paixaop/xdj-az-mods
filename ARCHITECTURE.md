@@ -54,9 +54,19 @@ Stated in the file headers and visible throughout the code.
 | **Nothing heavy on real-time or paint paths.** | Hooks on EP147's audio thread do no file I/O, allocation or locking; they read and publish atomics, and a background thread does the rest (`azstem.c`, `drumroll.c`). Flags read by hot hooks are refreshed off the hot path (`key_shift.c`, `vinyl_brake.c`). |
 | **Features are gated.** | Each mod follows a Mod Menu row (declared once in `features.def`, read through `azfeatures.h`), an opt-in flag file (`*.on`) or a kill switch (`*.off`) under `/home/root/settings`. Hooks that must be installed at start stay installed and pass through while their feature is off. |
 
-The [stems design lessons](docs/STEMS-DESIGN.md) examine these principles across pad and
-EQ ownership, source audio, native widgets and waveform data, including the current
-file-polling limitation and recommendations for public SDK services.
+Stems playback substitutes decoded lanes below native DSP so player tempo,
+key lock and scratch apply to the selected audio. Match the current track and
+source before reusing PCM or widget state. Pad and EQ control changes must
+agree with their displayed state. Keep file polling, decoding and allocation
+off playback hooks, and treat stored waveform heights as display data.
+
+The overview renderer draws height bytes 4 and 5 of each 12-byte native point.
+The hook substitutes a scaled array only when it can retain the caller's
+already-owned Content. Scoped cleanup restores the array on normal return
+and unwind before releasing that lease. Unsupported entry contexts render
+with stock data. The report thread reads copied atomic counters without
+following cached widget or provider pointers. Run `tests/wave-overview.sh`
+and `tests/wave-report.sh` after changes to these paths.
 
 ### Diagnostics
 

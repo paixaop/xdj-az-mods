@@ -103,6 +103,5 @@ and feature/probability/kernel oracles. Runtime checks cover copied results,
 capacity, retirement, reordered loads, cancellation, visible automatic progress,
 source reuse versus failure and busy/pending/failed locator outcomes.
 
-Historical native USB/Beatport and physical results from the previous mod pipeline
-do not certify the new core integration. Re-run applicable emulator cases and
-separately record physical idle/playback acceptance before claiming those results.
+Verify the current core integration on USB and Beatport loads. Record emulator
+coverage separately from physical idle and playback checks.

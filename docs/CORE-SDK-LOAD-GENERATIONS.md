@@ -7,9 +7,7 @@ capability is claimed by this module. Device acceptance is still required.
 
 ## Verified boundary
 
-The bounded evidence and full ID-flow report are retained at
-`anchor/output/sdk-completion-native-commands/LOAD-TAP-REPORT.md` and the adjacent
-SHA-256-checked ELF RTTI/assembly. Supported artifacts are EP147 1.30
+Supported artifacts are EP147 1.30
 (`736bdc9322c00e5770af459c92cace33d8680825c07f00f909f74dfc473a77a6`)
 and 2.00 (`6577f42532375936c7e3fa830efa35b7daa9cde8e0a265c1fc7143f824321925`).
 
@@ -169,10 +167,6 @@ unknown-ID barriers, shared-listener invalidation and bounded RTTI comparison.
 Every control must fail its actual fixture assertion; the RTTI memcmp control
 must produce an ASan global-buffer-overflow.
 
-Development GNU ARM64 tests use the pinned `azmod-test:18.04` image. Under its
-QEMU environment ASan must use `detect_leaks=0`; those results include ASan/UBSan
-and explicitly exclude LSan. TSan compilation succeeds but execution reports
-`unsupported VMA range` (47; supported39/42/48), so this environment supplies no
-TSan runtime coverage for the ELF observer. Logs are retained under
-`anchor/output/sdk-completion-native-commands/`. In-process/deck validation is
-owned by the integration task and is not represented by these synthetic tests.
+Use the [SDK integration tests](CORE-SDK-AUTOMATION.md) for native-kernel
+and in-process verification. The synthetic fixture checks the observer ABI,
+ownership and forwarding independently.
