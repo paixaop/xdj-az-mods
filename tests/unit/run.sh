@@ -1488,6 +1488,17 @@ for v in ctl-anymove ctl-nobase ctl-closed ctl-clickyes ctl-backyes ctl-second c
     $CC "${CFLAGS[@]}" -pthread -I$T -DSDK_LOGIC_INC="\"$d/$v.h\"" -o "$d/$v" $T/sdk_test.c -lm
 done
 suite "sdk" "$d/real" 1.0
+
+d="$OUT/sdkthreads"; mkdir -p "$d"
+awk '/^static _Atomic int g_sd_threads/ {copy=1} copy {print}' guest/azmod/sdk_ui.c > "$d/real.inc"
+mutate "$d/real.inc" "$d/ctl-binding.inc" 's/    analysis_owner_thread_bind\(s.analysis_owner\);/    (void) s.analysis_owner;/'
+mutate "$d/real.inc" "$d/ctl-replaced.inc" 's/return g_cm_on_ui \? analysis_owner_get\(owner\) : analysis_owner_for_caller\(owner\);/return analysis_owner_get(owner);/'
+for v in real ctl-binding ctl-replaced; do
+    $CC "${CFLAGS[@]}" -Wno-unused-function -pthread -Iguest/azmod -DTHREAD_INC="\"$d/$v.inc\"" -o "$d/$v" $T/sdk_thread_start_test.c guest/azmod/analysis_owner.c -lm
+done
+suite "sdk thread start and owner lifetime handoff" "$d/real"
+control "sdk thread entry loses owner binding" "$d/ctl-binding"
+control "sdk worker inherits a replacement owner" "$d/ctl-replaced"
 # ---------------------------------------------------------------- drum grid through EP147's references
 d="$OUT/meowgrid"; mkdir -p "$d"
 { cat "$OUT/lifetime/ls.inc"; region $DR '^#define BG_PROV_OFF ' '^/\* Flusher: reload each deck'; } > "$d/real.inc"
@@ -2437,7 +2448,9 @@ suite "settings" "$d/real" "$d/scratch-real"
 # Every Mod Menu screen a knob walk reaches, the settings each azmod.cfg loads to, and what a
 # press / a tap does, for a set of real and edge-case files (menudump_test.c), byte-identical
 # to the golden that 1.2.2's code (before the feature-table refactor) produced with the
-# refactor's intended changes applied to it (menudump-golden.sh, menudump-intended.patch).
+# refactor's intended changes applied. The built-in Track Analysis row and its
+# four deck statuses are included; the original upstream snapshot is retained in
+# menudump.golden-rel.orig.gz. The Remote Stems default mutation must still fail.
 d="$OUT/menudump"; mkdir -p "$d"
 cp "$OUT/cfg/real.inc" "$d/cfg.inc"
 mkdir -p "$d/guest"; cp -R guest/azmod guest/common "$d/guest/"
@@ -2475,14 +2488,14 @@ fi
 WERRCTL="$ROOT/guest/out/unit-werrorctl"; mkdir -p "$WERRCTL"
 mutate guest/Makefile "$WERRCTL/Makefile" 's/^AZ_WARN := -Wall -Wextra -Werror$/AZ_WARN := -Wall -Wextra/m'
 if [ "$PUBLIC" = 1 ]; then
-    werrortest() { docker run --rm --platform=linux/arm64 -v "$ROOT/guest":/g:ro -v "$ROOT/$T":/t:ro \
-        azmod-build:18.04 bash /t/werror-check.sh /g "$@"; }
+    werrortest() { docker run --rm --platform=linux/arm64 -v "$ROOT":/work:ro -v "$ROOT/$T":/t:ro \
+        azmod-build:18.04 bash /t/werror-check.sh /work/guest "$@"; }
     suite "build warnings are errors (release)" werrortest
     skip "build warnings are errors (development): the published tree has no development build"
     skip "build warnings are errors (Makefile.public): the published tree's Makefile is the one above"
 elif plain_only "werror-check.sh (release compile lines)"; then
-    werrortest() { docker run --rm --platform=linux/arm64 -v "$ROOT/guest":/g:ro -v "$ROOT/$T":/t:ro \
-        -v "$ROOT/tools/public-source":/p:ro azmod-build:18.04 bash /t/werror-check.sh /g "$@"; }
+    werrortest() { docker run --rm --platform=linux/arm64 -v "$ROOT":/work:ro -v "$ROOT/$T":/t:ro \
+        -v "$ROOT/tools/public-source":/p:ro azmod-build:18.04 bash /t/werror-check.sh /work/guest "$@"; }
     suite "build warnings are errors (release)" werrortest
     suite "build warnings are errors (development)" werrortest AZMOD_RELEASE=0
     suite "build warnings are errors (Makefile.public)" werrortest -f /p/Makefile.public
@@ -3948,9 +3961,9 @@ mutate "$d/real.c" "$d/ctl-rw.c" 's/suffix\[\] = "\?immutable=1"/suffix[] = ""/;
 mutate "$d/real.c" "$d/ctl-ui.c"      's/    if \(g_cm_on_ui\)\n/    if (0)\n/'
 mutate "$d/real.c" "$d/ctl-anyport.c" 's/ \|\| sdk_port_of_sysfs\(real\) != stick \+ 1\)/)/'
 mutate "$d/real.c" "$d/ctl-guess.c"   's/    if \(hits != 1\)\n/    if (hits < 1)\n/'
-mutate "$d/real.c" "$d/ctl-kickstick.c" 's/if \(!src\[0\] \|\| \(strncmp\(src, mount, ml\) == 0 && src\[ml\] == .\/.\) \|\| sdk_spool_waits\(src\)\) \{/if (!src[0]) {/'
-mutate "$d/real.c" "$d/ctl-kickother.c" 's/ \|\| sdk_spool_waits\(src\)\) \{/) {/'
-mutate "$d/real.c" "$d/ctl-kickunknown.c" 's/if \(!src\[0\] \|\| \(strncmp/if ((strncmp/; s/return 1; \/\* not on a stick it knows/return 0; \/* not on a stick it knows/; s/    if \(!end\)\n        return 1;/    if (!end)\n        return 0;/'
+mutate "$d/real.c" "$d/ctl-kickstick.c" 's/if \(!strncmp\(source, mount, length\) && source\[length\] == .\/.\) return "from that USB";/if ((void) length, 0) return "from that USB";/'
+mutate "$d/real.c" "$d/ctl-kickother.c" 's/return sdk_spool_waits\(source\) \? "from a USB with a spool waiting" : NULL;/(void) sdk_spool_waits; return NULL;/'
+mutate "$d/real.c" "$d/ctl-kickunknown.c" 's/if \(!source\[0\]\) return "from a USB it cannot place";/if (!source[0]) return NULL;/; s/return 1; \/\* not on a stick it knows/return 0; \/* not on a stick it knows/; s/    if \(!end\)\n        return 1;/    if (!end)\n        return 0;/'
 mutate "$d/real.c" "$d/ctl-trunc.c"   's/            rc = 1; \/\* the first k rows; the rest did not fit \*\//            rc = 0;/g'
 if [ "$(uname -s)" = Linux ]; then SDK_EXPORT=-rdynamic; else SDK_EXPORT=-Wl,-export_dynamic; fi
 for v in real ctl-rw ctl-ui ctl-anyport ctl-guess ctl-kickstick ctl-kickunknown ctl-kickother ctl-trunc; do
@@ -4016,12 +4029,12 @@ $CC "${CFLAGS[@]}" -pthread -I"$d" -DST_ENGINE_HEADER='"broken.h"' -o "$d/contro
 control "sdk track data: duplicate IDs merged across sources" "$d/control"
 
 if [ "$(uname -s)" = Linux ]; then
-    $CC "${CFLAGS[@]}" $SDK_EXPORT -pthread -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$OUT/sdkdata/provider" $T/sdktrack_test.c guest/azmod/sdk_command_engine.c guest/azmod/track_storage.c -lsqlite3 -ldl -lm
+    $CC "${CFLAGS[@]}" $SDK_EXPORT -pthread -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$OUT/sdkdata/provider" $T/sdktrack_test.c guest/azmod/sdk_command_engine.c guest/azmod/sdk_command_service.c guest/azmod/track_service.c guest/azmod/track_storage.c -Wl,--wrap=open,--wrap=pread -lsqlite3 -ldl -lm
     suite "sdk stored track disk provider" "$OUT/sdkdata/provider"
-    $CC "${CFLAGS[@]}" $SDK_EXPORT -Wno-unused-function -Wno-missing-field-initializers -pthread -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -DLSAPPLY_INC="\"$OUT/lsapply/real.inc\"" -o "$d/analysis-service" $T/sdkanalysis_service_test.c guest/azmod/analysis_owner.c guest/azmod/sdk_command_engine.c guest/azmod/track_storage.c -lsqlite3 -ldl -lm
+    $CC "${CFLAGS[@]}" $SDK_EXPORT -Wno-unused-function -Wno-missing-field-initializers -pthread -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -DLSAPPLY_INC="\"$OUT/lsapply/real.inc\"" -o "$d/analysis-service" $T/sdkanalysis_service_test.c guest/azmod/analysis_owner.c guest/azmod/analysis_source.c guest/azmod/analysis_encoding.c guest/azmod/sdk_command_engine.c guest/azmod/sdk_command_service.c guest/azmod/track_service.c guest/azmod/track_storage.c -lsqlite3 -ldl -lm
     suite "sdk analysis source leases and USB persistence" "$d/analysis-service"
     for v in database-alias database-uri missing-parent wave-errors analysis-binding track-fifo wave-fifo analysis-path-limit preview-extension; do
-        $CC "${CFLAGS[@]}" $SDK_EXPORT -pthread -I"$d/review/$v" -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$d/$v" $T/sdktrack_test.c guest/azmod/sdk_command_engine.c "$d/review/$v/track_storage.c" -lsqlite3 -ldl -lm
+        $CC "${CFLAGS[@]}" $SDK_EXPORT -pthread -I"$d/review/$v" -I$T -Iguest/azmod -DLIB_INC='"sdk_lib.c"' -o "$d/$v" $T/sdktrack_test.c guest/azmod/sdk_command_engine.c guest/azmod/sdk_command_service.c "$d/review/$v/track_service.c" "$d/review/$v/track_storage.c" -Wl,--wrap=open,--wrap=pread -lsqlite3 -ldl -lm
         control "sdk stored track: $v regression" "$d/$v"
     done
 else

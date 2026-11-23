@@ -18,7 +18,7 @@ static int slip_diagnostic_worker(void *(*run)(void *), void *user) {
     if (rc) return rc;
     rc = pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
     pthread_t worker;
-    if (!rc) rc = pthread_create(&worker, &attributes, run, user);
+    if (!rc) rc = az_thread_create(&worker, &attributes, run, user);
     pthread_attr_destroy(&attributes);
     return rc;
 }

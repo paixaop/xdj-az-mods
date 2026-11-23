@@ -1569,7 +1569,12 @@ static void sdk_ui_tick(void);
 
 #include "sdk_status.c"
 #ifndef SDK_PROC_IMPL
-#include "sdk_analysis_service.c"
+#include "analysis_native_adapter.h"
+const char *az_analysis_state_dir(void) { return CM_STATE; }
+int az_analysis_thread_create(pthread_t *thread, const pthread_attr_t *attributes,
+                              void *(*entry)(void *), void *argument) {
+    return az_thread_create(thread, attributes, entry, argument);
+}
 #include "analysis_api.c"
 #endif
 #ifndef SDK_PROC_IMPL
@@ -2145,14 +2150,14 @@ static void cm_services_start(void) {
 #ifndef SDK_PROC_IMPL
     /* Resolve the shared SQL table before any community worker can read it. */
     /* Public SDK data and command services are available on a normal install. */
-    g_st_enabled = access("/home/root/settings/azmod.track-data.off", F_OK) != 0;
-    if (g_st_enabled || ds.enabled) sdk_sq_resolve();
-    if (g_st_enabled) {
+    track_service_configure(access("/home/root/settings/azmod.track-data.off", F_OK) != 0);
+    if (track_service_enabled() || ds_enabled()) sdk_sq_resolve();
+    if (track_service_enabled()) {
         azexit_service_fn get_exit;
         *(void **) &get_exit = dlsym(RTLD_DEFAULT, "azstem_exit_service_v1");
         const struct azexit_service *api = get_exit ? get_exit() : NULL;
         if (api && api->size >= AZEXIT_SERVICE_V1_SIZE && api->version == 1) {
-            atomic_store_explicit(&g_sdk_exit_service, api, memory_order_release);
+            sdk_command_observe_native(api);
             (void) sdk_command_start(api);
         }
     }
@@ -2318,33 +2323,7 @@ static void cm_disable_all(int nen) {
         cm_refuse(&g_cm[i], AZCM_DISABLED, "Community mods are disabled");
     }
 }
-/* Host lifecycle: core services start even when the community loader has no
- * enabled packages. Source observation and automatic analysis are core work. */
-#ifndef SDK_PROC_IMPL
-static int core_analysis_assets(char *assets, size_t size) {
-    char mods[1024];
-    if (!usbmods_find(mods, sizeof mods)) return AZ_NOT_FOUND;
-    int n = snprintf(assets, size, "%s/analysis/assets", mods);
-    return n < 0 || (size_t) n >= size ? AZ_LIMIT : AZ_OK;
-}
-static void core_analysis_start(void) {
-    char assets[1200];
-    int rc = core_analysis_assets(assets, sizeof assets);
-    if (rc == AZ_OK) rc = analysis_host_start(assets, az_on(AZF_TRACK_ANALYSIS));
-    if (rc != AZ_OK) { dbg("analysis: core startup failed (%d)\n", rc); return; }
-    azmod_analysis_enable = analysis_host_enable;
-    rc = sdk_status_analysis_bind(analysis_runtime_load);
-    if (rc == AZ_OK) azmod_analysis_status = analysis_runtime_deck_status;
-    else dbg("analysis: automatic load observation unavailable (%d)\n", rc);
-}
-#endif
-static void core_services_init(void) {
-    sdk_status_start();
-    cm_services_start();
-#ifndef SDK_PROC_IMPL
-    core_analysis_start();
-#endif
-}
+#include "analysis_startup.c" /* explicit post-settings core startup */
 static void community_init(void) {
     cm_derive_fwtag();
     g_cm_logs_on = access(CM_ROOT "/azmod-logs.on", F_OK) == 0;
@@ -2457,7 +2436,7 @@ static void community_tick(void) {
 #ifndef SDK_PROC_IMPL
     /* Keep older companions' independent cue observations available. The
      * unbound core admits no native commands. */
-    if (!atomic_load_explicit(&g_sdk_exit_bound, memory_order_acquire)) sdk_cue_tick();
+    if (!sdk_command_native_bound()) sdk_cue_tick();
     sdk_data_callbacks_tick();                  /* works for mods with no tick callback */
 #endif
     cm_tick_callbacks(now);

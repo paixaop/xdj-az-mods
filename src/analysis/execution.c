@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #include "internal.h"
 #include <pthread.h>
+#include "../azmod/analysis_native_adapter.h"
 
 static int configuration_error(char *error, size_t size, const char *message)
 {
@@ -93,7 +94,7 @@ static int start_and_join(ta_group *group, unsigned threads)
     int failure = 0;
     for (unsigned i = 1; i < threads; i++) {
         /* Linux inherits the caller's A53 affinity and nice value. */
-        failure = pthread_create(&children[started], NULL, run, &group->workers[i]);
+        failure = az_analysis_thread_create(&children[started], NULL, run, &group->workers[i]);
         if (failure) {
             atomic_store_explicit(&group->failed, true, memory_order_relaxed);
             break;

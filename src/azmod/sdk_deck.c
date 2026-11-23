@@ -17,6 +17,7 @@
 #include "../common/azloadexport.h"
 #include "../common/azcueexport.h"
 #include "sdk_logic.h"
+#include "track_service.h"
 
 static _Atomic(azstem_deck_snapshot_fn) g_sd_snap;
 static _Atomic(azstem_deck_observation_v1_fn) g_sd_observation;
@@ -35,77 +36,77 @@ static _Atomic int g_sd_playing[AZMOD_STEM_DECKS] = {-1, -1, -1, -1};
 
 /* UI thread: look azstem's two functions up once it is loaded (dlsym takes a lock). */
 static void sd_bind_cue_mask(void) {
-    if (g_st_enabled && !atomic_load_explicit(&g_sd_cue_mask, memory_order_acquire)) {
+    if (track_service_enabled() && !atomic_load_explicit(&g_sd_cue_mask, memory_order_acquire)) {
         azstem_cue_observer_mask_v1_fn f;
         *(void **) &f = dlsym(RTLD_DEFAULT, "azstem_cue_observer_mask_v1");
         if (f) atomic_store_explicit(&g_sd_cue_mask, f, memory_order_release);
     }
 }
 static void sd_bind_cue_observation(void) {
-    if (g_st_enabled && !atomic_load_explicit(&g_sd_cue_observation, memory_order_acquire)) {
+    if (track_service_enabled() && !atomic_load_explicit(&g_sd_cue_observation, memory_order_acquire)) {
         azstem_cue_observation_v1_fn f;
         *(void **) &f = dlsym(RTLD_DEFAULT, "azstem_cue_observation_v1");
         if (f) atomic_store_explicit(&g_sd_cue_observation, f, memory_order_release);
     }
 }
 static void sd_bind_cue_take(void) {
-    if (g_st_enabled && !atomic_load_explicit(&g_sd_cue_take, memory_order_acquire)) {
+    if (track_service_enabled() && !atomic_load_explicit(&g_sd_cue_take, memory_order_acquire)) {
         azstem_cue_observation_v1_fn f;
         *(void **) &f = dlsym(RTLD_DEFAULT, "azstem_cue_take_v1");
         if (f) atomic_store_explicit(&g_sd_cue_take, f, memory_order_release);
     }
 }
 static void sd_bind_load_observation(void) {
-    if (g_st_enabled && !atomic_load_explicit(&g_sd_load_observation, memory_order_acquire)) {
+    if (track_service_enabled() && !atomic_load_explicit(&g_sd_load_observation, memory_order_acquire)) {
         azstem_load_observation_v1_fn f;
         *(void **) &f = dlsym(RTLD_DEFAULT, "azstem_load_observation_v1");
         if (f) atomic_store_explicit(&g_sd_load_observation, f, memory_order_release);
     }
 }
 static void sd_bind_tempo_lock_observation(void) {
-    if (g_st_enabled && !atomic_load_explicit(&g_sd_tempo_lock_observation, memory_order_acquire)) {
+    if (track_service_enabled() && !atomic_load_explicit(&g_sd_tempo_lock_observation, memory_order_acquire)) {
         azstem_tempo_lock_observation_v1_fn f;
         *(void **) &f = dlsym(RTLD_DEFAULT, "azstem_tempo_lock_observation_v1");
         if (f) atomic_store_explicit(&g_sd_tempo_lock_observation, f, memory_order_release);
     }
 }
 static void sd_bind_sync_observation(void) {
-    if (g_st_enabled && !atomic_load_explicit(&g_sd_sync_observation, memory_order_acquire)) {
+    if (track_service_enabled() && !atomic_load_explicit(&g_sd_sync_observation, memory_order_acquire)) {
         azstem_sync_observation_v1_fn f;
         *(void **) &f = dlsym(RTLD_DEFAULT, "azstem_sync_observation_v1");
         if (f) atomic_store_explicit(&g_sd_sync_observation, f, memory_order_release);
     }
 }
 static void sd_bind_live_observation(void) {
-    if (g_st_enabled && !atomic_load_explicit(&g_sd_live_observation, memory_order_acquire)) {
+    if (track_service_enabled() && !atomic_load_explicit(&g_sd_live_observation, memory_order_acquire)) {
         azstem_live_observation_v1_fn f;
         *(void **) &f = dlsym(RTLD_DEFAULT, "azstem_live_observation_v1");
         if (f) atomic_store_explicit(&g_sd_live_observation, f, memory_order_release);
     }
 }
 static void sd_bind_live_mask(void) {
-    if (g_st_enabled && !atomic_load_explicit(&g_sd_live_mask, memory_order_acquire)) {
+    if (track_service_enabled() && !atomic_load_explicit(&g_sd_live_mask, memory_order_acquire)) {
         azstem_live_observer_mask_v1_fn f;
         *(void **) &f = dlsym(RTLD_DEFAULT, "azstem_live_observer_mask_v1");
         if (f) atomic_store_explicit(&g_sd_live_mask, f, memory_order_release);
     }
 }
 static void sd_bind_loop_observation(void) {
-    if (g_st_enabled && !atomic_load_explicit(&g_sd_loop_observation, memory_order_acquire)) {
+    if (track_service_enabled() && !atomic_load_explicit(&g_sd_loop_observation, memory_order_acquire)) {
         azstem_loop_observation_v2_fn f;
         *(void **) &f = dlsym(RTLD_DEFAULT, "azstem_loop_observation_v2");
         if (f) atomic_store_explicit(&g_sd_loop_observation, f, memory_order_release);
     }
 }
 static void sd_bind_loop_mask(void) {
-    if (g_st_enabled && !atomic_load_explicit(&g_sd_loop_mask, memory_order_acquire)) {
+    if (track_service_enabled() && !atomic_load_explicit(&g_sd_loop_mask, memory_order_acquire)) {
         azstem_loop_observer_mask_v1_fn f;
         *(void **) &f = dlsym(RTLD_DEFAULT, "azstem_loop_observer_mask_v1");
         if (f) atomic_store_explicit(&g_sd_loop_mask, f, memory_order_release);
     }
 }
 static void sd_bind_observation(void) {
-    if (g_st_enabled && !atomic_load_explicit(&g_sd_observation, memory_order_acquire)) {
+    if (track_service_enabled() && !atomic_load_explicit(&g_sd_observation, memory_order_acquire)) {
         azstem_deck_observation_v1_fn f;
         *(void **) &f = dlsym(RTLD_DEFAULT, "azstem_deck_observation_v1");
         if (f) atomic_store_explicit(&g_sd_observation, f, memory_order_release);
@@ -276,7 +277,7 @@ static int sd_native_cue_event(int deck) {
     azstem_cue_observation_v1_fn take = atomic_load_explicit(&g_sd_cue_take, memory_order_acquire);
     if (!take) return 0;
     struct azstem_cue_observation_v1 sample = {sizeof sample, 1, 0, 0, 0, 0, 0};
-    int rc = g_st_enabled ? take(deck, &sample) : -1;
+    int rc = track_service_enabled() ? take(deck, &sample) : -1;
     if (rc == 1) return 0;
     if (rc != 0 || !sd_cue_receipt_valid(&sample)) {
         int invalidate = seen[deck].unit != 0;
@@ -325,14 +326,14 @@ static int sd_load_receipt_valid(const struct azstem_load_observation_v1 *receip
 static int sd_native_load_read(int deck, struct azstem_load_observation_v1 *out) {
     azstem_load_observation_v1_fn load = atomic_load_explicit(&g_sd_load_observation, memory_order_acquire);
     struct azstem_load_observation_v1 receipt = {sizeof receipt, 1, {0}};
-    if (!g_st_enabled || !load || load(deck, &receipt) || !sd_load_receipt_valid(&receipt)) return 0;
+    if (!track_service_enabled() || !load || load(deck, &receipt) || !sd_load_receipt_valid(&receipt)) return 0;
     *out = receipt;
     return 1;
 }
 static int sd_native_cue_read(int deck, struct azstem_cue_observation_v1 *out) {
     azstem_cue_observation_v1_fn read = atomic_load_explicit(&g_sd_cue_observation, memory_order_acquire);
     struct azstem_cue_observation_v1 sample = {sizeof sample, 1, 0, 0, 0, 0, 0};
-    if (!g_st_enabled || !read || read(deck, &sample) || !sd_cue_receipt_valid(&sample)) return 0;
+    if (!track_service_enabled() || !read || read(deck, &sample) || !sd_cue_receipt_valid(&sample)) return 0;
     *out = sample;
     return 1;
 }
@@ -354,7 +355,7 @@ static uint32_t sd_tempo_lock_capabilities(azstem_live_observer_mask_v1_fn mask)
     return mask && (mask() & 15u) && atomic_load_explicit(&g_sd_tempo_lock_observation, memory_order_acquire) ? AZ_LIVE_TEMPO_SLIDER_LOCKED : 0;
 }
 static uint32_t sd_load_capabilities(void) {
-    for (int deck = 0; g_st_enabled && deck < AZMOD_STEM_DECKS; ++deck) {
+    for (int deck = 0; track_service_enabled() && deck < AZMOD_STEM_DECKS; ++deck) {
         struct azstem_load_observation_v1 receipt;
         if (sd_native_load_read(deck, &receipt)) return AZ_LIVE_NATIVE_LOAD;
     }
@@ -362,13 +363,13 @@ static uint32_t sd_load_capabilities(void) {
 }
 static uint32_t sd_cue_capabilities(void) {
     azstem_cue_observer_mask_v1_fn cue = atomic_load_explicit(&g_sd_cue_mask, memory_order_acquire);
-    return g_st_enabled && cue && (cue() & 15u) && atomic_load_explicit(&g_sd_cue_observation, memory_order_acquire) ? AZ_LIVE_CUE_REVISION : 0;
+    return track_service_enabled() && cue && (cue() & 15u) && atomic_load_explicit(&g_sd_cue_observation, memory_order_acquire) ? AZ_LIVE_CUE_REVISION : 0;
 }
 static int sd_tempo_valid(double bpm, uint64_t generation, uint64_t revision, uint64_t observed_ns) {
     return bpm > 20.0 && bpm < 400.0 && generation && revision && observed_ns;
 }
 static uint32_t sd_tempo_capabilities(void) {
-    for (int deck = 0; g_st_enabled && deck < AZMOD_STEM_DECKS; ++deck) {
+    for (int deck = 0; track_service_enabled() && deck < AZMOD_STEM_DECKS; ++deck) {
         double bpm;
         uint64_t generation, revision, observed_ns;
         if (cm_tempo_read(deck, &bpm, &generation, &revision, &observed_ns) &&
@@ -383,7 +384,7 @@ static uint32_t sd_live_fields(void) {
     mask |= sd_live_capabilities(live);
     mask |= sd_sync_capabilities(live);
     mask |= sd_tempo_lock_capabilities(live);
-    if (g_st_enabled && master_state_supported()) mask |= AZ_LIVE_MASTER;
+    if (track_service_enabled() && master_state_supported()) mask |= AZ_LIVE_MASTER;
     mask |= sd_load_capabilities();
     mask |= sd_cue_capabilities();
     mask |= sd_tempo_capabilities();
@@ -432,7 +433,7 @@ static int sd_loaded_receipt_valid(const struct azstem_deck_observation_v1 *rece
 static void sd_snapshot_loaded(int deck, az_deck_snapshot *v) {
     azstem_deck_observation_v1_fn f = atomic_load_explicit(&g_sd_observation, memory_order_acquire);
     struct azstem_deck_observation_v1 o = {sizeof o, 1, -1, 0, 0, 0};
-    if (g_st_enabled && f && !f(deck, &o) && sd_loaded_receipt_valid(&o)) {
+    if (track_service_enabled() && f && !f(deck, &o) && sd_loaded_receipt_valid(&o)) {
         v->valid |= AZ_LIVE_LOADED;
         v->loaded = o.loaded;
         v->revision = o.revision;
@@ -449,7 +450,7 @@ static int sd_loop_bounds_valid(const struct azstem_loop_observation_v2 *loop) {
 static void sd_snapshot_loop(int deck, az_deck_snapshot *v) {
     azstem_loop_observation_v2_fn lf = atomic_load_explicit(&g_sd_loop_observation, memory_order_acquire);
     struct azstem_loop_observation_v2 lo = {sizeof lo, 2, 0, 0, 0, -1, 0, 0, 0};
-    if (g_st_enabled && lf && !lf(deck, &lo) && sd_loop_receipt_valid(&lo)) {
+    if (track_service_enabled() && lf && !lf(deck, &lo) && sd_loop_receipt_valid(&lo)) {
         v->loop_unit_generation = lo.unit_generation;
         v->loop_revision = lo.revision;
         v->loop_observed_ns = lo.observed_ns;
@@ -469,7 +470,7 @@ static void sd_snapshot_loop(int deck, az_deck_snapshot *v) {
 static void sd_snapshot_live(int deck, az_deck_snapshot *v) {
     azstem_live_observation_v1_fn live = atomic_load_explicit(&g_sd_live_observation, memory_order_acquire);
     struct azstem_live_observation_v1 observation = {sizeof observation, 1, {0}};
-    if (g_st_enabled && live && !live(deck, &observation)) {
+    if (track_service_enabled() && live && !live(deck, &observation)) {
         const struct azsdk_live_sample *sample = &observation.sample;
         v->live_unit_generation = sample->unit_generation;
         v->play_revision = sample->revisions[0];
@@ -501,7 +502,7 @@ static void sd_snapshot_live(int deck, az_deck_snapshot *v) {
 static void sd_snapshot_sync(int deck, az_deck_snapshot *v) {
     azstem_sync_observation_v1_fn sf = atomic_load_explicit(&g_sd_sync_observation, memory_order_acquire);
     struct azstem_sync_observation_v1 sync = {sizeof sync, 1, 0, 0, 0, -1, 0};
-    if (g_st_enabled && sf && !sf(deck, &sync)) {
+    if (track_service_enabled() && sf && !sf(deck, &sync)) {
         v->sync_unit_generation = sync.unit_generation;
         v->sync_revision = sync.revision;
         v->sync_observed_ns = sync.observed_ns;
@@ -515,7 +516,7 @@ static void sd_snapshot_sync(int deck, az_deck_snapshot *v) {
 static void sd_snapshot_tempo_lock(int deck, az_deck_snapshot *v) {
     azstem_tempo_lock_observation_v1_fn tf = atomic_load_explicit(&g_sd_tempo_lock_observation, memory_order_acquire);
     struct azstem_tempo_lock_observation_v1 tempo = {sizeof tempo, 1, 0, 0, 0, -1, 0};
-    if (g_st_enabled && tf && !tf(deck, &tempo)) {
+    if (track_service_enabled() && tf && !tf(deck, &tempo)) {
         v->tempo_lock_unit_generation = tempo.unit_generation;
         v->tempo_lock_revision = tempo.revision;
         v->tempo_lock_observed_ns = tempo.observed_ns;
@@ -526,7 +527,7 @@ static void sd_snapshot_tempo_lock(int deck, az_deck_snapshot *v) {
     }
 }
 static void sd_snapshot_tempo_master(int deck, az_deck_snapshot *v) {
-    if (g_st_enabled) {
+    if (track_service_enabled()) {
         int master;
         if (master_state_read(&master, &v->master_revision, &v->master_observed_ns)) {
             v->valid |= AZ_LIVE_MASTER;

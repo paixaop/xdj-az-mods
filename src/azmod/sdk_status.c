@@ -4,10 +4,12 @@
 #include <sys/eventfd.h>
 #include <sys/timerfd.h>
 #include <poll.h>
-#include "sdk_status_engine.c"
+#include "sdk_status_engine.h"
+#include "sdk_status_host.h"
+#include "sdk_status_diagnostics.h"
 
 static int ds_event_fd = -1, ds_timer_fd = -1;
-static void ds_wake(void) {
+void az_status_host_wake(void) {
     uint64_t one = 1;
     if (ds_event_fd >= 0) {
         ssize_t n;
@@ -16,17 +18,17 @@ static void ds_wake(void) {
         /* EAGAIN means the descriptor is already readable. */
     }
 }
-static void ds_deadline(uint64_t ns) {
+void az_status_host_deadline(uint64_t ns) {
     struct itimerspec timer = {0};
     timer.it_value.tv_sec = ns / UINT64_C(1000000000);
     timer.it_value.tv_nsec = ns % UINT64_C(1000000000);
     if (ds_timer_fd >= 0) (void) timerfd_settime(ds_timer_fd, TFD_TIMER_ABSTIME, &timer, NULL);
 }
-static int ds_live(int owner) {
+int az_status_host_live(int owner) {
     return owner >= 0 && owner < g_cm_n && g_cm[owner].state == AZCM_LOADED;
 }
 static void sdk_status_ui_drain(void) {
-    if (!ds.enabled) return;
+    if (!ds_enabled()) return;
     uint64_t value;
     ssize_t event_read = read(ds_event_fd, &value, sizeof value);
     ssize_t timer_read = read(ds_timer_fd, &value, sizeof value);
@@ -34,16 +36,16 @@ static void sdk_status_ui_drain(void) {
     ds_drain(8);
 }
 #ifndef SDK_PROC_IMPL
-#include "sdk_status_store.c"
-#include "sdk_status_native.c"
-#include "sdk_status_gui.c"
-#include "sdk_status_metrics.c"
+#include "sdk_status_store.h"
+#include "sdk_status_native.h"
+#include "sdk_status_gui.h"
+#include "sdk_status_native_host.c"
 #else
 /* The normal-loader fixture has no EP147 units or libraries. Inject receipts
  * at the reducer boundary; all registration, pinning and UI delivery is real. */
 static void ds_gui_interest(uint64_t topics) { (void) topics; }
 static void ds_native_start(void) {}
-static void ds_start_metrics(void) {}
+
 static void ds_native_interest(unsigned d, uint64_t t) {
     (void) d;
     (void) t;
@@ -71,32 +73,19 @@ static int ds_create_signals(void) {
     return 1;
 }
 static void sdk_status_start(void) {
-    if (ds.enabled || access(CM_ROOT "/azmod.deck-status.off", F_OK) == 0) return;
+    if (ds_enabled() || access(CM_ROOT "/azmod.deck-status.off", F_OK) == 0) return;
 #ifndef SDK_PROC_IMPL
     if (g_ep147_build != EPB_V130 && g_ep147_build != EPB_V200) return;
 #endif
     if (!ds_create_signals()) return;
-    ds.enabled = 1;
+    ds_enable();
     ds_native_start();
-    ds_start_metrics();
+#ifndef SDK_PROC_IMPL
+    ds_start_metrics(access(CM_ROOT "/azmod.deck-status.metrics", F_OK) == 0, ds_native_pending_bytes());
+#endif
 }
 /* Core consumers use the existing provider and source identities, without a
  * subscription slot, mod identity, or public event marshaling. */
-static int sdk_status_analysis_bind(ds_core_load_fn observer) {
-    if (!ds.enabled) return AZ_UNSUPPORTED;
-    atomic_store_explicit(&ds_core_load, observer, memory_order_release);
-    uint64_t topics = AZ_STATUS_TOPIC(AZ_STATUS_LOAD);
-    ds_gui_interest(topics);
-    for (unsigned deck = 0; deck < 4; ++deck) {
-        ds_native_interest(deck, topics);
-        sdk_status_store_interest(deck, topics);
-        pthread_mutex_lock(&ds.mu);
-        struct ds_analysis_cut copy = ds_analysis_copy(&ds.deck[deck].current);
-        pthread_mutex_unlock(&ds.mu);
-        ds_analysis_deliver(deck, &copy);
-    }
-    return AZ_OK;
-}
 static int sdk_status_code(cm_mod *mod, uintptr_t address) {
     if (!cm_called_by(mod, address)) return 0;
     for (unsigned i = 0; i < mod->nsegments; ++i) {
@@ -112,7 +101,7 @@ static int sdk_status_owner(const char *id, uintptr_t caller) {
     cm_mod *c = cm_self(id, caller, "deck status");
     if (!c || !sdk_status_code(c, caller)) return -1;
     int owner = (int) (c - g_cm);
-    return (ds_live(owner) || (g_sdk_in_init && owner == g_cm_loading)) ? owner : -1;
+    return (az_status_host_live(owner) || (g_sdk_in_init && owner == g_cm_loading)) ? owner : -1;
 }
 static int sdk_on_deck_status(const char *id, const az_deck_watch_v1 *watch, az_deck_status_fn fn,
                               void *user, az_deck_subscription *out) {
@@ -124,25 +113,16 @@ static int sdk_deck_status_release(const char *id, az_deck_subscription handle) 
     return ds_release(sdk_status_owner(id, CM_RA()), handle);
 }
 
+
+void az_status_host_store_binding(unsigned d, uint64_t e, const az_track_ref *r, uint64_t c) { sdk_status_store_binding(d, e, r, c); }
+
+void az_status_host_store_interest(unsigned d, uint64_t t) { sdk_status_store_interest(d, t); }
+
+void az_status_host_native_interest(unsigned d, uint64_t t) { ds_native_interest(d, t); }
+
+void az_status_host_gui_interest(uint64_t t) { ds_gui_interest(t); }
+
 #ifndef SDK_PROC_IMPL
-/* Copy only the reducer's qualified identity for this exact accepted load. */
-static int sa_load_cell_ready(const struct ds_cell *cell, uint64_t load) {
-    return cell && cell->info.info.availability == AZ_AVAIL_READY &&
-           cell->info.scope == AZ_STATUS_LOAD_SCOPE && cell->info.scope_id == load &&
-           cell->bytes == sizeof(az_track_ref);
-}
-static int sa_loaded_ref(unsigned deck, uint64_t load, az_track_ref *out) {
-    if (deck >= 4 || !load || !out) return AZ_INVALID;
-    int rc = AZ_BUSY;
-    pthread_mutex_lock(&ds.mu);
-    const struct ds_image *image = &ds.deck[deck].current;
-    const struct ds_cell *cell = image->field[AZ_STATUS_LOAD][AZ_STATUS_LOAD_TRACK];
-    if (image->epoch != load) rc = AZ_STALE;
-    else if (sa_load_cell_ready(cell, load)) {
-        memcpy(out, cell->data, sizeof *out);
-        rc = AZ_OK;
-    }
-    pthread_mutex_unlock(&ds.mu);
-    return rc;
-}
+int az_status_host_reader_register(int descriptor) { return libfd_add(descriptor, LIBFD_STATUS); }
+void az_status_host_reader_release(int descriptor) { libfd_del(descriptor); }
 #endif

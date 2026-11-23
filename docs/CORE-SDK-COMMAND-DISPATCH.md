@@ -2,7 +2,7 @@
 
 `src/azmod/sdk_command_engine.h` supplies bounded command policy and synthetic adapter
 tests. It contains no EP147 addresses, native pointer registry, hook, worker, or advertised
-native capability. The transient loop adapter in `sdk_exit_bridge.c` and `sdk_exit.c`
+native capability. The transient loop adapter in `sdk_command_service.c` and `sdk_exit.c`
 connects this engine to the native loop mailbox. Cue operations use the same public
 queue and the native cue control/actor, collection and persistence adapters. All 26
 public operation IDs have development implementation paths; functional correctness

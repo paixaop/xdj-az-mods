@@ -15,7 +15,7 @@ PASS=0; FAIL=0
 cv(){ rm -rf $W/cv; mkdir -p $W/cv; [ -f $W/root/azmod.conf ] || return 0
     CVD=$W/cv perl -ne 'next unless /^([a-z0-9-]+):(cfg|str)\.(\S+) = (.*)$/; my ($i,$n,$k,$v)=($1,$2,$3,$4); $k=~s/:([0-9a-f]{2})/chr hex $1/ge; if ($n eq "str") { $v=~s/^"(.*)"$/$1/; $k.="\$" } open my $f, ">>", "$ENV{CVD}/$i.cfg" or die; print $f "$k=$v\n"' $W/root/azmod.conf; }
 ok(){ cv; if eval "$2"; then PASS=$((PASS+1)); echo "PASS $1"; else FAIL=$((FAIL+1)); echo "FAIL $1"; echo "---- output:"; cat $W/out; fi; }
-$HCC -O1 -g -Wall -I$A -DCM_ROOT="\"$W/root\"" -DCM_LOGDIR="\"$W/log\"" -DCM_USB_ROOT="\"$W/usb\"" -no-pie -o $W/harness $T/harness.c $A/sdk_command_engine.c -pthread -ldl -lm -rdynamic 2>$W/cc.log || { cat $W/cc.log; exit 1; }
+$HCC -O1 -g -Wall -I$A -DCM_ROOT="\"$W/root\"" -DCM_LOGDIR="\"$W/log\"" -DCM_USB_ROOT="\"$W/usb\"" -no-pie -o $W/harness $T/harness.c $A/sdk_command_engine.c $A/sdk_command_service.c $A/sdk_status_engine.c -pthread -ldl -lm -rdynamic 2>$W/cc.log || { cat $W/cc.log; exit 1; }
 TAG=$($W/harness tag); read A0 A1 < <($W/harness addrs)
 echo "tag $TAG"
 $W/harness tagmp > $W/out
@@ -238,11 +238,11 @@ mkdir -p $W/root/az-usbload/community/empty-lib; : > $W/root/az-usbload/communit
 mod huge-lib; truncate -s 17M $W/root/az-usbload/community/huge-lib/huge-lib.so; manifest huge-lib '["any"]' false
 mod undef-lib -DMOD_UNDEF; manifest undef-lib '["any"]' false
 mod null-entry -DMOD_NULLENTRY; manifest null-entry '["any"]' false
-mod abi-2 -DMOD_ABI=2; manifest abi-2 '["any"]' false
+mod abi-99 -DMOD_ABI=99; manifest abi-99 '["any"]' false
 mod small-desc -DMOD_SIZE=8; manifest small-desc '["any"]' false
 mod no-init -DMOD_NOINIT; manifest no-init '["any"]' false
 mod fw-text; manifest fw-text '"any"' false
-enable good-any no-lib empty-lib huge-lib undef-lib null-entry abi-2 small-desc no-init fw-text
+enable good-any no-lib empty-lib huge-lib undef-lib null-entry abi-99 small-desc no-init fw-text
 $W/harness init > $W/out
 ok "a good mod loads beside 9 broken libraries (CONTROL)" '[ "$(st good-any)" = 1 ] && grep -q "^LIVE 1" $W/out'
 ok "no library file: refused, named"         '[ "$(st no-lib)" = 3 ] && rs no-lib | grep -q "Missing no-lib.so"'
@@ -250,7 +250,7 @@ ok "an empty library: refused"               '[ "$(st empty-lib)" = 3 ] && rs em
 ok "a library over 16 MB: refused"           '[ "$(st huge-lib)" = 3 ] && rs huge-lib | grep -q "empty or too large"'
 ok "a library dlopen cannot load: refused, with its reason (not the path)" '[ "$(st undef-lib)" = 3 ] && rs undef-lib | grep -q "Could not load: undefined symbol: az_test_symbol_nobody_defines"'
 ok "a descriptor that is NULL: refused"      '[ "$(st null-entry)" = 3 ] && rs null-entry | grep -q "returned nothing"'
-ok "another API's descriptor: refused"       '[ "$(st abi-2)" = 3 ] && rs abi-2 | grep -q "different mod API"'
+ok "another API's descriptor: refused"       '[ "$(st abi-99)" = 3 ] && rs abi-99 | grep -q "different mod API"'
 ok "a descriptor too small: refused"         '[ "$(st small-desc)" = 3 ] && rs small-desc | grep -q "different mod API"'
 ok "no init(): refused"                      '[ "$(st no-init)" = 3 ] && rs no-init | grep -q "has no init()"'
 ok "a firmware entry that is not a list: refused" '[ "$(st fw-text)" = 3 ] && rs fw-text | grep -q "no readable firmware list"'
@@ -598,7 +598,7 @@ ok "a kept paint context draws nothing after on_draw returns" 'grep -q "PAINT pa
 rm -rf $W/ctlsrc; mkdir -p $W/ctlsrc; cp -r $A $W/ctlsrc/azmod; cp -r $A/../common $W/ctlsrc/common 2>/dev/null
 perl -0pi -e 's/    if \(d && d == g_cm_paint\)\n        return 1;/    if (d)\n        return 1;/' $W/ctlsrc/azmod/community.c
 if cmp -s $A/community.c $W/ctlsrc/azmod/community.c; then echo "MUTATION DID NOT APPLY (paint control)"; FAIL=$((FAIL+1)); fi
-$HCC -O1 -g -w -I$W/ctlsrc/azmod -DCM_ROOT="\"$W/root\"" -DCM_LOGDIR="\"$W/log\"" -DCM_USB_ROOT="\"$W/usb\"" -no-pie -o $W/harness-ctl $W/ctlsrc/azmod/test/community/harness.c $W/ctlsrc/azmod/sdk_command_engine.c -pthread -ldl -lm -rdynamic 2>>$W/cc.log
+$HCC -O1 -g -w -I$W/ctlsrc/azmod -DCM_ROOT="\"$W/root\"" -DCM_LOGDIR="\"$W/log\"" -DCM_USB_ROOT="\"$W/usb\"" -no-pie -o $W/harness-ctl $W/ctlsrc/azmod/test/community/harness.c $W/ctlsrc/azmod/sdk_command_engine.c $W/ctlsrc/azmod/sdk_command_service.c $W/ctlsrc/azmod/sdk_status_engine.c -pthread -ldl -lm -rdynamic 2>>$W/cc.log
 rm -f $W/root/azmod-community/.starting; $W/harness-ctl init paint > $W/out
 ok "CONTROL: without the check, the kept context draws from tick" 'grep -q "PAINT painted=2 in_paint=2 after_ticks=[1-9]" $W/out'
 # 10. Controls for the eject, refusal-log and deck-state cases: the same cases on cores with
@@ -607,7 +607,7 @@ ctl_core() {   # ctl_core <name> <perl substitution>: $W/harness-<name> built fr
     rm -rf $W/ctlsrc; mkdir -p $W/ctlsrc; cp -r $A $W/ctlsrc/azmod; cp -r $A/../common $W/ctlsrc/common 2>/dev/null
     perl -0pi -e "$2" $W/ctlsrc/azmod/community.c
     if cmp -s $A/community.c $W/ctlsrc/azmod/community.c; then echo "MUTATION DID NOT APPLY ($1 control)"; FAIL=$((FAIL+1)); fi
-    $HCC -O1 -g -w -I$W/ctlsrc/azmod -DCM_ROOT="\"$W/root\"" -DCM_LOGDIR="\"$W/log\"" -DCM_USB_ROOT="\"$W/usb\"" -no-pie -o $W/harness-$1 $W/ctlsrc/azmod/test/community/harness.c $W/ctlsrc/azmod/sdk_command_engine.c -pthread -ldl -lm -rdynamic 2>>$W/cc.log
+    $HCC -O1 -g -w -I$W/ctlsrc/azmod -DCM_ROOT="\"$W/root\"" -DCM_LOGDIR="\"$W/log\"" -DCM_USB_ROOT="\"$W/usb\"" -no-pie -o $W/harness-$1 $W/ctlsrc/azmod/test/community/harness.c $W/ctlsrc/azmod/sdk_command_engine.c $W/ctlsrc/azmod/sdk_command_service.c $W/ctlsrc/azmod/sdk_status_engine.c -pthread -ldl -lm -rdynamic 2>>$W/cc.log
 }
 ctl_core stale 's/ && \(!c->data_ok \|\| access\(c->data, F_OK\) == 0\)\)\n        return/)\n        return/'
 reset; rm -rf $W/usb $W/usb.away; mod files-mod -DMOD_FILES; manifest files-mod '["any"]' false; enable files-mod

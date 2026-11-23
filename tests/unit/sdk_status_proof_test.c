@@ -5,19 +5,19 @@
 #include <errno.h>
 #include <unistd.h>
 #include "sdk_status_engine.c"
-static void ds_wake(void) {}
-static void ds_deadline(uint64_t ns) { (void) ns; }
-static int ds_live(int owner) { return owner >= 0; }
-static void ds_gui_interest(uint64_t topics) { (void) topics; }
-static void ds_native_interest(unsigned deck, uint64_t topics) {
+void az_status_host_wake(void) {}
+void az_status_host_deadline(uint64_t ns) { (void) ns; }
+int az_status_host_live(int owner) { return owner >= 0; }
+void az_status_host_gui_interest(uint64_t topics) { (void) topics; }
+void az_status_host_native_interest(unsigned deck, uint64_t topics) {
     (void) deck;
     (void) topics;
 }
-static void sdk_status_store_interest(unsigned deck, uint64_t topics) {
+void az_status_host_store_interest(unsigned deck, uint64_t topics) {
     (void) deck;
     (void) topics;
 }
-static void sdk_status_store_binding(unsigned d, uint64_t e, const az_track_ref *r, uint64_t c) {
+void az_status_host_store_binding(unsigned d, uint64_t e, const az_track_ref *r, uint64_t c) {
     (void) d;
     (void) e;
     (void) r;

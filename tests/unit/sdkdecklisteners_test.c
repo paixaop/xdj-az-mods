@@ -19,6 +19,7 @@ typedef struct {
 static int cm_running(const cm_mod *c) { return __atomic_load_n(&c->state, __ATOMIC_ACQUIRE) == AZCM_LOADED; }
 static cm_mod g_cm[12];
 static int g_cm_loading = -1, g_st_enabled = 1;
+static int track_service_enabled(void) { return g_st_enabled; }
 static cm_mod *cm_self(const char *id, void *ra, const char *fn) {
     unsigned owner;
     (void) ra;

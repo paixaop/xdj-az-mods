@@ -15,13 +15,23 @@ int analysis_host_start(const char *assets, int enabled) {
         analysis_owner_core_retire();
         return rc;
     }
+    if (!enabled) analysis_owner_core_retire();
     analysis_runtime_enable(owner, enabled);
     atomic_store_explicit(&started, 1, memory_order_release);
     return AZ_OK;
 }
 void analysis_host_enable(int enabled) {
-    if (atomic_load_explicit(&started, memory_order_acquire))
-        analysis_runtime_enable(analysis_owner_core(), enabled);
+    if (!atomic_load_explicit(&started, memory_order_acquire)) return;
+    az_analysis_owner owner = analysis_owner_core();
+    if (!!owner.generation == !!enabled) return;
+    if (enabled) {
+        owner = analysis_owner_core_begin();
+        if (owner.generation) analysis_runtime_enable(owner, 1);
+        return;
+    }
+    analysis_owner_core_retire();
+    analysis_runtime_enable(owner, 0);
+    analysis_source_retire(owner);
 }
 static int analysis_notice_ready(unsigned deck, az_analysis_status_v1 *status) {
     if (analysis_runtime_deck_status(deck, status) != AZ_OK) return 0;

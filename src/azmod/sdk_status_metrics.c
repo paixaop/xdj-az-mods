@@ -1,7 +1,18 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* Optional diagnostic file, atomically replaced off the overlay/native threads.
  * The counters exist independently of the diagnostic writer. */
+#include "sdk_status_engine.h"
+#include "sdk_status_diagnostics.h"
+#ifndef az_thread_create
+#include "../common/azaltstack.h"
+#endif
+#include <pthread.h>
+#include <stdio.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <unistd.h>
 #include <inttypes.h>
+static size_t ds_metrics_native_bytes;
 #ifndef DS_METRICS_PATH
 #define DS_METRICS_PATH "/tmp/azmod-deck-status.stats"
 #endif
@@ -33,25 +44,6 @@ static int ds_percentile(const uint64_t *hist, uint64_t count, unsigned pct) {
     }
     return -1;
 }
-struct ds_metrics_snapshot {
-    struct ds_metrics deck[4];
-    size_t bytes, peak;
-    uint64_t slow[DS_SUBS], longest[DS_SUBS], sequence[4];
-    unsigned proof_enabled, proof_count, proof_overflow;
-};
-static void ds_capture_metrics(struct ds_metrics_snapshot *snapshot) {
-    pthread_mutex_lock(&ds.mu);
-    memcpy(snapshot->deck, ds.metrics, sizeof snapshot->deck);
-    memcpy(snapshot->slow, ds.slow_callbacks, sizeof snapshot->slow);
-    memcpy(snapshot->longest, ds.max_callback_ns, sizeof snapshot->longest);
-    for (unsigned d = 0; d < 4; d++) snapshot->sequence[d] = ds.deck[d].current.sequence;
-    snapshot->bytes = ds.bytes;
-    snapshot->peak = ds.peak;
-    snapshot->proof_enabled = ds_proofs.enabled;
-    snapshot->proof_count = ds_proofs.count;
-    snapshot->proof_overflow = ds_proofs.overflow;
-    pthread_mutex_unlock(&ds.mu);
-}
 static FILE *ds_metrics_file(char *temporary) {
     int descriptor = mkstemp(temporary);
     if (descriptor < 0) return NULL;
@@ -63,21 +55,17 @@ static FILE *ds_metrics_file(char *temporary) {
     return file;
 }
 static void ds_write_metrics_header(FILE *file, const struct ds_metrics_snapshot *snapshot) {
-    size_t fixed = sizeof ds + sizeof ds_pending + sizeof ds_proofs;
-#ifdef DS_NATIVE_PENDING_BYTES
-    fixed += DS_NATIVE_PENDING_BYTES;
-#endif
+    size_t fixed = snapshot->fixed_bytes + ds_metrics_native_bytes;
     fprintf(file, "monotonic_ns=%" PRIu64 " revision_bytes=%zu revision_high_bytes=%zu revision_budget_bytes=%u fixed_reducer_bytes=%zu\n",
             ds_now(), snapshot->bytes, snapshot->peak, DS_BYTES, fixed);
     fprintf(file, "provenance_version=1 provenance_enabled=%u provenance_count=%u provenance_capacity=%u provenance_overflow=%u provenance_bytes=%zu provenance_touched_bytes=%zu\n",
-            snapshot->proof_enabled, snapshot->proof_count, DS_PROOF_CAPACITY, snapshot->proof_overflow, sizeof ds_proofs,
-            offsetof(__typeof__(ds_proofs), record) + snapshot->proof_count * sizeof ds_proofs.record[0]);
+            snapshot->proof_enabled, snapshot->proof_count, DS_PROOF_CAPACITY, snapshot->proof_overflow, snapshot->proof_bytes, snapshot->proof_touched);
     for (unsigned d = 0; d < 4; d++)
         fprintf(file, "provenance_base_deck=%u capture_gap_cuts=%" PRIu64 " revision_loss_cuts=%" PRIu64 " resyncs=%" PRIu64 " sequence=%" PRIu64 "\n",
-                d, ds_proofs.capture_base[d], ds_proofs.revision_base[d], ds_proofs.resync_base[d], ds_proofs.sequence_base[d]);
+                d, snapshot->capture_base[d], snapshot->revision_base[d], snapshot->resync_base[d], snapshot->sequence_base[d]);
     /* Published slots are immutable. The acquired count bounds this snapshot;
      * later appends touch distinct slots and require no long I/O mutex hold. */
-    for (unsigned i = 0; i < snapshot->proof_count; i++) ds_write_proof(file, &ds_proofs.record[i]);
+    for (unsigned i = 0; i < snapshot->proof_count; i++) ds_write_proof(file, &snapshot->proof[i]);
 }
 static void ds_write_latency(FILE *file, unsigned d, const struct ds_metrics *m) {
     for (unsigned kind = 0; kind < 2; kind++) {
@@ -98,7 +86,7 @@ static void ds_write_metrics_deck(FILE *file, unsigned d, const struct ds_metric
             m->resyncs, m->last_lost_topics);
     ds_write_latency(file, d, m);
 }
-static void ds_write_metrics(void) {
+void ds_write_metrics(void) {
     struct ds_metrics_snapshot snapshot;
     ds_capture_metrics(&snapshot);
     char temporary[] = DS_METRICS_PATH ".XXXXXX";
@@ -122,18 +110,10 @@ static void *ds_metrics_worker(void *unused) {
     }
     return NULL;
 }
-static void ds_start_metrics(void) {
-    if (access(CM_ROOT "/azmod.deck-status.metrics", F_OK)) return;
-    pthread_mutex_lock(&ds.mu);
-    for (unsigned d = 0; d < 4; d++) {
-        ds_proofs.capture_base[d] = ds.metrics[d].capture_gaps;
-        ds_proofs.revision_base[d] = ds.metrics[d].revision_losses;
-        ds_proofs.resync_base[d] = ds.metrics[d].resyncs;
-        ds_proofs.sequence_base[d] = ds.deck[d].current.sequence;
-    }
-    ds_proofs.enabled = 1;
-    atomic_store_explicit(&ds_proof_enabled, 1, memory_order_release);
-    pthread_mutex_unlock(&ds.mu);
+void ds_start_metrics(int enabled, size_t native_bytes) {
+    if (!enabled) return;
+    ds_metrics_native_bytes = native_bytes;
+    ds_enable_proofs();
     pthread_t thread;
     pthread_attr_t attr;
     pthread_attr_init(&attr);

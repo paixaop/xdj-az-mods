@@ -29,6 +29,11 @@ int __wrap_poll(struct pollfd *fds, nfds_t count, int timeout) {
     if (atomic_load(&native_service_testing) && atomic_load(&native_service_stop)) return 0;
     return __real_poll(fds, count, timeout);
 }
+int __real___poll_chk(struct pollfd *, nfds_t, int, size_t);
+int __wrap___poll_chk(struct pollfd *fds, nfds_t count, int timeout, size_t bytes) {
+    if (atomic_load(&native_service_testing) && atomic_load(&native_service_stop)) return 0;
+    return __real___poll_chk(fds, count, timeout, bytes);
+}
 static struct azstatus_native_v1 native_service_api;
 static const struct azstatus_native_v1 *native_service_export;
 const struct azstatus_native_v1 *azstem_status_service_v1(void) { return native_service_export; }
@@ -61,17 +66,17 @@ static int native_service_capture(azn_source_capture_fn capture) {
     return 1;
 }
 static int native_service_settings(int build, azn_setting_patch_fn patch) {
-    assert(build == g_ep147_build && patch == azm_install_island_hook_at);
+    assert(build == g_ep147_build && patch == az_status_host_install_island);
     native_service_hooks |= 2;
     return 1;
 }
 static int native_service_terminal(int build, azn_setting_patch_fn patch) {
-    assert(build == g_ep147_build && patch == azm_install_island_hook_at);
+    assert(build == g_ep147_build && patch == az_status_host_install_island);
     native_service_hooks |= 4;
     return 1;
 }
 static int native_service_analysis_install(int build, azn_analysis_patch_fn patch) {
-    assert(build == g_ep147_build && patch == azm_install_island_hook_at);
+    assert(build == g_ep147_build && patch == az_status_host_install_island);
     native_service_hooks |= 8;
     return 1;
 }
@@ -86,12 +91,12 @@ const struct azn_file_map_callbacks *azfile_map_callbacks(void) {
     return &callbacks;
 }
 static int native_service_file_install(int build, azn_setting_patch_fn patch, const struct azn_file_cue_callbacks *callbacks) {
-    assert(build == g_ep147_build && patch == azm_install_island_hook_at && callbacks == azfile_status_callbacks());
+    assert(build == g_ep147_build && patch == az_status_host_install_island && callbacks == azfile_status_callbacks());
     native_service_hooks |= 16;
     return 1;
 }
 static int native_service_map_install(int build, azn_setting_patch_fn patch, const struct azn_file_map_callbacks *callbacks) {
-    assert(build == g_ep147_build && patch == azm_install_island_hook_at && callbacks == azfile_map_callbacks());
+    assert(build == g_ep147_build && patch == az_status_host_install_island && callbacks == azfile_map_callbacks());
     native_service_hooks |= 32;
     return 1;
 }

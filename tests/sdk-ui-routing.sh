@@ -13,7 +13,6 @@ from pathlib import Path
 import json,re,sys
 out=Path(sys.argv[1])
 groups={
-    'status': ('sdk_status.c', ['sa_load_cell_ready','sa_loaded_ref']),
     'refresh': ('waveform.c', ['ov_refresh_tile','ov_refresh_if_needed']),
     'bus': ('bus_interpose.c', ['gpiodrv_slot','bus_fd_drop','bus_fd_forget','bus_note_panel',
         'bus_note_device','bus_fd_note','epoll_ctl','epoll_wait','bus_route_frame','bus_read_frame','read']),

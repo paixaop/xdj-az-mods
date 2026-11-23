@@ -34,7 +34,8 @@ esac
 "$dir/memory" 1
 "$dir/memory" 2
 "${HOST_CC:-cc}" -std=gnu11 "${flags[@]}" -Wno-unused-function tests/unit/sdkstatus_native_reduce_test.c \
-    -rdynamic -Wl,--wrap=pthread_create,--wrap=pthread_detach,--wrap=poll -lm -ldl -o "$dir/reducer"
+    -rdynamic -Wl,--wrap=pthread_create,--wrap=pthread_detach,--wrap=poll,--wrap=__poll_chk -lm -ldl -o "$dir/reducer"
+"$dir/reducer" load-seed
 "$dir/reducer" map-clocks
 "$dir/reducer" gap-seeds
 "$dir/reducer" service-lifecycle

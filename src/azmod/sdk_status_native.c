@@ -1,5 +1,21 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
-/* Included after the status reducer in the host translation unit. */
+/* Non-real-time native receipt consumer, independently linked into azmod.so. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#include "sdk_status_native.h"
+#include "sdk_status_engine.h"
+#include "sdk_status_store.h"
+#include "sdk_status_gui.h"
+#include "sdk_status_native_host.h"
+#ifndef az_thread_create
+#include "../common/azaltstack.h"
+#endif
+#include "../common/aztimestamp.h"
+#include <stdatomic.h>
+#include <string.h>
+#include <math.h>
+#include <limits.h>
 #include "../common/azstatus_native.h"
 #include "../common/azstatus_memory.h"
 #include "../common/azanalysis_native.h"
@@ -44,7 +60,6 @@ static pthread_mutex_t ds_native_attach_mu = PTHREAD_MUTEX_INITIALIZER;
 /* Only the native reducer worker mutates these. The invalidation fence and the
  * matched public load epoch are separate domains. */
 static uint64_t ds_native_epoch[4], ds_native_fence[4];
-static void ds_gui_load(unsigned deck);
 static int ds_native_terminal[4];
 static struct {
     uint64_t load, normal_unit, generation, phrase_provider, phrase_revision;
@@ -280,9 +295,9 @@ static int ds_motion_may_wait(const struct azstatus_native_receipt *r, uint64_t 
     return !lost && r->a == AZN_MEASURE && first_order == r->motion_order && ds_native_motion_gap[r->deck] != r->load_generation;
 }
 static int ds_motion_wait_barrier(const struct azstatus_native_receipt *r, uint64_t *lost) {
-    pthread_mutex_lock(&ds.mu);
-    const uint64_t generation = ds.deck[r->deck].motion_generation;
-    pthread_mutex_unlock(&ds.mu);
+    struct ds_deck_stamp stamp;
+    ds_read_stamp(r->deck, &stamp);
+    const uint64_t generation = stamp.motion_generation;
     if (r->motion_generation <= generation) return 0;
     if (ds_hold_head(r->deck, r) == AZ_PENDING) return 1;
     *lost |= AZ_STATUS_TOPIC(AZ_STATUS_TRANSPORT);
@@ -642,10 +657,9 @@ static void ds_native_field_gap(const struct azstatus_native_receipt *r, unsigne
     unsigned d = r->deck;
     const uint64_t epoch = ds_native_epoch[d];
     struct ds_field f = {.topic = topic, .field = field, .info = {.scope = AZ_STATUS_LOAD_SCOPE, .scope_id = epoch, .info = {.availability = AZ_AVAIL_STALE, .provenance = AZ_PROV_NATIVE, .observed_ns = r->observed_ns}}};
-    pthread_mutex_lock(&ds.mu);
-    struct ds_cell *old = ds.deck[d].current.field[topic][field];
-    if (old && old->info.scope_id == epoch) f.info.provider_id = old->info.provider_id;
-    pthread_mutex_unlock(&ds.mu);
+    struct ds_field old = {.topic = topic, .field = field};
+    ds_read_receipts(d, &old, 1, NULL);
+    if (old.info.scope_id == epoch) f.info.provider_id = old.info.provider_id;
     if (ds_native_stamp(d, &f, 1))
         ds_publish(d, epoch, DS_NATIVE_INPUT | DS_FIELD_LOSS, r->observed_ns, &f, 1, NULL, NULL,
                    AZ_STATUS_TOPIC(topic), AZ_STATUS_CAPTURE_GAP);
@@ -735,9 +749,9 @@ static void ds_slip_pending(const struct azstatus_native_receipt *r, uint64_t ge
 static int ds_slip_order(const struct azstatus_native_receipt *r, unsigned *availability) {
     uint64_t sample = r->size >= offsetof(struct azstatus_native_receipt, motion_generation) + sizeof r->motion_generation ? r->motion_generation : 0;
     if (!r->c && sample) {
-        pthread_mutex_lock(&ds.mu);
-        uint64_t generation = ds.deck[r->deck].motion_generation;
-        pthread_mutex_unlock(&ds.mu);
+        struct ds_deck_stamp stamp;
+        ds_read_stamp(r->deck, &stamp);
+        uint64_t generation = stamp.motion_generation;
         if (sample < generation) return 0;
         if (sample > generation) {
             ds_slip_pending(r, sample);
@@ -792,8 +806,205 @@ static void ds_native_stems(const struct azstatus_native_receipt *r) {
     if (ds_native_stamp(d, fields, 2))
         ds_publish(d, r->load_generation, DS_NATIVE_INPUT, r->observed_ns, fields, 2, NULL, NULL, 0, 0);
 }
-#include "sdk_status_maps_consumer.inc"
-#include "sdk_status_memory_consumer.inc"
+/* SPDX-License-Identifier: GPL-3.0-only */
+/* Only the native reducer thread decodes pinned immutable native rows. */
+static const struct azn_maps_api *ds_map_service(void) {
+    const struct azstatus_native_v1 *api = atomic_load_explicit(&ds_native_api, memory_order_acquire);
+    if (!api || api->size < offsetof(struct azstatus_native_v1, maps) + sizeof api->maps || !api->maps) return NULL;
+    const struct azn_maps_api *map = api->maps();
+    return map && map->size >= offsetof(struct azn_maps_api, release) + sizeof map->release &&
+                   map->version == 1 && map->read && map->release
+               ? map
+               : NULL;
+}
+static void *ds_map_allocate(unsigned kind, unsigned count) {
+    size_t width = kind == AZNM_GRID ? sizeof(az_beat) : sizeof(az_phrase);
+    if (count > (kind == AZNM_GRID ? 32768u : 1024u)) return NULL;
+    return malloc(count * width);
+}
+static int ds_map_payload(const struct azn_maps_api *api, const struct aznm_component *part, unsigned kind, void *owned, unsigned count, unsigned *n) {
+    int rc = api->read(part, kind, owned, count, &count);
+    if (rc != AZ_OK) return rc == AZ_LIMIT ? AZ_LIMIT : AZ_AVAIL_STALE;
+    *n = count;
+    return AZ_AVAIL_READY;
+}
+static int ds_map_rows(const struct azn_maps_api *api, const struct aznm_component *part, unsigned kind, void **owned, unsigned *n) {
+    *n = 0;
+    *owned = NULL;
+    if (!part->content || part->availability != AZ_AVAIL_READY) return part->availability;
+    uint32_t count = 0;
+    int rc = api->read(part, kind, NULL, 0, &count);
+    if (rc != AZ_OK) return rc == AZ_LIMIT ? AZ_LIMIT : AZ_AVAIL_STALE;
+    if (!count) return AZ_AVAIL_EMPTY;
+    *owned = ds_map_allocate(kind, count);
+    if (!*owned) return AZ_LIMIT;
+    return ds_map_payload(api, part, kind, *owned, count, n);
+}
+struct ds_map_receipt {
+    void *rows[2];
+    int64_t *ticks;
+    struct ds_time_axis clock;
+    struct ds_field fields[3];
+    unsigned count, cause;
+    uint64_t lost;
+    int availability[2];
+};
+static int ds_map_samples(const struct azn_maps_api *api, const struct aznm_component *part, unsigned count, struct ds_map_receipt *map) {
+    map->ticks = malloc(count * sizeof *map->ticks);
+    if (!map->ticks) return AZ_LIMIT;
+    uint32_t samples = 0, rate = 0;
+    int rc = api->read_samples(part, map->ticks, count, &samples, &rate);
+    if (rc != AZ_OK || samples != count || !rate || rate != part->sample_rate) return rc == AZ_LIMIT ? AZ_LIMIT : AZ_AVAIL_STALE;
+    map->clock = (struct ds_time_axis) {rate, map->ticks, 1, rate, NULL};
+    return AZ_AVAIL_READY;
+}
+static void ds_map_part_clock(const struct azn_maps_api *api, const struct aznm_component *part, unsigned i, unsigned *count, struct ds_map_receipt *map) {
+    if (i || map->availability[i] != AZ_AVAIL_READY || api->size < offsetof(struct azn_maps_api, read_samples) + sizeof api->read_samples || !api->read_samples) return;
+    map->availability[i] = ds_map_samples(api, part, *count, map);
+    if (map->availability[i] != AZ_AVAIL_READY) *count = 0;
+}
+static struct ds_field ds_map_part_field(const struct azstatus_native_receipt *r, const struct aznm_component *part,
+                                         unsigned topic, unsigned i, unsigned count, const struct ds_map_receipt *map) {
+    return (struct ds_field) {topic, i ? AZ_STATUS_PHRASES_CURRENT : AZ_STATUS_GRID_CURRENT, {.info = {map->availability[i], AZ_PROV_NATIVE, part->revision, r->observed_ns}, .scope = AZ_STATUS_LOAD_SCOPE, .scope_id = r->load_generation, .provider_id = part->provider, .count = count}, map->rows[i], !i && map->clock.ticks ? &map->clock : NULL};
+}
+static void ds_map_part(const struct azstatus_native_receipt *r, const struct azn_maps_api *api, unsigned i, struct ds_map_receipt *map) {
+    const struct aznm_component *part = i ? &r->map.phrases : &r->map.grid;
+    if (!part->provider || !part->revision) return;
+    unsigned count = 0;
+    map->availability[i] = ds_map_rows(api, part, i ? AZNM_PHRASES : AZNM_GRID, &map->rows[i], &count);
+    ds_map_part_clock(api, part, i, &count, map);
+    int limited = map->availability[i] == AZ_LIMIT;
+    if (limited) map->availability[i] = AZ_AVAIL_STALE;
+    unsigned topic = i ? AZ_STATUS_PHRASES : AZ_STATUS_GRID;
+    map->fields[map->count++] = ds_map_part_field(r, part, topic, i, count, map);
+    if (limited) {
+        map->lost |= AZ_STATUS_TOPIC(topic) | AZ_STATUS_TOPIC(AZ_STATUS_PHRASE_TRANSITION);
+        map->cause |= AZ_STATUS_REVISION_LOST;
+    }
+}
+static void ds_map_file_pair(const struct azstatus_native_receipt *r) {
+    const struct azn_file_cue_api *file = atomic_load_explicit(&ds_file_cues, memory_order_acquire);
+    if (!azfile_map_pair || !file || file->size < offsetof(struct azn_file_cue_api, map_hold) + sizeof file->map_hold || !file->map_origins || !file->map_hold) return;
+    uint64_t tokens[3] = {0};
+    if (file->map_origins(&r->map, tokens)) {
+        azfile_map_pair(r->deck, r->load_generation, tokens);
+        file->map_hold(tokens, 3, 0);
+    }
+}
+static void ds_map_path(const struct azstatus_native_receipt *r, uint64_t lost, struct ds_path *path) {
+    *path = (struct ds_path) {.kind = DS_PATH_BASELINE, .order = r->motion_order, .generation = r->motion_generation};
+    ds_native_windows(path, r);
+    ds_native_map_stamp(path, r);
+    if (ds_native_coord(&r->points[1], &path->to)) {
+        path->endpoints = AZ_STATUS_OCCURRENCE_TO;
+        path->opening = !lost && r->size >= offsetof(struct azstatus_native_receipt, motion_flags) + sizeof r->motion_flags && r->motion_flags == AZN_AT_OPENING;
+    }
+}
+static void ds_map_publish(const struct azstatus_native_receipt *r, struct ds_map_receipt *map) {
+    const struct aznm_packet *packet = &r->map;
+    az_status_grid_ref_v1 grid = {r->load_generation, packet->grid.provider, packet->grid.revision, AZ_PROV_NATIVE, AZ_STATUS_GRID_CURRENT};
+    int paired = packet->owner && map->availability[0] == AZ_AVAIL_READY && map->availability[1] == AZ_AVAIL_READY;
+    if (paired) ds_map_file_pair(r);
+    map->fields[map->count++] = (struct ds_field) {AZ_STATUS_PHRASES, AZ_STATUS_PHRASES_CURRENT_GRID, {.info = {paired ? AZ_AVAIL_READY : AZ_AVAIL_STALE, AZ_PROV_NATIVE, packet->owner, r->observed_ns}, .scope = AZ_STATUS_LOAD_SCOPE, .scope_id = r->load_generation, .provider_id = packet->owner, .count = paired}, &grid, NULL};
+    struct ds_path path;
+    ds_map_path(r, map->lost, &path);
+    unsigned flags = DS_NATIVE_INPUT | (map->lost ? DS_FIELD_LOSS : 0);
+    if (path.order) ds_native_path(&path, r->deck, r->load_generation, flags, r->observed_ns, map->fields, map->count, NULL, map->lost, map->cause);
+    else ds_publish(r->deck, r->load_generation, flags, r->observed_ns, map->fields, map->count, NULL, NULL, map->lost, map->cause);
+}
+static void ds_native_map(const struct azstatus_native_receipt *r) {
+    const struct azn_maps_api *api = ds_map_service();
+    if (!api) return;
+    struct ds_map_receipt map = {.lost = r->lost_topics, .cause = r->lost_topics ? AZ_STATUS_CAPTURE_GAP : 0, .availability = {AZ_AVAIL_STALE, AZ_AVAIL_STALE}};
+    if (r->deck < 4 && ds_native_loaded(r) && r->map.changed) {
+        for (unsigned i = 0; i < 2; i++) ds_map_part(r, api, i, &map);
+        ds_map_publish(r, &map);
+    }
+    free(map.rows[0]);
+    free(map.rows[1]);
+    free(map.ticks);
+    api->release(&r->map);
+}
+
+/* SPDX-License-Identifier: GPL-3.0-only */
+/* Runs on the native reducer thread. A taken content token owns a reference
+ * even if an intervening load or newer seed means its payload is obsolete. */
+static int ds_memory_api_valid(const struct azn_memory_api *memory) {
+    return memory && memory->size >= sizeof *memory && memory->version == 1 && memory->read && memory->release && memory->seed;
+}
+static const struct azn_memory_api *ds_memory_api(void) {
+    const struct azstatus_native_v1 *api = atomic_load_explicit(&ds_native_api, memory_order_acquire);
+    if (!api || api->size < offsetof(struct azstatus_native_v1, memory) + sizeof api->memory || !api->memory) return NULL;
+    const struct azn_memory_api *memory = api->memory();
+    return ds_memory_api_valid(memory) ? memory : NULL;
+}
+static uint64_t ds_mem_epoch[4], ds_mem_provider[4], ds_mem_revision[4], ds_mem_public_revision[4];
+static int ds_memory_revision_current(const struct azstatus_native_receipt *r) {
+    unsigned d = r->deck;
+    return (r->lost_topics && !r->attempt) || r->load_generation != ds_mem_epoch[d] || r->attempt > ds_mem_provider[d] ||
+           (r->attempt == ds_mem_provider[d] && r->memory_serial >= ds_mem_revision[d]);
+}
+static int ds_memory_recover_edition(const struct azstatus_native_receipt *r) {
+    return r->lost_topics || (r->attempt == ds_mem_provider[r->deck] && r->memory_serial != ds_mem_revision[r->deck]);
+}
+static void ds_memory_confirm_edition(const struct azstatus_native_receipt *r, const struct ds_field *field, int result) {
+    if (!r->attempt) return;
+    unsigned d = r->deck;
+    ds_mem_epoch[d] = r->load_generation;
+    ds_mem_provider[d] = r->attempt;
+    ds_mem_revision[d] = r->memory_serial;
+    if (result == AZ_OK && field->info.info.availability == AZ_AVAIL_READY) ds_mem_public_revision[d] = field->info.info.revision;
+}
+static void ds_memory_publish(const struct azstatus_native_receipt *r, struct ds_field *field) {
+    unsigned d = r->deck;
+    struct ds_native_revision *edition = &ds_native_revisions[d][AZ_STATUS_CUES][AZ_STATUS_CUES_LIVE_MEMORY];
+    uint64_t prior = edition->revision;
+    ds_mem_public_revision[d] = 0;
+    if (!ds_native_stamp(d, field, 1)) return;
+    if (ds_memory_recover_edition(r) && prior == field->info.info.revision && prior < UINT64_MAX) field->info.info.revision = ++edition->revision;
+    int rc = ds_publish(d, r->load_generation, DS_NATIVE_INPUT | (r->lost_topics ? DS_FIELD_LOSS : 0), r->observed_ns, field, 1,
+                        NULL, NULL, r->lost_topics, r->lost_topics ? AZ_STATUS_CAPTURE_GAP : 0);
+    ds_memory_confirm_edition(r, field, rc);
+}
+static int ds_memory_clock(struct azn_memory_rows *values, int64_t *ticks, struct ds_time_axis *clock) {
+    int has_clock = values->clock_version == 1 || values->clock_version == 2;
+    if (values->availability != AZ_AVAIL_READY || !has_clock) return 0;
+    if (!ds_native_cue_clock(values->count, values->rows, values->points, ticks, clock)) {
+        values->availability = AZ_AVAIL_STALE;
+        values->count = 0;
+        return 0;
+    }
+    if (values->clock_version == 2) clock->stored_cue_ms = &values->stored_ms[0][0];
+    return 1;
+}
+static void ds_memory_receipt(const struct azstatus_native_receipt *r, const struct azn_memory_api *memory) {
+    struct azn_memory_rows values = {.size = sizeof values, .version = 1, .availability = (unsigned) r->valid};
+    if (r->memory_pin && (!memory->read(r->memory_pin, &values) || values.count > AZ_NATIVE_CUE_LIMIT)) {
+        values.availability = AZ_AVAIL_STALE;
+        values.count = 0;
+    }
+    int64_t ticks[AZ_NATIVE_CUE_LIMIT * 2];
+    struct ds_time_axis clock = {0};
+    int has_clock = ds_memory_clock(&values, ticks, &clock);
+    struct ds_field field = ds_native_field(r, AZ_STATUS_CUES, AZ_STATUS_CUES_LIVE_MEMORY, values.availability, values.rows);
+    if (has_clock) field.clock = &clock;
+    field.info.provider_id = r->attempt;
+    field.info.count = values.count;
+    field.info.info.revision = r->memory_serial;
+    ds_memory_publish(r, &field);
+}
+static void ds_native_memory(const struct azstatus_native_receipt *r) {
+    const struct azn_memory_api *memory = ds_memory_api();
+    if (!memory) return;
+    if (r->deck < 4 && ds_native_loaded(r) && r->unit && ds_memory_revision_current(r)) ds_memory_receipt(r, memory);
+    if (r->memory_pin) memory->release(r->memory_pin);
+}
+static void ds_native_memory_seed(unsigned deck) {
+    const struct azn_memory_api *m = ds_memory_api();
+    struct azstatus_native_receipt seed = {.size = sizeof seed, .version = 1};
+    if (m && m->seed(deck, &seed)) ds_native_memory(&seed);
+}
+
 static int ds_native_rate_source(const struct azstatus_native_receipt *r, int gap, uint64_t epoch) {
     return epoch && (gap || (ds_native_loaded(r) && r->unit && r->attempt));
 }
@@ -802,12 +1013,10 @@ static int ds_native_rate_payload(const struct azstatus_native_receipt *r, doubl
            r->a >= -1 && r->a <= 1 && isfinite(speed) && speed >= 0 && speed <= 8;
 }
 static void ds_native_rate_providers(unsigned d, uint64_t epoch, struct ds_field fields[2]) {
-    pthread_mutex_lock(&ds.mu);
-    for (unsigned i = 0; i < 2; i++) {
-        struct ds_cell *old = ds.deck[d].current.field[fields[i].topic][fields[i].field];
-        if (old && old->info.scope_id == epoch) fields[i].info.provider_id = old->info.provider_id;
-    }
-    pthread_mutex_unlock(&ds.mu);
+    struct ds_field old[2] = {fields[0], fields[1]};
+    ds_read_receipts(d, old, 2, NULL);
+    for (unsigned i = 0; i < 2; i++)
+        if (old[i].info.scope_id == epoch) fields[i].info.provider_id = old[i].info.provider_id;
 }
 static void ds_native_rate_fields(const struct azstatus_native_receipt *source, const struct azstatus_native_receipt *r,
                                   int gap, uint64_t epoch, const double *speed, struct ds_field fields[2]) {
@@ -894,16 +1103,15 @@ static int ds_end_prepare(const struct azstatus_native_receipt *r, int gap, stru
 }
 static void ds_end_gap(const struct azstatus_native_receipt *r, struct ds_end_receipt *end) {
     unsigned d = r->deck;
-    pthread_mutex_lock(&ds.mu);
-    const struct ds_cell *active = ds_ready(&ds.deck[d].current, AZ_STATUS_PHRASE_TRANSITION, AZ_STATUS_PHRASE_TRANSITION_ACTIVE);
-    if (active && active->info.scope_id == end->epoch) {
-        end->fields[1] = (struct ds_field) {AZ_STATUS_PHRASE_TRANSITION, AZ_STATUS_PHRASE_TRANSITION_ACTIVE, active->info, NULL, NULL};
+    struct ds_field active = {.topic = AZ_STATUS_PHRASE_TRANSITION, .field = AZ_STATUS_PHRASE_TRANSITION_ACTIVE};
+    ds_read_receipts(d, &active, 1, NULL);
+    if (active.info.info.availability == AZ_AVAIL_READY && active.info.scope_id == end->epoch) {
+        end->fields[1] = active;
         end->fields[1].info.info.availability = AZ_AVAIL_STALE;
         end->fields[1].info.info.observed_ns = r->observed_ns;
         end->fields[1].info.count = 0;
         end->count = 2;
     }
-    pthread_mutex_unlock(&ds.mu);
     ds_end_state[d].ended = 0;
     ds_publish(d, end->epoch, DS_NATIVE_INPUT | DS_FIELD_LOSS, r->observed_ns, end->fields, end->count, NULL, NULL, end->lost, AZ_STATUS_CAPTURE_GAP);
 }
@@ -1027,12 +1235,10 @@ static void ds_duration_fields(const struct azstatus_native_receipt *origin, con
     }
 }
 static void ds_duration_providers(unsigned d, struct ds_field fields[2]) {
-    pthread_mutex_lock(&ds.mu);
-    for (unsigned i = 0; i < 2; ++i) {
-        const struct ds_cell *old = ds.deck[d].current.field[AZ_STATUS_METADATA][fields[i].field];
-        if (old && old->info.info.provenance == AZ_PROV_NATIVE) fields[i].info.provider_id = old->info.provider_id;
-    }
-    pthread_mutex_unlock(&ds.mu);
+    struct ds_field old[2] = {fields[0], fields[1]};
+    ds_read_receipts(d, old, 2, NULL);
+    for (unsigned i = 0; i < 2; ++i)
+        if (old[i].info.info.provenance == AZ_PROV_NATIVE) fields[i].info.provider_id = old[i].info.provider_id;
 }
 static void ds_native_duration(const struct azstatus_native_receipt *r, int gap) {
     if (!ds_duration_source(r, gap)) return;
@@ -1462,21 +1668,21 @@ static unsigned ds_native_cap_scope(unsigned topic, unsigned cap) {
                ? AZ_STATUS_UNIT
                : AZ_STATUS_LOAD_SCOPE;
 }
-static int ds_native_cap_preserve(const struct ds_cell *old, unsigned caps, unsigned cap) {
-    return old && (old->info.info.provenance == AZ_PROV_FILE || ((caps & cap) && old->info.info.availability != AZ_AVAIL_UNSUPPORTED));
+static int ds_native_cap_preserve(const az_status_field_info_v1 *old, unsigned caps, unsigned cap) {
+    return old->scope && (old->info.provenance == AZ_PROV_FILE || ((caps & cap) && old->info.availability != AZ_AVAIL_UNSUPPORTED));
 }
 static unsigned ds_native_cap_updates(unsigned deck, unsigned caps, unsigned changed, struct ds_field *updates, uint64_t *epoch) {
     unsigned count = 0;
-    pthread_mutex_lock(&ds.mu);
-    *epoch = ds.deck[deck].current.epoch;
+    struct ds_field prior[sizeof ds_native_cap_fields / sizeof ds_native_cap_fields[0]];
+    for (size_t i = 0; i < sizeof prior / sizeof prior[0]; ++i)
+        prior[i] = (struct ds_field) {.topic = ds_native_cap_fields[i].topic, .field = ds_native_cap_fields[i].field};
+    ds_read_receipts(deck, prior, sizeof prior / sizeof prior[0], epoch);
     for (size_t i = 0; i < sizeof ds_native_cap_fields / sizeof ds_native_cap_fields[0]; ++i) {
         const struct ds_native_cap_field *field = &ds_native_cap_fields[i];
         if (!(changed & field->cap)) continue;
-        struct ds_cell *old = ds.deck[deck].current.field[field->topic][field->field];
-        if (ds_native_cap_preserve(old, caps, field->cap)) continue;
+        if (ds_native_cap_preserve(&prior[i].info, caps, field->cap)) continue;
         updates[count++] = (struct ds_field) {.topic = field->topic, .field = field->field, .info = {.scope = ds_native_cap_scope(field->topic, field->cap), .info = {.provenance = AZ_PROV_NATIVE, .availability = (caps & field->cap) ? AZ_AVAIL_LOADING : AZ_AVAIL_UNSUPPORTED}}};
     }
-    pthread_mutex_unlock(&ds.mu);
     return count;
 }
 static void ds_native_cap_reseed(unsigned deck, uint64_t epoch, unsigned caps, unsigned changed) {
@@ -1547,7 +1753,7 @@ static int ds_native_leg_budget(const struct azstatus_native_receipt *next, cons
     return elapsed != AZ_TIME_INVALID && elapsed != AZ_TIME_AFTER;
 }
 static unsigned ds_native_interior_rows(const struct azstatus_native_receipt *rows, unsigned count, unsigned d, int direction,
-                                        const struct ds_map *map, const az_status_phrase_endpoint_v1 *active, struct ds_path *path) {
+                                        const struct ds_phrase_span *span, struct ds_path *path) {
     unsigned n = 1;
     for (; n < count; ++n) {
         const struct azstatus_native_receipt *next = &rows[n], *prev = &rows[n - 1];
@@ -1555,20 +1761,14 @@ static unsigned ds_native_interior_rows(const struct azstatus_native_receipt *ro
         ds_native_coord(&next->points[1], &path->to);
         path->observed_window_samples = next->observed_window_samples;
         path->observed_window_rate = next->observed_window_rate;
-        if (!ds_inside_item(map, active, path)) break;
+        if (!ds_path_inside_span(span, path)) break;
     }
     return n;
 }
 static unsigned ds_native_interior_cut(const struct azstatus_native_receipt *rows, unsigned count, unsigned d, int direction, struct ds_path *path) {
-    unsigned n = 1;
-    struct ds_map map;
-    pthread_mutex_lock(&ds.mu);
-    const struct ds_image *im = &ds.deck[d].current;
-    const az_status_phrase_endpoint_v1 *active = ds_value(im, AZ_STATUS_PHRASE_TRANSITION, AZ_STATUS_PHRASE_TRANSITION_ACTIVE);
-    if (im->epoch == rows->load_generation && ds_map_at(im, path, &map) && ds_endpoint_known(&map, active) && ds_inside_item(&map, active, path))
-        n = ds_native_interior_rows(rows, count, d, direction, &map, active, path);
-    pthread_mutex_unlock(&ds.mu);
-    return n;
+    struct ds_phrase_span span;
+    if (!ds_read_phrase_span(d, rows->load_generation, path, &span)) return 1;
+    return ds_native_interior_rows(rows, count, d, direction, &span, path);
 }
 static unsigned ds_native_interior(const struct azstatus_native_receipt *rows, unsigned count, unsigned d) {
     if (count < 2) return 1;
@@ -1688,27 +1888,27 @@ static void ds_native_install_writers(const struct azstatus_native_v1 *api) {
     if (api->size >= offsetof(struct azstatus_native_v1, register_source_capture) + sizeof api->register_source_capture && api->register_source_capture)
         (void) api->register_source_capture(azjs_capture);
     if (api->size >= offsetof(struct azstatus_native_v1, install_settings) + sizeof api->install_settings && api->install_settings)
-        (void) api->install_settings(g_ep147_build, azm_install_island_hook_at);
+        (void) api->install_settings(az_status_host_build(), az_status_host_install_island);
     if (api->size >= offsetof(struct azstatus_native_v1, install_terminal) + sizeof api->install_terminal && api->install_terminal)
-        (void) api->install_terminal(g_ep147_build, azm_install_island_hook_at);
+        (void) api->install_terminal(az_status_host_build(), az_status_host_install_island);
 }
 static void ds_native_install_analysis(const struct azstatus_native_v1 *api) {
     if (api->size < offsetof(struct azstatus_native_v1, analysis_source) + sizeof api->analysis_source || !api->analysis_source) return;
     const struct azn_analysis_source_api *analysis = api->analysis_source();
     if (analysis && analysis->version == 1 && analysis->size >= sizeof *analysis && analysis->install)
-        (void) analysis->install(g_ep147_build, azm_install_island_hook_at);
+        (void) analysis->install(az_status_host_build(), az_status_host_install_island);
 }
 static int ds_native_file_api_valid(const struct azn_file_cue_api *file) {
     return file && file->version == 1 && file->size >= offsetof(struct azn_file_cue_api, observe_input) + sizeof file->observe_input && file->install && file->transport;
 }
 static void ds_native_install_file_maps(const struct azn_file_cue_api *file) {
     if (azfile_map_callbacks && file->size >= offsetof(struct azn_file_cue_api, install_maps) + sizeof file->install_maps && file->install_maps)
-        (void) file->install_maps(g_ep147_build, azm_install_island_hook_at, azfile_map_callbacks());
+        (void) file->install_maps(az_status_host_build(), az_status_host_install_island, azfile_map_callbacks());
 }
 static void ds_native_install_files(const struct azstatus_native_v1 *api) {
     if (!azfile_status_callbacks || !azfile_status_ref || api->size < offsetof(struct azstatus_native_v1, file_cues) + sizeof api->file_cues || !api->file_cues) return;
     const struct azn_file_cue_api *file = api->file_cues();
-    if (!ds_native_file_api_valid(file) || !file->install(g_ep147_build, azm_install_island_hook_at, azfile_status_callbacks())) return;
+    if (!ds_native_file_api_valid(file) || !file->install(az_status_host_build(), az_status_host_install_island, azfile_status_callbacks())) return;
     atomic_store_explicit(&ds_file_cues, file, memory_order_release);
     ds_native_install_file_maps(file);
 }
@@ -1716,9 +1916,7 @@ static void ds_native_connect(const struct azstatus_native_v1 *api, pthread_t th
     pthread_detach(thread);
     const struct azn_memory_api *memory = ds_memory_api();
     if (memory && memory->connect) memory->connect();
-    pthread_mutex_lock(&ds.mu);
-    if (api->size >= offsetof(struct azstatus_native_v1, bind_stems) + sizeof api->bind_stems) ds_bind_stems = api->bind_stems;
-    pthread_mutex_unlock(&ds.mu);
+    if (api->size >= offsetof(struct azstatus_native_v1, bind_stems) + sizeof api->bind_stems) ds_set_stem_binding(api->bind_stems);
     for (unsigned d = 0; d < 4; ++d) api->interest(d, atomic_load_explicit(&ds_native_topics[d], memory_order_acquire));
 }
 static void ds_native_launch(const struct azstatus_native_v1 *api) {
@@ -1727,7 +1925,7 @@ static void ds_native_launch(const struct azstatus_native_v1 *api) {
     if (!az_thread_create(&thread, NULL, ds_native_run, (void *) api)) ds_native_connect(api, thread);
     else atomic_store_explicit(&ds_native_api, NULL, memory_order_release);
 }
-static void ds_native_start(void) {
+void ds_native_start(void) {
     pthread_mutex_lock(&ds_native_attach_mu);
     if (!atomic_load_explicit(&ds_native_api, memory_order_acquire)) {
         azstatus_native_fn get = (azstatus_native_fn) dlsym(RTLD_DEFAULT, "azstem_status_service_v1");
@@ -1741,13 +1939,10 @@ static void ds_native_start(void) {
     }
     pthread_mutex_unlock(&ds_native_attach_mu);
 }
-static void ds_native_interest(unsigned deck, uint64_t topics) {
+void ds_native_interest(unsigned deck, uint64_t topics) {
     if (deck >= 4) return;
     atomic_store_explicit(&ds_native_topics[deck], topics, memory_order_release);
-    pthread_mutex_lock(&ds.mu);
-    ds.deck[deck].watch_stems = (topics & AZ_STATUS_TOPIC(AZ_STATUS_STEMS)) != 0;
-    ds_send_stem_binding(deck);
-    pthread_mutex_unlock(&ds.mu);
+    ds_watch_stems(deck, (topics & AZ_STATUS_TOPIC(AZ_STATUS_STEMS)) != 0);
     const struct azstatus_native_v1 *api = atomic_load_explicit(&ds_native_api, memory_order_acquire);
     if (api) {
         api->interest(deck, topics);
@@ -1755,4 +1950,11 @@ static void ds_native_interest(unsigned deck, uint64_t topics) {
         ds_native_ready(deck, api);
         pthread_mutex_unlock(&ds_native_reduce_mu);
     }
+}
+
+size_t ds_native_pending_bytes(void) { return DS_NATIVE_PENDING_BYTES; }
+int ds_native_load_seed(unsigned deck, struct azstatus_native_receipt *receipt) {
+    const struct azstatus_native_v1 *api = atomic_load_explicit(&ds_native_api, memory_order_acquire);
+    *receipt = (struct azstatus_native_receipt) {.size = sizeof *receipt, .version = 1};
+    return api && api->load_seed && api->load_seed(deck, receipt) && receipt->load_generation;
 }

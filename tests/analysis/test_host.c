@@ -16,7 +16,7 @@ int analysis_runtime_start(const char *assets) {
     return start_result;
 }
 void analysis_runtime_enable(az_analysis_owner owner, int enabled) {
-    assert(analysis_owner_current(owner));
+    assert(analysis_owner_current(owner) == !!enabled);
     accepted = owner;
     ++enables;
     last_enabled = enabled;
@@ -33,7 +33,7 @@ void analysis_runtime_retire(az_analysis_owner owner) {
 }
 void analysis_runtime_shutdown(void) { assert(retired > joined); ++joined; }
 void analysis_source_retire(az_analysis_owner owner) {
-    assert(owner.generation == accepted.generation && joined > reclaimed);
+    assert(owner.generation == accepted.generation && !analysis_owner_current(owner));
     ++reclaimed;
 }
 static void banner(const char *text, int duration) {
@@ -60,10 +60,22 @@ static void startup_and_retirement(void) {
     start_result = AZ_OK;
     assert(analysis_host_start("/usb/MODS/analysis/assets", 0) == AZ_OK);
     assert(starts == 2 && enables == 1 && !last_enabled);
+    assert(!analysis_owner_current(accepted));
     assert(analysis_host_start("/usb/MODS/analysis/assets", 1) == AZ_OK);
     assert(starts == 2 && enables == 1);
     analysis_host_enable(1);
     assert(enables == 2 && last_enabled);
+    az_analysis_owner before = accepted;
+    analysis_host_enable(1);
+    assert(enables == 2 && analysis_owner_current(before));
+    analysis_host_enable(0);
+    assert(enables == 3 && !last_enabled && !analysis_owner_current(before));
+    assert(reclaimed == 1);
+    analysis_host_enable(0);
+    assert(enables == 3 && reclaimed == 1);
+    analysis_host_enable(1);
+    assert(enables == 4 && last_enabled && accepted.generation != before.generation);
+    assert(!analysis_owner_current(before) && analysis_owner_current(accepted));
 }
 static void result_delivery(void) {
     terminal(0, 1, AZ_ANALYSIS_RUNNING, AZ_PENDING);
@@ -112,7 +124,7 @@ int main(void) {
     presentation();
     uint64_t previous = accepted.generation;
     analysis_host_shutdown();
-    assert(retired == 1 && joined == 1 && reclaimed == 1);
+    assert(retired == 1 && joined == 1 && reclaimed == 2);
     unsigned before = queries;
     analysis_host_notices(banner, diagnostic);
     analysis_host_shutdown();
@@ -120,6 +132,6 @@ int main(void) {
     assert(analysis_host_start("/usb/MODS/analysis/assets", 1) == AZ_OK);
     assert(accepted.generation != previous);
     analysis_host_shutdown();
-    assert(retired == 2 && joined == 2 && reclaimed == 2);
+    assert(retired == 2 && joined == 2 && reclaimed == 3);
     puts("analysis host: lifecycle, copied status, and presentation passed");
 }
