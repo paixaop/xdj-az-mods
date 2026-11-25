@@ -992,6 +992,48 @@ typedef struct az_commands_v1 {
 /* One shared library service. All consumers use the same source identities, bounded cache,
  * snapshots, event journal and native command policy. No per-mod data backend is created. */
 #define AZ_LIBRARY_ABI 2u
+#define AZ_PLAYLIST_PAGE_LIMIT 128u
+/* Plan Set on a highlighted or open USB playlist. The target is a copyable snapshot.
+ * Its mount is an opaque routing field for plan_set_resolve. */
+typedef struct az_plan_set_target_v1 {
+    uint32_t size, version, playlist_id, reserved;
+    char mount[128];
+    char name[96];                 /* empty when the browser has no playlist title */
+} az_plan_set_target_v1;
+
+typedef struct az_plan_set_source_v1 {
+    uint32_t size, version, stick, reserved;
+    uint64_t source_generation, library_id;
+} az_plan_set_source_v1;
+
+typedef void (*az_plan_set_fn)(const az_plan_set_target_v1 *target, void *user);
+
+typedef struct az_playlist_order_v1 {
+    uint32_t size, version;
+    uint32_t total, returned;
+    uint64_t source_generation, library_id, revision;
+} az_playlist_order_v1;
+
+typedef struct az_playlist_entry_v1 {
+    uint64_t entry_id;             /* exact occurrence within this order */
+    uint32_t track_id, position;   /* one-based playlist position */
+} az_playlist_entry_v1;
+
+typedef struct az_playlist_move_v1 {
+    uint32_t size, version;
+    uint32_t stick, playlist_id;   /* stick 0 = USB 1, 1 = USB 2 */
+    uint32_t from, to;             /* one-based source and final positions */
+    uint64_t source_generation, library_id, revision, entry_id;
+} az_playlist_move_v1;
+
+enum { AZ_PLAYLIST_NOT_MOVED, AZ_PLAYLIST_MOVED, AZ_PLAYLIST_UNCERTAIN };
+enum { AZ_PDB_NOT_ATTEMPTED, AZ_PDB_CURRENT, AZ_PDB_FAILED };
+typedef struct az_playlist_move_result_v1 {
+    uint32_t size, version;
+    int32_t status;
+    uint32_t outcome, device_library;
+} az_playlist_move_result_v1;
+
 typedef struct az_library_v1 {
     uint32_t abi, size;
     int  (*lib_playlists)(const char *id, int stick,
@@ -1031,6 +1073,17 @@ typedef struct az_library_v1 {
      * Releasing before collection suppresses completion. Failed init/retired owners
      * receive no callbacks. Registrations last until the core restarts. */
     int (*on_data_event)(const char *id, void (*fn)(const az_data_change *, void *), void *user);
+    /* Optional. Worker only for playlist_order, which returns one page and a
+     * whole-order revision. offset is zero-based; capacity is 0..128.
+     * Pass that revision and an exact occurrence to playlist_move. A move
+     * returns AZ_PENDING with a receipt. Poll until terminal before retrying.
+     * A later accepted move replaces the one retained result. An uncertain
+     * write requires a fresh order read. No callback enters the caller's code. */
+    int (*playlist_order)(const char *id, int stick, uint32_t playlist_id,
+                          uint32_t offset, az_playlist_entry_v1 *entries,
+                          uint32_t capacity, az_playlist_order_v1 *out);
+    int (*playlist_move)(const char *id, const az_playlist_move_v1 *request, uint64_t *receipt);
+    int (*playlist_move_status)(const char *id, uint64_t receipt, az_playlist_move_result_v1 *out);
 } az_library_v1;
 #define AZ_LIB_HAS(service, field) \
     ((service) && (service)->abi == AZ_LIBRARY_ABI && \
@@ -1079,6 +1132,14 @@ enum az_panel_button {
     AZ_PANEL_DECK_1, AZ_PANEL_DECK_2, AZ_PANEL_DECK_3, AZ_PANEL_DECK_4,
     AZ_PANEL_PLAY_LEFT, AZ_PANEL_PLAY_RIGHT, AZ_PANEL_CUE_LEFT, AZ_PANEL_CUE_RIGHT
 };
+
+/* Copied Mod Menu setting, with the configured choice separate from a
+ * toggle's effective value and the row's current availability. */
+typedef struct az_official_setting_v1 {
+    uint32_t size, version;
+    int32_t kind, configured, effective, available, choices;
+    char key[32], label[64];
+} az_official_setting_v1;
 
 typedef struct az_core_v1 {
     int abi;
@@ -1362,6 +1423,22 @@ typedef struct az_core_v1 {
     int (*button_poll)(const char *id, uint64_t token);
 
     const az_analysis_v1 *(*analysis_service)(uint32_t abi);
+
+    /* Overlay thread only. Enumerate from zero until AZ_NOT_FOUND.
+     * AZ_EMPTY skips a non-setting or unavailable descriptor index.
+     * Write is compare-and-set against the configured value read earlier.
+     * The core queues normal settings persistence after a successful write. */
+    int (*official_setting_read)(uint32_t index, az_official_setting_v1 *out);
+    int (*official_setting_write)(const char *id, const char *key,
+                                  int expected, int desired);
+
+    /* Optional. Register one Plan Set handler during init. The callback runs on the
+     * overlay thread after closing the native MENU. Copy the target before returning.
+     * Resolve the target on a mod worker and match its identity against playlist_order.
+     * Older cores omit both fields. */
+    int (*on_plan_set)(const char *id, az_plan_set_fn fn, void *user);
+    int (*plan_set_resolve)(const char *id, const az_plan_set_target_v1 *target,
+                            az_plan_set_source_v1 *out);
 
 } az_core_v1;
 

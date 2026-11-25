@@ -93,6 +93,8 @@ typedef struct {
     void *h;
     const az_mod_v1 *m;
     const az_screen_v1 *screen;
+    az_plan_set_fn plan_set_fn;
+    void *plan_set_user;
     struct { char k[32]; int v; } cfg[CM_CFG_MAX];
     struct { char k[32]; char v[128]; } cfgs[CM_CFGS_MAX];   /* text settings ("key$=value" lines) */
     int  ncfg, ncfgs, cfg_loaded, cfg_dirty;
@@ -1563,6 +1565,7 @@ static void sdk_ui_tick(void);
 #include "sdk_proc.c"
 #include "sdk_lib.c"
 #include "sdk_track.c"
+#include "sdk_playlist_bindings.c"
 #include "sdk_audio.c"
 #include "sdk_vslot.c"
 #endif
@@ -1645,11 +1648,16 @@ static const az_library_v1 g_sdk_library = {
     .waveform_request = sdk_waveform_request,
     .waveform_acquire = sdk_waveform_acquire,
     .on_data_event = sdk_on_data_event,
+    .playlist_order = sdk_playlist_order,
+    .playlist_move = sdk_playlist_move,
+    .playlist_move_status = sdk_playlist_move_status,
 #endif
 };
 static const az_library_v1 *sdk_library_service(uint32_t abi) {
     return abi == AZ_LIBRARY_ABI ? &g_sdk_library : NULL;
 }
+
+#include "sdk_plan_set.c"
 
 static const az_core_v1 g_cm_core = {
     .abi = AZ_MOD_ABI,
@@ -1685,6 +1693,10 @@ static const az_core_v1 g_cm_core = {
     .row_value = cm_row_value,
     .row_set = cm_row_set,
     .row_lookup = cm_row_lookup,
+#ifndef SDK_ROWS_IMPL
+    .official_setting_read = sdk_official_setting_read,
+    .official_setting_write = sdk_official_setting_write,
+#endif
     /* svc: input */
     .frame_filter = cm_frame_filter,
     .touch_filter = cm_touch_filter,
@@ -1726,11 +1738,13 @@ static const az_core_v1 g_cm_core = {
     .library_service = sdk_library_service,
     .observation_service = sdk_observation_service,
     .command_service = sdk_command_service,
+    .on_plan_set = sdk_on_plan_set,
 #ifndef SDK_PROC_IMPL
     .analysis_service = sdk_analysis_service,
     .beatport_login_service = sdk_beatport_login_service,
     .button_press = cm_button_press,
     .button_poll = cm_button_poll,
+    .plan_set_resolve = sdk_plan_set_resolve,
 #endif
 };
 

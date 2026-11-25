@@ -12,7 +12,7 @@ static _Thread_local uintptr_t t_pst_server;
 static _Thread_local int t_pst_own;
 static _Thread_local unsigned t_pst_slots;
 static _Atomic int g_pst_armed, g_rs_on, g_ls_armed;
-static int g_sm_on, g_sdk_sources_on, g_ep147_build = 2;
+static int g_sm_on, g_sdk_sources_on, plan_set_enabled, g_ep147_build = 2;
 static int expected_server, expected_message, base_own, execute_result;
 static int chain_result, chain_race, log_disabled, log_fd = -1;
 static unsigned chain_media, executes, syncs, chains, originals;
@@ -68,7 +68,9 @@ static void pst_lib_service(void *server) {
     assert(t_pst_server == (uintptr_t) server && !t_pst_slots && t_pst_own == base_own);
     event('P', server);
 }
+static void playlist_sdk_native(void *server) { (void)server; }
 static void mm_note(void *server) { event('M', server); }
+static int az_plan_set_available(void) { return plan_set_enabled; }
 static void fc_refresh_service(void *server) {
     assert(t_pst_own == base_own);
     event('C', server);
@@ -175,7 +177,7 @@ static void invoke_hook(void *unused) {
     mlserver_onmsg_hook(&expected_server, &expected_message, 37);
 }
 static void hook_cases(void) {
-    for (unsigned flags = 0; flags < 32; ++flags)
+    for (unsigned flags = 0; flags < 64; ++flags)
         for (unsigned unwind = 0; unwind < 2; ++unwind) {
             reset();
             log_disabled = 1;
@@ -185,6 +187,7 @@ static void hook_cases(void) {
             g_rs_on = !!(flags & 4);
             g_ls_armed = !!(flags & 8);
             g_sdk_sources_on = !!(flags & 16);
+            plan_set_enabled = !!(flags & 32);
             t_pst_server = 991;
             t_pst_slots = 13;
             unsigned deletions = fixture_exception_deletions;
@@ -194,7 +197,7 @@ static void hook_cases(void) {
             assert(executes == 1 && syncs == 1 && originals == 1 && atomic_load(&g_mv_state) == MV_DONE);
             char expected[80] = "";
             if (g_pst_armed) strcat(expected, "P");
-            if (g_sm_on || g_rs_on) strcat(expected, "M");
+            if (g_sm_on || g_rs_on || plan_set_enabled) strcat(expected, "M");
             strcat(expected, "EYC");
             if (g_ls_armed) strcat(expected, "L");
             if (g_sdk_sources_on) strcat(expected, "F");

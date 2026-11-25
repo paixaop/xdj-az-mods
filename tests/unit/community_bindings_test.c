@@ -88,10 +88,37 @@ static void test_buttons(void) {
     assert(cm_button_poll("fixture", token) == AZ_OK);
     assert(panel_presses == 1 && panel_polls == 1);
 }
+static void test_official_settings(void)
+{
+    az_defaults();
+    az_official_setting_v1 out = { .size = sizeof out };
+    int setting = g_cm_core.row_lookup("stems");
+    assert(setting >= 0);
+    g_cm_on_ui = 0;
+    assert(g_cm_core.official_setting_read((uint32_t)setting, &out) == AZ_INVALID);
+    assert(g_cm_core.official_setting_write("fixture", "stems", 0, 1) == AZ_INVALID);
+    g_cm_on_ui = 1;
+    assert(g_cm_core.official_setting_write("missing", "stems", 0, 1) == AZ_INVALID);
+    assert(g_cm_core.official_setting_read((uint32_t)setting, &out) == AZ_OK);
+    int value = out.configured;
+    assert(g_cm_core.official_setting_write("fixture", "stems", !value, value) == AZ_STALE);
+    assert(g_cm_core.official_setting_write("fixture", "stems", value, value) == AZ_OK);
+    assert(!g_state.config_dirty);
+    assert(g_cm_core.official_setting_write("fixture", "stems", value, !value) == AZ_OK);
+    assert(g_state.config_dirty);
+    assert(g_cm_core.official_setting_read((uint32_t)setting, &out) == AZ_OK);
+    assert(out.configured == !value);
+    az_toggle(setting);
+    assert(az_get(setting) == value);
+    az_toggle(-1);
+    g_cm_on_ui = 0;
+}
+
 int main(void) {
     test_code_segments();
     test_tempo_receipts();
     test_buttons();
-    puts("PASS community bindings: executable segment admission, coherent tempo receipts, stale/contended clocks, caller/state/profile button admission");
+    test_official_settings();
+    puts("PASS community bindings: code admission, tempo receipts, panel buttons and official settings");
     return 0;
 }
