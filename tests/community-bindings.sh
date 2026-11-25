@@ -13,7 +13,7 @@ start = text.index('static int cm_button_press(')
 end = text.index('\n#endif', start)
 Path(sys.argv[1]).write_text('#line %d "%s"\n' % (text.count('\n', 0, start) + 1, source) + text[start:end] + '\n')
 EXTRACT
-flags=(-std=gnu11 -O1 -g -Wall -Wextra -Wno-unused-function -fno-optimize-sibling-calls -Isrc/azmod -I"$task_tmp" -pthread -rdynamic)
+flags=(-std=gnu11 -O1 -g -Wall -Wextra -Wno-unused-function -fno-optimize-sibling-calls -DCM_TEST_OFFICIAL_SETTINGS -Isrc/azmod -I"$task_tmp" -pthread -rdynamic)
 case ${SAN:-plain} in
 plain|'') ;;
 asan) flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer) ;;

@@ -74,6 +74,8 @@ static int core_analysis_ticks;
 static void analysis_events_core_tick(void) { ++core_analysis_ticks; }
 static void sdk_analysis_callbacks_tick(void) {}
 static void sdk_beatport_owner_tick(void) {}
+static int plan_set_ticks;
+static void sdk_plan_set_tick(void) { ++plan_set_ticks; }
 static int native_bound, cue_ticks;
 static void sdk_cue_tick(void) { ++cue_ticks; }
 static int sdk_command_native_bound(void) { return native_bound; }
@@ -125,6 +127,7 @@ int main(void) {
     g_cm_n = 0, g_cm_live = 0;
     CHECK("no community mod at all: the core's question is shown and answered", asked_and_answered());
     CHECK("core analysis completion listeners run without community mods", core_analysis_ticks == 3);
+    CHECK("Plan Set dispatch waits for a running mod", plan_set_ticks == 0);
     CHECK("... and nothing of the mods' runs", g_mod_ticks == 0 && g_drains == 0 && g_deck_ticks == 0);
     g_cm_n = 2, g_cm_live = 0;
     g_cm[0] = (cm_mod) {.state = AZCM_REFUSED, .m = &g_mod};
@@ -135,6 +138,7 @@ int main(void) {
     g_cm[0].state = AZCM_LOADED;
     g_cm_live = 1;
     CHECK("a running mod: the question is shown and answered too", asked_and_answered());
+    CHECK("Plan Set dispatch runs on the overlay tick", plan_set_ticks == 3);
     CHECK("... and the mod's own tick and queue run (CONTROL for the setup)", g_mod_ticks > 0 && g_drains > 0);
     int before = cue_ticks;
     native_bound = 1;

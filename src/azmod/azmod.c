@@ -2016,6 +2016,9 @@ static void setvis_hook(long self, int on) {
 #include "playlist_editor.c"
 #include "library_db.c"
 #include "library_edits.c"
+#include "sdk_playlist_order.c"
+#include "playlist_device_sync.c"
+#include "sdk_playlist_move.c"
 #include "remote_stems.c"
 #include "libfd.h" /* the library fds azmod's own workers hold, by owner */
 #include "stem_marks.c"
@@ -2510,9 +2513,11 @@ static void msg_tick(void) {
 #include "browse_columns.c" /* PREVIEW and the sub column remembered; Column Edit's columns */
 #include "clock_native.c" /* the Clock in the place of EP147's status bar readout */
 static void bf_tick(void); /* browse_fields.c */
+static void mp_plan_tick(void); /* menu_plan_set.c */
 #include "beatport_service.h"
 static void calltimers_hook(void *self) {
     msg_tick();
+    playlist_sdk_tick();
     analysis_host_notices(analysis_banner, analysis_diagnostic);
     bt_mods_tick();
     bc_tick();
@@ -2520,6 +2525,7 @@ static void calltimers_hook(void *self) {
     bf_tick();
     sk_tick();
     mp_anim_tick();
+    mp_plan_tick();
     cm_icons_tick();
     bp_login_message_tick();
     /* installed at run time from any thread: never branch to an original not yet visible */

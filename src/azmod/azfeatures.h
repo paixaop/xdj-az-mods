@@ -182,6 +182,9 @@ int azf_from_row_v1(const struct az_row_v1 *r, az_feature_v2 *f); /* the SDK's r
 int azf_row_value(int handle);           /* row_value: one atomic load, any thread; -1 = bad */
 int azf_row_set(int handle, int value);  /* row_set: registered rows only, UI thread; 0 / -1 */
 int azf_row_lookup(const char *key);     /* row_lookup: an official row by key, read-only */
+struct az_official_setting_v1;
+int azf_official_setting(unsigned index, struct az_official_setting_v1 *out);
+int azf_official_setting_write(const char *key, int expected, int desired);
 const char *azf_owner(int item);         /* the registering mod's id, "" for an official row */
 /* A registered SCREEN row with nothing to open (no screen of its own, its mod has no page or is
  * not running) is grayed and inert. Set by the row services (sdk_rows.c); NULL = always one. */

@@ -704,11 +704,15 @@ enum {
     MV_IDLE,
     MV_ARMED,
     MV_TAKEN,
-    MV_DONE
+    MV_DONE,
+    MV_SDK_ARMED,
+    MV_SDK_TAKEN
 };
 #define MV_DEADLINE_MS 2500
 static _Atomic int g_mv_state = MV_IDLE;
 static _Atomic int g_mv_kick; /* message thread: post the renewal */
+static void playlist_sdk_native(void *server);
+static int mv_pdb_sync_status(void *server);
 /* REMOVE on a folder (stock disables DELETE on folders): count what is inside (library
  * thread), confirm with EP147's own OK / CANCEL box, then delete the whole tree in one
  * transaction inside the undo journal (UNDO restores it). */
@@ -1574,22 +1578,7 @@ static int mv_op_writes(int op) {
     }
 }
 static void mv_pdb_sync(void *server) {
-    uintptr_t svc = 0, lib = 0, db = 0, conn = 0;
-    unsigned media = 0;
-    char root[300];
-    if (mlserver_chain(server, &svc, &lib, &db, &media) || !own_q(db + SQLDB_CONN, &conn) ||
-        !conn) /* onMessage's own server, on its thread */
-        return;
-    if (!sq_resolve() || !cp_mount_of((void *) conn, root, sizeof root))
-        return;
-    FILE *lg = azlog_open("/tmp/azmod-libspool.log", "a");
-    if (lg)
-        setvbuf(lg, NULL, _IONBF, 0);
-    char why[32];
-    snprintf(why, sizeof why, "edit op %d", g_mv.op);
-    ls_pdb_sync_root((void *) conn, root, 0, why, lg);
-    if (lg)
-        fclose(lg);
+    (void) mv_pdb_sync_status(server);
 }
 /* ---- export.pdb after EP147's own playlist writes (always, not only Playlist Editing) ---
  * Stock TAG LIST > CREATE PLAYLIST and stock DELETE / ALL DELETE write the stick's
@@ -1824,15 +1813,18 @@ static void mv_service_armed(void *server) {
         __atomic_store_n(&g_mv_state, MV_DONE, __ATOMIC_RELEASE);
     }
 }
+static int az_plan_set_available(void);
+
 static void mlserver_onmsg_hook(void *server, void *msg, unsigned param) {
     struct pst_scope pst_sc __attribute__((cleanup(pst_scope_end))) = {t_pst_server, t_pst_slots};
     t_pst_server = (uintptr_t) server;
     t_pst_slots = 0;
     if (__atomic_load_n(&g_pst_armed, __ATOMIC_ACQUIRE))
         pst_lib_service(server); /* a stock write's export.pdb sync, due on this stick */
-    if (g_sm_on || __atomic_load_n(&g_rs_on, __ATOMIC_RELAXED))
+    if (g_sm_on || __atomic_load_n(&g_rs_on, __ATOMIC_RELAXED) || az_plan_set_available())
         mm_note(server);
     mv_service_armed(server);
+    playlist_sdk_native(server);
     fc_refresh_service(server); /* a FOLDER-view copy landed on this stick: re-list it */
     if (__atomic_load_n(&g_ls_armed, __ATOMIC_ACQUIRE)) {
         t_pst_own++;        /* the spool syncs export.pdb itself (ls_pdb_sync) */

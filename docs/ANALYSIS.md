@@ -127,7 +127,7 @@ metadata is reported without silently trimming the audio.
 
 Vocal analysis uses the recovered 29-feature, bidirectional two-layer LSTM with
 256 units per layer and two dense layers. Its 1,669,314 weights remain a local
-model asset, imported with `tools/analysis/import-pvdi-model.py`; they are not committed.
+model asset prepared with the [model importer](#private-model-provisioning).
 Inference uses C and ARMv8 NEON with deterministic window merging. Linux retains
 the original musl activation rounding through private C math functions. The frontend
 runs at 22050 Hz with 2048-sample FFT windows and a 1024-sample hop. Activity values
@@ -168,13 +168,26 @@ SAN=asan bash tests/sdk-analysis.sh
 ## Private model provisioning
 
 The model is private local data and is excluded from source, SDK examples and
-release packages. Import a supported locally installed model to an explicit
-private location:
+release packages. On macOS, run this from the core checkout with the Xcode
+command-line tools installed. The command creates `~/pvdi-model.bin` from the
+local rekordbox 7.2.19.0342 app bundle in one step.
 
 ```sh
-python3 tools/analysis/import-pvdi-model.py --arm64-executable /private/rekordbox-arm64 \
-  --output /private/analysis-assets/pvdi-model.bin
-python3 tools/analysis/provision-assets.py --from-assets /private/analysis-assets \
+make -f tools/analysis/create-pvdi-model.mk
+```
+
+Set `REKORDBOX_APP` to use another copy of the app, or set `OUTPUT_DIR` to an
+existing private directory outside the checkout. The importer selects a profile
+by the app's full `CFBundleVersion` and verifies the SHA-256 of both source
+files before reading any profile offsets. Add a verified build in the
+[`profiles` table](../src/analysis/host/pvdi-model.c), including the executable
+offsets and the GraphDef layout. Builds shipping an identical GraphDef can share
+its layout. The original `tools/analysis/import-pvdi-model.py` command remains
+available for pre-extracted 7.2.19 files. Copy the generated model to the
+locally mounted AZ-MODS USB:
+
+```sh
+python3 tools/analysis/provision-assets.py --from-assets "$HOME" \
   --mods-dir /Volumes/USB/MODS
 ```
 

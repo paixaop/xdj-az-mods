@@ -138,7 +138,15 @@ static __thread int g_cm_on_ui;
 #define SDK_SURFACE_IMPL "test/community/sdk_surface_stub.c" /* no overlay thread here */
 #define SDK_DECKUI_IMPL "test/community/sdk_deckui_stub.c"  /* no azstem, no EP147 here */
 #define SDK_PROC_IMPL "test/community/sdk_proc_stub.c"      /* no audio, systemd or stick here */
+#ifdef CM_TEST_OFFICIAL_SETTINGS
+static azmod_state g_state;
+#include "../../azfeatures.c"
+static int register_row_internal(const char *mod_id, const az_feature_v2 *feature) {
+    return azf_register(mod_id, feature);
+}
+#else
 #define SDK_ROWS_IMPL "test/community/sdk_rows_stub.c"      /* no feature table or settings here */
+#endif
 #include "../../community.c"
 #include "../../sdk_input.c"   /* the frame and touch filters: plain logic, no EP147 needed */
 

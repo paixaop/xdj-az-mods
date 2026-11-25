@@ -88,6 +88,21 @@ static int cm_row_lookup(const char *official_key) {
     return azf_row_lookup(official_key);
 }
 
+static int sdk_official_setting_read(uint32_t index, az_official_setting_v1 *out)
+{
+    return g_cm_on_ui ? azf_official_setting(index, out) : AZ_INVALID;
+}
+
+static int sdk_official_setting_write(const char *id, const char *key, int expected, int desired)
+{
+    if (!g_cm_on_ui || !cm_self(id, CM_RA(), "official_setting_write"))
+        return AZ_INVALID;
+    int status = azf_official_setting_write(key, expected, desired);
+    if (status == AZ_OK && expected != desired)
+        g_state.config_dirty = true;
+    return status;
+}
+
 /* UI thread, every tick: the rows of a mod that is not running leave the menu, and none of their
  * callbacks is called again (an init() that failed after register_row, a mod stopped). Only when
  * the set of running mods changes. */

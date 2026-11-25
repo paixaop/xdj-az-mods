@@ -273,6 +273,7 @@ static void sdk_confirm_tick(void) {
 /* UI thread, from community_tick while mods run: their post_ui callbacks. */
 static void sdk_ui_tick(void) {
     sd_drain(&g_sd_pq);
+    sdk_plan_set_tick();
 }
 
 /* ---- thread_start ---- */
