@@ -3,12 +3,12 @@ include src/analysis/build.mk
 TEST_ENGINE_OBJ := $(ENGINE_OBJ) $(OUT)/tests/analysis/thread_fixture.o
 $(OUT)/fixtures.c: tests/analysis/generate_fixtures.py $(wildcard tests/analysis/fixtures/*.json)
 	$(PYTHON) $< $@
-$(OUT)/test_phrases: $(OUT)/fixtures.c $(TEST_ENGINE_OBJ)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -O0 $(LDFLAGS) $^ $(LDLIBS) -o $@
-PHRASE_EDGE_PARTS := boundaries classifier fills rhythm features decorators high_boundaries
+$(OUT)/test_phrases: $(OUT)/fixtures.c $(TEST_ENGINE_OBJ) tests/analysis/phrase-model-fixture.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -O0 -include tests/analysis/phrase-model-fixture.h $(LDFLAGS) $(filter-out %.h,$^) $(LDLIBS) -o $@
+PHRASE_EDGE_PARTS := boundaries classifier fills rhythm features decorators high_boundaries opening snare spectra
 PHRASE_EDGE_TESTS := $(addprefix tests/analysis/test_phrase_edges_,$(addsuffix .c,$(PHRASE_EDGE_PARTS)))
 PHRASE_EDGE_OBJECTS := $(addprefix $(OUT)/src/analysis/phrase_,$(addsuffix .o,$(PHRASE_EDGE_PARTS)))
-$(OUT)/test_phrase_edges: tests/analysis/test_phrase_edges.c $(PHRASE_EDGE_TESTS) $(TEST_ENGINE_OBJ)
+$(OUT)/test_phrase_edges: tests/analysis/test_phrase_edges.c $(PHRASE_EDGE_TESTS) $(TEST_ENGINE_OBJ) tests/analysis/phrase-model-fixture.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) tests/analysis/test_phrase_edges.c $(PHRASE_EDGE_TESTS) $(filter-out $(PHRASE_EDGE_OBJECTS),$(TEST_ENGINE_OBJ)) $(LDLIBS) -o $@
 $(OUT)/test_analysis: tests/analysis/test_analysis.c $(TEST_ENGINE_OBJ)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
@@ -18,19 +18,28 @@ $(OUT)/test_vocal_kernels: tests/analysis/test_vocal_kernels.c src/analysis/voca
 	$(CC) $(CPPFLAGS) $(CFLAGS) -O3 $(LDFLAGS) $< $(filter-out $(OUT)/src/analysis/vocals.o,$(TEST_ENGINE_OBJ)) $(LDLIBS) -o $@
 $(OUT)/test_vocal_frontend: tests/analysis/test_vocal_frontend.c src/analysis/vocals.c $(TEST_ENGINE_OBJ)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -O3 $(LDFLAGS) $< $(filter-out $(OUT)/src/analysis/vocals.o,$(TEST_ENGINE_OBJ)) $(LDLIBS) -o $@
+$(OUT)/test_vocal_motion: tests/analysis/test_vocal_motion.c $(OUT)/src/analysis/vocal-motion.o
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
 $(OUT)/test_parallel_analysis: tests/analysis/test_parallel_analysis.c $(TEST_ENGINE_OBJ)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
+$(OUT)/test_windows_model_asset: tests/analysis/test_windows_model_asset.c $(TEST_ENGINE_OBJ)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
+.PHONY: test-windows-model
+test-windows-model: $(OUT)/test_windows_model_asset $(OUT)/test_parallel_analysis
+	$(OUT)/test_windows_model_asset "$(ANALYSIS_ASSETS)"
+	$(OUT)/test_parallel_analysis tests/analysis/fixtures "$(ANALYSIS_ASSETS)"
 $(OUT)/test_activation_math: tests/analysis/test_activation_math.c tests/analysis/fixtures/musl-activation-bits.inc $(filter $(OUT)/vendor/analysis/musl-math/%,$(TEST_ENGINE_OBJ))
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $< $(filter %.o,$^) $(LDLIBS) -o $@
 $(OUT)/test_fft: tests/analysis/test_fft.c $(OUT)/src/analysis/dsp/dsp.o
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
-test: $(OUT)/test_fft $(OUT)/test_phrase_edges $(OUT)/test_phrases $(OUT)/test_execution $(OUT)/test_vocal_kernels $(OUT)/test_vocal_frontend $(OUT)/test_analysis $(OUT)/test_parallel_analysis $(OUT)/test_activation_math
+test: $(OUT)/test_fft $(OUT)/test_phrase_edges $(OUT)/test_phrases $(OUT)/test_execution $(OUT)/test_vocal_kernels $(OUT)/test_vocal_frontend $(OUT)/test_vocal_motion $(OUT)/test_analysis $(OUT)/test_parallel_analysis $(OUT)/test_activation_math
 	$(OUT)/test_fft
-	$(OUT)/test_phrase_edges
-	$(OUT)/test_phrases
+	TA_TEST_MODEL_ASSETS="$(ANALYSIS_ASSETS)" $(OUT)/test_phrase_edges
+	TA_TEST_MODEL_ASSETS="$(ANALYSIS_ASSETS)" $(OUT)/test_phrases
 	$(OUT)/test_execution
 	$(OUT)/test_vocal_kernels
-	$(OUT)/test_vocal_frontend
+	$(OUT)/test_vocal_frontend "$(ANALYSIS_ASSETS)"
+	$(OUT)/test_vocal_motion
 	$(OUT)/test_activation_math
 	$(OUT)/test_analysis tests/analysis/fixtures $(ANALYSIS_ASSETS)
 	$(OUT)/test_parallel_analysis tests/analysis/fixtures $(ANALYSIS_ASSETS)

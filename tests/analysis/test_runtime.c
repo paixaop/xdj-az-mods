@@ -120,6 +120,16 @@ static void release_request(az_analysis_owner owner, uint64_t id) {
     } while (rc == AZ_BUSY);
     assert(rc == AZ_OK);
 }
+static int result_after_contention(az_analysis_owner owner, uint64_t id, az_analysis_result_v1 *result,
+                                   az_vocal_frame_v1 *frames, uint32_t count) {
+    for (int i = 0; i < 20000; i++) {
+        int rc = analysis_runtime_result(owner, id, result, NULL, 0, frames, count);
+        if (rc != AZ_BUSY)
+            return rc;
+        pause_ms();
+    }
+    return AZ_BUSY;
+}
 static void computation(az_analysis_owner owner) {
     az_analysis_request_v1 r = request(3);
     uint64_t id = 0;
@@ -127,16 +137,16 @@ static void computation(az_analysis_owner owner) {
     az_analysis_status_v1 status = wait_state(owner, id, AZ_ANALYSIS_COMPLETE);
     assert(status.result == AZ_OK && status.completed_components == AZ_ANALYSIS_VOCALS);
     az_analysis_result_v1 result = {.size = sizeof result};
-    assert(analysis_runtime_result(owner, id, &result, NULL, 0, NULL, 0) == AZ_LIMIT);
+    assert(result_after_contention(owner, id, &result, NULL, 0) == AZ_LIMIT);
     assert(result.vocals.count >= 9 && !result.vocals.frames && !result.phrases.entries);
     az_vocal_frame_v1 *frames = calloc(result.vocals.count, sizeof *frames);
     assert(frames);
-    assert(analysis_runtime_result(owner, id, &result, NULL, 0, frames, result.vocals.count) == AZ_OK);
+    assert(result_after_contention(owner, id, &result, frames, result.vocals.count) == AZ_OK);
     unsigned first = frames[0].activity;
     release_request(owner, id);
     assert(frames[0].activity == first); /* caller-owned bytes survive release */
     free(frames);
-    assert(analysis_runtime_result(owner, id, &result, NULL, 0, NULL, 0) == AZ_STALE);
+    assert(result_after_contention(owner, id, &result, NULL, 0) == AZ_STALE);
 }
 static void invalid_requests(az_analysis_owner owner) {
     az_analysis_request_v1 r = request(1);

@@ -86,7 +86,7 @@ for control in input-clock input-budget input-elapsed; do
     echo "CONTROL caught: time $control"
 done
 for control in clock grid interval; do
-    ${HOST_CC:-cc} "${cflags[@]}" -I"$task_tmp/$control" tests/unit/sdktime_test.c -lm -o "$task_tmp/time-$control"
+    ${HOST_CC:-cc} "${cflags[@]}" -I"$task_tmp/$control" -Isrc/azmod tests/unit/sdktime_test.c -lm -o "$task_tmp/time-$control"
     if ( ulimit -c 0; "$task_tmp/time-$control" "$control" >"$task_tmp/$control.log" 2>&1 ) 2>/dev/null; then
         echo "FAIL: time $control control was not caught" >&2; exit 1
     fi

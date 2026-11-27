@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #include "../common/aztimestamp.h"
+#include "../common/azanalysis_policy.h"
 #include "phrase.h"
 struct ta_result {
     az_analysis_result_v1 view;
@@ -26,19 +27,19 @@ typedef struct {
 static int valid_native_beat(const az_beat *b)
 {
     return !(!isfinite(b->time_s) || b->time_s < 0 || !isfinite(b->bpm) || b->bpm <= 0 ||
-             b->bpm > 655.35 || b->beat_in_bar < 1 || b->beat_in_bar > 4 || b->reserved);
+             b->bpm > az_analysis_maximum_stored_bpm() || !az_analysis_phase_supported(b->beat_in_bar) || b->reserved);
 }
 
 static void validate_beat_order(ta_context *c, const az_beat *b, const az_beat *previous, unsigned rate)
 {
-    int order = compare_timestamps(b->time_s, previous->time_s, 1, rate, 1);
+    int order = compare_timestamps(b->time_s, previous->time_s, 1, rate, AZ_ANALYSIS_POLICY_GRID_TOLERANCE_SAMPLES);
     if (order == AZ_TIME_INVALID || order == AZ_TIME_EQUAL || order == AZ_TIME_BEFORE)
         ta_fail(c, TA_FAILED, "unordered native beat grid");
 }
 
 static void validate_native_grid(ta_context *c, const ta_request *request, unsigned rate)
 {
-    if (!request->beats || !request->beat_count || request->beat_count > 32768)
+    if (!request->beats || !request->beat_count || request->beat_count > AZ_ANALYSIS_POLICY_MAXIMUM_GRID_BEATS)
         ta_fail(c, TA_FAILED, "missing native beat grid");
     for (uint32_t i = 0; i < request->beat_count; i++) {
         const az_beat *b = &request->beats[i];
@@ -49,7 +50,7 @@ static void validate_native_grid(ta_context *c, const ta_request *request, unsig
 
 static void retain_phrases(ta_context *c, ta_result *result, PhraseExport phrases, uint32_t beat_count)
 {
-    if (!phrases.map.count || phrases.map.count > 1024 || !phrases.map.end_beat ||
+    if (!phrases.map.count || phrases.map.count > AZ_ANALYSIS_POLICY_MAXIMUM_PHRASE_COUNT || !phrases.map.end_beat ||
         phrases.map.end_beat > beat_count)
         ta_fail(c, TA_FAILED, "phrase result exceeds native grid");
     size_t size = phrases.map.count * sizeof *result->phrases;
@@ -71,26 +72,24 @@ static void run_phrase_stage(ta_context *c, analysis_stages *job)
     validate_native_grid(c, request, rate);
     const az_beat *first = request->beats;
     double bpm = isfinite(request->bpm) && request->bpm > 0 ? request->bpm : first->bpm;
-    if (bpm > 655.35)
+    if (bpm > az_analysis_maximum_stored_bpm())
         ta_fail(c, TA_FAILED, "invalid native tempo");
-    Timing timing = reference_timing(c, bpm, first->time_s, first->beat_in_bar, first->bpm);
-    Samples samples = phrase_decode(c);
-    if ((unsigned)samples.rate != rate || (uint64_t)samples.frames + 1 != frames)
+    double phrase_parameters[TA_PHRASE_PARAMETER_COUNT];
+    ta_model_phrase_parameters(c, phrase_parameters);
+    Timing timing = reference_timing(c, bpm, first->time_s, first->beat_in_bar, first->bpm, phrase_parameters);
+    Samples samples = phrase_decode(c, phrase_parameters);
+    uint64_t trim = (uint64_t)phrase_parameters[TA_PHRASE_SOURCE_FRAME_TRIM];
+    if ((unsigned)samples.rate != rate || (uint64_t)samples.frames + trim != frames)
         ta_fail(c, TA_FAILED, "source clock changed");
     ta_profile_mark(c, "decode_bands_grid");
-    PhraseExport phrases = phrase_classify(c, samples, timing);
+    PhraseExport phrases = phrase_classify(c, samples, timing, phrase_parameters);
     retain_phrases(c, result, phrases, request->beat_count);
 }
 
 static void run_vocal_stage(ta_context *c, analysis_stages *job)
 {
-    const ta_request *request = c->request;
     ta_result *result = job->result;
-    char model[1200];
-    if (!request->assets_path || snprintf(model, sizeof model, "%s/pvdi-model.bin",
-                                          request->assets_path) >= (int)sizeof model)
-        ta_fail(c, TA_FAILED, "missing vocal model path");
-    az_analysis_vocal_map_v1 vocals = ta_vocals(c, model);
+    az_analysis_vocal_map_v1 vocals = ta_vocals(c);
     size_t size = vocals.count * sizeof *result->vocals;
     result->vocals = ta_malloc(size);
     if (!result->vocals)
@@ -157,8 +156,8 @@ static void run_analysis(ta_context *c, ta_result *result)
     unsigned rate = 0;
     uint64_t frames = 0;
     c->decoder = ta_decode_open(request->audio_path, &rate, &frames);
-    if (!c->decoder || (rate != 44100 && rate != 48000) || frames < 2 ||
-        frames > (uint64_t)rate * 1200)
+    if (!c->decoder || !az_analysis_source_rate_supported(rate) || frames < AZ_ANALYSIS_POLICY_MINIMUM_SOURCE_FRAMES ||
+        frames > (uint64_t)rate * AZ_ANALYSIS_POLICY_MAXIMUM_SOURCE_SECONDS)
         ta_fail(c, TA_FAILED, "unsupported source clock or duration");
     ta_decode_close(c->decoder);
     c->decoder = NULL;

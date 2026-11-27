@@ -440,7 +440,7 @@ static int sa_publication_dimensions_valid(const struct sa_tags *p, const struct
 }
 static int sa_publication_beats_valid(const struct st_data *parsed) {
     for (unsigned i = 0; i < parsed->view.beat_count; i++)
-        if (parsed->beats[i].beat_in_bar < 1 || parsed->beats[i].beat_in_bar > 4 ||
+        if (!az_analysis_phase_supported(parsed->beats[i].beat_in_bar) ||
             !isfinite(parsed->beats[i].bpm) || parsed->beats[i].bpm <= 0) return 0;
     return 1;
 }
@@ -582,13 +582,14 @@ static int sa_grid_header_valid(struct sa_grid_view *grid) {
     if (grid->size < 24 || memcmp(grid->bytes, "PQTZ", 4)) return 0;
     grid->header = sa_u32(grid->bytes + 4);
     grid->count = sa_u32(grid->bytes + 20);
-    return grid->header >= 24 && grid->header <= grid->size && grid->count && grid->count <= 32768 &&
+    return grid->header >= 24 && grid->header <= grid->size && grid->count &&
+           grid->count <= AZ_ANALYSIS_POLICY_MAXIMUM_GRID_BEATS &&
            grid->count <= (grid->size - grid->header) / 8;
 }
 static int sa_grid_rows_valid(const struct sa_grid_view *grid) {
     for (uint32_t i = 0; i < grid->count; i++) {
         const uint8_t *row = grid->bytes + grid->header + i * 8;
-        if (sa_u16(row) < 1 || sa_u16(row) > 4 || !sa_u16(row + 2)) return 0;
+        if (!az_analysis_phase_supported(sa_u16(row)) || !sa_u16(row + 2)) return 0;
     }
     return 1;
 }
@@ -607,10 +608,12 @@ static int sa_grid_read(const struct sa_job *job, struct sa_grid_view *grid) {
     return AZ_OK;
 }
 static void sa_grid_copy(const struct sa_grid_view *grid, az_beat *beats) {
+    const double seconds_per_ms = 1.0 / AZ_ANALYSIS_POLICY_STORED_MILLISECONDS_PER_SECOND;
+    const double bpm_per_unit = 1.0 / AZ_ANALYSIS_POLICY_TEMPO_UNITS_PER_BPM;
     for (uint32_t i = 0; i < grid->count; i++) {
         const uint8_t *row = grid->bytes + grid->header + i * 8;
-        beats[i] = (az_beat) {.time_s = (double) sa_u32(row + 4) * 0.001,
-                              .bpm = (double) sa_u16(row + 2) * 0.01,
+        beats[i] = (az_beat) {.time_s = sa_u32(row + 4) * seconds_per_ms,
+                              .bpm = sa_u16(row + 2) * bpm_per_unit,
                               .beat_in_bar = sa_u16(row)};
     }
 }
@@ -683,13 +686,18 @@ static int sa_grid_capture_read(struct sa_job *job, struct sa_grid_capture *capt
 }
 static unsigned sa_grid_first_bar(const struct sa_grid_capture *capture) {
     for (unsigned i = 0; i < capture->count; i++)
-        if (capture->rows[i].beat_in_bar == 1) return i;
+        if (capture->rows[i].beat_in_bar == AZ_ANALYSIS_POLICY_MINIMUM_PHASE) return i;
     return capture->count;
 }
 static int sa_grid_encode_row(const struct sa_grid_capture *capture, unsigned first, unsigned i, uint8_t *out) {
-    unsigned beat = capture->rows[i].beat_in_bar ? capture->rows[i].beat_in_bar : (i + 4u - first % 4u) % 4u + 1u;
-    double ms = (double) capture->ticks[i] * 1000.0 / capture->rate, bpm = capture->rows[i].bpm * 100.0;
-    if (beat > 4 || !isfinite(ms) || ms < 0 || ms > UINT32_MAX || !isfinite(bpm) || bpm < 1 || bpm > UINT16_MAX) return AZ_UNSUPPORTED;
+    const unsigned phases = AZ_ANALYSIS_POLICY_MAXIMUM_PHASE - AZ_ANALYSIS_POLICY_MINIMUM_PHASE + 1;
+    unsigned beat = capture->rows[i].beat_in_bar;
+    beat = beat ? beat : (i + phases - first % phases) % phases + AZ_ANALYSIS_POLICY_MINIMUM_PHASE;
+    double ms = (double)capture->ticks[i] * AZ_ANALYSIS_POLICY_STORED_MILLISECONDS_PER_SECOND / capture->rate;
+    double bpm = capture->rows[i].bpm * AZ_ANALYSIS_POLICY_TEMPO_UNITS_PER_BPM;
+    if (!az_analysis_phase_supported(beat) || !isfinite(ms) || ms < 0 || ms > UINT32_MAX ||
+        !isfinite(bpm) || bpm < 1 || bpm > UINT16_MAX)
+        return AZ_UNSUPPORTED;
     sa_put16(out, beat);
     sa_put16(out + 2, (unsigned) llround(bpm));
     sa_put32(out + 4, (uint32_t) llround(ms));
@@ -717,7 +725,7 @@ static int sa_capture_grid(struct sa_job *j) {
     int rc = j->maps->read(&j->native_map.grid, AZNM_GRID, NULL, 0, &capture.count);
     if (rc) return rc;
     if (capture.count < 2) return AZ_BUSY;
-    if (capture.count > 32768) return AZ_UNSUPPORTED;
+    if (capture.count > AZ_ANALYSIS_POLICY_MAXIMUM_GRID_BEATS) return AZ_UNSUPPORTED;
     rc = sa_grid_capture_allocate(&capture);
     if (!rc) rc = sa_grid_capture_read(j, &capture);
     if (!rc) rc = sa_grid_encode(&capture);

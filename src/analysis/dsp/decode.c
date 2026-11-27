@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
+#include "../../common/azanalysis_policy.h"
 #define MA_NO_DEVICE_IO
 #define MA_NO_ENGINE
 #define MA_NO_RESOURCE_MANAGER
@@ -70,7 +71,7 @@ static int ta_mpeg_same_format(struct ta_mpeg_frame a, struct ta_mpeg_frame b)
 }
 static int ta_mpeg_valid_frame(const unsigned char h[4], struct ta_mpeg_frame *f, uint64_t remaining)
 {
-    return ta_mpeg_header(h, f) && f->bytes <= remaining && (f->rate == 44100 || f->rate == 48000);
+    return ta_mpeg_header(h, f) && f->bytes <= remaining && az_analysis_source_rate_supported(f->rate);
 }
 static int ta_mpeg_scan_frame(FILE *file, struct ta_mpeg_scan *scan, const unsigned char h[4])
 {
@@ -85,7 +86,7 @@ static int ta_mpeg_scan_frame(FILE *file, struct ta_mpeg_scan *scan, const unsig
     if (scan->count >= (unsigned)scan->metadata && !ta_mpeg_same_format(f, scan->normal)) return 0;
     scan->count++;
     scan->at += f.bytes;
-    return scan->count <= (uint64_t)f.rate * 1200 / 1152 + 1;
+    return scan->count <= (uint64_t)f.rate * AZ_ANALYSIS_POLICY_MAXIMUM_SOURCE_SECONDS / 1152 + 1;
 }
 static int ta_mpeg_scan_stream(FILE *file, struct ta_mpeg_scan *scan)
 {
@@ -125,8 +126,8 @@ static int ta_decode_mpeg_clock(ta_decoder *d, const char *path)
 static int ta_decode_valid_length(ta_decoder *d, ma_uint64 *length)
 {
     return ma_decoder_get_length_in_pcm_frames(&d->decoder, length) == MA_SUCCESS && *length &&
-           *length <= (ma_uint64)d->decoder.outputSampleRate * 1200 &&
-           d->prefix <= (ma_uint64)d->decoder.outputSampleRate * 1200 - *length;
+           *length <= (ma_uint64)d->decoder.outputSampleRate * AZ_ANALYSIS_POLICY_MAXIMUM_SOURCE_SECONDS &&
+           d->prefix <= (ma_uint64)d->decoder.outputSampleRate * AZ_ANALYSIS_POLICY_MAXIMUM_SOURCE_SECONDS - *length;
 }
 static int ta_decode_miniaudio(ta_decoder *d, const char *path, ma_decoder_config config, unsigned *rate, uint64_t *frames)
 {
@@ -134,9 +135,9 @@ static int ta_decode_miniaudio(ta_decoder *d, const char *path, ma_decoder_confi
         ma_decoder_uninit(&d->decoder);
         return 0;
     }
-    if (d->decoder.outputSampleRate != 44100 && d->decoder.outputSampleRate != 48000) {
+    if (!az_analysis_source_rate_supported(d->decoder.outputSampleRate)) {
         ma_decoder_uninit(&d->decoder);
-        config.sampleRate = 44100;
+        config.sampleRate = AZ_ANALYSIS_POLICY_ALLOWED_RATE_LOW;
         if (ma_decoder_init_file(path, &config, &d->decoder) != MA_SUCCESS) return 0;
     }
     ma_uint64 length = 0;

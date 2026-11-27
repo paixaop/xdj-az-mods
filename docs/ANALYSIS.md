@@ -31,7 +31,8 @@ changed results or saved files are refused. Retained publication bytes are
 released on completion or retirement.
 
 Phrase work requires and preserves the loaded native grid. Vocal-only work does
-not need a grid. Populated phrase/vocal maps are preserved, including valid
+not need a grid. Both extraction stages read the private analysis model.
+Populated phrase/vocal maps are preserved, including valid
 all-zero instrumental timelines. Errors remain visible in status and core logs.
 With normal core logging enabled, startup and request failures are written to
 `/tmp/azmod-analysis.log` under the existing core log size cap; debug tracing is
@@ -130,8 +131,9 @@ Vocal analysis uses the recovered 29-feature, bidirectional two-layer LSTM with
 model asset prepared with the [model importer](#private-model-provisioning).
 Inference uses C and ARMv8 NEON with deterministic window merging. Linux retains
 the original musl activation rounding through private C math functions. The frontend
-runs at 22050 Hz with 2048-sample FFT windows and a 1024-sample hop. Activity values
-0–4 use strict thresholds 0.2, 0.4, 0.6 and 0.8. At least nine frames are required.
+runs at 22050 Hz with 2048-sample FFT windows and a 1024-sample hop. The model
+supplies the strict thresholds for activity values 0–4. At least nine frames
+are required.
 The public SDK records `AZ_VOCAL_LSTM` provenance. Existing vocal maps, including
 older heuristic maps, are preserved.
 
@@ -168,38 +170,95 @@ SAN=asan bash tests/sdk-analysis.sh
 ## Private model provisioning
 
 The model is private local data and is excluded from source, SDK examples and
-release packages. On macOS, run this from the core checkout with the Xcode
-command-line tools installed. The command creates `~/pvdi-model.bin` from the
-local rekordbox 7.2.19.0342 app bundle in one step.
+release packages. The macOS extractor accepts both macOS app bundles and Windows
+installation files in a single executable. Build it from the core checkout with
+the Xcode command-line tools and OpenSSL development library. The makefile uses
+`pkg-config` to find libcrypto when available.
 
 ```sh
 make -f tools/analysis/create-pvdi-model.mk
 ```
 
-Set `REKORDBOX_APP` to use another copy of the app, or set `OUTPUT_DIR` to an
-existing private directory outside the checkout. The importer selects a profile
-by the app's full `CFBundleVersion` and verifies the SHA-256 of both source
-files before reading any profile offsets. Add a verified build in the
-[`profiles` table](../src/analysis/host/pvdi-model.c), including the executable
-offsets and the GraphDef layout. Builds shipping an identical GraphDef can share
-its layout. The original `tools/analysis/import-pvdi-model.py` command remains
-available for pre-extracted 7.2.19 files. Copy the generated model to the
-locally mounted AZ-MODS USB:
+The default command creates `~/pvdi-model.bin` from a local rekordbox app
+bundle. The supported macOS builds are 7.2.19.0342 and 7.2.20.0354.
+Set `REKORDBOX_APP` to use another copy of the app, or set `OUTPUT_DIR` to a
+private directory outside the checkout. The importer selects a profile
+by the app's full `CFBundleVersion` and requires the exact size and SHA-256 of
+the ARM64 executable slice and model graph for that build. The importer rejects
+a version or file mismatch before reading any profile offsets. The `AZPVDI60`
+file contains weights, vocal normalization, frontend and activity thresholds,
+tensor shapes, recurrent connections and gate order, initial states and biases,
+the vocal output class, and extracted phrase parameters for PCM, band filters,
+mood, tempo, compression, beat activity, rhythm, fades, boundaries, opening spectra,
+snare detection, vocal entry windows, fills, and recurrence. The loader uses the
+graph input width and native motion window width to locate the coefficient tables
+and tensors. The profile
+records each build's source instructions and table locations in the
+[macOS offset table](../src/analysis/host/pvdi-macos-offsets.inc).
+Both supported builds ship the same GraphDef.
+
+Run `make -f tools/analysis/create-pvdi-model.mk test` with the supported app to
+check the complete generated model against the verified reference digest.
+The test also checks that unsupported builds, modified graphs and modified
+executables are rejected and that a rejected import preserves the previously
+generated file.
+
+For Windows x64 builds 7.2.17.0, 7.2.18.0, 7.2.19.0 and 7.2.20.0, pass
+`rekordbox.exe` and the `vd_param.pb` file from the same installation directory.
+On macOS, `windows-model` runs the same extractor executable as the default
+target.
 
 ```sh
-python3 tools/analysis/provision-assets.py --from-assets "$HOME" \
-  --mods-dir /Volumes/USB/MODS
+make -f tools/analysis/create-pvdi-model.mk windows-model \
+  WINDOWS_REKORDBOX_EXE="/path/to/rekordbox.exe" \
+  WINDOWS_VD_PARAM_PB="/path/to/vd_param.pb" \
+  OUTPUT_DIR="/path/to/private/assets"
 ```
 
-For an upgrade, `--from-assets` can point explicitly to the old installed
-Track Analysis assets directory. The tool validates the format/checksum before
-atomically installing `MODS/analysis/assets/pvdi-model.bin` and the licenses. It
-operates only on a locally mounted USB. Core reads only this new location;
-there is no fallback to an obsolete mod. Remove the old package through the
-usual mod manager after provisioning. ABI rejection prevents it executing during
-that transition. A clean installation needs only the core and these private
-assets. Missing/corrupt model data produces a visible vocal-analysis error;
-phrase computation remains available independently.
+After building, invoke the macOS extractor directly with either input form.
+Create the output directory before running these commands.
+
+```sh
+src/out/host/create-pvdi-model "/path/to/rekordbox.app" "/path/to/private/assets"
+src/out/host/create-pvdi-model "/path/to/rekordbox.exe" "/path/to/vd_param.pb" "/path/to/private/assets"
+```
+
+A Windows-host build is available through the `src/out/host/create-pvdi-model-windows`
+target. It takes the same three positional arguments for Windows input.
+The extractor verifies the PE size, SHA-256 and fixed file version, then
+authenticates and decodes the packaged graph. All four supported Windows builds
+produce the same `AZPVDIW1` file. It includes Windows-derived phrase and vocal
+parameters and the native arithmetic recipes for vocal motion and phrase
+reductions. The four supported builds contain the same decoded network weights as
+the supported macOS builds.
+
+Run `test-windows` in the same makefile with both Windows input paths and the
+full `WINDOWS_REKORDBOX_VERSION` to check all mapped fields, the complete file
+digest, and rejection of unsupported or damaged inputs. On macOS, `test-unified`
+uses one compiled executable for both the macOS and Windows extraction tests.
+Run `test-windows-model` in `tests/analysis.mk` with `ANALYSIS_ASSETS` set to the
+generated directory to exercise both analysis stages and check the model loader.
+
+The [core analysis policy table](../src/common/analysis-policy.def) supplies the
+portable decoder and SDK compatibility rules. Its audio input limits and
+floating-offset rounding come from core commit `9128e8d`. Grid and phrase
+capacities come from `21e693d`. Saved-vocal activation and interval clipping
+come from `026ab712`. The storage units follow the SDK's ANLZ wire format. The
+core includes that table at build time. SDK clients can still read previously
+saved analysis with the private model absent.
+
+To create and atomically install the file on the mounted AZ-MODS USB, use its
+`MODS/analysis/assets` directory as the output directory:
+
+```sh
+make -f tools/analysis/create-pvdi-model.mk OUTPUT_DIR=/Volumes/USB/MODS/analysis/assets
+```
+
+Regenerate existing `AZPVDI01` through `AZPVDI59` assets before using this build.
+For an older core that still consumes `AZPVDI01`, use the importer and
+provisioning tools from its matching core release. After provisioning, remove
+the obsolete Track Analysis mod through the usual mod manager. Missing or corrupt assets produce a visible
+error when fresh extraction is requested. Valid saved maps remain available.
 
 See [the core service contract](CORE-SDK-TRACK-ANALYSIS.md) and the public SDK's
 `docs/18-track-analysis.md` for ownership, sources and publication outcomes.

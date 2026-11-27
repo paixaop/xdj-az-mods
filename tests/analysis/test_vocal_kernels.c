@@ -8,28 +8,29 @@ static float value(void) {
     return (float)((int32_t)(seed >> 8) - 8388608) * 0x1p-24f;
 }
 int main(void) {
-    const int shapes[][2] = {{285, 1024}, {512, 1024}, {512, 64}, {64, 2}};
+    const int shapes[][2] = {{285, 1024}, {512, 1024}, {512, 64}, {64, 2}, {21, 12}};
     ta_context *c = calloc(1, sizeof *c);
     assert(c && !setjmp(c->failure));
-    for (unsigned shape = 0; shape < 4; shape++) {
+    for (size_t shape = 0; shape < sizeof shapes / sizeof *shapes; shape++) {
         int rows = shapes[shape][0], columns = shapes[shape][1];
         float *weights = ta_alloc(c, rows * columns, sizeof(float));
         float *bias = ta_alloc(c, columns, sizeof(float));
-        float *input = ta_alloc(c, 8 * 512, sizeof(float));
+        float *input = ta_alloc(c, WINDOW_BATCH * rows, sizeof(float));
         for (int i = 0; i < rows * columns; i++) weights[i] = value();
         for (int i = 0; i < columns; i++) bias[i] = value();
-        for (int i = 0; i < 8 * 512; i++) input[i] = value();
+        for (int i = 0; i < WINDOW_BATCH * rows; i++) input[i] = value();
         input[0] = -0.0f; input[1] = 0x1p-149f; input[2] = -0x1p-149f;
         Matrix matrix;
         matrix_init(c, &matrix, weights, rows, columns);
-        for (int batch = 1; batch <= (columns == 1024 ? 8 : 1); batch++) {
-            float actual[8 * 1024], expected[8 * 1024];
-            for (int i = 0; i < 8 * 1024; i++) actual[i] = expected[i] = -1234;
+        for (int batch = 1; batch <= WINDOW_BATCH; batch++) {
+            float actual[WINDOW_BATCH * 1024], expected[WINDOW_BATCH * 1024];
+            for (size_t i = 0; i < sizeof actual / sizeof *actual; i++)
+                actual[i] = expected[i] = -1234;
             for (int b = 0; b < batch; b++)
                 for (int j = 0; j < columns; j++) {
                     float sum = 0;
-                    for (int i = 0; i < rows; i++) sum = fmaf(input[b * 512 + i], weights[i * columns + j], sum);
-                    expected[b * 1024 + j] = sum + bias[j];
+                    for (int i = 0; i < rows; i++) sum = fmaf(input[b * rows + i], weights[i * columns + j], sum);
+                    expected[b * columns + j] = sum + bias[j];
                 }
             matrix_windows(&matrix, input, bias, actual, batch);
             assert(!memcmp(actual, expected, sizeof actual));

@@ -2,6 +2,7 @@
 /* Bounded, format-only ANLZ edit. Unknown tags and header bytes survive verbatim. */
 #ifndef SDK_ANALYSIS_WRITE_H
 #define SDK_ANALYSIS_WRITE_H
+#include "../common/azanalysis_policy.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,12 +42,12 @@ static inline int sa_framed(const uint8_t *b, size_t n) {
 static inline int sa_grid_count(const uint8_t *tag, size_t header, size_t length) {
     if (header < 24) return -1;
     uint32_t count = sa_u32(tag + 20);
-    return count <= 32768 && count <= (length - header) / 8 ? (int) count : -1;
+    return count <= AZ_ANALYSIS_POLICY_MAXIMUM_GRID_BEATS && count <= (length - header) / 8 ? (int)count : -1;
 }
 static inline int sa_phrase_count(const uint8_t *tag, size_t header, size_t length) {
     if (header < 32 || sa_u16(tag + 12) > 1 || sa_u16(tag + 14) != 24) return -1;
     unsigned count = sa_u16(tag + 16);
-    return count <= 1024 && count <= (length - header) / 24 ? (int) count : -1;
+    return count <= AZ_ANALYSIS_POLICY_MAXIMUM_PHRASE_COUNT && count <= (length - header) / 24 ? (int)count : -1;
 }
 static inline int sa_vocal_scores_valid(const uint8_t *scores, uint32_t count) {
     for (uint32_t i = 0; i < count; ++i)

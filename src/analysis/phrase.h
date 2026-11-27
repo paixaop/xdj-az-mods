@@ -41,9 +41,11 @@ typedef struct {
     D quarters, peaks, bars;
 } Power;
 typedef struct {
-    ta_phrase_biquad low[4], high[4], delaySmoother, bandSmoother;
+    ta_phrase_biquad low[TA_ATTACK_FILTER_SECTION_CAPACITY], high[TA_ATTACK_FILTER_SECTION_CAPACITY];
+    ta_phrase_biquad delaySmoother, bandSmoother;
     int lowCount, second, delay;
     double previous, maximum;
+    const double *parameters;
 } Attacks;
 typedef struct {
     D lowPower, subPower, allPower, allPeaks, dividedLow, dividedMiddle;
@@ -51,38 +53,40 @@ typedef struct {
     I finalMiddle;
     int zeroData, middleExtent;
 } Rhythm;
-double d_sum(D a);
+double d_sum(D a, const double *parameters);
+bool phrase_reduction_uses_windows(const double *order, int width);
+double phrase_reduce_pairs(const double *lanes, const double *order, int width);
 double d_sequential(D a);
 double d_max(D a);
 double d_min(D a);
 double d_square(D a);
 D d_view(ta_context *c, D a, int start, int end);
 D d_copy(ta_context *c, D a);
-D d_normalized(ta_context *c, D a);
+D d_normalized(ta_context *c, D a, double zero_scale);
 I i_copy(ta_context *c, I a);
 ta_phrase_biquad second_order(double rate, double cutoff, double damping, bool high);
 ta_phrase_biquad smoother(double rate, double cutoff);
 D filter(ta_context *c, ta_phrase_biquad *sections, int count, D input, bool rectify);
-Samples phrase_decode(ta_context *c);
-Envelopes phrase_envelopes(ta_context *c, Samples s);
-Timing reference_timing(ta_context *c, double bpm, double first, int position, double firstBpm);
-Coordinates phrase_coordinates(ta_context *c, Samples s, Timing t);
-I stage_coordinates(ta_context *c, int count, double rate, double bpm, int offset);
-int nominal_beats(double period, int phase, double seconds);
-int activity_start(D samples, double rate, double bpm, int offset);
-Activity low_activity(ta_context *c, D source, int phase);
-Activity middle_activity(ta_context *c, D source, int phase);
-AllActivity all_activity(ta_context *c, D source, int phase);
-AllActivity middle_peak_activity(ta_context *c, D source, int count, int phase);
-Beats phrase_beats(ta_context *c, Samples s, Timing t);
+Samples phrase_decode(ta_context *c, const double *parameters);
+Envelopes phrase_envelopes(ta_context *c, Samples s, const double *parameters);
+Timing reference_timing(ta_context *c, double bpm, double first, int position, double firstBpm, const double *);
+Coordinates phrase_coordinates(ta_context *c, Samples s, Timing t, const double *);
+I stage_coordinates(ta_context *c, int count, double rate, double bpm, int offset, const double *);
+int nominal_beats(double bpm, int phase, int offset_ms, const double *parameters);
+int activity_start(D samples, double rate, double bpm, int offset, const double *parameters);
+Activity low_activity(ta_context *c, D source, int phase, const double *parameters);
+Activity middle_activity(ta_context *c, D source, int phase, const double *parameters);
+AllActivity all_activity(ta_context *c, D source, int phase, const double *parameters);
+AllActivity middle_peak_activity(ta_context *c, D source, int count, int phase, const double *parameters);
+Beats phrase_beats(ta_context *c, Samples s, Timing t, const double *parameters);
 Power rhythm_power(ta_context *c, ta_phrase_biquad *section, D input, double rate, double bpm,
-                   I coordinates, int n, bool low);
-Attacks attacks_init(ta_context *c, double rate, bool second);
+                   I coordinates, int n, bool low, const double *parameters);
+Attacks attacks_init(ta_context *c, double rate, bool second, const double *parameters);
 B attacks_process(ta_context *c, Attacks *a, D input, double rate, double bpm, int offset,
                   int phase, int block, I coordinates, int n, bool integerPeriod);
 B attacks_timing(ta_context *c, Attacks *a, D input, double rate, double bpm, int offset, int phase,
                  int block);
-Rhythm phrase_rhythm(ta_context *c, Samples s, Timing t, Coordinates coordinates);
+Rhythm phrase_rhythm(ta_context *c, Samples s, Timing t, Coordinates coordinates, const double *parameters);
 typedef struct {
     D *rows;
     int n;
@@ -99,13 +103,14 @@ typedef struct {
     B presence, rises;
     D envelope;
 } OpeningFeatures;
-Peaks spectral_peaks(ta_context *c, D samples);
+Peaks spectral_peaks(ta_context *c, D samples, const double *parameters);
 Spectra phrase_spectra(ta_context *c, Samples samples, Timing timing, Coordinates coordinates,
-                       bool recurrence);
-Spectra opening_spectra(ta_context *c, D samples, double rate);
-OpeningFeatures opening_features(ta_context *c, Spectra spectra, int first, int beats);
-D vocal_activity(ta_context *c, Spectra spectra);
-I vocal_entries(ta_context *c, D activity);
+                       bool recurrence, const double *parameters);
+Spectra opening_spectra(ta_context *c, D samples, double rate, const double *);
+int opening_first_frame(ta_context *c, double middle_rate, Timing timing, const double *parameters);
+OpeningFeatures opening_features(ta_context *c, Spectra spectra, int first, int beats, const double *parameters);
+D vocal_activity(ta_context *c, Spectra spectra, const double *parameters);
+I vocal_entries(ta_context *c, D activity, const double *parameters);
 void spectra_release(ta_context *c, Spectra spectra);
 enum { MOOD_HIGH = 1, MOOD_MID = 2, MOOD_LOW = 3 };
 typedef struct {
@@ -141,20 +146,24 @@ typedef struct {
     I roles;
     D level, middle, vocal;
 } SeedEvidence;
-int initial_mood(MoodInputs x);
-void bpm_flags(double bpm, int *narrow, int *broad);
-LowPower classify_power(ta_context *c, D low, D full, int beats);
-Compression classify_compression(ta_context *c, D low, D full, B rhythm, int phase);
-int slow_rock(ta_context *c, B low, B middle);
-RhythmFlags rhythm_flags(ta_context *c, B rhythm, double bpm, D powers);
+int initial_mood(MoodInputs x, const double parameters[TA_PHRASE_PARAMETER_COUNT]);
+void bpm_flags(double bpm, int *narrow, int *broad, const double *parameters);
+LowPower classify_power(ta_context *c, D low, D full, int beats, const double *);
+Compression classify_compression(ta_context *c, D low, D full, B rhythm, int phase,
+                                 const double *parameters);
+int slow_rock(ta_context *c, B low, B middle, const double *);
+RhythmFlags rhythm_flags(ta_context *c, B rhythm, double bpm, D powers, const double *parameters);
 int slow_tempo(ta_context *c, double rate, double bpm, D powers, SnarePositions onsets, I beats,
-               int sourceOffset, int analysisOffset);
-int fade_out(D low, D full);
-int revise_mood(ta_context *c, int mood, int beats, D low, D quarters);
-Recurrence recurrence(ta_context *c, Spectra spectra, I boundaries, int phase, int endBeat);
-SeedEvidence non_high_seeds(ta_context *c, D middle, D envelope, I boundaries, D vocal, int mood);
-I reconcile_roles(ta_context *c, I seeds, Recurrence recurrence);
-SnarePositions genre_snares(ta_context *c, Samples samples, Timing timing, int *rhythmType);
+               int sourceOffset, int analysisOffset, const double *parameters);
+int fade_out(D low, D full, const double *parameters);
+int revise_mood(ta_context *c, int mood, int beats, D low, D quarters, const double *parameters);
+Recurrence recurrence(ta_context *c, Spectra spectra, I boundaries, int phase, int endBeat,
+                      const double *parameters);
+SeedEvidence non_high_seeds(ta_context *c, D middle, D envelope, I boundaries, D vocal, int mood,
+                            const double *parameters);
+I reconcile_roles(ta_context *c, I seeds, Recurrence recurrence, const double *);
+SnarePositions genre_snares(ta_context *c, Samples samples, Timing timing, int *rhythmType,
+                           const double *parameters);
 I i_sorted(ta_context *c, I a, bool descending);
 I i_compact(ta_context *c, I a, bool unique);
 I i_join(ta_context *c, I a, I b);
@@ -167,8 +176,10 @@ typedef struct {
     I raw;
     D scores;
 } Opening;
-Opening opening_judge(ta_context *c, D envelope, D low, D middle, D vocal, int phase);
-Opening opening_main(ta_context *c, D envelope, D low, D middle, D vocal, int phase, I anchors);
+Opening opening_judge(ta_context *c, D envelope, D low, D middle, D vocal, int phase,
+                      const double *parameters);
+Opening opening_main(ta_context *c, D envelope, D low, D middle, D vocal, int phase, I anchors,
+                     const double *parameters);
 typedef struct {
     I roles;
     bool simple;
@@ -181,9 +192,9 @@ typedef struct {
     double score;
     D positive, negative;
 } Route;
-HighRoles high_classify(ta_context *, I, D, D);
-BlockMeans block_means(ta_context *, I, D, D, D, int);
-Route phrase_route(ta_context *, D, int, double, I, I, int);
+HighRoles high_classify(ta_context *, I, D, D, const double *);
+BlockMeans block_means(ta_context *, I, D, D, D, int, const double *);
+Route phrase_route(ta_context *, D, int, double, I, I, int, const double *);
 typedef struct {
     D levels, contrast, direction;
 } RatioSeries;
@@ -200,15 +211,15 @@ typedef struct {
 typedef struct {
     Candidates shortList, longList;
 } Alternatives;
-RatioSeries ratio_series(ta_context *, D);
-CandidateFeatures candidate_features(ta_context *, D, D, D, D, int);
-I local_candidates(ta_context *, RatioSeries, int);
-I verse_hook_candidates(ta_context *, CandidateFeatures, I, int, int, int);
-I short_breaks(ta_context *, D, D, int, int);
-I adjust_candidates(ta_context *, I, I, int, int);
-Anchors secure_points(ta_context *, D, int);
-Alternatives initial_alternatives(ta_context *, Anchors, int);
-I noise_changes(ta_context *, D);
+RatioSeries ratio_series(ta_context *, D, const double *);
+CandidateFeatures candidate_features(ta_context *, D, D, D, D, int, const double *);
+I local_candidates(ta_context *, RatioSeries, int, const double *);
+I verse_hook_candidates(ta_context *, CandidateFeatures, I, int, int, int, const double *);
+I short_breaks(ta_context *, D, D, int, int, const double *);
+I adjust_candidates(ta_context *, I, I, int, int, const double *);
+Anchors secure_points(ta_context *, D, int, const double *);
+Alternatives initial_alternatives(ta_context *, Anchors, int, const double *);
+I noise_changes(ta_context *, D, const double *parameters);
 typedef struct {
     int start, end;
     bool deep;
@@ -225,17 +236,17 @@ typedef struct {
     B flags;
     double mean;
 } RhythmRejection;
-I low_peak_candidates(ta_context *, int, D, int, B);
-BreakEvidence break_evidence(ta_context *, I, int, D, D, D);
-ChangeEvidence change_evidence(ta_context *, I, int, D, D, D, D, D);
-I irregular_seeds(ta_context *, int, D, int, B, int, BreakEvidence, ChangeEvidence);
-double verse_score(ta_context *, int, VerseProfile *, double);
-I all_band_candidates(ta_context *, I, int, D, B, B, B, VerseProfile);
-I adjust_high_candidates(ta_context *, I, D, D);
-RhythmRejection reject_repeated_rhythm(ta_context *, I, B);
-I add_genre1(ta_context *, I, I, RatioSeries, I, I, int);
-I reconcile_high_seeds(ta_context *, I, I);
-I finish_candidates(ta_context *, I, int, I, int, int);
+I low_peak_candidates(ta_context *, int, D, int, B, const double *);
+BreakEvidence break_evidence(ta_context *, I, int, D, D, D, const double *);
+ChangeEvidence change_evidence(ta_context *, I, int, D, D, D, D, D, const double *);
+I irregular_seeds(ta_context *, int, D, int, B, int, BreakEvidence, ChangeEvidence, const double *);
+double verse_score(ta_context *, int, VerseProfile *, double, const double *);
+I all_band_candidates(ta_context *, I, int, D, B, B, B, VerseProfile, const double *);
+I adjust_high_candidates(ta_context *, I, D, D, const double *);
+RhythmRejection reject_repeated_rhythm(ta_context *, I, B, const double *);
+I add_genre1(ta_context *, I, I, RatioSeries, I, I, int, const double *);
+I reconcile_high_seeds(ta_context *, I, I, const double *);
+I finish_candidates(ta_context *, I, int, I, int, int, const double *);
 typedef struct {
     D values;
     int beats;
@@ -253,19 +264,16 @@ typedef struct {
 typedef struct {
     I roles, starts, auxiliary, routes;
 } Fills;
-HighProfile normalize_high(ta_context *, D, int);
-I snare_candidates(ta_context *, D, int);
-FillDetection fill_growth(ta_context *, int, int, D);
-FillDetection fill_cut(ta_context *, int, int, D, D);
-int repeated_peak_score(D);
-I repeated_scores(ta_context *, HighProfile);
-FillDetection repeated_upper(int, int, I);
-Fills attach_fills(ta_context *, I, I, FillProfile, int);
-void clean_activity(ta_context *, I, FillProfile, Fills *);
-bool is_hook(int);
-bool is_up(int);
-int undecorated(int);
-void final_adjust(ta_context *, I, bool, D, Fills *);
+HighProfile normalize_high(ta_context *, D, int, const double *parameters);
+I snare_candidates(ta_context *, D, int, const double *parameters);
+FillDetection fill_growth(ta_context *, int, int, D, const double *);
+FillDetection fill_cut(ta_context *, int, int, D, D, const double *);
+int repeated_peak_score(D, const double *);
+I repeated_scores(ta_context *, HighProfile, const double *);
+FillDetection repeated_upper(int, int, I, const double *);
+Fills attach_fills(ta_context *, I, I, FillProfile, int, const double *);
+void clean_activity(ta_context *, I, FillProfile, Fills *, const double *);
+void final_adjust(ta_context *, I, bool, D, Fills *, const double *parameters);
 typedef struct {
     I roles, starts;
     D metrics;
@@ -282,12 +290,12 @@ typedef struct {
     Fills fills;
     I upStarts, upFirst, upSecond, upThird;
 } Decorated;
-bool beat_four(ta_context *, int, int, bool, D, D);
-UpAnalysis simple_loops(ta_context *, I, I, D, D, D);
-I restore_loops(ta_context *, I, I, D);
-RhythmAnalysis decorate_rhythm(ta_context *, I, I, B);
-Outro phrase_outro(ta_context *, I, I, D, B, D, int);
-Decorated decorate_high(ta_context *, I, I, FillProfile, D, D, D, B);
+bool beat_four(ta_context *, int, int, bool, D, D, const double *);
+UpAnalysis simple_loops(ta_context *, I, I, D, D, D, const double *);
+I restore_loops(ta_context *, I, I, D, const double *);
+RhythmAnalysis decorate_rhythm(ta_context *, I, I, B, const double *);
+Outro phrase_outro(ta_context *, I, I, D, B, D, int, const double *);
+Decorated decorate_high(ta_context *, I, I, FillProfile, D, D, D, B, const double *);
 typedef struct {
     int flag;
     double summary;
@@ -297,9 +305,10 @@ typedef struct {
     Variation variation;
     I auxiliary;
 } PhraseExport;
-Variation phrase_variation(ta_context *, D, I);
-PhraseExport phrase_convert(ta_context *, int, Decorated, Variation);
-PhraseExport export_non_high(ta_context *, int, I, Spectra, int, int, D, D, D, D, B, D, D);
-I phrase_candidates(ta_context *, Beats, Opening, D, D, B, B, double, int);
-PhraseExport phrase_classify(ta_context *, Samples, Timing);
+Variation phrase_variation(ta_context *, D, I, const double *);
+PhraseExport phrase_convert(ta_context *, int, Decorated, Variation, const double *);
+PhraseExport export_non_high(ta_context *, int, I, Spectra, int, int, D, D, D, D, B, D, D,
+                             const double *);
+I phrase_candidates(ta_context *, Beats, Opening, D, D, B, B, double, int, const double *);
+PhraseExport phrase_classify(ta_context *, Samples, Timing, const double *phrase_parameters);
 #endif

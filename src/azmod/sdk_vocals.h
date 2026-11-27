@@ -33,7 +33,7 @@ static inline int sv_tag(const uint8_t *p, size_t n, az_vocal_snapshot_v1 *v) {
     v->frame_count = count;
     v->hop_samples = hop;
     v->sample_rate = rate;
-    v->threshold = 3;
+    v->threshold = AZ_ANALYSIS_POLICY_SAVED_VOCAL_THRESHOLD;
     v->analyzed_s = (double) count * hop / rate;
     return count ? AZ_OK : AZ_NOT_FOUND;
 }
@@ -86,9 +86,11 @@ static inline uint32_t sv_interval_count(const uint8_t *scores, const az_vocal_s
 }
 static inline int sv_interval(const az_vocal_snapshot_v1 *v, uint32_t start, uint32_t end, az_vocal_interval *out) {
     double stop = (double) end * v->hop_samples / v->sample_rate;
-    int order = compare_timestamps(stop, v->analyzed_s, 1, v->sample_rate, 1);
+    int order = compare_timestamps(stop, v->analyzed_s, 1, v->sample_rate,
+                                   AZ_ANALYSIS_POLICY_SAVED_VOCAL_TOLERANCE_SAMPLES);
     if (order == AZ_TIME_INVALID) return AZ_FAILED;
-    if (order == AZ_TIME_AFTER) stop = v->analyzed_s;
+    if (order == AZ_TIME_AFTER && AZ_ANALYSIS_POLICY_CLIP_SAVED_VOCAL_END)
+        stop = v->analyzed_s;
     *out = (az_vocal_interval) {(double) start * v->hop_samples / v->sample_rate, stop};
     return AZ_OK;
 }

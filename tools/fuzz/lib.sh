@@ -121,7 +121,7 @@ fz_prepare() {
     cmcat)
         mkdir -p "$dir/azmod" "$dir/common"
         cp guest/azmod/*.c guest/azmod/*.h guest/azmod/*.def "$dir/azmod/"
-        cp guest/common/*.h "$dir/common/"
+        cp guest/common/*.h guest/common/analysis-policy.def "$dir/common/"
         [ ! -d guest/azmod/icons ] || cp -R guest/azmod/icons "$dir/azmod/"
         grep -q '^static void cm_load(void)' "$dir/azmod/screen_community.c" ;;
     sdklib)
@@ -130,7 +130,7 @@ fz_prepare() {
     sdkanalysis)
         mkdir -p "$dir/../common"
         cp guest/azmod/sdk_analysis.h guest/azmod/hc_anlz.h guest/azmod/azmod-mod.h "$dir/"
-        cp guest/common/aztimestamp.h "$dir/../common/" ;;
+        cp guest/common/{aztimestamp.h,azanalysis_policy.h,analysis-policy.def} "$dir/../common/" ;;
     hcanlz)
         cp guest/azmod/hc_anlz.h "$dir/"
         grep -q 'static inline int hc_anlz_hot_cues' "$dir/hc_anlz.h" ;;

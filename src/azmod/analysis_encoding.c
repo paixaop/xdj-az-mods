@@ -14,11 +14,12 @@ static int sa_result_header_valid(const az_analysis_result_v1 *r) {
            !r->reserved && !r->reserved2;
 }
 static int sa_result_source_valid(const az_analysis_result_v1 *r) {
-    return (r->source_rate == 44100 || r->source_rate == 48000) && r->source_frames &&
-           r->source_frames <= (uint64_t) r->source_rate * 1200;
+    return az_analysis_source_rate_supported(r->source_rate) && r->source_frames &&
+           r->source_frames <= (uint64_t)r->source_rate * AZ_ANALYSIS_POLICY_MAXIMUM_SOURCE_SECONDS;
 }
 static int sa_result_counts_valid(const az_analysis_result_v1 *r) {
-    return r->beat_count <= 32768 && r->phrases.count <= 1024 &&
+    return r->beat_count <= AZ_ANALYSIS_POLICY_MAXIMUM_GRID_BEATS &&
+           r->phrases.count <= AZ_ANALYSIS_POLICY_MAXIMUM_PHRASE_COUNT &&
            r->vocals.count <= SV_FRAMES_MAX && !r->phrases.reserved &&
            (r->phrases.count || r->vocals.count);
 }
@@ -43,19 +44,22 @@ static int sa_result_metadata_valid(const az_analysis_result_v1 *r) {
            sa_result_buffers_valid(r) && sa_result_phrase_header_valid(r) && sa_result_vocal_header_valid(r);
 }
 static int sa_result_beat_time_valid(const az_beat *beat) {
-    return isfinite(beat->time_s) && beat->time_s >= 0 && beat->time_s * 1000 + 0.5 <= UINT32_MAX;
+    return isfinite(beat->time_s) && beat->time_s >= 0 && az_analysis_stored_time(beat->time_s) <= UINT32_MAX;
 }
 static int sa_result_beat_tempo_valid(const az_beat *beat) {
-    return isfinite(beat->bpm) && round(beat->bpm * 100) >= 1 && round(beat->bpm * 100) <= UINT16_MAX &&
-           beat->beat_in_bar >= 1 && beat->beat_in_bar <= 4 && !beat->reserved;
+    double stored = round(beat->bpm * AZ_ANALYSIS_POLICY_TEMPO_UNITS_PER_BPM);
+    return isfinite(beat->bpm) && stored >= 1 && stored <= UINT16_MAX &&
+           az_analysis_phase_supported(beat->beat_in_bar) && !beat->reserved;
 }
 static int sa_result_beats_ordered(const az_analysis_result_v1 *r) {
+    unsigned window = AZ_ANALYSIS_POLICY_GRID_TOLERANCE_SAMPLES;
+    unsigned units = AZ_ANALYSIS_POLICY_STORED_MILLISECONDS_PER_SECOND;
     for (uint32_t i = 1; i < r->beat_count; i++) {
-        int order = compare_timestamps(r->beats[i].time_s, r->beats[i - 1].time_s, 1, r->source_rate, 1);
+        int order = compare_timestamps(r->beats[i].time_s, r->beats[i - 1].time_s, 1, r->source_rate, window);
         if (order == AZ_TIME_INVALID || order != AZ_TIME_AFTER) return 0;
-        uint64_t current_ms = (uint64_t) (r->beats[i].time_s * 1000 + 0.5);
-        uint64_t previous_ms = (uint64_t) (r->beats[i - 1].time_s * 1000 + 0.5);
-        order = compare_timestamps(current_ms, previous_ms, 1000, r->source_rate, 1);
+        uint64_t current_ms = (uint64_t)az_analysis_stored_time(r->beats[i].time_s);
+        uint64_t previous_ms = (uint64_t)az_analysis_stored_time(r->beats[i - 1].time_s);
+        order = compare_timestamps(current_ms, previous_ms, units, r->source_rate, window);
         if (order == AZ_TIME_INVALID || order != AZ_TIME_AFTER) return 0;
     }
     return 1;
@@ -102,8 +106,8 @@ static void sa_encode_grid(const az_analysis_result_v1 *r, uint8_t *tag, uint32_
     for (uint32_t i = 0; i < r->beat_count; i++) {
         uint8_t *row = tag + 24 + i * 8;
         sa_typed_put16(row, r->beats[i].beat_in_bar);
-        sa_typed_put16(row + 2, (uint32_t) round(r->beats[i].bpm * 100));
-        sa_put32(row + 4, (uint32_t) (r->beats[i].time_s * 1000 + 0.5));
+        sa_typed_put16(row + 2, (uint32_t)round(r->beats[i].bpm * AZ_ANALYSIS_POLICY_TEMPO_UNITS_PER_BPM));
+        sa_put32(row + 4, (uint32_t)az_analysis_stored_time(r->beats[i].time_s));
     }
 }
 static void sa_encode_phrases(const az_analysis_result_v1 *r, uint8_t *tag, uint32_t pn) {

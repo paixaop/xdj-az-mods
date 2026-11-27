@@ -1463,7 +1463,7 @@ fi
 # ---------------------------------------------------------------- community mod services: deck and UI
 d="$OUT/sdk"; mkdir -p "$d"
 mkdir -p "$OUT/common"
-cp guest/common/aztimestamp.h "$OUT/common/"
+cp guest/common/{aztimestamp.h,azanalysis_policy.h,analysis-policy.def} "$OUT/common/"
 L=guest/azmod/sdk_logic.h
 region $DR '^/\* Correction for unmeasured cases' '^/\* ---- EP147.s own beat grid' > "$d/grid.inc"
 extract guest/azstem/sdk_export.c '^int azstem_deck_beat_phase\(int deck, double \*phase\) \{' >> "$d/grid.inc"
@@ -3345,7 +3345,7 @@ fi
 echo "=== thread lint ==="
 if ! plain_only "thread lint"; then :; elif "$T/thread-lint.sh" guest; then :; else failures=$((failures + 1)); fi
 TL="$OUT/thread-lint"; mkdir -p "$TL/azmod" "$TL/azstem" "$TL/common"
-cp guest/azmod/*.c "$TL/azmod/"; cp guest/azstem/*.c "$TL/azstem/"; cp guest/common/*.h "$TL/common/"
+cp guest/azmod/*.c "$TL/azmod/"; cp guest/azstem/*.c "$TL/azstem/"; cp guest/common/*.h guest/common/analysis-policy.def "$TL/common/"
 printf '%s\n' 'static void planted(void) { pthread_t t; pthread_create(&t, NULL, flusher, NULL); }' >> "$TL/azstem/azstem.c"
 echo
 

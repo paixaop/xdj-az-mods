@@ -3,6 +3,7 @@
 #define _DARWIN_C_SOURCE
 #include "pvdi-model.h"
 
+#include <CoreFoundation/CoreFoundation.h>
 #include <errno.h>
 #include <limits.h>
 #include <spawn.h>
@@ -89,18 +90,70 @@ static bool create_model(struct import_paths *paths, const struct pvdi_profile *
     return success;
 }
 
-int main(int argc, char **argv)
+static CFDictionaryRef copy_bundle_info(const char *app)
 {
-    if (argc != 3 || !argv[1][0] || !argv[2][0]) {
-        fprintf(stderr, "Usage: %s REKORDBOX_APP OUTPUT_DIRECTORY\n", argv[0]);
-        return EXIT_FAILURE;
-    }
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)app,
+                                                          (CFIndex)strlen(app), true);
+    if (!url)
+        return NULL;
+    CFDictionaryRef info = CFBundleCopyInfoDictionaryForURL(url);
+    CFRelease(url);
+    return info;
+}
+
+static bool bundle_version(const char *app, char *version, size_t size)
+{
+    CFDictionaryRef info = copy_bundle_info(app);
+    if (!info)
+        return false;
+    CFTypeRef value = CFDictionaryGetValue(info, CFSTR("CFBundleVersion"));
+    bool ok = value && CFGetTypeID(value) == CFStringGetTypeID() &&
+              CFStringGetCString((CFStringRef)value, version, (CFIndex)size, kCFStringEncodingUTF8);
+    CFRelease(info);
+    return ok;
+}
+
+static const struct pvdi_profile *profile_for_app(const char *app)
+{
+    char version[64];
+    if (bundle_version(app, version, sizeof version))
+        return pvdi_macos_profile_for_version(version);
+    fprintf(stderr, "Cannot read rekordbox bundle version from %s\n", app);
+    return NULL;
+}
+
+static bool import_bundle(const char *app, const char *output_dir)
+{
     struct import_paths paths;
-    if (!prepare_paths(&paths, argv[1], argv[2]) ||
+    if (!prepare_paths(&paths, app, output_dir) ||
         strlen(paths.temporary) + sizeof "/pvdi-model.bin" > PATH_MAX) {
         fputs("Model import path is too long\n", stderr);
+        return false;
+    }
+    const struct pvdi_profile *profile = profile_for_app(app);
+    return profile && create_model(&paths, profile);
+}
+
+static bool valid_arguments(int argc, char **argv)
+{
+    if (argc != 3 && argc != 4)
+        return false;
+    for (int i = 1; i < argc; ++i) {
+        if (!argv[i][0])
+            return false;
+    }
+    return true;
+}
+
+int main(int argc, char **argv)
+{
+    if (!valid_arguments(argc, argv)) {
+        fprintf(stderr, "Usage: %s REKORDBOX_APP OUTPUT_DIRECTORY\n"
+                        "       %s REKORDBOX_EXE VD_PARAM_PB OUTPUT_DIRECTORY\n",
+                argv[0], argv[0]);
         return EXIT_FAILURE;
     }
-    const struct pvdi_profile *profile = pvdi_profile_for_app(argv[1]);
-    return profile && create_model(&paths, profile) ? EXIT_SUCCESS : EXIT_FAILURE;
+    bool ok = argc == 3 ? import_bundle(argv[1], argv[2]) :
+                         pvdi_create_windows_model(argv[1], argv[2], argv[3]);
+    return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

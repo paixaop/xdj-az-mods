@@ -4,6 +4,7 @@
 #include "PortableDSP.h"
 #include "allocator.h"
 #include "analysis.h"
+#include "model-format.h"
 #include <float.h>
 #include <limits.h>
 #include <setjmp.h>
@@ -30,6 +31,7 @@ typedef struct ta_context {
     ta_budget owned_budget, *budget;
     struct timespec profile_previous;
     bool phrase_profile;
+    bool windows_model;
 } ta_context;
 /* Every allocation belongs to one analysis and is released on success, failure,
  * or cancellation. The recovery boundary is on this same C thread. */
@@ -100,5 +102,7 @@ static inline void ta_put16(uint8_t *p, unsigned n) {
     p[0] = n >> 8;
     p[1] = n;
 }
-az_analysis_vocal_map_v1 ta_vocals(ta_context *c, const char *model_path);
+uint8_t *ta_model_open(ta_context *c);
+void ta_model_phrase_parameters(ta_context *c, double parameters[TA_PHRASE_PARAMETER_COUNT]);
+az_analysis_vocal_map_v1 ta_vocals(ta_context *c);
 #endif
