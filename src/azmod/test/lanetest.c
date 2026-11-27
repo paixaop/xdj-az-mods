@@ -114,6 +114,10 @@ int azcm_confirm(const char *title, const char *text, const char *yes,
     (void) user;
     return -1; /* no dialog on the host: nothing is asked, so nothing is sent */
 }
+__attribute__((weak)) int azcm_text_entry(const az_text_entry_v1 *entry) {
+    (void) entry;
+    return AZ_UNSUPPORTED;
+}
 void azcm_reload_requested(void) {}
 void azcm_unsuspend(const char *id) { (void) id; }
 void azcm_set_all_off(int off) { (void) off; }

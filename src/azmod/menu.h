@@ -291,6 +291,8 @@ bool azmod_back(azmod_state *s);
  * Returns true while a drag the box owns is in progress. */
 bool azmod_changelog_drag(azmod_state *s, const azmod_fb *fb, int y, int phase);
 bool azmod_cm_drag(azmod_state *s, const azmod_fb *fb, int y, int phase);
+__attribute__((visibility("hidden"))) int azmod_cm_screen_owner(const azmod_state *s);
+__attribute__((visibility("hidden"))) int azcm_text_entry(const az_text_entry_v1 *entry);
 /* Community Mods: Update all's next step, every overlay tick (the menu open or closed) */
 __attribute__((visibility("hidden"))) void azmod_cm_bg_tick(void);
 void azmod_menu_clock(long ms);        /* ms now, before each touch event (tap timing) */

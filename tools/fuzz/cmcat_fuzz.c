@@ -4,7 +4,7 @@
  * writes from what it downloaded, so any bytes. Every parse is followed by a layout of the
  * page the input picks, so the parsed fields reach the drawing code.
  *
- * Input: byte 0 picks the page (home tabs, a catalog mod's page, the Add repository keyboard), its high
+ * Input: byte 0 picks the page (home tabs, a catalog mod's page, the Repositories tab), its high
  * bits the Browse order and a turn of the knob on Home; byte 1 the mod, or Browse's
  * view (Home, All mods, a category); the rest is split at the first NUL into the catalog and the
  * status file (no NUL: no status file). A mod line's download count (field 21) is any bytes too:
@@ -88,7 +88,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n) {
     g_cm_sort = (page >> 4 & 3) % CMB_NSORT;
     g_cm_fcat = pick % (CMB_NCAT + 2) - 2; /* CMB_HOME, CMB_ALL, then the categories */
     if ((page & 7) == 7) {
-        g_cm_view = CMV_KBD;
+        g_cm_view = CMV_HOME;
+        g_cm_tab = 2;
     } else if ((page & 7) < 3) {
         g_cm_view = CMV_HOME;
         g_cm_tab = page & 3;

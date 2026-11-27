@@ -139,6 +139,10 @@ static int install_library_hooks(void) {
     mark("library");
     return library_ok;
 }
+static void azsp_runtime_start(int build) {
+    assert(build == identified && build == g_ep147_build);
+    mark("provider");
+}
 static void *cr_watch(void *arg) { return arg; }
 static void *overlay_thread(void *arg) { return arg; }
 static int az_thread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*fn)(void *), void *arg) {
@@ -209,6 +213,9 @@ static void constructor_paths(void) {
         before("altstack ", "install_crash_reporter ");
         before("install_crash_reporter ", "crash_thread ");
         before("load_settings_early ", "install_static_hooks ");
+        before("load_settings_early ", "provider ");
+        if (!status_off && registry_ok) before("library ", "provider ");
+        before("provider ", "wz_restore ");
         before("wz_restore ", "install_banner ");
         before("install_static_hooks ", "azm_hooks_go_late ");
         before("sdk_beatport_install ", "azm_hooks_go_late ");

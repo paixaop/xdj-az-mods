@@ -690,6 +690,40 @@ static void map_origin_cases(const struct st_source *src, sqlite3 *writer, const
 }
 #include "sdkstatus_store_validation_test.inc"
 #include "sdkstatus_save_install_test.inc"
+static void hfs_status_handoff(const char *root) {
+    sqlite3 *writer = hfs_sample_library(root, 104);
+    char physical[1024];
+    snprintf(physical, sizeof physical, "%s/sdb1/.PIONEER/USBANLZ/sample.DAT", g_media);
+    const char logical[] = "/PIONEER/USBANLZ/sample.DAT";
+    const char content[] = "/Contents/a/ten.mp3";
+    uint16_t audio[sizeof content - 1], analysis[sizeof logical - 1];
+    for (size_t i = 0; i < sizeof content - 1; ++i) audio[i] = (uint16_t) content[i];
+    for (size_t i = 0; i < sizeof logical - 1; ++i) analysis[i] = (uint16_t) logical[i];
+
+    uint64_t id = fi_begin(physical, strlen(physical), NULL, 0);
+    assert(id && !fi_seal(id, 0));
+    id = fi_begin(physical, strlen(physical), audio, sizeof audio / sizeof *audio);
+    assert(id && !fi_seal(id, 0));
+
+    sql(writer, "UPDATE content SET analysisDataFilePath='/.PIONEER/USBANLZ/sample.DAT' WHERE content_id=11");
+    assert(!fi_begin(physical, strlen(physical), NULL, 0));
+    id = fi_begin(physical, strlen(physical), audio, sizeof audio / sizeof *audio);
+    assert(id && !fi_seal(id, 0));
+
+    struct st_source source;
+    char export[1024];
+    assert(st_source_read(0, &source) == AZ_OK);
+    int length = ss_export_root(&source, export);
+    assert(length > 0 && (size_t) length < sizeof export);
+    struct fo_read *read = fo_alloc();
+    assert(read && fo_open(read, export, (size_t) length, audio, sizeof audio / sizeof *audio,
+                           analysis, sizeof analysis / sizeof *analysis, NULL, 0));
+    assert(read->source.ref.track_id == 10 && !strcmp(read->files[0].path, physical));
+    fo_drop(read);
+    assert(!sqlite3_close(writer));
+    puts("PASS HFS+ status input accepts both locator forms and rejects ambiguous ownership");
+}
+
 int main(int argc, char **argv) {
     st_test_real_worker = 1;
 #if defined(__linux__)
@@ -1190,6 +1224,7 @@ int main(int argc, char **argv) {
     pthread_mutex_lock(&test_mu);
     assert(proof_database && proof_other && proof_baselines);
     pthread_mutex_unlock(&test_mu);
+    hfs_status_handoff(real_root);
     puts("PASS provenance: exact database-version cause, distinct file/source uncertainty and fenced baseline context");
     puts("status store: isolated DAT/EXT payloads and framing, PWAV bytes, two ports, epoch fencing, WAL, rollback and source loss passed");
     return 0;

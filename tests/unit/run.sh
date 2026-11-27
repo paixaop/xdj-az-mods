@@ -2097,6 +2097,45 @@ for v in real ctl-late; do
 done
 suite "core dialog" "$d/real"
 
+# SOURCE service activation, native cell bounds, and mixer button filtering.
+d="$OUT/source-browser"; mkdir -p "$d"
+for fixture in sdksource_browser_native_test sdk_source_browser_test source_provider_test; do
+    $CC "${CFLAGS[@]}" -pthread -Iguest/azmod -o "$d/$fixture" "$T/$fixture.c" guest/azmod/source_provider.c
+    suite "$fixture" "$d/$fixture"
+done
+$CC "${CFLAGS[@]}" -pthread -Iguest/azmod -o "$d/source_import_test" "$T/source_import_test.c" \
+    guest/azmod/source_provider.c guest/azmod/source_import_files.c guest/azmod/source_import_sql.c \
+    guest/azmod/source_import_publish.c guest/azmod/source_provider_catalog.c guest/azmod/source_provider_stream.c \
+    guest/azmod/source_import_analyzer.c guest/azmod/track_storage.c -lsqlite3 -lm
+suite "source import files and SQL" "$d/source_import_test"
+$CC "${CFLAGS[@]}" -pthread -Iguest/azmod -o "$d/source_import_queue_test" "$T/source_import_queue_test.c"
+suite "source import queue" "$d/source_import_queue_test"
+$CC "${CFLAGS[@]}" -pthread -Iguest/azmod -o "$d/source_import_worker_test" "$T/source_import_worker_test.c"
+suite "source import worker" "$d/source_import_worker_test"
+$CC "${CFLAGS[@]}" -pthread -Iguest/azmod -o "$d/source_import_analyzer_test" "$T/source_import_analyzer_test.c" \
+    guest/azmod/source_import_analyzer.c guest/azmod/track_storage.c -lm
+suite "source import analyzer" "$d/source_import_analyzer_test"
+$CC "${CFLAGS[@]}" -pthread -Iguest/azmod -o "$d/source_provider_dispatch_test" "$T/source_provider_dispatch_test.c"
+suite "source provider native dispatch" "$d/source_provider_dispatch_test"
+$CC "${CFLAGS[@]}" -pthread -Iguest/azmod -o "$d/source_provider_cache_test" "$T/source_provider_cache_test.c" \
+    guest/azmod/source_provider.c guest/azmod/source_provider_cache.c
+suite "source provider cache" "$d/source_provider_cache_test"
+$CC "${CFLAGS[@]}" -pthread -Iguest/azmod -o "$d/source_provider_query_test" "$T/source_provider_query_test.c" \
+    guest/azmod/source_provider_query.c guest/azmod/source_provider_catalog.c -lsqlite3
+query_fixture=$(mktemp -d "$d/native-query.XXXXXX")
+suite "source provider native query" "$d/source_provider_query_test" "$query_fixture"
+runtime_libs=()
+if [ "$(uname -s)" = Linux ]; then runtime_libs+=(-ldl); fi
+$CC "${CFLAGS[@]}" -pthread -Iguest/azmod -o "$d/source_provider_runtime_test" "$T/source_provider_runtime_test.c" "${runtime_libs[@]}"
+suite "source provider runtime" "$d/source_provider_runtime_test"
+$CC "${CFLAGS[@]}" -pthread -Iguest/azmod -o "$d/source_provider_lifetime_test" "$T/source_provider_lifetime_test.c"
+suite "source provider native lifetime" "$d/source_provider_lifetime_test"
+
+# The native keyboard bridge and its UI lifecycle, with a controlled firmware peer.
+d="$OUT/text-entry"; mkdir -p "$d"
+$CC "${CFLAGS[@]}" -pthread -Iguest/azmod -o "$d/real" "$T/sdk_text_entry_test.c"
+suite "native text entry" "$d/real"
+
 # ---------------------------------------------------------------- the library gate's bounds
 # community.c cm_elf_span / cm_elf_strtab: inside the file, no 64-bit wrap, aligned, NUL-ended
 # (elfspan_test.c; tools/fuzz elfcheck fuzzes the whole gate)
@@ -3079,8 +3118,9 @@ echo "=== busread lint ==="
 if ! plain_only "busread lint"; then :; elif "$T/busread-lint.sh" guest; then :; else failures=$((failures + 1)); fi
 BL="$OUT/busread-lint"; mkdir -p "$BL/azmod"
 # control: read() takes the Playlist Editing toggle from g_state again (the old line)
-mutate guest/azmod/bus_interpose.c "$BL/azmod/bus_interpose.c" \
-    's/__atomic_store_n\(&g_reorder_enabled, bus_cfg_reorder\(cfg\), __ATOMIC_RELAXED\);/__atomic_store_n(\&g_reorder_enabled, g_state.mod_enabled[AZMOD_ACTION_PLEDIT], __ATOMIC_RELAXED);/'
+cp guest/azmod/bus_interpose.c "$BL/azmod/bus_interpose.c"
+mutate guest/azmod/mixer_input.c "$BL/azmod/mixer_input.c" \
+    's/bus_cfg_reorder\(cfg\)/g_state.mod_enabled[AZMOD_ACTION_PLEDIT]/'
 echo
 
 echo "=== Community Mods layouts ==="
@@ -3100,12 +3140,14 @@ echo
 echo "=== busread trace ==="
 if CC=$CC "$T/busread-trace.sh" guest "$OUT/bustrace/real" && san_reports; then :; else failures=$((failures + 1)); fi
 BT="$OUT/bustrace/ctl"; mkdir -p "$BT/azmod"; cp guest/azmod/*.h "$BT/azmod/"
+cp guest/azmod/mixer_input.c "$BT/azmod/"
 # control: the overlay watchdog trips one frame later
 mutate guest/azmod/bus_interpose.c "$BT/azmod/bus_interpose.c" \
     's/if \(wd_stall > 200u\)\n        menu_open = 0;/if (wd_stall > 201u)\n        menu_open = 0;/'
 # control: community filters see mixer frames that carry no CRC (the gate removed)
 BU="$OUT/bustrace/ctlcrc"; mkdir -p "$BU/azmod"; cp guest/azmod/*.h "$BU/azmod/"
-mutate guest/azmod/bus_interpose.c "$BU/azmod/bus_interpose.c" \
+cp guest/azmod/bus_interpose.c "$BU/azmod/"
+mutate guest/azmod/mixer_input.c "$BU/azmod/mixer_input.c" \
     's/    if \(crc_in\) \/\* community mods see only checked input[^\n]*\n        sdk_filter_raw/    sdk_filter_raw/'
 # control: a community mod's surface holds the knob for the whole replay
 mutate "$T/busread_trace_test.c" "$OUT/bustrace/focus_test.c" \

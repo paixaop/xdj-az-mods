@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sqlite3.h>
+#include <unistd.h>
 
 #include "../../src/azmod/sdk_playlist_order.c"
 
@@ -52,9 +53,9 @@ void *sdk_db_open(const char *path)
 }
 uint64_t st_disk_sig(const char *path) { assert(!strcmp(path, database_path)); return signature; }
 int st_database_quiet(const char *path) { assert(!strcmp(path, database_path)); return quiet; }
-int st_source_path(const char *mount, const char *relative, char out[1024])
+int st_source_database(const struct st_source *source, char out[1024])
 {
-    assert(!strcmp(mount, "/usb") && strstr(relative, "exportLibrary.db"));
+    assert(!strcmp(source->mount, "/usb"));
     snprintf(out, 1024, "%s", database_path);
     return 1;
 }
@@ -282,6 +283,37 @@ static void refused_moves(void)
     assert(result(receipt, AZ_OK).outcome == AZ_PLAYLIST_UNCERTAIN && moves == 2);
 }
 
+static void replaced_database(void)
+{
+    char moved[1024];
+    assert((unsigned)snprintf(moved, sizeof moved, "%s.old", database_path) < sizeof moved);
+    assert(rename(database_path, moved) == 0);
+    sqlite3 *replacement = NULL;
+    assert(sqlite3_open(database_path, &replacement) == SQLITE_OK);
+    sqlite3_backup *backup = sqlite3_backup_init(replacement, "main", active, "main");
+    assert(backup && sqlite3_backup_step(backup, -1) == SQLITE_DONE);
+    assert(sqlite3_backup_finish(backup) == SQLITE_OK);
+    struct stat named, prior;
+    assert(stat(sqlite3_db_filename(active, "main"), &named) == 0);
+    assert(stat(moved, &prior) == 0 && named.st_ino != prior.st_ino);
+
+    ++generation;
+    az_playlist_move_v1 move = prepare_move();
+    unsigned before = moves;
+    uint64_t receipt = submit(&move);
+    playlist_sdk_tick();
+    playlist_sdk_native(active);
+    assert(result(receipt, AZ_OK).status == AZ_STALE && moves == before);
+
+    assert(sqlite3_close(active) == SQLITE_OK && unlink(moved) == 0);
+    active = replacement;
+    writer_result = 0;
+    receipt = submit(&move);
+    playlist_sdk_tick();
+    playlist_sdk_native(active);
+    assert(result(receipt, AZ_OK).outcome == AZ_PLAYLIST_MOVED && moves == before + 1);
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2);
@@ -295,6 +327,7 @@ int main(int argc, char **argv)
     read_guards();
     guarded_move();
     refused_moves();
+    replaced_database();
     assert(sqlite3_close(active) == SQLITE_OK);
     puts("USB playlist SDK snapshots, duplicate occurrences, move receipts and stale guards passed");
 }

@@ -87,6 +87,10 @@ static void sd_drain(struct sdq *q) {
 }
 /* EP147's message thread, from msg_tick. */
 static void sdk_ui_msg_drain(void) {
+#ifndef SDK_PROC_IMPL
+    te_native_tick(te_native_api());
+    source_keyboard_tick();
+#endif
     sd_drain(&g_sd_bq);
 }
 
@@ -252,6 +256,10 @@ int azcm_confirm(const char *title, const char *text, const char *yes,
  * (the SSH key approval, a mod's removal) through this dialog too, so it is serviced whether or
  * not any community mod is loaded or running. */
 static void sdk_confirm_tick(void) {
+#ifndef SDK_PROC_IMPL
+    if (sdk_text_entry_tick())
+        return;
+#endif
     struct sc_answer a;
     pthread_mutex_lock(&g_sd_cmu);
     int show = sc_tick(&g_sd_confirm, sdk_core_can_show(), &a);

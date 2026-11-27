@@ -39,8 +39,9 @@ variant("database-uri", "sdk_lib.c",
         "if (*p == '%' || *p == '?' || *p == '#')", "if (0)")
 variant("analysis-binding", "track_service.c",
         "if (strcmp(current, data->files[i])) return 0;", "(void) current;")
-variant("track-fifo", "track_storage.c", "O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK",
-        "O_RDONLY | O_CLOEXEC | O_NOFOLLOW")
+variant("track-fifo", "track_storage.c",
+        "O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);\n    if (fd < 0) return NULL;",
+        "O_RDONLY | O_CLOEXEC | O_NOFOLLOW);\n    if (fd < 0) return NULL;")
 variant("wave-fifo", "sdk_wave_provider.h", "O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK",
         "O_RDONLY | O_CLOEXEC | O_NOFOLLOW")
 variant("analysis-path-limit", "track_service.c",

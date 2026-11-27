@@ -69,6 +69,20 @@ static void pst_lib_service(void *server) {
     event('P', server);
 }
 static void playlist_sdk_native(void *server) { (void)server; }
+static void source_import_native(void *server) { (void) server; }
+static void source_catalog_native(void *server) { (void) server; }
+static int azsp_carrier_consume_wake(void *server, void *message, unsigned sender) {
+    assert(server == &expected_server && message == &expected_message && sender == 37);
+    return 0;
+}
+struct azsp_query_scope { void *server; };
+static void source_provider_query_begin(void *server, void *message, struct azsp_query_scope *scope) {
+    assert(message == &expected_message);
+    scope->server = server;
+}
+static void azsp_query_end(struct azsp_query_scope *scope) {
+    assert(scope->server == &expected_server);
+}
 static void mm_note(void *server) { event('M', server); }
 static int az_plan_set_available(void) { return plan_set_enabled; }
 static void fc_refresh_service(void *server) {

@@ -161,14 +161,24 @@ static bool playlist_claim(void *conn, struct playlist_job *job)
     return claimed;
 }
 
+static bool playlist_connection_current(void *conn)
+{
+    int (*file_control)(void *, const char *, int, void *);
+    *(void **)&file_control = dlsym(RTLD_DEFAULT, "sqlite3_file_control");
+    int moved = 1;
+    return file_control && file_control(conn, "main", 20 /* SQLITE_FCNTL_HAS_MOVED */, &moved) == 0 && !moved;
+}
+
 static bool playlist_database_current(void *conn, const struct st_source *source)
 {
     const char *(*filename)(void *, const char *);
     *(void **)&filename = dlsym(RTLD_DEFAULT, "sqlite3_db_filename");
     const char *path = filename ? filename(conn, "main") : NULL;
     struct stat disk;
+    /* A new export can occupy the same path while the native server retains
+     * its old open database. Check the backing SQLite file as well. */
     return path && stat(path, &disk) == 0 && (uint64_t)disk.st_dev == source->device &&
-           (uint64_t)disk.st_ino == source->inode;
+           (uint64_t)disk.st_ino == source->inode && playlist_connection_current(conn);
 }
 
 static bool playlist_current(void *conn, const struct playlist_job *job)

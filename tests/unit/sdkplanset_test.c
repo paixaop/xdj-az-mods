@@ -18,6 +18,7 @@ typedef struct {
 static cm_mod g_cm[2];
 static int g_sdk_in_init, g_cm_loading, g_cm_on_ui, callback_owned = 1;
 static int this_owner, usb_connected[2] = {1, 1};
+static uint64_t usb_generation[2] = {40, 41}, usb_library[2] = {60, 61};
 #define CM_RA() ((uintptr_t)1)
 
 static cm_mod *cm_self(const char *id, uintptr_t address, const char *service)
@@ -38,11 +39,27 @@ int st_source_read(int stick, struct st_source *out)
     assert(stick >= 0 && stick < 2);
     if (!usb_connected[stick])
         return AZ_STALE;
-    *out = (struct st_source){.ref = {.source_generation = (uint64_t)stick + 40, .library_id = 60}};
+    *out = (struct st_source){.ref = {.source_generation = usb_generation[stick], .library_id = usb_library[stick]}};
     snprintf(out->mount, sizeof out->mount, "/media/usb/%d", stick + 1);
     return AZ_OK;
 }
 
+enum { SQLDB_CONN = 0x10, NATIVE_DB = 0x1000 };
+static unsigned bound_media;
+static int mlserver_chain(void *server, uintptr_t *svc, uintptr_t *lib, uintptr_t *db, unsigned *media)
+{
+    assert(server);
+    *svc = *lib = *db = NATIVE_DB;
+    *media = bound_media;
+    return !bound_media;
+}
+static int own_q(uintptr_t address, uintptr_t *out);
+static int cp_mount_of(void *connection, char *mount, size_t size)
+{
+    assert(connection == (void *)NATIVE_DB);
+    return snprintf(mount, size, "/media/usb/%u", bound_media) < (int)size;
+}
+#include "playlist_media.c"
 #include "sdk_plan_set.c"
 
 enum { CONTROLLER = 0x1000, WIDGET = 0x2000, BUTTON = 0x3000, FIRST = 0x4000,
@@ -117,6 +134,7 @@ static void bn_set(struct bn_holder *n, const char *text, size_t len)
 static int own_q(uintptr_t address, uintptr_t *out)
 {
     switch (address) {
+    case NATIVE_DB + SQLDB_CONN: *out = NATIVE_DB; return 1;
     case CONTROLLER + 0x18: *out = mode; return 1;
     case CONTROLLER + 0xa0: *out = WIDGET; return 1;
     case TAPPED:
@@ -149,13 +167,6 @@ static int img_q(uintptr_t address, uintptr_t *out)
     }
 }
 static struct plsnap plsnap_get(void) { return highlight; }
-static int media_mount(unsigned media, char *mount, size_t size)
-{
-    if (media != 1 && media != 2)
-        return 0;
-    snprintf(mount, size, "/media/usb/%u", media);
-    return 1;
-}
 static const unsigned char ML_NEWPL_W210_normal[] = {210, 0};
 static const unsigned char ML_NEWPL_W210_down[] = {210, 1};
 static const unsigned char ML_NEWPL_W210_disabled[] = {210, 2};
@@ -340,6 +351,14 @@ static void tap_plan(void)
     mp_click_with_plan((void *)CONTROLLER, (void *)TAPPED);
 }
 
+static void check_target_source(const az_plan_set_target_v1 *target, unsigned stick)
+{
+    az_plan_set_source_v1 source = {.size = sizeof source, .version = AZ_DATA_VERSION};
+    assert(sdk_plan_set_resolve("planner", target, &source) == AZ_OK);
+    assert(source.stick == stick && source.source_generation == usb_generation[stick]);
+    assert(source.library_id == usb_library[stick]);
+}
+
 static void browser_actions(void)
 {
     mode = 1;
@@ -367,7 +386,7 @@ static void browser_actions(void)
     assert(!az_plan_set_queue(&mp_plan_shown));
     sdk_plan_set_tick();
     assert(delivered == 1 && received.playlist_id == 23 && !strcmp(received.name, "Party"));
-    assert(!strcmp(received.mount, "/media/usb/2"));
+    check_target_source(&received, 1);
     highlight.sel_folder = 1;
     build_panel();
     assert(!shown);
@@ -378,7 +397,7 @@ static void browser_actions(void)
     tap_plan();
     sdk_plan_set_tick();
     assert(delivered == 2 && received.playlist_id == 44 && !received.name[0]);
-    assert(!strcmp(received.mount, "/media/usb/1"));
+    check_target_source(&received, 0);
     mode = MP_TYPE_ADD;
     highlight.any_media = 0;
     build_panel();
@@ -443,22 +462,69 @@ static void resolution(void)
     assert(sdk_plan_set_resolve("foreign", &target, &source) == AZ_INVALID);
     assert(sdk_plan_set_resolve("planner", &target, &source) == AZ_OK);
     assert(source.stick == 0 && source.source_generation == 40 && source.library_id == 60);
-    strcpy(target.mount, "/media/usb/2");
     usb_connected[0] = 0;
-    assert(sdk_plan_set_resolve("planner", &target, &source) == AZ_OK && source.stick == 1);
-    usb_connected[1] = 0;
     assert(sdk_plan_set_resolve("planner", &target, &source) == AZ_STALE);
+    usb_connected[0] = 1;
     memset(target.mount, '/', sizeof target.mount);
     assert(sdk_plan_set_resolve("planner", &target, &source) == AZ_INVALID);
+}
+
+static void bind_native(unsigned media, uintptr_t server)
+{
+    bound_media = media;
+    char mount[128];
+    if (mm_record((void *)server, mount))
+        assert(mount[0] == '/');
+}
+
+static void replacement(void)
+{
+    az_plan_set_source_v1 source = {.size = sizeof source, .version = AZ_DATA_VERSION};
+    az_plan_set_target_v1 old = received;
+    mode = 2;
+    highlight = (struct plsnap){.open_pl = old.playlist_id, .any_media = 1};
+    build_panel();
+    assert(shown);
+
+    ++usb_generation[0];
+    ++usb_library[0];
+    assert(sdk_plan_set_resolve("planner", &old, &source) == AZ_STALE);
+    bind_native(1, 3);
+    unsigned closed_before = closes;
+    tap_plan();
+    assert(closes == closed_before);
+    build_panel();
+    tap_plan();
+    sdk_plan_set_tick();
+    assert(sdk_plan_set_resolve("planner", &received, &source) == AZ_OK);
+    assert(source.source_generation == usb_generation[0] && source.library_id == usb_library[0]);
+    assert(sdk_plan_set_resolve("planner", &old, &source) == AZ_STALE);
+}
+
+static void recycled_servers(void)
+{
+    az_plan_set_target_v1 copied = received;
+    for (unsigned i = 0; i < MM_N; ++i)
+        bind_native(3 + i, 10 + i);
+    char mount[128];
+    assert(!media_mount(1, mount, sizeof mount));
+    check_target_source(&copied, 0);
 }
 
 int main(void)
 {
     installation();
     registration();
+    bind_native(1, 1);
+    bind_native(1, 1);
+    bind_native(2, 2);
+    char mount[128];
+    assert(media_mount(1, mount, sizeof mount) && !strcmp(mount, "/media/usb/1"));
     browser_actions();
     resolution();
+    replacement();
     native_row();
+    recycled_servers();
     puts("Native Plan Set action tests passed");
     return 0;
 }

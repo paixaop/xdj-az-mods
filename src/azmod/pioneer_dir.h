@@ -78,15 +78,18 @@ static inline int pd_file_in(char *out, size_t n, const char *mount, const char 
 /* The export folder's name on the stick mounted at `mount`: ".PIONEER" on HFS+, else "PIONEER".
  * Reads the mount table (its first 16 KiB, far more than a deck's), so it is for code that already
  * does file I/O, never a paint path. */
-static const char *pd_dir(const char *mount) {
+static const char *pd_dir_in(const char *mount, const char *mounts) {
     char t[16384];
-    FILE *f = fopen("/proc/mounts", "re");
+    FILE *f = fopen(mounts, "re");
     if (!f)
         return PD_DIR;
     size_t n = fread(t, 1, sizeof t - 1, f);
     fclose(f);
     t[n] = 0;
     return pd_is_hfsplus(t, mount) ? PD_DIR_HFS : PD_DIR;
+}
+static const char *pd_dir(const char *mount) {
+    return pd_dir_in(mount, "/proc/mounts");
 }
 /* pd_file_in for the stick mounted at `mount`, with its export folder from the mount table */
 static int pd_file(char *out, size_t n, const char *mount, const char *stored, size_t drop,

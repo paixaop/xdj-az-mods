@@ -93,38 +93,49 @@ static int sdk_port_of_sysfs(const char *real) {
     return 0;
 }
 
-/* The mount point of the rekordbox library in the deck's USB port (stick 0 = USB 1, 1 = USB 2):
- * the one volume mounted under SDK_LIB_MEDIA from a device in that port that holds a library.
- * 0 = none, or two such volumes (which one EP147 shows is not known here, so neither). */
+static int sdk_mount_entry(const char *line, char device[128], char mount[2048]) {
+    size_t length = strlen(SDK_LIB_MEDIA);
+    return sscanf(line, "%127s %2047s", device, mount) == 2 &&
+           !strncmp(device, "/dev/", 5) && !strncmp(mount, SDK_LIB_MEDIA, length) &&
+           mount[length] == '/' && !strchr(mount, '\\');
+}
+
+static int sdk_mount_library(const char *device, const char *mount, int port) {
+    char sys[PATH_MAX], real[PATH_MAX];
+    snprintf(sys, sizeof sys, "%s/%s", SDK_LIB_SYSBLOCK, device + 5);
+    if (!realpath(sys, real) || sdk_port_of_sysfs(real) != port)
+        return 0;
+    char db[PATH_MAX];
+    snprintf(db, sizeof db, "%s/%s/rekordbox/exportLibrary.db", mount, pd_dir_in(mount, SDK_LIB_MOUNTS));
+    return access(db, R_OK) == 0;
+}
+
+static int sdk_find_mount(FILE *f, int port, char found[PATH_MAX]) {
+    char line[512];
+    int hits = 0;
+    while (fgets(line, sizeof line, f)) {
+        char dev[128], mp[2048];
+        if (!sdk_mount_entry(line, dev, mp) || !sdk_mount_library(dev, mp, port))
+            continue;
+        if (!hits || strcmp(found, mp) != 0) /* a volume mounted twice is still one */
+            hits++;
+        snprintf(found, PATH_MAX, "%s", mp);
+    }
+    return hits == 1;
+}
+
+/* One rekordbox library mounted under SDK_LIB_MEDIA on the requested USB port.
+ * Refuse an ambiguous port with more than one eligible volume. */
 static int sdk_stick_mount(int stick, char *mount, size_t cap) {
     if (stick < 0 || stick > 1)
         return 0;
     FILE *f = fopen(SDK_LIB_MOUNTS, "re");
     if (!f)
         return 0;
-    char line[512], found[PATH_MAX] = "";
-    int hits = 0;
-    size_t ml = strlen(SDK_LIB_MEDIA);
-    while (fgets(line, sizeof line, f)) {
-        char dev[128], mp[2048];
-        if (sscanf(line, "%127s %2047s", dev, mp) != 2 || strncmp(dev, "/dev/", 5) != 0 ||
-            strncmp(mp, SDK_LIB_MEDIA, ml) != 0 || mp[ml] != '/' || strchr(mp, '\\'))
-            continue; /* escaped (unusual) mount points are skipped, not decoded */
-        char sys[PATH_MAX], real[PATH_MAX], db[PATH_MAX];
-        snprintf(sys, sizeof sys, "%s/%s", SDK_LIB_SYSBLOCK, dev + 5);
-        if (!realpath(sys, real) || sdk_port_of_sysfs(real) != stick + 1)
-            continue;
-        snprintf(db, sizeof db, "%s/%s/rekordbox/exportLibrary.db", mp, pd_dir(mp));
-        if (access(db, R_OK) != 0)
-            continue;
-        if (!hits || strcmp(found, mp) != 0) /* a volume mounted twice is still one */
-            hits++;
-        snprintf(found, sizeof found, "%s", mp);
-    }
+    char found[PATH_MAX] = "";
+    int unique = sdk_find_mount(f, stick + 1, found);
     fclose(f);
-    if (hits != 1)
-        return 0;
-    return snprintf(mount, cap, "%s", found) < (int) cap;
+    return unique && snprintf(mount, cap, "%s", found) < (int) cap;
 }
 
 int az_storage_stick_mount(int stick, char *mount, size_t capacity) {

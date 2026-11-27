@@ -36,19 +36,13 @@ struct sa_open_result {
 };
 struct sa_job {
     uint64_t id;
-    int owner, needs_link, link_queued;
     az_analysis_owner lifetime;
     char reader_path[1024];
     struct st_source source;
     char database[1024], audio[1024], dat[1024], ext[1024], ex2[1024];
-    char stream_identity[1024], stream_digest[65];
+    char stream_identity[1024];
     char relative_audio[2048], relative_dat[1024];
     uint64_t signatures[5];
-    uint32_t needed;
-    int vocals, reader_fd;
-    int loaded, deck, streaming;
-    int display_read; /* synchronous, read-only native-load lease; no producer owner */
-    unsigned vocal_length_s;
     uint64_t load, native_epoch, audio_token;
     const struct azn_analysis_source_api *audio_api;
     const struct azn_maps_api *maps;
@@ -59,6 +53,13 @@ struct sa_job {
      * Keep its exact original encoding so only that publication can resume. */
     uint8_t *published;
     struct sa_tags published_tags;
+    int owner, needs_link, link_queued;
+    uint32_t needed;
+    int vocals, reader_fd;
+    int loaded, deck, streaming;
+    int display_read; /* synchronous, read-only native-load lease; no producer owner */
+    unsigned vocal_length_s;
+    char stream_digest[65];
 };
 static struct sa_job sa_jobs[8];
 static uint64_t sa_serial;
@@ -80,9 +81,9 @@ static int sa_disk_files_match(const struct sa_job *j) {
     return st_disk_sig(j->audio) == j->signatures[1] && st_disk_sig(j->dat) == j->signatures[2] &&
            st_disk_sig(j->ext) == j->signatures[3];
 }
-static int sa_resolved_path_matches(const char *mount, const char *relative, const char *expected) {
+static int sa_resolved_path_matches(const struct st_source *source, const char *relative, const char *expected) {
     char path[1024];
-    return st_source_path(mount, relative, path) && !strcmp(path, expected);
+    return st_source_file(source, relative, path) && !strcmp(path, expected);
 }
 static int sa_source_paths_match(const struct sa_job *j, const struct st_source *source) {
     char relative[1024];
@@ -90,12 +91,12 @@ static int sa_source_paths_match(const struct sa_job *j, const struct st_source 
     size_t len = strlen(relative);
     if (len < 4) return 0;
     memcpy(relative + len - 4, ".EXT", 5);
-    if (!sa_resolved_path_matches(source->mount, j->relative_audio, j->audio) ||
-        !sa_resolved_path_matches(source->mount, j->relative_dat, j->dat) ||
-        !sa_resolved_path_matches(source->mount, relative, j->ext)) return 0;
+    if (!sa_resolved_path_matches(source, j->relative_audio, j->audio) ||
+        !sa_resolved_path_matches(source, j->relative_dat, j->dat) ||
+        !sa_resolved_path_matches(source, relative, j->ext)) return 0;
     if (!j->vocals) return 1;
     memcpy(relative + len - 4, ".2EX", 5);
-    return sa_resolved_path_matches(source->mount, relative, j->ex2);
+    return sa_resolved_path_matches(source, relative, j->ex2);
 }
 static int sa_source_signatures_match(const struct sa_job *j, const struct st_source *source) {
     return st_resolution_source_equal(source, &j->source) && st_database_quiet(j->database) &&
@@ -146,7 +147,7 @@ static int sa_open_row(const az_track_ref *track, struct sa_job *j, struct st_re
     if (st_source_read((int) track->source_id - 1, &j->source)) return AZ_STALE;
     j->source.ref.track_id = track->track_id;
     if (!st_ref_equal(track, &j->source.ref) ||
-        !st_source_path(j->source.mount, "/PIONEER/rekordbox/exportLibrary.db", j->database) ||
+        !st_source_database(&j->source, j->database) ||
         !st_database_quiet(j->database)) return AZ_STALE;
     j->signatures[0] = st_disk_sig(j->database);
     void *db = sdk_db_open(j->database);
@@ -161,8 +162,8 @@ static int sa_dat_path_valid(const char *path) {
 }
 static int sa_open_paths(struct sa_job *j, const struct st_resolution *row) {
     if (!row->content[0] || !sa_dat_path_valid(row->analysis) || row->analysis_limited ||
-        !st_source_path(j->source.mount, row->content, j->audio) ||
-        !st_source_path(j->source.mount, row->analysis, j->dat)) return 0;
+        !st_source_file(&j->source, row->content, j->audio) ||
+        !st_source_file(&j->source, row->analysis, j->dat)) return 0;
     if (!sa_dat_path_valid(j->dat)) return 0;
     snprintf(j->relative_audio, sizeof j->relative_audio, "%s", row->content);
     snprintf(j->relative_dat, sizeof j->relative_dat, "%s", row->analysis);
@@ -170,9 +171,9 @@ static int sa_open_paths(struct sa_job *j, const struct st_resolution *row) {
     char relative[1024];
     snprintf(relative, sizeof relative, "%s", row->analysis);
     memcpy(relative + strlen(relative) - 4, ".EXT", 5);
-    if (!st_source_path(j->source.mount, relative, j->ext)) return 0;
+    if (!st_source_file(&j->source, relative, j->ext)) return 0;
     memcpy(relative + strlen(relative) - 4, ".2EX", 5);
-    if (!st_source_path(j->source.mount, relative, j->ex2)) return 0;
+    if (!st_source_file(&j->source, relative, j->ex2)) return 0;
     j->signatures[4] = st_disk_sig(j->ex2);
     j->signatures[1] = st_disk_sig(j->audio);
     j->signatures[2] = st_disk_sig(j->dat);
@@ -366,7 +367,7 @@ static int sa_link_analysis(struct sa_job *job) {
     if (!n) return 0;
     if (!job->id) job->id = ++sa_serial;
     snprintf(relative, sizeof relative, "/PIONEER/azspool/track-analysis-%08x-%llu.sql", job->source.ref.track_id, (unsigned long long) job->id);
-    if (!st_source_path(job->source.mount, relative, path)) return 0;
+    if (!st_source_file(&job->source, relative, path)) return 0;
     struct sa_staged spool = {.dir = -1};
     int ok = sa_stage(job, path, (const uint8_t *) sql, (size_t) n, &spool) && sa_publish(&spool);
     sa_stage_drop(&spool);
@@ -1163,7 +1164,7 @@ static int sv_source(const az_track_ref *track, struct sa_job *j) {
     if (st_source_read((int) track->source_id - 1, &j->source)) return AZ_STALE;
     j->source.ref.track_id = track->track_id;
     if (!st_ref_equal(track, &j->source.ref) ||
-        !st_source_path(j->source.mount, "/PIONEER/rekordbox/exportLibrary.db", j->database) ||
+        !st_source_database(&j->source, j->database) ||
         !st_database_quiet(j->database)) return AZ_STALE;
     j->signatures[0] = st_disk_sig(j->database);
     return AZ_OK;
@@ -1185,12 +1186,12 @@ static int sv_analysis_paths(struct sa_job *j, const struct st_resolution *row) 
     snprintf(j->relative_dat, sizeof j->relative_dat, "%s", row->analysis);
     char relative[1024];
     snprintf(relative, sizeof relative, "%s", row->analysis);
-    if (!st_source_path(j->source.mount, row->content, j->audio) ||
-        !st_source_path(j->source.mount, relative, j->dat)) return AZ_UNSUPPORTED;
+    if (!st_source_file(&j->source, row->content, j->audio) ||
+        !st_source_file(&j->source, relative, j->dat)) return AZ_UNSUPPORTED;
     memcpy(relative + n - 4, ".EXT", 5);
-    if (!st_source_path(j->source.mount, relative, j->ext)) return AZ_UNSUPPORTED;
+    if (!st_source_file(&j->source, relative, j->ext)) return AZ_UNSUPPORTED;
     memcpy(relative + n - 4, ".2EX", 5);
-    return st_source_path(j->source.mount, relative, j->ex2) ? AZ_OK : AZ_UNSUPPORTED;
+    return st_source_file(&j->source, relative, j->ex2) ? AZ_OK : AZ_UNSUPPORTED;
 }
 static void sv_signatures(struct sa_job *j) {
     j->signatures[1] = st_disk_sig(j->audio);

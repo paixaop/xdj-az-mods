@@ -74,6 +74,10 @@ static int core_analysis_ticks;
 static void analysis_events_core_tick(void) { ++core_analysis_ticks; }
 static void sdk_analysis_callbacks_tick(void) {}
 static void sdk_beatport_owner_tick(void) {}
+static int source_browser_ticks;
+static void sdk_source_browser_tick(void) { ++source_browser_ticks; }
+static int keyboard_up;
+static int sdk_text_entry_tick(void) { return keyboard_up; }
 static int plan_set_ticks;
 static void sdk_plan_set_tick(void) { ++plan_set_ticks; }
 static int native_bound, cue_ticks;
@@ -127,6 +131,7 @@ int main(void) {
     g_cm_n = 0, g_cm_live = 0;
     CHECK("no community mod at all: the core's question is shown and answered", asked_and_answered());
     CHECK("core analysis completion listeners run without community mods", core_analysis_ticks == 3);
+    CHECK("the source browser mailbox is drained on the overlay tick", source_browser_ticks == 3);
     CHECK("Plan Set dispatch waits for a running mod", plan_set_ticks == 0);
     CHECK("... and nothing of the mods' runs", g_mod_ticks == 0 && g_drains == 0 && g_deck_ticks == 0);
     g_cm_n = 2, g_cm_live = 0;
@@ -149,5 +154,15 @@ int main(void) {
     g_now += 40;
     community_tick();
     CHECK("unbound companion retains independent cue observations", cue_ticks == before + 1);
+    g_shown = g_answers = 0;
+    CHECK("a confirmation can queue while the keyboard is in use",
+          azcm_confirm("Confirm", "Proceed?", "OK", answered, NULL) == 0);
+    keyboard_up = 1;
+    community_tick();
+    CHECK("the confirmation waits for the keyboard to close", !g_shown && !g_answers);
+    keyboard_up = 0;
+    community_tick();
+    CHECK("the queued confirmation opens after the keyboard closes", g_shown == 1 && g_sd_dlg.up);
+    sd_dlg_close(0);
     return ut_summary();
 }

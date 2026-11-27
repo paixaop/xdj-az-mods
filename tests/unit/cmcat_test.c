@@ -10,7 +10,7 @@
  *     on its tile and page and offers no Install; a line others also offer says so; the name of
  *     an installed id never comes from another author's line;
  *   - Browse (field 20 and cm_browse.h through the real screen): the view buttons and their
- *     counts, the orders, and Add repository's keyboard typing the address;
+ *     counts, the orders, and the native Add repository prompt;
  *   - the download count (field 21): read, drawn on a tile and a mod page only when there is
  *     one; the Downloads order; Home's shelves (one row each, the tiles that fit), See all, a
  *     shelf tile, the knob scrolling the page (no focus); the mod page's header, buttons and
@@ -23,7 +23,14 @@
 #include <unistd.h>
 #include "check.h"
 #define CM_NOW() 1950134400LL /* 2031-10-19 UTC: a mod page's "updated N days ago" draws the same every day */
+#define CM_REQ CM_CATALOG ".request"
 #include MENU_C
+
+static az_text_entry_v1 repo_prompt;
+int azcm_text_entry(const az_text_entry_v1 *entry) {
+    repo_prompt = *entry;
+    return AZ_OK;
+}
 
 static char g_seen[1 << 16];
 static size_t g_seen_n;
@@ -236,9 +243,25 @@ int main(void) {
     CHECK("a category button picks it and goes back to the top", g_cm_fcat == 0 && g_cm_scroll == 0);
     layout(CMV_HOME, 1, -1);
     CHECK("Visual: only its mod", nkind(CMC_TILE) == 1 && ctl_of(CMC_TILE, 1) >= 0);
-    cm_fire(&(cm_ctl) {CMC_ADDREPO, 0, 0, 0, 1, 1});
-    cm_fire(&(cm_ctl) {CMC_KEY, 'a', 0, 0, 1, 1});
-    CHECK("Add repository's keyboard types the address", g_cm_view == CMV_KBD && !strcmp(g_cm_kb, "a"));
+    layout(CMV_HOME, 2, -1);
+    cm_fire(ctl_p(CMC_ADDREPO, 0));
+    CHECK("Add repository opens the native prompt", repo_prompt.on_result &&
+          !strcmp(repo_prompt.title, "Add repository") && !strcmp(repo_prompt.submit, "Add"));
+    unlink(CM_REQ);
+    CHECK("An empty address stays open", repo_prompt.on_result(AZ_OK, "", NULL) != NULL);
+    CHECK("A line break is refused", repo_prompt.on_result(AZ_OK, "owner/repo\nnext", NULL) != NULL);
+    CHECK("Cancel writes no request", !repo_prompt.on_result(AZ_CANCELLED, NULL, NULL) &&
+          access(CM_REQ, F_OK) != 0);
+    g_cs.state[0] = 0;
+    CHECK("A repository address is accepted", !repo_prompt.on_result(AZ_OK, "owner/repo", NULL));
+    char request[64] = "";
+    FILE *repo_request = fopen(CM_REQ, "r");
+    if (repo_request) {
+        fgets(request, sizeof request, repo_request);
+        fclose(repo_request);
+    }
+    CHECK("An accepted address reaches the repository worker", !strcmp(request, "addrepo owner/repo\n"));
+    unlink(CM_REQ);
     g_cm_kb[0] = 0;
     g_cm_sort = CMB_SORT_NAME;
 
@@ -365,21 +388,22 @@ int main(void) {
         CHECK("its install confirmation: \"...  >  <name>  >  Install\"", seen(want));
     } else
         CHECK("the catalog has a mod for the breadcrumb checks", 0);
-    layout(CMV_KBD, 2, -1);
-    CHECK("Add repository: \"Community Mods  >  Repositories  >  Add repository\"",
-          seen("Community Mods  >  Repositories  >  Add repository"));
     {
         char t[CM_CRUMB_MAX];
-        g_cm_view = CMV_KBD;
-        g_cm_tab = 2;
-        cm_crumbs(t, sizeof t, 0, 20);
-        CHECK("room: the whole path", !strcmp(t, "Community Mods  >  Repositories  >  Add repository"));
-        cm_crumbs(t, sizeof t, cm_tw("Community Mods  >  Add repository", 20) + 2, 20);
-        CHECK("too narrow for the tab: the tab left out, the page kept", !strcmp(t, "Community Mods  >  Add repository"));
         g_cm_view = CMV_RELOAD;
         cm_crumbs(t, sizeof t, 0, 20);
         CHECK("the reload page: \"Community Mods  >  Reload\"", !strcmp(t, "Community Mods  >  Reload"));
-        g_cm_view = CMV_HOME;
+        cm_ctl cancel = {CMC_RELOAD_NO, 0, 600, 300, 140, 50};
+        struct cm_input_event touch = {
+            .fb = &g_fb, .ctl = &cancel, .n = 1, .tx = 585, .ty = 315, .touched = true
+        };
+        int tab_before = g_cm_tab;
+        g_cm_reload_from = CMV_HOME;
+        cm_input_page_touch(&touch);
+        CHECK("tapping outside the expanded Cancel target keeps the reload page", g_cm_view == CMV_RELOAD);
+        touch.tx = 596; /* four pixels outside the painted button, inside its touch margin */
+        cm_input_page_touch(&touch);
+        CHECK("tapping inside the Cancel margin returns to the previous tab", g_cm_view == CMV_HOME && g_cm_tab == tab_before);
     }
     return ut_summary();
 }

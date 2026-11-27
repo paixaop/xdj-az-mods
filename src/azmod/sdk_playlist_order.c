@@ -111,7 +111,7 @@ static int playlist_snapshot(int stick, uint32_t playlist, uint32_t offset,
     struct st_source source, after;
     char database[1024];
     if (st_source_read(stick, &source) != AZ_OK ||
-        !st_source_path(source.mount, "/PIONEER/rekordbox/exportLibrary.db", database))
+        !st_source_database(&source, database))
         return AZ_STALE;
     az_playlist_order_v1 order = { .size = sizeof order, .version = AZ_DATA_VERSION,
         .source_generation = source.ref.source_generation, .library_id = source.ref.library_id };

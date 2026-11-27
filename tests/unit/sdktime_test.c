@@ -74,7 +74,7 @@ static void grid_cases(void) {
     double t = 81673.0 / 44100;
     beats[2].time_s = t;
     assert(st_time_to_beat(&s, t, &out) == AZ_OK && out == 2);
-    assert(st_beat_to_time(&s, 2, &out) == AZ_OK && out == t);
+    assert(st_beat_to_time(&s, 2, &out) == AZ_OK && compare_timestamps(out, t, 1, 1000, 1) == AZ_TIME_EQUAL);
     assert(st_beat_to_time(&s, 1.25, &out) == AZ_OK);
     double back = 0;
     assert(st_time_to_beat(&s, out, &back) == AZ_OK && fabs(back - 1.25) < 1e-15);
@@ -97,6 +97,21 @@ static void grid_cases(void) {
     assert(st_beat_to_time(&s, 1.5, &out) == AZ_FAILED && out == 123);
     beats[2].time_s = .25; /* A reversed selected beat must not interpolate backwards. */
     assert(st_beat_to_time(&s, 1.5, &out) == AZ_FAILED && out == 123);
+    beats[0].time_s = .1;
+    beats[1].time_s = .6;
+    beats[2].time_s = 1.6;
+    assert(st_time_to_beat(&s, .0985, &out) == AZ_NOT_FOUND);
+    assert(st_time_to_beat(&s, .0995, &out) == AZ_OK && out == 0);
+    assert(st_beat_to_time(&s, out, &back) == AZ_OK && compare_timestamps(back, .1, 1, 1000, 1) == AZ_TIME_EQUAL);
+    assert(st_time_to_beat(&s, .1005, &out) == AZ_OK && fabs(out - .001) < 1e-15);
+    assert(st_time_to_beat(&s, .5995, &out) == AZ_OK && fabs(out - .999) < 1e-15);
+    assert(st_time_to_beat(&s, .6, &out) == AZ_OK && out == 1);
+    assert(st_time_to_beat(&s, .6005, &out) == AZ_OK && fabs(out - 1.0005) < 1e-15);
+    assert(st_time_to_beat(&s, 1.5995, &out) == AZ_OK && fabs(out - 1.9995) < 1e-15);
+    assert(st_time_to_beat(&s, 1.6005, &out) == AZ_OK && out == 2);
+    assert(st_time_to_beat(&s, 1.6015, &out) == AZ_NOT_FOUND);
+    beats[1].time_s = NAN;
+    assert(st_time_to_beat(&s, .7, &out) == AZ_FAILED);
 }
 static void interval_cases(void) {
     az_time_interval out = {.size = sizeof out};

@@ -712,6 +712,9 @@ enum {
 static _Atomic int g_mv_state = MV_IDLE;
 static _Atomic int g_mv_kick; /* message thread: post the renewal */
 static void playlist_sdk_native(void *server);
+static void source_import_native(void *server);
+static void source_catalog_native(void *server);
+static void source_provider_query_begin(void *server, void *message, struct azsp_query_scope *scope);
 static int mv_pdb_sync_status(void *server);
 /* REMOVE on a folder (stock disables DELETE on folders): count what is inside (library
  * thread), confirm with EP147's own OK / CANCEL box, then delete the whole tree in one
@@ -887,17 +890,6 @@ static void nm_view_changed(int search_shown) { /* setvis_hook, message thread *
     nm_end(search_shown ? "Search opened: canceled" : "left Browse: canceled");
 }
 /* SearchView's listener slots: while naming, the keys are the playlist name */
-static void nm_key(void *str) {
-    uintptr_t p = 0;
-    char k[16] = "";
-    if (str && own_q((uintptr_t) str, &p) && p > 0x10000) /* the keystroke EP147 passes in */
-        own_str(p, k, sizeof k);
-    size_t n = strlen(g_nm.name), m = strlen(k);
-    if (m && n + m < 64 && (unsigned char) k[0] >= 0x20) {
-        memcpy(g_nm.name + n, k, m + 1);
-        __atomic_store_n(&g_nm_dirty, 1, __ATOMIC_RELEASE);
-    }
-}
 /* the listener's slot 1: 0 = backspace (the login keyboard's runs TextEditor::deleteBackwards),
  * 1 = the keyboard's second action (Search's +0x78): clear */
 static void nm_action(int a) {
@@ -919,17 +911,16 @@ static void nm_action(int a) {
 static int nm_naming(void) {
     return __atomic_load_n(&g_nm.state, __ATOMIC_ACQUIRE) == NM_NAMING;
 }
-static void sv_key_hook(void *self, void *str) {
-    if (nm_naming())
-        nm_key(str);
-    else
-        g_orig_sv_key(self, str);
-}
-static void sv_bs_hook(void *self, int a) {
-    if (nm_naming())
-        nm_action(a);
-    else
-        g_orig_sv_bs(self, a);
+#include "browse_keyboard.c"
+/* GCC's indirect-call optimization discards calls through the fixed integer
+ * address when it specializes the helper. Load the firmware entry at runtime. */
+static uintptr_t volatile source_keyboard_enable_v200 = 0x1dc2f10;
+static void source_keyboard_tick(void) {
+    if (g_ep147_build == EPB_V200) {
+        uintptr_t view = atomic_load_explicit(&g_sv_obj, memory_order_acquire);
+        source_keyboard_update(source_search_keyboard(view, 0x2fd44b8), sdk_source_browser_editing(),
+                               (void (*)(uintptr_t, int))source_keyboard_enable_v200);
+    }
 }
 static void bp_key_hook(void *self, void *str) {
     if (nm_naming())
@@ -1487,71 +1478,11 @@ void azmod_naming_cancel(void) {
 int azmod_naming_dirty(void) {
     return __atomic_exchange_n(&g_nm_dirty, 0, __ATOMIC_ACQ_REL);
 }
-/* Which mount a media id is on: each library server's database carries its media id
- * (SQLDB_MEDIA_Q) and its sqlite file path gives the mount. Recorded once per server
- * (library thread) for the stems mark, which must resolve a playlist on the stick being
- * browsed: playlist ids are per-stick counters, so two sticks' playlists with the same
- * id differ. */
-#define MM_N 4
-static struct {
-    _Atomic unsigned long server;
-    _Atomic unsigned media;
-    _Atomic unsigned seq;
-    char mount[128];
-} g_mm[MM_N];
+#include "playlist_media.c"
 static void mm_note(void *server) {
-    for (int i = 0; i < MM_N; i++)
-        if (__atomic_load_n(&g_mm[i].server, __ATOMIC_ACQUIRE) ==
-            (unsigned long) (uintptr_t) server)
-            return;
-    uintptr_t svc = 0, lib = 0, db = 0, conn = 0;
-    unsigned media = 0;
     char mnt[128];
-    /* library thread, inside MusicLibraryServer::onMessage: `server` and the chain from it are
-     * EP147's own objects for this call */
-    if (mlserver_chain(server, &svc, &lib, &db, &media) || !own_q(db + SQLDB_CONN, &conn) ||
-        !conn || !cp_mount_of((void *) conn, mnt, sizeof mnt))
-        return;
-    static unsigned seq, rr;
-    int k = -1;
-    for (int i = 0; i < MM_N && k < 0; i++)
-        if (!__atomic_load_n(&g_mm[i].server, __ATOMIC_ACQUIRE))
-            k = i;
-    if (k < 0)
-        k = (int) (rr++ % MM_N);
-    __atomic_store_n(&g_mm[k].server, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_mm[k].media, 0, __ATOMIC_RELEASE);
-    /* media reads 0 before any byte of the new mount is visible (media_mount re-checks it) */
-    __atomic_thread_fence(__ATOMIC_RELEASE);
-    snprintf(g_mm[k].mount, sizeof g_mm[k].mount, "%s", mnt);
-    __atomic_store_n(&g_mm[k].seq, ++seq, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_mm[k].media, media, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_mm[k].server, (unsigned long) (uintptr_t) server, __ATOMIC_RELEASE);
-    fc_mount_cleanup(mnt); /* an interrupted FOLDER-view copy onto this stick */
-}
-/* the newest server's mount for `media`; 0 = unknown (then nothing is drawn) */
-static int media_mount(unsigned media, char *out, size_t n) {
-    unsigned best = 0;
-    out[0] = 0;
-    for (int i = 0; i < MM_N; i++) {
-        if (!media || __atomic_load_n(&g_mm[i].media, __ATOMIC_ACQUIRE) != media)
-            continue;
-        unsigned sq = __atomic_load_n(&g_mm[i].seq, __ATOMIC_ACQUIRE);
-        if (sq <= best)
-            continue;
-        /* mm_note can reuse this slot while we copy (a fifth server): keep the copy only if
-         * media and seq are unchanged after it. A rewrite zeroes media before the mount and
-         * moves seq before restoring media, so either change shows. */
-        char tmp[sizeof g_mm[i].mount];
-        snprintf(tmp, sizeof tmp, "%s", g_mm[i].mount);
-        __atomic_thread_fence(__ATOMIC_ACQUIRE);
-        if (__atomic_load_n(&g_mm[i].media, __ATOMIC_ACQUIRE) != media ||
-            __atomic_load_n(&g_mm[i].seq, __ATOMIC_RELAXED) != sq)
-            continue;
-        best = sq;
-        snprintf(out, n, "%s", tmp);
-    }
-    return out[0] == '/';
+    if (mm_record(server, mnt))
+        fc_mount_cleanup(mnt); /* an interrupted FOLDER-view copy onto this stick */
 }
 /* Every Playlist Editing write also updates the stick's export.pdb (the Device Library that
  * older players and rekordbox read), so the Device Library never shows the old list. Same
@@ -1825,6 +1756,10 @@ static void mlserver_onmsg_hook(void *server, void *msg, unsigned param) {
         mm_note(server);
     mv_service_armed(server);
     playlist_sdk_native(server);
+    source_import_native(server);
+    source_catalog_native(server);
+    if (azsp_carrier_consume_wake(server, msg, param))
+        return;
     fc_refresh_service(server); /* a FOLDER-view copy landed on this stick: re-list it */
     if (__atomic_load_n(&g_ls_armed, __ATOMIC_ACQUIRE)) {
         t_pst_own++;        /* the spool syncs export.pdb itself (ls_pdb_sync) */
@@ -1832,10 +1767,14 @@ static void mlserver_onmsg_hook(void *server, void *msg, unsigned param) {
         t_pst_own--;
     }
     /* Original message forwarding boundary. */
-    if (g_sdk_sources_on)
-        azsdk_sources_forward_owned_message(g_ep147_build, server, msg, param, g_orig_mlserver_onmsg);
-    else
-        g_orig_mlserver_onmsg(server, msg, param);
+    {
+        struct azsp_query_scope scope __attribute__((cleanup(azsp_query_end)));
+        source_provider_query_begin(server, msg, &scope);
+        if (g_sdk_sources_on)
+            azsdk_sources_forward_owned_message(g_ep147_build, server, msg, param, g_orig_mlserver_onmsg);
+        else
+            g_orig_mlserver_onmsg(server, msg, param);
+    }
     if (g_sdk_sources_on) azsdk_sources_observe_owned_message(server, NULL, 0);
     pst_msg_done(server); /* stock wrote playlists in it: schedule the export.pdb sync */
 }

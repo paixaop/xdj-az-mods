@@ -296,10 +296,10 @@ int main(void) {
     g_t += 1000;
     azmod_menu_clock(g_t);
     azmod_input(&g_s, &g_fb, t->x + 10, t->y + 10, true, 0, false);
-    g_cm_view = CMV_KBD;
+    g_cm_view = CMV_RELOAD;
     azmod_menu_clock(g_t + 50);
     r = azmod_pane_drag(&g_s, &g_fb, t->x + 10, t->y + 10, 2);
-    CHECK("the page changed under the finger: the release fires nothing", r == 0 && g_cm_view == CMV_KBD && g_cm_cat != 3);
+    CHECK("the page changed under the finger: the release fires nothing", r == 0 && g_cm_view == CMV_RELOAD && g_cm_cat != 3);
 
     /* the knob: scrolls a row per detent, no focus, click fires nothing */
     home(g_tab0);

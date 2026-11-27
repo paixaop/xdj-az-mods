@@ -63,31 +63,33 @@ int sqlite3_exec(void *db, const char *sql, void *cb, void *arg, void **errmsg) 
         dbg("[onelibrary] sqlite3_exec: '%s'\n", sql);
     return next_sqlite3_exec(db, sql, cb, arg, errmsg);
 }
-static int (*next_sqlite3_prepare_v2)(void *, const char *, int, void **, const void **);
-int sqlite3_prepare_v2(void *db, const char *sql, int n, void **stmt, const void **tail) {
+static void onelib_log_sql(void *db, const char *sql, int n) {
+    FILE *f = azlog_open("/tmp/azmod-sql.log", "a");
+    if (!f)
+        return;
+    int length = n >= 0 && n < 4000 ? n : 4000;
+    fprintf(f, "[%ld] db=%lx %.*s\n", (long) syscall(SYS_gettid), (unsigned long) (uintptr_t) db, length, sql);
+    fclose(f);
+}
+
+static void onelib_trace_sql(void *db, const char *sql, int n) {
+    static int on = -1;
+    static _Atomic int budget = 300;
+    if (on < 0)
+        on = AZ_PROBE_ON("/home/root/settings/azmod-sqltrace.on");
+    if (on && sql && strstr(sql, "laylist") && __atomic_fetch_sub(&budget, 1, __ATOMIC_RELAXED) > 0)
+        onelib_log_sql(db, sql, n);
+}
+
+static azsp_query_prepare_fn next_sqlite3_prepare_v2;
+int sqlite3_prepare_v2(void *db, const char *sql, int n, void **stmt, const char **tail) {
     NEXT(next_sqlite3_prepare_v2, "sqlite3_prepare_v2");
     if (g_azm_inert)
         return next_sqlite3_prepare_v2(db, sql, n, stmt, tail);
-    { /* opt-in trace (azmod-sqltrace.on): SQL that touches playlists */
-        static int on = -1;
-        if (on < 0)
-            on = AZ_PROBE_ON("/home/root/settings/azmod-sqltrace.on");
-        static _Atomic int budget = 300;
-        if (on && sql && strstr(sql, "laylist") &&
-            __atomic_fetch_sub(&budget, 1, __ATOMIC_RELAXED) > 0) {
-            FILE *f = azlog_open("/tmp/azmod-sql.log", "a");
-            if (f) {
-                fprintf(f, "[%ld] db=%lx %.*s\n", (long) syscall(SYS_gettid),
-                        (unsigned long) (uintptr_t) db, n < 0 ? 4000 : (n > 4000 ? 4000 : n), sql);
-                fclose(f);
-            }
-        }
-    }
-    if (!onelib_fix_enabled())
-        return next_sqlite3_prepare_v2(db, sql, n, stmt, tail);
-    if (sql && sql[0] == 'P')
+    onelib_trace_sql(db, sql, n);
+    if (onelib_fix_enabled() && sql && sql[0] == 'P')
         dbg("[onelibrary] sqlite3_prepare_v2: '%.*s'\n", n < 0 ? (int) strlen(sql) : n, sql);
-    return next_sqlite3_prepare_v2(db, sql, n, stmt, tail);
+    return azsp_query_prepare(db, sql, n, stmt, tail, next_sqlite3_prepare_v2);
 }
 
 extern int g_hidinj_peer, g_hidinj_reads; /* azmod-hidinject.on, block at EOF */
