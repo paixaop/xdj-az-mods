@@ -68,14 +68,16 @@ static void pst_lib_service(void *server) {
     assert(t_pst_server == (uintptr_t) server && !t_pst_slots && t_pst_own == base_own);
     event('P', server);
 }
-static void playlist_sdk_native(void *server) { (void)server; }
+static void playlist_sdk_native(void *server) { (void) server; }
 static void source_import_native(void *server) { (void) server; }
 static void source_catalog_native(void *server) { (void) server; }
 static int azsp_carrier_consume_wake(void *server, void *message, unsigned sender) {
     assert(server == &expected_server && message == &expected_message && sender == 37);
     return 0;
 }
-struct azsp_query_scope { void *server; };
+struct azsp_query_scope {
+    void *server;
+};
 static void source_provider_query_begin(void *server, void *message, struct azsp_query_scope *scope) {
     assert(message == &expected_message);
     scope->server = server;

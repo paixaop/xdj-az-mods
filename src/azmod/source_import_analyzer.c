@@ -56,7 +56,7 @@ static int analyzer_component_ok(const char *name, size_t size) {
 static int analyzer_path_components(const char *audio) {
     unsigned depth = 0;
     const char *part = audio + 1;
-    for (const char *p = part; ; ++p) {
+    for (const char *p = part;; ++p) {
         if (*p != '/' && *p)
             continue;
         if (!analyzer_component_ok(part, (size_t) (p - part)) || ++depth > 9)
@@ -161,10 +161,9 @@ static const struct analyzer_entry *analyzer_find_entry(void *digger, uint32_t p
     return NULL;
 }
 
-static uint32_t analyzer_folder_track(void *digger, const char *audio) {
-    int (*reread)(void *, uint32_t) = (void *) ANALYZER_FOLDER_REREAD;
+static uint32_t analyzer_walk_folders(void *digger, const char *audio, int (*reread)(void *, uint32_t)) {
     uint32_t parent = 0;
-    for (const char *part = audio + 1; ; ) {
+    for (const char *part = audio + 1;;) {
         if (reread(digger, parent))
             return 0;
         size_t length = strcspn(part, "/");
@@ -176,6 +175,11 @@ static uint32_t analyzer_folder_track(void *digger, const char *audio) {
         parent = entry->id;
         part += length + 1;
     }
+}
+
+static uint32_t analyzer_folder_track(void *digger, const char *audio) {
+    int (*reread)(void *, uint32_t) = (void *) ANALYZER_FOLDER_REREAD;
+    return analyzer_walk_folders(digger, audio, reread);
 }
 
 static void *analyzer_manager(void) {

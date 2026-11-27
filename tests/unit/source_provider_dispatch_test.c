@@ -5,7 +5,10 @@
 #include <stdio.h>
 
 static uintptr_t deck_objects[DISPATCH_DECKS] = {
-    TRACK_LOADER_VTABLE, TRACK_LOADER_VTABLE, TRACK_LOADER_VTABLE, TRACK_LOADER_VTABLE,
+    TRACK_LOADER_VTABLE,
+    TRACK_LOADER_VTABLE,
+    TRACK_LOADER_VTABLE,
+    TRACK_LOADER_VTABLE,
 };
 static struct azspd_search search_request;
 static struct azspd_load load_event;
@@ -213,8 +216,12 @@ static bool patch(uintptr_t slot, uintptr_t original, uintptr_t hook) {
 
 static void install_fixture(void) {
     const struct azspd_host host = {
-        .on_message_thread = message_thread, .owns_browse = owns_browse, .owns_track = owns_track,
-        .prepare = prepare, .search = submit_search, .preview = submit_preview,
+        .on_message_thread = message_thread,
+        .owns_browse = owns_browse,
+        .owns_track = owns_track,
+        .prepare = prepare,
+        .search = submit_search,
+        .preview = submit_preview,
         .search_view = visible_search_view,
     };
     assert(azspd_install(1, &host, patch) == AZ_UNSUPPORTED && !patches);
@@ -386,8 +393,7 @@ static void unavailable_loads(void) {
 static void preview_requests(void) {
     struct azspd_track_id track = {.player = 1, .media = 0x142, .kind = 1, .track = 47};
     struct hierarchy_item item = {{1, 2, 3}};
-    const struct hierarchy_view hierarchy = {.category = 8, .begin = &item, .end = &item + 1,
-                                             .capacity = &item + 1};
+    const struct hierarchy_view hierarchy = {.category = 8, .begin = &item, .end = &item + 1, .capacity = &item + 1};
     dispatch_preview(&preview_loader, &track, 0.5f, &hierarchy);
     assert(previews == 1 && preview_started == 0 && azspd_preview_current(preview_event.ticket));
     uint64_t first = preview_event.ticket;
@@ -452,14 +458,22 @@ static int match_deck_track(unsigned deck, uint64_t epoch, uint64_t load, const 
 }
 
 static const struct azstatus_native_v1 deck_api = {
-    .size = sizeof(deck_api), .version = 1, .load_seed = read_deck_seed,
+    .size = sizeof(deck_api),
+    .version = 1,
+    .load_seed = read_deck_seed,
     .track_matches = match_deck_track,
 };
 
 static struct azstatus_native_receipt deck_event(int state, uint64_t epoch) {
     return (struct azstatus_native_receipt) {
-        .size = sizeof(deck_seed), .version = 1, .kind = AZN_LOAD, .deck = 1,
-        .a = state, .valid = state == AZN_LOADED, .unit = 12, .epoch = epoch,
+        .size = sizeof(deck_seed),
+        .version = 1,
+        .kind = AZN_LOAD,
+        .deck = 1,
+        .a = state,
+        .valid = state == AZN_LOADED,
+        .unit = 12,
+        .epoch = epoch,
         .load_generation = state == AZN_LOADED ? epoch * 2 : 0,
     };
 }
@@ -496,7 +510,8 @@ static void track_lifecycle(void) {
 
 static void stable_replacement(void) {
     struct azspd_deck_watch watch = {
-        .id = {.player = 1, .media = 0x142, .kind = 1, .track = 47}, .deck = 2,
+        .id = {.player = 1, .media = 0x142, .kind = 1, .track = 47},
+        .deck = 2,
     };
     struct azstatus_native_receipt receipt = deck_event(AZN_LOADED, 12);
     deck_track = watch.id;

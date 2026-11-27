@@ -66,7 +66,13 @@ void azsp_query_end(struct azsp_query_scope *scope) {
     query_scope = scope->previous;
 }
 
-enum query_table { QUERY_CONTENT, QUERY_PLAYLIST, QUERY_PLAYLIST_LINK, QUERY_HISTORY, QUERY_HISTORY_LINK };
+enum query_table {
+    QUERY_CONTENT,
+    QUERY_PLAYLIST,
+    QUERY_PLAYLIST_LINK,
+    QUERY_HISTORY,
+    QUERY_HISTORY_LINK
+};
 
 struct query_enumeration {
     const char *prefix;
@@ -79,7 +85,8 @@ static const struct query_enumeration query_enumerations[] = {
      "artist_id_originalArtist, artist_id_composer, artist_id_lyricist, album_id, genre_id, label_id, key_id, "
      "color_id, image_id, djComment, rating, releaseYear, dateAdded, path, fileName, fileType, bitrate, isrc, "
      "djPlayCount, isHotCueAutoLoadOn, isKuvoDeliverStatusOn, kuvoDeliveryComment, masterDbId, masterContentId, "
-     "analysisDataFilePath FROM content", "content", QUERY_CONTENT},
+     "analysisDataFilePath FROM content",
+     "content", QUERY_CONTENT},
     {"SELECT artist.artist_id, artist.name FROM artist INNER JOIN ( SELECT DISTINCT artist_id_artist FROM content",
      "content", QUERY_CONTENT},
     {"SELECT album.album_id, album.name, album.image_id FROM album INNER JOIN ( SELECT DISTINCT album_id FROM content",
@@ -125,22 +132,22 @@ static const char *query_table_scope(enum query_table table) {
 }
 
 static int query_catalog_sql(char *out, const char *source, const char *suffix,
-                            const struct query_enumeration *rule, const char *provider) {
+                             const struct query_enumeration *rule, const char *provider) {
     int head = (int) (suffix - source - strlen(rule->table_name));
     return snprintf(out, QUERY_MAX_SQL,
-        "%.*s(SELECT rows.* FROM main.%s rows WHERE EXISTS (SELECT 1 FROM main.%s"
-        "CAST(X'%s' AS TEXT))) AS %s%s",
-        head, source, rule->table_name, query_table_scope(rule->table), provider, rule->table_name, suffix);
+                    "%.*s(SELECT rows.* FROM main.%s rows WHERE EXISTS (SELECT 1 FROM main.%s"
+                    "CAST(X'%s' AS TEXT))) AS %s%s",
+                    head, source, rule->table_name, query_table_scope(rule->table), provider, rule->table_name, suffix);
 }
 
 static int query_search_sql(char *out, const char *source, const char *suffix, const struct azsp_query_scope *scope) {
     int head = (int) (suffix - source - strlen("content"));
     return snprintf(out, QUERY_MAX_SQL,
-        "%.*s(SELECT '%s' AS title, rows.* FROM main.content rows "
-        "JOIN main.azProviderSearch result ON result.content_id = rows.content_id "
-        "JOIN main.azProviderTrack owner ON owner.id = rows.content_id AND owner.provider = CAST(X'%s' AS TEXT) "
-        "ORDER BY result.sequenceNo) AS content%s",
-        head, source, scope->search_token, scope->provider_hex, suffix);
+                    "%.*s(SELECT '%s' AS title, rows.* FROM main.content rows "
+                    "JOIN main.azProviderSearch result ON result.content_id = rows.content_id "
+                    "JOIN main.azProviderTrack owner ON owner.id = rows.content_id AND owner.provider = CAST(X'%s' AS TEXT) "
+                    "ORDER BY result.sequenceNo) AS content%s",
+                    head, source, scope->search_token, scope->provider_hex, suffix);
 }
 
 static int query_make_sql(char *out, const char *sql, const char *suffix,
@@ -171,7 +178,7 @@ static int query_owns_database(const struct azsp_query_scope *scope, void *db) {
 }
 
 static int query_prepare_rewritten(void *db, const char *original_sql, size_t bytes, const char *sql,
-                                    void **statement, const char **tail, azsp_query_prepare_fn original) {
+                                   void **statement, const char **tail, azsp_query_prepare_fn original) {
     if (tail) *tail = original_sql + bytes;
     return original(db, sql, -1, statement, NULL);
 }
@@ -183,7 +190,7 @@ static int query_prepare_error(void **statement, const char **tail, const char *
 }
 
 int azsp_query_prepare(void *db, const char *sql, int len, void **statement, const char **tail,
-                      azsp_query_prepare_fn original) {
+                       azsp_query_prepare_fn original) {
     const struct azsp_query_scope *scope = query_scope;
     if (!sql || !query_owns_database(scope, db)) return original(db, sql, len, statement, tail);
     char rewritten[QUERY_MAX_SQL];

@@ -28,8 +28,8 @@ static _Atomic unsigned cue_count;
 static _Atomic unsigned cue_operation;
 static _Atomic unsigned cue_busy;
 static const uint64_t cue_operations = (UINT64_C(1) << AZ_CMD_CUE_POINT_SET) |
-    (UINT64_C(1) << AZ_CMD_CUE_LOOP_SET) | (UINT64_C(1) << AZ_CMD_HOT_CLEAR) |
-    (UINT64_C(1) << AZ_CMD_MEMORY_DELETE);
+                                       (UINT64_C(1) << AZ_CMD_CUE_LOOP_SET) | (UINT64_C(1) << AZ_CMD_HOT_CLEAR) |
+                                       (UINT64_C(1) << AZ_CMD_MEMORY_DELETE);
 int activity;
 
 void signal(void) {
@@ -67,19 +67,13 @@ static int submit_command(const azexit_request *request, uint32_t operation) {
 static int target_cue(unsigned deck, struct azexit_cue_target *out) {
     assert(deck < 4);
     *out = (struct azexit_cue_target) {
-        .revision = atomic_load(&cue_revision), .revision_valid = 1,
-        .persistent_commands = cue_operations, .revision_commands = cue_operations
-    };
+        .revision = atomic_load(&cue_revision), .revision_valid = 1, .persistent_commands = cue_operations, .revision_commands = cue_operations};
     return AZ_OK;
 }
 static int native_cues(unsigned deck, az_native_cue_snapshot *out) {
     assert(out->size >= sizeof *out);
     *out = (az_native_cue_snapshot) {
-        .size = sizeof *out, .version = AZ_DATA_VERSION, .deck = deck,
-        .native_load_generation = deck + 10, .revision = atomic_load(&cue_revision),
-        .count = atomic_load(&cue_count), .source_rate_hz = 48000,
-        .entries = {{.classification = AZ_CUE_MEMORY, .entry_id = 1, .type = AZ_CUE_POINT}}
-    };
+        .size = sizeof *out, .version = AZ_DATA_VERSION, .deck = deck, .native_load_generation = deck + 10, .revision = atomic_load(&cue_revision), .count = atomic_load(&cue_count), .source_rate_hz = 48000, .entries = {{.classification = AZ_CUE_MEMORY, .entry_id = 1, .type = AZ_CUE_POINT}}};
     return AZ_OK;
 }
 static int submit_cue(const struct azexit_cue_request *request) {

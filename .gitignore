@@ -15,3 +15,4 @@ src/azmod/stems4art.h
 src/azmod/wavref.h
 __pycache__/
 tests/.work/
+/deck/.stage.*/

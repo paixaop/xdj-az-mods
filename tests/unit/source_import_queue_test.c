@@ -242,8 +242,12 @@ static void *catalog_stream_worker(void *opaque) {
     const struct azspi_record record = {.source = {.mount = "/carrier", .device = 7}};
     uint64_t analysis_ticket = 0;
     const struct azsp_catalog_stream_request request = {
-        .media = fixture->media, .id = 51, .source = &record.source, .record = &record,
-        .audio = "/Media/audio.m4a", .dat = "/PIONEER/USBANLZ/ANLZ0000.DAT",
+        .media = fixture->media,
+        .id = 51,
+        .source = &record.source,
+        .record = &record,
+        .audio = "/Media/audio.m4a",
+        .dat = "/PIONEER/USBANLZ/ANLZ0000.DAT",
         .analysis_ticket = &analysis_ticket,
     };
     assert(azsp_catalog_stream(fixture->operation, &request) == fixture->status);

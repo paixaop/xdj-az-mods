@@ -266,14 +266,7 @@ static void run_cue_batch(unsigned mode, uint64_t id, unsigned existing, int fai
     const uint64_t load = 13, revision = 400;
     fixture_cue_bank(existing, revision);
     struct batch_client client = {.plan = {
-        .size = sizeof(az_cue_batch_request), .version = AZ_DATA_VERSION, .deck = deck,
-        .mode = mode, .request_id = id, .expected_load_generation = load, .expected_revision = revision,
-        .deadline_ns = scmd_monotonic(NULL) + UINT64_C(5000000000), .count = 2,
-        .entries = {
-            {.classification = AZ_CUE_HOT, .type = AZ_CUE_POINT, .slot = 1, .position_s = 2, .comment = "start"},
-            {.classification = AZ_CUE_MEMORY, .type = AZ_CUE_LOOP, .position_s = 4, .end_s = 6}
-        }
-    }};
+                                      .size = sizeof(az_cue_batch_request), .version = AZ_DATA_VERSION, .deck = deck, .mode = mode, .request_id = id, .expected_load_generation = load, .expected_revision = revision, .deadline_ns = scmd_monotonic(NULL) + UINT64_C(5000000000), .count = 2, .entries = {{.classification = AZ_CUE_HOT, .type = AZ_CUE_POINT, .slot = 1, .position_s = 2, .comment = "start"}, {.classification = AZ_CUE_MEMORY, .type = AZ_CUE_LOOP, .position_s = 4, .end_s = 6}}}};
     az_command_result out = {.size = sizeof out};
     fixture_cue_busy_once();
     assert(library->cue_batch_submit_async("four", &client.plan, batch_completed, &client, &out) == AZ_OK);
@@ -303,14 +296,7 @@ static void run_cue_batch(unsigned mode, uint64_t id, unsigned existing, int fai
 static void reject_colliding_batch(void) {
     fixture_cue_bank(1, 500);
     struct batch_client client = {.plan = {
-        .size = sizeof(az_cue_batch_request), .version = AZ_DATA_VERSION, .deck = 3,
-        .mode = AZ_CUE_BATCH_REPLACE, .request_id = 3, .expected_load_generation = 13,
-        .expected_revision = 500, .deadline_ns = scmd_monotonic(NULL) + UINT64_C(5000000000),
-        .count = 2, .entries = {
-            {.classification = AZ_CUE_MEMORY, .type = AZ_CUE_POINT, .position_s = 2.},
-            {.classification = AZ_CUE_MEMORY, .type = AZ_CUE_POINT, .position_s = 2. + 0.25 / 48000}
-        }
-    }};
+                                      .size = sizeof(az_cue_batch_request), .version = AZ_DATA_VERSION, .deck = 3, .mode = AZ_CUE_BATCH_REPLACE, .request_id = 3, .expected_load_generation = 13, .expected_revision = 500, .deadline_ns = scmd_monotonic(NULL) + UINT64_C(5000000000), .count = 2, .entries = {{.classification = AZ_CUE_MEMORY, .type = AZ_CUE_POINT, .position_s = 2.}, {.classification = AZ_CUE_MEMORY, .type = AZ_CUE_POINT, .position_s = 2. + 0.25 / 48000}}}};
     az_command_result out = {.size = sizeof out};
     assert(library->cue_batch_submit_async("four", &client.plan, batch_completed, &client, &out) == AZ_OK);
     while (!client.releases) (void) drain_ui();

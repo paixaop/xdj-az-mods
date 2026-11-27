@@ -3,8 +3,19 @@
  * owns the key graphics and layout, and the controller sends JUCE strings
  * and edit actions to an ISoftwareKeyboard::IListener. All native calls
  * and object lifetimes stay on EP147's message thread. */
-enum { TE_IDLE, TE_OPEN, TE_READY, TE_BROKEN, TE_CLOSE };
-enum { TE_WIDTH = 1280, TE_HEIGHT = 800, TE_TOP = 74, TE_KEYS_Y = 518 };
+enum {
+    TE_IDLE,
+    TE_OPEN,
+    TE_READY,
+    TE_BROKEN,
+    TE_CLOSE
+};
+enum {
+    TE_WIDTH = 1280,
+    TE_HEIGHT = 800,
+    TE_TOP = 74,
+    TE_KEYS_Y = 518
+};
 static _Atomic int te_native_phase;
 static uintptr_t te_parent_window;
 static void *te_widget, *te_controller;

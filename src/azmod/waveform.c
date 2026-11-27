@@ -2318,10 +2318,10 @@ static bool (*g_orig_detail_cue_update)(void *);
 static int cue_marker_source(uintptr_t self, int deck) {
     uintptr_t block = perdeck_block(deck);
     if (!block) return 0;
-    uintptr_t bank = *(const uintptr_t *)(block + 0x1040);
+    uintptr_t bank = *(const uintptr_t *) (block + 0x1040);
     if (!bank) return 0;
-    return *(const uintptr_t *)(self + 0x958) == *(const uintptr_t *)bank &&
-           *(const uintptr_t *)(self + 0x968) == *(const uintptr_t *)(bank + 0x10);
+    return *(const uintptr_t *) (self + 0x958) == *(const uintptr_t *) bank &&
+           *(const uintptr_t *) (self + 0x968) == *(const uintptr_t *) (bank + 0x10);
 }
 static int cue_markers_held(void *self) {
     if (!on_msg_thread()) return 0;

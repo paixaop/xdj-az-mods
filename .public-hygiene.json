@@ -41,7 +41,8 @@
     "date": [
       "CHANGELOG*",
       "*/CHANGELOG*",
-      "*.minisig"
+      "*.minisig",
+      "vendor/analysis/dsp/miniaudio.h"
     ]
   },
   "skip_files": [

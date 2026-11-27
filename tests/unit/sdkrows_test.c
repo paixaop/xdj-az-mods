@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "azmod-mod.h"
 #include "check.h"
 
 enum {
@@ -45,10 +46,55 @@ static int azf_row_set(int item, int v) {
     g_sets++;
     return 0;
 }
+static cm_mod *cm_self(const char *id, uintptr_t address, const char *service);
+static int setting_value, setting_calls;
+
+static int azf_official_setting_write(const char *key, int expected, int desired) {
+    ++setting_calls;
+    if (strcmp(key, "stems") || (desired != 0 && desired != 1))
+        return AZ_INVALID;
+    if (expected != setting_value)
+        return AZ_STALE;
+    setting_value = desired;
+    return AZ_OK;
+}
+
 #include SDKROWS_INC
+
+static cm_mod *cm_self(const char *id, uintptr_t address, const char *service) {
+    cm_mod *mod = cm_find(id);
+    if (strcmp(service, "official_setting_write") || !mod || !cm_called_by(mod, address))
+        return NULL;
+    return mod;
+}
 
 static int unchanged(void) { return g_sets == 0 && !g_state.config_dirty; }
 static void reset(void) { g_sets = 0, g_state.config_dirty = 0; }
+
+static void official_settings_test(void) {
+    reset();
+    g_ra = 0x1800;
+    g_cm_on_ui = 0;
+    CHECK("official write off the UI thread is refused before reaching settings",
+          sdk_official_setting_write("mod-a", "stems", 0, 1) == AZ_INVALID &&
+              setting_calls == 0 && !g_state.config_dirty);
+    g_cm_on_ui = 1;
+    CHECK("official write under another mod's ID is refused before reaching settings",
+          sdk_official_setting_write("mod-b", "stems", 0, 1) == AZ_INVALID &&
+              setting_calls == 0 && !g_state.config_dirty);
+    CHECK("a stale expected setting keeps the configuration clean",
+          sdk_official_setting_write("mod-a", "stems", 1, 1) == AZ_STALE &&
+              setting_calls == 1 && setting_value == 0 && !g_state.config_dirty);
+    CHECK("an invalid setting value keeps the configuration clean",
+          sdk_official_setting_write("mod-a", "stems", 0, 2) == AZ_INVALID &&
+              setting_calls == 2 && setting_value == 0 && !g_state.config_dirty);
+    CHECK("setting the current value succeeds without scheduling a save",
+          sdk_official_setting_write("mod-a", "stems", 0, 0) == AZ_OK &&
+              setting_calls == 3 && setting_value == 0 && !g_state.config_dirty);
+    CHECK("an authorized setting change schedules a save",
+          sdk_official_setting_write("mod-a", "stems", 0, 1) == AZ_OK &&
+              setting_calls == 4 && setting_value == 1 && g_state.config_dirty);
+}
 
 int main(void) {
     ut_suite = "sdk: row_set";
@@ -72,5 +118,6 @@ int main(void) {
     g_cm_on_ui = 1;
     g_ra = 0x3800;
     CHECK("mod-b's own row from mod-b's code: set (CONTROL)", cm_row_set(2, 2) == 0 && g_val[2] == 2);
+    official_settings_test();
     return ut_summary();
 }

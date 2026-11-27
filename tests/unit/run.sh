@@ -2113,7 +2113,7 @@ suite "source import queue" "$d/source_import_queue_test"
 $CC "${CFLAGS[@]}" -pthread -Iguest/azmod -o "$d/source_import_worker_test" "$T/source_import_worker_test.c"
 suite "source import worker" "$d/source_import_worker_test"
 $CC "${CFLAGS[@]}" -pthread -Iguest/azmod -o "$d/source_import_analyzer_test" "$T/source_import_analyzer_test.c" \
-    guest/azmod/source_import_analyzer.c guest/azmod/track_storage.c -lm
+    guest/azmod/track_storage.c -lm
 suite "source import analyzer" "$d/source_import_analyzer_test"
 $CC "${CFLAGS[@]}" -pthread -Iguest/azmod -o "$d/source_provider_dispatch_test" "$T/source_provider_dispatch_test.c"
 suite "source provider native dispatch" "$d/source_provider_dispatch_test"
@@ -2130,6 +2130,10 @@ $CC "${CFLAGS[@]}" -pthread -Iguest/azmod -o "$d/source_provider_runtime_test" "
 suite "source provider runtime" "$d/source_provider_runtime_test"
 $CC "${CFLAGS[@]}" -pthread -Iguest/azmod -o "$d/source_provider_lifetime_test" "$T/source_provider_lifetime_test.c"
 suite "source provider native lifetime" "$d/source_provider_lifetime_test"
+if [[ $(uname -s) == Linux && $(uname -m) == aarch64 ]]; then
+    $CC "${CFLAGS[@]}" -pthread -Iguest/azmod -o "$d/source_provider_carrier_test" "$T/source_provider_carrier_test.c" -ldl
+    suite "source provider native carrier" "$d/source_provider_carrier_test"
+fi
 
 # The native keyboard bridge and its UI lifecycle, with a controlled firmware peer.
 d="$OUT/text-entry"; mkdir -p "$d"
@@ -4016,8 +4020,8 @@ d="$OUT/sdklib"; mkdir -p "$d"
 cp guest/azmod/sdk_lib.c "$d/real.c"
 mutate "$d/real.c" "$d/ctl-rw.c" 's/suffix\[\] = "\?immutable=1"/suffix[] = ""/; s/0x01 \| 0x40 \/\* READONLY \| URI \*\//0x02 | 0x40/'
 mutate "$d/real.c" "$d/ctl-ui.c"      's/    if \(g_cm_on_ui\)\n/    if (0)\n/'
-mutate "$d/real.c" "$d/ctl-anyport.c" 's/ \|\| sdk_port_of_sysfs\(real\) != stick \+ 1\)/)/'
-mutate "$d/real.c" "$d/ctl-guess.c"   's/    if \(hits != 1\)\n/    if (hits < 1)\n/'
+mutate "$d/real.c" "$d/ctl-anyport.c" 's/ \|\| sdk_port_of_sysfs\(real\) != port\)/)/'
+mutate "$d/real.c" "$d/ctl-guess.c"   's/return hits == 1;/return hits >= 1;/'
 mutate "$d/real.c" "$d/ctl-kickstick.c" 's/if \(!strncmp\(source, mount, length\) && source\[length\] == .\/.\) return "from that USB";/if ((void) length, 0) return "from that USB";/'
 mutate "$d/real.c" "$d/ctl-kickother.c" 's/return sdk_spool_waits\(source\) \? "from a USB with a spool waiting" : NULL;/(void) sdk_spool_waits; return NULL;/'
 mutate "$d/real.c" "$d/ctl-kickunknown.c" 's/if \(!source\[0\]\) return "from a USB it cannot place";/if (!source[0]) return NULL;/; s/return 1; \/\* not on a stick it knows/return 0; \/* not on a stick it knows/; s/    if \(!end\)\n        return 1;/    if (!end)\n        return 0;/'
@@ -4054,21 +4058,23 @@ suite "handoff guard" "$d/real/t"
 
 # row_set (sdk_rows.c): a running mod's own rows only, from its own code (sdkrows_test.c)
 d="$OUT/sdkrows"; mkdir -p "$d"
+setting_line=$(grep -n '^static int sdk_official_setting_write(' guest/azmod/sdk_rows.c | cut -d: -f1)
 { extract guest/azmod/community.c '^static int cm_called_by\('
-  extract guest/azmod/sdk_rows.c '^static int cm_row_set\('; } > "$d/real.inc"
+  extract guest/azmod/sdk_rows.c '^static int cm_row_set\('
+  printf '#line %s "%s/guest/azmod/sdk_rows.c"\n' "$setting_line" "$ROOT"
+  extract guest/azmod/sdk_rows.c '^static int sdk_official_setting_write\('; } > "$d/real.inc"
 grep -q 'cm_called_by(c, CM_RA())' "$d/real.inc" || { echo "extraction of cm_row_set failed"; exit 2; }
 # control: any mod's row set (the owner not checked)
 mutate "$d/real.inc" "$d/ctl-anyowner.inc" 's/    if \(!c \|\| !cm_called_by\(c, CM_RA\(\)\) \|\|\n\s*\(!cm_running\(c\) && \(int\) \(c - g_cm\) != g_cm_loading\)\) \{/    if (0) {/'
 for v in real ctl-anyowner; do
-    $CC "${CFLAGS[@]}" -I$T -DSDKROWS_INC="\"$d/$v.inc\"" -o "$d/$v" $T/sdkrows_test.c
+    $CC "${CFLAGS[@]}" -I$T -Iguest/azmod -DSDKROWS_INC="\"$d/$v.inc\"" -o "$d/$v" $T/sdkrows_test.c
 done
 suite "sdk: row_set" "$d/real"
 
 # deck_info (sdk_deck.c): exactly the caller's .size written, unknown never mistaken for a value
 # Stored track snapshots: shared production cache and parser, no firmware assets.
 d="$OUT/sdkdata"; mkdir -p "$d"
-cp guest/azmod/sdk_data_engine.h guest/azmod/sdk_analysis.h guest/azmod/hc_anlz.h guest/azmod/azmod-mod.h "$d/"
-$CC "${CFLAGS[@]}" -pthread -I"$d" -o "$d/real" $T/sdkdata_test.c -lm
+$CC "${CFLAGS[@]}" -pthread -Iguest/azmod -o "$d/real" $T/sdkdata_test.c -lm
 suite "sdk track data, parser, timing and concurrent consumers" "$d/real"
 $CC "${CFLAGS[@]}" -Iguest/azmod -o "$d/analysis-write" $T/sdkanalysis_write_test.c
 suite "sdk analysis insertion preserves existing ANLZ data" "$d/analysis-write"
@@ -4081,8 +4087,8 @@ for v in timing-size timing-version; do
 done
 $CC "${CFLAGS[@]}" -Iguest/azmod -o "$d/waveform" $T/sdkwaveform_test.c
 suite "sdk stored detail waveform bounds and ranges" "$d/waveform"
-mutate "$d/sdk_data_engine.h" "$d/broken.h" 's/return a->source_id == b->source_id && a->source_generation == b->source_generation &&\n\s*a->library_id == b->library_id && a->track_id == b->track_id;/return a->track_id == b->track_id;/'
-$CC "${CFLAGS[@]}" -pthread -I"$d" -DST_ENGINE_HEADER='"broken.h"' -o "$d/control" $T/sdkdata_test.c -lm
+mutate guest/azmod/sdk_data_engine.h "$d/broken.h" 's/return a->source_id == b->source_id && a->source_generation == b->source_generation &&\n\s*a->library_id == b->library_id && a->track_id == b->track_id;/return a->track_id == b->track_id;/'
+$CC "${CFLAGS[@]}" -pthread -I"$d" -Iguest/azmod -DST_ENGINE_HEADER='"broken.h"' -o "$d/control" $T/sdkdata_test.c -lm
 control "sdk track data: duplicate IDs merged across sources" "$d/control"
 
 if [ "$(uname -s)" = Linux ]; then

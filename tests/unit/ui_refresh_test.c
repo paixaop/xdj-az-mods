@@ -23,7 +23,11 @@ static int on_msg_thread(void) { return message_thread; }
 static uint64_t sdk_command_cue_presentation_hold(unsigned deck) { return held[deck]; }
 static int sdk_command_cue_presentation_current(unsigned deck, uint64_t load) { return loaded[deck] == load; }
 static uintptr_t perdeck_block(int deck) { return (uintptr_t) player[deck]; }
-static bool marker_update(void *self) { assert(self == upper); ++marker_updates; return true; }
+static bool marker_update(void *self) {
+    assert(self == upper);
+    ++marker_updates;
+    return true;
+}
 static bool (*g_orig_overview_cue_update)(void *) = marker_update;
 static bool (*g_orig_detail_cue_update)(void *) = marker_update;
 static unsigned marker_installs;

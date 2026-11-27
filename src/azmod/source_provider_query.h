@@ -24,6 +24,6 @@ void azsp_query_begin(void *server, const void *message, void *db, const char *p
 void azsp_query_end(struct azsp_query_scope *scope);
 
 int azsp_query_prepare(void *db, const char *sql, int len, void **statement, const char **tail,
-                      azsp_query_prepare_fn original);
+                       azsp_query_prepare_fn original);
 
 #endif

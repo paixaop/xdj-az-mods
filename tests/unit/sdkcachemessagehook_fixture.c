@@ -5,7 +5,7 @@
 #include "azsources.h"
 #include "native_abi_fixture.h"
 #include "cache_message_fixture.h"
-#include "../azmod/source_provider_query.h"
+#include "../../src/azmod/source_provider_query.h"
 #include <stdio.h>
 #define REQUIRE(x, why)                                      \
     do {                                                     \

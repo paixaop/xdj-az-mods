@@ -94,7 +94,7 @@ static bool motion_read_reductions(ta_vocal_motion *out, const MotionRecord *rec
         &out->weighted, &out->magnitude, &out->logs, &out->flatness_magnitude,
         &out->negative, &out->nonnegative
     };
-    for (size_t i = 0; i < sizeof reductions / sizeof *reductions; ++i)
+    for (size_t i = 0; i < sizeof operations / sizeof operations[0]; ++i)
         if (!motion_read_reduction(reductions[i], records[WEIGHTED + i], operations[i]))
             return false;
     return out->width % out->weighted.lanes == 0 && out->width % out->magnitude.lanes == 0 &&
@@ -275,7 +275,7 @@ static void motion_selection_reduce(const unsigned lanes, const double *scores,
 
 static unsigned motion_select(const ta_vocal_motion *motion, const double *scores)
 {
-    unsigned lanes = motion->selection_lanes;
+    const unsigned lanes = TA_MOTION_SELECTION_LANES;
     double best[TA_MOTION_SELECTION_LANES], adjacent[TA_MOTION_SELECTION_LANES];
     double all[TA_MOTION_SELECTION_LANES] = {0};
     unsigned indexes[TA_MOTION_SELECTION_LANES];
@@ -305,7 +305,7 @@ static unsigned motion_select(const ta_vocal_motion *motion, const double *score
 
 int ta_vocal_motion_lag(const ta_vocal_motion *motion, const double *previous, const double *following)
 {
-    double scores[TA_MOTION_CANDIDATES];
+    double scores[TA_MOTION_CANDIDATES] = {0};
     for (unsigned i = 0; i < motion->candidates; ++i)
         scores[i] = motion_correlation(motion, previous, following, (int)i - (int)motion->center);
     double inverse = motion->reciprocal_numerator / scores[motion->center];

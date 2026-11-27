@@ -82,20 +82,17 @@ static cm_mod *sdk_source_provider_selected(void) {
     return atomic_load_explicit(&g_source_provider_owner, memory_order_acquire);
 }
 
-static cm_mod *sdk_source_browser_live(void)
-{
+static cm_mod *sdk_source_browser_live(void) {
     cm_mod *owner = atomic_load_explicit(&g_source_browser_owner, memory_order_acquire);
     return owner && cm_running(owner) ? owner : NULL;
 }
 
-static cm_mod *sdk_source_browser_registered(int index)
-{
+static cm_mod *sdk_source_browser_registered(int index) {
     cm_mod *owner = atomic_load_explicit(&g_source_browser_registered[index], memory_order_acquire);
     return owner && cm_running(owner) ? owner : NULL;
 }
 
-static cm_mod *sdk_source_browser_at(int row)
-{
+static cm_mod *sdk_source_browser_at(int row) {
     for (int i = 0; i < CM_MAX; ++i) {
         cm_mod *owner = sdk_source_browser_registered(i);
         if (owner && row-- == 0)
@@ -104,22 +101,19 @@ static cm_mod *sdk_source_browser_at(int row)
     return NULL;
 }
 
-static int sdk_source_browser_count(void)
-{
+static int sdk_source_browser_count(void) {
     int count = 0;
     for (int i = 0; i < CM_MAX; ++i)
         count += sdk_source_browser_registered(i) != NULL;
     return count;
 }
 
-static const char *sdk_source_browser_label(int row)
-{
+static const char *sdk_source_browser_label(int row) {
     cm_mod *owner = sdk_source_browser_at(row);
     return owner ? owner->source_browser_name : NULL;
 }
 
-static uintptr_t sdk_source_browser_icon(int row, uintptr_t (*decode)(const unsigned char *, int))
-{
+static uintptr_t sdk_source_browser_icon(int row, uintptr_t (*decode)(const unsigned char *, int)) {
     cm_mod *owner = sdk_source_browser_at(row);
     if (!owner || !owner->source_browser_png)
         return 0;
@@ -182,23 +176,20 @@ static void sdk_source_browser_activate(int row, void *model) {
     }
 }
 
-static int sdk_source_browser_reveal_native(void)
-{
+static int sdk_source_browser_reveal_native(void) {
     return atomic_load_explicit(&g_source_browser_shown, memory_order_acquire) &&
            __atomic_load_n(&g_sdk_focus, __ATOMIC_ACQUIRE) &&
            atomic_load_explicit(&g_source_browser_over_source, memory_order_acquire);
 }
 
-static void sdk_source_browser_native_tab(unsigned rising)
-{
+static void sdk_source_browser_native_tab(unsigned rising) {
     /* The custom surface can cover SOURCE's screen signature. Track a native
      * tab change from the button that reached firmware. */
     if (rising & SOURCE_BROWSER_NATIVE_TABS)
         atomic_store_explicit(&g_source_browser_over_source, 0, memory_order_release);
 }
 
-static unsigned sdk_source_browser_synthetic_key(unsigned buttons)
-{
+static unsigned sdk_source_browser_synthetic_key(unsigned buttons) {
     static unsigned held;
     static long until;
     if (buttons) {
@@ -214,23 +205,20 @@ static unsigned sdk_source_browser_synthetic_key(unsigned buttons)
     return time < until ? held : 0;
 }
 
-static unsigned sdk_source_browser_route_native(unsigned buttons, unsigned rising)
-{
+static unsigned sdk_source_browser_route_native(unsigned buttons, unsigned rising) {
     int view = source_browser_key_view(rising);
     if (view != SOURCE_BROWSER_NO_VIEW)
         sdk_source_browser_native_queue(view, 0);
     return sdk_source_browser_synthetic_key(buttons);
 }
 
-static int sdk_source_browser_native_owner(int selected)
-{
+static int sdk_source_browser_native_owner(int selected) {
     cm_mod *owner = selected ? sdk_source_browser_live() : NULL;
     return owner && owner->source_browser_query;
 }
 
 static unsigned sdk_source_browser_route(struct source_browser_buttons *keys, unsigned buttons,
-                                         int selected)
-{
+                                         int selected) {
     unsigned previous = keys->down;
     int view;
     int native = sdk_source_browser_native_owner(selected);
@@ -244,24 +232,22 @@ static unsigned sdk_source_browser_route(struct source_browser_buttons *keys, un
     return result;
 }
 
-static int sdk_source_browser_tracks_active(void)
-{
+static int sdk_source_browser_tracks_active(void) {
     int view = atomic_load_explicit(&g_source_browser_native_view, memory_order_acquire);
     return (view == AZ_SOURCE_VIEW_BROWSE && atomic_load_explicit(&g_bv_vis, memory_order_acquire)) ||
            (view == AZ_SOURCE_VIEW_SEARCH && atomic_load_explicit(&g_sv_vis, memory_order_acquire));
 }
 
 static int sdk_source_browser_store_buttons(uint8_t *frame, unsigned buttons, unsigned actions,
-                                            int native)
-{
+                                            int native) {
     if (buttons == frame[32] && actions == frame[33])
         return 0;
     if (buttons && buttons != frame[32] && native)
         frame[6] = 0;
     if (!buttons && !actions)
         frame[6] = 0x08;
-    frame[32] = (uint8_t)buttons;
-    frame[33] = (uint8_t)actions;
+    frame[32] = (uint8_t) buttons;
+    frame[33] = (uint8_t) actions;
     return 1;
 }
 
@@ -276,8 +262,7 @@ static int sdk_source_browser_filter(uint8_t *frame) {
                                             sdk_source_browser_native_owner(selected));
 }
 
-static int sdk_source_browser_view_ready(cm_mod *owner, int view)
-{
+static int sdk_source_browser_view_ready(cm_mod *owner, int view) {
     if (owner && owner->source_browser_query) {
         if (view == AZ_SOURCE_VIEW_SEARCH)
             return atomic_load_explicit(&g_sv_vis, memory_order_acquire);
@@ -287,8 +272,7 @@ static int sdk_source_browser_view_ready(cm_mod *owner, int view)
     return 1;
 }
 
-static int sdk_source_browser_wait_view(cm_mod *owner, int view)
-{
+static int sdk_source_browser_wait_view(cm_mod *owner, int view) {
     if (sdk_source_browser_view_ready(owner, view))
         return 0;
     int pending = SOURCE_BROWSER_NO_VIEW;
@@ -297,16 +281,14 @@ static int sdk_source_browser_wait_view(cm_mod *owner, int view)
     return 1;
 }
 
-static void sdk_source_browser_notify(cm_mod *owner, enum az_source_view view)
-{
+static void sdk_source_browser_notify(cm_mod *owner, enum az_source_view view) {
     if (!owner || !cm_running(owner))
         return;
     sdk_text_source_changed(owner);
     owner->source_browser_view(view, owner->source_browser_user);
 }
 
-static void sdk_source_browser_views(void)
-{
+static void sdk_source_browser_views(void) {
     int view = atomic_exchange_explicit(&g_source_browser_pending, SOURCE_BROWSER_NO_VIEW,
                                         memory_order_acq_rel);
     if (view == SOURCE_BROWSER_NO_VIEW)
@@ -322,12 +304,11 @@ static void sdk_source_browser_views(void)
     if (sdk_source_browser_wait_view(owner, view))
         return;
     atomic_store_explicit(&g_source_browser_shown, view != AZ_SOURCE_VIEW_HIDDEN, memory_order_release);
-    sdk_source_browser_notify(owner, (enum az_source_view)view);
+    sdk_source_browser_notify(owner, (enum az_source_view) view);
     g_source_browser_delivered = owner;
 }
 
-static cm_mod *sdk_source_browser_editor(void)
-{
+static cm_mod *sdk_source_browser_editor(void) {
     if (atomic_load_explicit(&g_source_browser_native_view, memory_order_acquire) != AZ_SOURCE_VIEW_SEARCH)
         return NULL;
     if (!atomic_load_explicit(&g_sv_vis, memory_order_acquire))
@@ -336,13 +317,11 @@ static cm_mod *sdk_source_browser_editor(void)
     return owner && owner->source_browser_query ? owner : NULL;
 }
 
-static int sdk_source_browser_editing(void)
-{
+static int sdk_source_browser_editing(void) {
     return sdk_source_browser_editor() != NULL;
 }
 
-static int sdk_source_browser_key(const char *key)
-{
+static int sdk_source_browser_key(const char *key) {
     cm_mod *owner = sdk_source_browser_editor();
     if (!owner)
         return 0;
@@ -356,13 +335,12 @@ static int sdk_source_browser_key(const char *key)
     return 1;
 }
 
-static void sdk_source_browser_trim(cm_mod *owner, int action)
-{
+static void sdk_source_browser_trim(cm_mod *owner, int action) {
     char *text = owner->source_browser_search;
     size_t end = strlen(text);
     if (action == 0 && end) {
         --end;
-        while (end && ((unsigned char)text[end] & 0xc0) == 0x80)
+        while (end && ((unsigned char) text[end] & 0xc0) == 0x80)
             --end;
     } else if (action == 1) {
         end = 0;
@@ -371,8 +349,7 @@ static void sdk_source_browser_trim(cm_mod *owner, int action)
     owner->source_browser_search_dirty = 1;
 }
 
-static int sdk_source_browser_action(int action)
-{
+static int sdk_source_browser_action(int action) {
     cm_mod *owner = sdk_source_browser_editor();
     if (!owner)
         return 0;
@@ -382,8 +359,7 @@ static int sdk_source_browser_action(int action)
     return 1;
 }
 
-static void sdk_source_browser_query(cm_mod *owner)
-{
+static void sdk_source_browser_query(cm_mod *owner) {
     char text[sizeof(owner->source_browser_search)];
     if (pthread_mutex_trylock(&g_source_browser_query_lock))
         return;
@@ -396,8 +372,7 @@ static void sdk_source_browser_query(cm_mod *owner)
         owner->source_browser_query(text, owner->source_browser_user);
 }
 
-static void sdk_source_browser_tick(void)
-{
+static void sdk_source_browser_tick(void) {
     sdk_source_browser_views();
     cm_mod *owner = sdk_source_browser_editor();
     if (owner)
@@ -406,19 +381,17 @@ static void sdk_source_browser_tick(void)
 
 #include "source_browser_native.c"
 
-static int sdk_source_browser_init_owner(const cm_mod *owner)
-{
+static int sdk_source_browser_init_owner(const cm_mod *owner) {
     return owner && g_sdk_in_init && (owner - g_cm) == g_cm_loading;
 }
 
-static int sdk_source_browser_validate(cm_mod *owner, const az_source_browser_v1 *browser)
-{
+static int sdk_source_browser_validate(cm_mod *owner, const az_source_browser_v1 *browser) {
     if (!browser || browser->size < offsetof(az_source_browser_v1, on_query) ||
         !browser->name || !browser->on_view)
         return 0;
     size_t len = strnlen(browser->name, sizeof(owner->source_browser_name));
     return len && len < sizeof(owner->source_browser_name) &&
-           cm_command_code(owner, (uintptr_t)browser->on_view);
+           cm_command_code(owner, (uintptr_t) browser->on_view);
 }
 
 static int sdk_source_copy_icon(cm_mod *owner, const unsigned char *png, uint32_t bytes) {
@@ -444,24 +417,21 @@ static int sdk_source_browser_copy_icon(cm_mod *owner, const az_source_browser_v
     return browser->size < sizeof(*browser) ? AZ_OK : sdk_source_copy_icon(owner, browser->icon_png, browser->icon_bytes);
 }
 
-static int sdk_source_browser_has_query(const az_source_browser_v1 *browser)
-{
+static int sdk_source_browser_has_query(const az_source_browser_v1 *browser) {
     return browser->size >= offsetof(az_source_browser_v1, icon_png) && browser->on_query;
 }
 
-static int sdk_source_browser_query_valid(cm_mod *owner, const az_source_browser_v1 *browser)
-{
+static int sdk_source_browser_query_valid(cm_mod *owner, const az_source_browser_v1 *browser) {
     if (!sdk_source_browser_has_query(browser))
         return AZ_OK;
     if (!(g_nm_hooked & 1) || !install_msgtick_hook("Source Search keyboard"))
         return AZ_UNSUPPORTED;
-    if (!cm_command_code(owner, (uintptr_t)browser->on_query))
+    if (!cm_command_code(owner, (uintptr_t) browser->on_query))
         return AZ_INVALID;
     return AZ_OK;
 }
 
-static int sdk_source_browser_install_once(void)
-{
+static int sdk_source_browser_install_once(void) {
     if (!g_source_browser_install_result)
         g_source_browser_install_result = source_browser_native_install() ? 1 : -1;
     return g_source_browser_install_result > 0;
@@ -498,10 +468,9 @@ static int sdk_source_register_browser(const char *id, const az_source_browser_v
     return AZ_OK;
 }
 
-static int sdk_source_show_view(const char *id, enum az_source_view view)
-{
+static int sdk_source_show_view(const char *id, enum az_source_view view) {
     static const unsigned buttons[] = {0x80u, 0x40u, 0x08u};
-    if ((unsigned)view >= sizeof(buttons) / sizeof(buttons[0]))
+    if ((unsigned) view >= sizeof(buttons) / sizeof(buttons[0]))
         return AZ_INVALID;
     cm_mod *owner = cm_self(id, CM_RA(), "source_show_view");
     if (!owner || !owner->source_browser_query)

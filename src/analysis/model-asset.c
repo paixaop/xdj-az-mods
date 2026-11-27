@@ -303,7 +303,7 @@ static void validate_rhythm_prototypes(ta_context *c, const double *parameters)
 
 static bool valid_rhythm_role_mask(double mask)
 {
-    return mask >= 0 && mask < 0x1p53 && trunc(mask) == mask;
+    return mask >= 0 && mask < (double)(UINT64_C(1) << 53) && trunc(mask) == mask;
 }
 
 static void validate_rhythm_masks(ta_context *c, const double *parameters)
@@ -864,8 +864,9 @@ static void validate_fade_geometry(ta_context *c, const double *parameters)
     double lookback = parameters[TA_FADE_TAIL_LOOKBACK];
     int alignment = (int)parameters[TA_FADE_END_ALIGNMENT];
     int64_t first = (int64_t)parameters[TA_FADE_SHORT_INPUT_MAX] + 1;
+    int64_t aligned_first = first - first % alignment;
     if (last > UINT8_MAX || lookback < (last + 1) * 2 * parameters[TA_FADE_GROUP_SAMPLES] ||
-        lookback > first - first % alignment ||
+        lookback > (double)aligned_first ||
         parameters[TA_FADE_REFERENCE_RATIO_COUNT] >= last ||
         parameters[TA_FADE_FIRST_DESCENDING_PAIR] >= last)
         ta_fail(c, TA_FAILED, "invalid fade geometry");

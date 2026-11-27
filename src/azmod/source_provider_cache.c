@@ -92,7 +92,7 @@ static bool session_name(const char *name) {
         return false;
     const char *tail = name + offset;
     return strlen(tail) == 6 && strspn(tail, "abcdefghijklmnopqrstuvwxyz"
-                                          "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") == 6;
+                                             "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") == 6;
 }
 
 static bool cache_path(char out[AZ_SOURCE_PATH_BYTES], const char *parent, const char *name) {
@@ -121,7 +121,7 @@ static void reclaim_sessions(int fd, const char *parent) {
         close(stream);
         return;
     }
-    for (struct dirent *entry; (entry = readdir(dir)); ) {
+    for (struct dirent *entry; (entry = readdir(dir));) {
         char path[AZ_SOURCE_PATH_BYTES];
         if (session_name(entry->d_name) && cache_path(path, parent, entry->d_name))
             reclaim_session(path);
@@ -218,7 +218,7 @@ static bool can_hold(const struct azsp_cache *cache, const struct azsp_stage *st
 }
 
 static const struct cache_stage *held_stage(const struct azsp_cache *cache,
-                                           const struct azsp_stage *stage) {
+                                            const struct azsp_stage *stage) {
     for (const struct cache_stage *node = cache->stages; node; node = node->next) {
         if (node->stage == stage)
             return node;

@@ -63,7 +63,10 @@ static void sdk_filter_raw(int bus, const unsigned char *f, int len) {
     g_filt_unchecked += bus == 3 && len < 98;
 }
 static void sdk_filter_view(int bus, const unsigned char *f, int len) { (void) bus, (void) f, (void) len; }
-static int sdk_source_browser_filter(uint8_t *frame) { (void) frame; return 0; }
+static int sdk_source_browser_filter(uint8_t *frame) {
+    (void) frame;
+    return 0;
+}
 static void sdk_touch_read(void *buf, ssize_t r) { (void) buf, (void) r; }
 static inline int azmod_logical_deck(int side, int sel) { return side + (sel ? AZMOD_PAD_DECKS : 0); }
 

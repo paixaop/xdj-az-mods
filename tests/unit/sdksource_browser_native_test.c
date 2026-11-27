@@ -8,7 +8,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { EPB_V130 = 1, EPB_V200 = 2 };
+enum {
+    EPB_V130 = 1,
+    EPB_V200 = 2
+};
 static int g_ep147_build;
 static int img_q(uintptr_t at, uintptr_t *out);
 static int azm_patch_vtable(uintptr_t at, void *hook, void **original);
@@ -55,8 +58,15 @@ static uintptr_t sdk_source_browser_icon(int row, uintptr_t (*decode)(const unsi
     return decode(png, sizeof png);
 }
 static int sdk_source_browser_is_selected(void) { return active; }
-static void sdk_source_browser_activate(int row, void *model) { assert(row == 0 && model); ++activations; active = 1; }
-static void sdk_source_browser_native_selected(void) { ++cleared; active = 0; }
+static void sdk_source_browser_activate(int row, void *model) {
+    assert(row == 0 && model);
+    ++activations;
+    active = 1;
+}
+static void sdk_source_browser_native_selected(void) {
+    ++cleared;
+    active = 0;
+}
 
 static int img_q(uintptr_t at, uintptr_t *out) {
     if (at == SBN_SELECT_ITEM) {
@@ -136,7 +146,7 @@ static void set_data_mock(void *component, int index, const struct sbn_row *row)
     assert(index == 0 || index == 2);
     assert(row->vtable == (uintptr_t) sbn_row_vtable);
     assert(row->kind == 3 && !row->root[0]);
-    assert(!((unsigned (*)(const struct sbn_row *))sbn_row_vtable[3])(row));
+    assert(!((unsigned (*)(const struct sbn_row *)) sbn_row_vtable[3])(row));
     row_focus = row->focused;
     row_active = row->active;
 }

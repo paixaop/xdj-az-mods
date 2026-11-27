@@ -305,7 +305,7 @@ static int sbn_slots_match(void) {
 static int sbn_patch_slots(void) {
     for (size_t i = 0; i < sizeof sbn_slots / sizeof sbn_slots[0]; ++i)
         if (azm_patch_vtable(SBN_MODEL_VT + 8 * sbn_slots[i].slot, sbn_slots[i].hook,
-                            sbn_slots[i].original) != 1)
+                             sbn_slots[i].original) != 1)
             return 0;
     return 1;
 }

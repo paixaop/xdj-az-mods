@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
-#include "source_import_analyzer.h"
+#include "source_import_analyzer.c"
 #include "library_sql.h"
 
 #include <assert.h>
@@ -65,10 +65,58 @@ static void native_admission_refuses_unqualified_inputs(void) {
     assert(raw[0] == 0x5a);
 }
 
+struct folder_fixture {
+    unsigned char prefix[0x30];
+    const struct analyzer_entry *const *begin, *const *end;
+    uint32_t visits[3];
+    unsigned visit_count;
+    uint32_t refuse_parent;
+};
+
+_Static_assert(offsetof(struct folder_fixture, begin) == 0x30, "folder vector begin");
+_Static_assert(offsetof(struct folder_fixture, end) == 0x38, "folder vector end");
+
+static int reread_folder(void *opaque, uint32_t parent) {
+    struct folder_fixture *fixture = opaque;
+    assert(fixture->visit_count < sizeof fixture->visits / sizeof fixture->visits[0]);
+    fixture->visits[fixture->visit_count++] = parent;
+    return parent == fixture->refuse_parent;
+}
+
+static void folder_track_lookup(void) {
+    static const struct analyzer_entry artists = {.id = 10, .directory = 1, .basename = "Artists"};
+    static const struct analyzer_entry album = {.id = 20, .parent = 10, .directory = 1, .basename = "Album"};
+    static const struct analyzer_entry track = {.id = 31, .parent = 20, .basename = "track.m4a"};
+    static const struct analyzer_entry other = {.id = 32, .parent = 10, .basename = "track.m4a"};
+    static const struct analyzer_entry prefix = {.id = 33, .parent = 20, .basename = "track.m4a.backup"};
+    static const struct analyzer_entry *const entries[] = {&artists, &album, &other, &prefix, &track};
+    struct folder_fixture fixture = {
+        .begin = entries, .end = entries + sizeof entries / sizeof entries[0], .refuse_parent = UINT32_MAX};
+
+    assert(analyzer_walk_folders(&fixture, "/Artists/Album/track.m4a", reread_folder) == track.id);
+    assert(fixture.visit_count == 3 && fixture.visits[0] == 0 &&
+           fixture.visits[1] == artists.id && fixture.visits[2] == album.id);
+    fixture.visit_count = 0;
+    assert(analyzer_walk_folders(&fixture, "/Artists/Album", reread_folder) == 0);
+    assert(fixture.visit_count == 2);
+    fixture.visit_count = 0;
+    assert(analyzer_walk_folders(&fixture, "/Artists/track.m4a/child", reread_folder) == 0);
+    assert(fixture.visit_count == 2);
+    fixture.visit_count = 0;
+    assert(analyzer_walk_folders(&fixture, "/Artists/Album/missing.m4a", reread_folder) == 0);
+    assert(fixture.visit_count == 3);
+
+    fixture.visit_count = 0;
+    fixture.refuse_parent = artists.id;
+    assert(analyzer_walk_folders(&fixture, "/Artists/Album/track.m4a", reread_folder) == 0);
+    assert(fixture.visit_count == 2 && fixture.visits[1] == artists.id);
+}
+
 int main(void) {
     locator_fixtures();
     invalid_paths();
     native_admission_refuses_unqualified_inputs();
-    puts("PASS source import analyzer locator and admission");
+    folder_track_lookup();
+    puts("PASS source import analyzer locator, admission, and folder lookup");
     return 0;
 }
