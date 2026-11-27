@@ -10,6 +10,9 @@
  * that updates the hash says why. A pure refactor must leave it unchanged. */
 #define _GNU_SOURCE
 #define _Atomic /* single-threaded harness: the builtins need plain integers on clang */
+#define atomic_load_explicit __atomic_load_n
+#define atomic_store_explicit __atomic_store_n
+#define memory_order_relaxed __ATOMIC_RELAXED
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -60,6 +63,7 @@ static void sdk_filter_raw(int bus, const unsigned char *f, int len) {
     g_filt_unchecked += bus == 3 && len < 98;
 }
 static void sdk_filter_view(int bus, const unsigned char *f, int len) { (void) bus, (void) f, (void) len; }
+static int sdk_source_browser_filter(uint8_t *frame) { (void) frame; return 0; }
 static void sdk_touch_read(void *buf, ssize_t r) { (void) buf, (void) r; }
 static inline int azmod_logical_deck(int side, int sel) { return side + (sel ? AZMOD_PAD_DECKS : 0); }
 

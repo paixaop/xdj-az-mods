@@ -1141,6 +1141,117 @@ typedef struct az_official_setting_v1 {
     char key[32], label[64];
 } az_official_setting_v1;
 
+/* A mod browser in the native SOURCE screen's library/service list. */
+enum az_source_view {
+    AZ_SOURCE_VIEW_HIDDEN = 0,
+    AZ_SOURCE_VIEW_BROWSE,
+    AZ_SOURCE_VIEW_SEARCH
+};
+
+typedef struct az_source_browser_v1 {
+    uint32_t size;
+    const char *name; /* label copied by the core during registration */
+    void (*on_view)(enum az_source_view view, void *user); /* overlay thread */
+    void *user;
+    /* Optional. Opt into native Browse/Search navigation and receive UTF-8 edits
+     * from the deck's Search keyboard on the overlay thread. Text is borrowed. */
+    void (*on_query)(const char *text, void *user);
+    /* Optional transparent PNG, at most 128x128 and 16 KiB. Copied at registration. */
+    const unsigned char *icon_png;
+    uint32_t icon_bytes;
+} az_source_browser_v1;
+
+#define AZ_SOURCE_ID_BYTES 128u
+#define AZ_SOURCE_NAME_BYTES 32u
+#define AZ_SOURCE_QUERY_BYTES 256u
+#define AZ_SOURCE_PATH_BYTES 1024u
+#define AZ_SOURCE_PAGE_MAX 64u
+
+/* IDs are nonempty, opaque strings scoped to the registered provider. All text
+ * is NUL-terminated UTF-8. IDs must remain stable across catalog requests. */
+typedef struct az_source_playlist_v1 {
+    char id[AZ_SOURCE_ID_BYTES];
+    char name[192];
+} az_source_playlist_v1;
+
+typedef struct az_source_track_v1 {
+    char id[AZ_SOURCE_ID_BYTES];
+    char title[192];
+    char artist[128];
+    char album[128];
+    uint32_t duration_ms, bpm_x100; /* zero when unknown */
+} az_source_track_v1;
+
+typedef struct az_source_page_v1 {
+    uint32_t count;    /* rows written, at most the supplied capacity */
+    uint32_t has_more; /* 1 if another page exists, 0 otherwise */
+} az_source_page_v1;
+
+enum az_source_storage_mode {
+    AZ_SOURCE_STREAMING = 1, /* Core retains the audio for playback, then evicts it. */
+    AZ_SOURCE_IMPORT          /* Core publishes the audio and analysis in the export library. */
+};
+
+/* The core owns browsing, search, playlist navigation and deck loading.
+ * Callbacks run serially per provider on a core worker. Callback arguments
+ * and outputs are borrowed for the duration of the call. Pages use zero-based
+ * offsets and capacities of 1..AZ_SOURCE_PAGE_MAX. Return AZ_OK with count=0
+ * and has_more=0 for an empty page. Return a negative AZ_* status on failure.
+ * prepare_track receives an empty core-owned directory and returns the absolute
+ * path of a completed, seekable audio file directly inside it. Keep the file's
+ * audio extension. After return, the core owns the directory and its contents. */
+typedef struct az_source_provider_v1 {
+    uint32_t size;
+    const char *name; /* 1..AZ_SOURCE_NAME_BYTES-1 UTF-8 bytes */
+    const unsigned char *icon_png; /* optional PNG, up to 128x128 and 16 KiB */
+    uint32_t icon_bytes;
+    enum az_source_storage_mode storage_mode;
+    void *user;
+    int (*list_playlists)(void *user, uint32_t offset, az_source_playlist_v1 *rows,
+                          uint32_t capacity, az_source_page_v1 *page);
+    int (*playlist_tracks)(void *user, const char *playlist_id, uint32_t offset,
+                           az_source_track_v1 *rows, uint32_t capacity, az_source_page_v1 *page);
+    int (*search)(void *user, const char *query, uint32_t offset, az_source_track_v1 *rows,
+                  uint32_t capacity, az_source_page_v1 *page);
+    int (*prepare_track)(void *user, const az_source_track_v1 *track, const char *directory,
+                         char *path, uint32_t capacity);
+} az_source_provider_v1;
+
+#define AZ_SOURCE_ABI 1u
+typedef struct az_source_v1 {
+    uint32_t abi, size;
+    /* Init only. The core owns selection and routes BROWSE
+     * and SEARCH only while the source is selected. HIDDEN releases screen
+     * focus when another native view opens or the mod is disabled. */
+    int (*register_browser)(const char *id, const az_source_browser_v1 *browser);
+    /* Overlay thread, selected native browser only. HIDDEN returns to SOURCE. */
+    int (*show_view)(const char *id, enum az_source_view view);
+    /* Init only, once per mod. The descriptor, name and icon are copied.
+     * Available only when the running firmware has a native source adapter. */
+    int (*register_provider)(const char *id, const az_source_provider_v1 *provider);
+    /* Overlay thread. Choose the mode for subsequent loads by this provider. */
+    int (*set_storage_mode)(const char *id, enum az_source_storage_mode mode);
+} az_source_v1;
+
+#define AZ_SOURCE_HAS(service, field) \
+    ((service) && (service)->abi == AZ_SOURCE_ABI && \
+     (service)->size >= offsetof(az_source_v1, field) + sizeof((service)->field) && (service)->field)
+
+#define AZ_TEXT_ENTRY_MAX_BYTES 255u
+typedef struct az_text_entry_v1 {
+    uint32_t size;
+    uint32_t max_bytes;              /* UTF-8 bytes excluding the NUL, 1..AZ_TEXT_ENTRY_MAX_BYTES */
+    const char *title;
+    const char *initial;             /* optional */
+    const char *submit;              /* optional, defaults to OK */
+    const char *hint;                /* optional, shown until validation reports an error */
+    /* Called on the overlay thread. For AZ_OK, return a validation message to
+     * keep editing, or NULL to accept. For AZ_CANCELLED/AZ_FAILED, text is NULL
+     * and the return value is ignored. Copy text if it is needed after the call. */
+    const char *(*on_result)(int status, const char *text, void *user);
+    void *user;
+} az_text_entry_v1;
+
 typedef struct az_core_v1 {
     int abi;
     int size;          /* sizeof(az_core_v1) at the core's build */
@@ -1439,6 +1550,15 @@ typedef struct az_core_v1 {
     int (*on_plan_set)(const char *id, az_plan_set_fn fn, void *user);
     int (*plan_set_resolve)(const char *id, const az_plan_set_target_v1 *target,
                             az_plan_set_source_v1 *out);
+
+    /* Optional native SOURCE service. Unsupported ABI or firmware -> NULL. */
+    const az_source_v1 *(*source_service)(uint32_t abi);
+
+    /* Optional native keyboard. Call on the overlay thread from the active
+     * mod screen or focused surface. AZ_OK queues one prompt; the strings are
+     * copied. BACK and leaving the requesting view cancel it. Other returns
+     * refuse the request without a callback. Check AZ_HAS before use. */
+    int (*text_entry)(const char *id, const az_text_entry_v1 *entry);
 
 } az_core_v1;
 

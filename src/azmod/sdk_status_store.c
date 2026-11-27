@@ -240,7 +240,7 @@ static void ss_file_probe(const struct st_source *src, const struct st_resolutio
     if (!suffix || strcmp(suffix, ".DAT")) return;
     if (ext) memcpy(suffix, ".EXT", 5);
     memcpy(file->relative, relative, sizeof file->relative);
-    if (!st_source_path(src->mount, relative, file->path)) {
+    if (!st_source_file(src, relative, file->path)) {
         file->rc = AZ_FAILED;
         return;
     }
@@ -440,7 +440,7 @@ static void ss_observed_metadata(struct ss_observation *o) {
     char path[1024];
     o->image.metadata = o->monitor->row.metadata;
     o->image.duration_ticks = o->monitor->row.duration_ticks;
-    if (o->monitor->row.content[0] && st_source_path(o->image.src.mount, o->monitor->row.content, path) && strlen(path) < sizeof o->image.metadata.path) {
+    if (o->monitor->row.content[0] && st_source_file(&o->image.src, o->monitor->row.content, path) && strlen(path) < sizeof o->image.metadata.path) {
         memcpy(o->image.metadata.path, path, strlen(path) + 1);
         o->image.metadata.valid |= AZ_META_PATH;
     }
@@ -511,7 +511,7 @@ static void ss_observe_database(struct ss_observation *o) {
     char path[1024];
     if (!o->source_rc) {
         o->image.rc = AZ_FAILED;
-        if (!o->monitor->db && st_source_path(o->image.src.mount, "/PIONEER/rekordbox/exportLibrary.db", path))
+        if (!o->monitor->db && st_source_database(&o->image.src, path))
             o->monitor->db = ss_open_database(path, &o->image.src, &o->monitor->db_fd);
         if (o->monitor->db && !ss_database_version(o->monitor->db, &o->version)) {
             if (o->monitor->version && o->monitor->version != o->version) {
@@ -1031,11 +1031,18 @@ struct fo_sql_bindings {
     int (*utf16)(struct sqlite3_stmt *, int, const void *, int, void (*)(void *));
     int (*utf8)(struct sqlite3_stmt *, int, const char *, int, void (*)(void *));
 };
-static int fo_root_valid(const char *root, size_t length) {
-    return root && length > 8 && length < 1024 && !memcmp(root + length - 8, "/PIONEER", 8);
+static int ss_export_root(const struct st_source *source, char root[1024]) {
+    return snprintf(root, 1024, "%s/%s", source->mount, st_source_export(source));
+}
+static int ss_export_matches(const struct st_source *source, const char *root, size_t length) {
+    size_t mount = strlen(source->mount);
+    const char *folder = st_source_export(source);
+    size_t bytes = strlen(folder);
+    return length == mount + 1 + bytes && root[mount] == '/' &&
+           !memcmp(source->mount, root, mount) && !memcmp(folder, root + mount + 1, bytes);
 }
 static int fo_locator_valid(const struct fo_locator *where) {
-    if (!fo_root_valid(where->root, where->length)) return 0;
+    if (!where->root || !where->length || where->length >= 1024) return 0;
     if (!where->physical_path_only && !fo_unicode(where->audio, where->audio_units)) return 0;
     if (!where->analysis_utf8 && !fo_unicode(where->analysis, where->analysis_units)) return 0;
     return az_storage_sql()->ok == 1;
@@ -1044,7 +1051,7 @@ static int fo_source_root(struct fo_read *r, const struct fo_locator *where) {
     unsigned found = 0;
     for (int i = 0; i < 2; i++) {
         struct st_source source;
-        if (!st_source_read(i, &source) && strlen(source.mount) == where->length - 8 && !memcmp(where->root, source.mount, where->length - 8)) {
+        if (!st_source_read(i, &source) && ss_export_matches(&source, where->root, where->length)) {
             r->source = source;
             found++;
         }
@@ -1064,13 +1071,22 @@ static int fo_sql_bindings(struct fo_sql_bindings *bindings, int need_utf8) {
 }
 static int fo_open_database(struct fo_read *r) {
     char path[1024];
-    return st_source_path(r->source.mount, "/PIONEER/rekordbox/exportLibrary.db", path) &&
+    return st_source_database(&r->source, path) &&
            (r->db = ss_open_database(path, &r->source, &r->db_fd)) && !ss_database_version(r->db, &r->version);
 }
 static int fo_bind_locator(struct sqlite3_stmt *stmt, const struct fo_locator *where, const struct fo_sql_bindings *bindings) {
     if (!where->physical_path_only && bindings->utf16(stmt, 1, where->audio, (int) (2 * where->audio_units), NULL)) return 0;
     return !(where->analysis_utf8 ? bindings->utf8(stmt, 2, where->analysis_utf8, -1, NULL)
                                   : bindings->utf16(stmt, 2, where->analysis, (int) (2 * where->analysis_units), NULL));
+}
+static int fo_bind_analysis_alias(struct sqlite3_stmt *stmt, const struct st_source *source,
+                                  const char *physical, const struct fo_sql_bindings *bindings) {
+    if (!source->hfsplus || !physical || strncmp(physical, "/.PIONEER/", sizeof "/.PIONEER/" - 1))
+        return 1;
+    char logical[1024];
+    int bytes = snprintf(logical, sizeof logical, "/%s", physical + 2);
+    return (unsigned) bytes < sizeof logical &&
+           !bindings->utf8(stmt, 3, logical, -1, (void (*)(void *)) -1); /* SQLITE_TRANSIENT */
 }
 static uint32_t fo_unique_content(struct sqlite3_stmt *stmt) {
     if (az_storage_sql()->step(stmt) != 100) return 0;
@@ -1079,10 +1095,18 @@ static uint32_t fo_unique_content(struct sqlite3_stmt *stmt) {
     return 0;
 }
 static uint32_t fo_find_content(struct fo_read *r, const struct fo_locator *where, const struct fo_sql_bindings *bindings) {
-    const char *sql = where->physical_path_only ? "SELECT content_id FROM content WHERE analysisDataFilePath=?2 COLLATE BINARY LIMIT 2" : "SELECT content_id FROM content WHERE path=?1 COLLATE BINARY AND analysisDataFilePath=?2 COLLATE BINARY LIMIT 2";
+    static const char path_only[] =
+        "SELECT content_id FROM content WHERE analysisDataFilePath COLLATE BINARY IN (?2, ?3) LIMIT 2";
+    static const char with_audio[] =
+        "SELECT content_id FROM content WHERE path=?1 COLLATE BINARY "
+        "AND analysisDataFilePath COLLATE BINARY IN (?2, ?3) LIMIT 2";
+    const char *sql = where->physical_path_only ? path_only : with_audio;
     void *stmt = NULL;
     uint32_t id = 0;
-    if (!az_storage_sql()->prepare(r->db, sql, -1, &stmt, NULL) && stmt && fo_bind_locator(stmt, where, bindings)) id = fo_unique_content(stmt);
+    if (!az_storage_sql()->prepare(r->db, sql, -1, &stmt, NULL) && stmt &&
+        fo_bind_locator(stmt, where, bindings) &&
+        fo_bind_analysis_alias(stmt, &r->source, where->analysis_utf8, bindings))
+        id = fo_unique_content(stmt);
     if (stmt) az_storage_sql()->finalize(stmt);
     return id;
 }
@@ -1096,7 +1120,7 @@ static int fo_probe_files(struct fo_read *r, const struct st_resolution *row) {
 }
 static int fo_open_files(struct fo_read *r, uint32_t id, unsigned required) {
     struct st_resolution row = {0};
-    if (!id || st_read_row(r->db, id, &row) || row.analysis_limited || !st_source_path(r->source.mount, row.content, r->audio)) return 0;
+    if (!id || st_read_row(r->db, id, &row) || row.analysis_limited || !st_source_file(&r->source, row.content, r->audio)) return 0;
     r->source.ref.track_id = id;
     if (!fo_probe_files(r, &row)) return 0;
     ss_arm_paths(&r->watch, r->files);
@@ -1429,9 +1453,7 @@ static int fi_source_paths(const char *actual, size_t bytes, char root[1024], ch
         if (st_source_read(port, &source)) continue;
         size_t mount = strlen(source.mount);
         if (bytes <= mount || memcmp(actual, source.mount, mount) || actual[mount] != '/') continue;
-        if (mount + sizeof "/PIONEER" > 1024) return 0;
-        memcpy(root, actual, mount);
-        memcpy(root + mount, "/PIONEER", sizeof "/PIONEER");
+        if ((unsigned) ss_export_root(&source, root) >= 1024) return 0;
         memcpy(analysis, actual + mount, bytes - mount + 1);
         found++;
     }
@@ -2269,7 +2291,7 @@ static int ss_publish_baseline(unsigned deck, const struct ss_binding *b, uint64
 static int ss_file_current(const struct st_source *src, const struct ss_file *f) {
     if (!f->relative[0]) return 1;
     char path[1024] = "";
-    st_source_path(src->mount, f->relative, path);
+    st_source_file(src, f->relative, path);
     return !strcmp(path, f->path) && (!path[0] || st_disk_sig(path) == f->signature);
 }
 static int ss_pin_witness(uint64_t token, struct azjs_origin *origin, struct azsdk_source_sample *native);
@@ -2534,7 +2556,7 @@ static int ss_pin_identity(uint64_t token, struct st_source *src, az_track_ref *
 static int ss_pin_read_row(uint64_t token, struct st_source *source, const az_track_ref *ref) {
     char path[1024];
     int rc = AZ_STALE;
-    if (st_source_path(source->mount, "/PIONEER/rekordbox/exportLibrary.db", path)) {
+    if (st_source_database(source, path)) {
         int fd = -1;
         void *db = ss_open_database(path, source, &fd);
         if (db) {
@@ -2865,8 +2887,8 @@ struct sw_locator {
 static int sw_binding_paths(const struct ss_binding *binding, const struct sw_locator *locator) {
     const char *mount = binding->image.src.mount;
     size_t length = strlen(mount);
-    return locator->root_length == length + 8 && !memcmp(locator->root, mount, length) &&
-           !memcmp(locator->root + length, "/PIONEER", 8) && (binding->image.metadata.valid & AZ_META_PATH) &&
+    return ss_export_matches(&binding->image.src, locator->root, locator->root_length) &&
+           (binding->image.metadata.valid & AZ_META_PATH) &&
            !strncmp(binding->image.metadata.path, mount, length) &&
            sw_name(locator->audio, locator->audio_length, binding->image.metadata.path + length) &&
            sw_name(locator->analysis, locator->analysis_length, binding->image.file[0].relative);
@@ -2935,7 +2957,7 @@ static unsigned sw_group_members(const struct sw_batch *batch, unsigned index) {
 }
 static int sw_saved_file_path(const struct ss_file *file, const struct st_source *source, struct stat *status) {
     char path[1024];
-    return file->path[0] && st_source_path(source->mount, file->relative, path) && !strcmp(path, file->path) &&
+    return file->path[0] && st_source_file(source, file->relative, path) && !strcmp(path, file->path) &&
            !stat(path, status) && S_ISREG(status->st_mode) &&
            !((uint64_t) status->st_dev == source->device && (uint64_t) status->st_ino == source->inode);
 }

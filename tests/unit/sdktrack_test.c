@@ -70,6 +70,7 @@ static int st_test_start_worker(pthread_t *t, const pthread_attr_t *a, void *(*f
 }
 #define az_thread_create st_test_start_worker
 #include "sdk_track.c"
+#include "sdk_playlist_order.c"
 #include "sdk_wave_provider.h"
 #undef az_thread_create
 #define az_thread_create pthread_create
@@ -94,29 +95,32 @@ static int sd_deck_snapshot_v1(int deck, az_deck_snapshot *out) {
     (void) out;
     return AZ_UNSUPPORTED;
 }
-static void mountinfo(const char *root, int mid) {
+static void mountinfo_format(const char *root, int mid, const char *format) {
     FILE *f = fopen(st_test_mountinfo, "w");
     assert(f);
-    fprintf(f, "%d 1 8:1 / %s/media/sdb1 rw - vfat /dev/sdb1 rw\n", mid, root);
+    fprintf(f, "%d 1 8:1 / %s/media/sdb1 rw - %s /dev/sdb1 rw\n", mid, root, format);
     fprintf(f, "200 1 8:2 / %s/media/sda1 rw - vfat /dev/sda1 rw\n", root);
     fclose(f);
+}
+static void mountinfo(const char *root, int mid) {
+    mountinfo_format(root, mid, "vfat");
 }
 static void source_generation_exhaustion(const char *root) {
     (void) root;
     struct st_source first = {0}, second = {0};
     struct stat status = {.st_dev = 1, .st_ino = 9};
     uint64_t generation = UINT64_MAX - 1;
-    assert(st_source_assign(&first, &generation, 0, "/usb/one", 901, status) == AZ_OK);
+    assert(st_source_assign(&first, &generation, 0, "/usb/one", 901, 0, status) == AZ_OK);
     assert(first.ref.source_generation == UINT64_MAX);
     second = first;
     CHECK("source generation exhaustion refuses a reconnect without publishing zero",
-          st_source_assign(&second, &generation, 1, "/usb/two", 902, status) == AZ_LIMIT && !second.ref.source_generation);
+          st_source_assign(&second, &generation, 1, "/usb/two", 902, 0, status) == AZ_LIMIT && !second.ref.source_generation);
     CHECK("counter exhaustion never reuses a prior token on retry",
-          st_source_assign(&second, &generation, 1, "/usb/two", 902, status) == AZ_LIMIT);
+          st_source_assign(&second, &generation, 1, "/usb/two", 902, 0, status) == AZ_LIMIT);
     CHECK("full generation counter leaves an unchanged current source usable",
-          st_source_assign(&first, &generation, 0, "/usb/one", 901, status) == AZ_OK && first.ref.source_generation == UINT64_MAX);
+          st_source_assign(&first, &generation, 0, "/usb/one", 901, 0, status) == AZ_OK && first.ref.source_generation == UINT64_MAX);
     CHECK("both USB source slots fail closed on later reconnect",
-          st_source_assign(&first, &generation, 0, "/usb/one", 903, status) == AZ_LIMIT);
+          st_source_assign(&first, &generation, 0, "/usb/one", 903, 0, status) == AZ_LIMIT);
     CHECK("source identity counter never wraps", generation == UINT64_MAX);
 }
 static void short_records(void) {
@@ -869,6 +873,86 @@ static void stored_worker_roundtrip(const az_track_ref *ref) {
     assert(track_service_release(6, ticket, 0) == AZ_OK);
     puts("Stored data compiled worker: asynchronous request, immutable acquire and late release passed");
 }
+
+static void hfs_sample_file(const char *path, int detail) {
+    static const uint8_t dat[28] = {
+        [0] = 'P', [1] = 'M', [2] = 'A', [3] = 'I', [7] = 28, [11] = 28};
+    static const uint8_t ext[38] = {
+        [0] = 'P', [1] = 'M', [2] = 'A', [3] = 'I', [7] = 12, [11] = 38, [12] = 'P', [13] = 'W', [14] = 'V', [15] = '3', [19] = 24, [23] = 26, [27] = 1, [31] = 2, [33] = 0x96, [36] = 0x11, [37] = 0x22};
+    FILE *file = fopen(path, "wb");
+    size_t bytes = detail ? sizeof ext : sizeof dat;
+    assert(file && fwrite(detail ? ext : dat, 1, bytes, file) == bytes && !fclose(file));
+}
+
+static sqlite3 *hfs_sample_library(const char *root, int id) {
+    char ordinary[PATH_MAX], hidden[PATH_MAX], path[PATH_MAX];
+    snprintf(ordinary, sizeof ordinary, "%s/sdb1/PIONEER", g_media);
+    snprintf(hidden, sizeof hidden, "%s/sdb1/.PIONEER", g_media);
+    assert(!rename(ordinary, hidden));
+    FILE *mounts = fopen(g_mounts, "a");
+    assert(mounts && fprintf(mounts, "/dev/sdb1 %s/sdb1 hfsplus rw 0 0\n", g_media) > 0);
+    assert(!fclose(mounts));
+    mountinfo_format(root, id, "hfsplus");
+    snprintf(path, sizeof path, "%s/USBANLZ", hidden);
+    assert(!mkdir(path, 0700));
+    snprintf(path, sizeof path, "%s/USBANLZ/sample.DAT", hidden);
+    hfs_sample_file(path, 0);
+    snprintf(path, sizeof path, "%s/USBANLZ/sample.EXT", hidden);
+    hfs_sample_file(path, 1);
+    snprintf(path, sizeof path, "%s/rekordbox/exportLibrary.db", hidden);
+    sqlite3 *db = NULL;
+    assert(!sqlite3_open(path, &db));
+    sql(db, "UPDATE content SET title='HFS track',analysisDataFilePath='/PIONEER/USBANLZ/sample.DAT' WHERE content_id=10");
+    return db;
+}
+
+static void hfs_snapshot(const az_track_ref *ref, struct st_data *data) {
+    st_data_init(data);
+    assert(track_service_disk_load(ref, AZ_DATA_METADATA, data, NULL) == AZ_OK);
+    assert(!strcmp(data->view.metadata.title, "HFS track"));
+    assert(strstr(data->files[0], "/.PIONEER/rekordbox/exportLibrary.db"));
+    assert(strstr(data->view.metadata.path, "/Contents/a/ten.mp3"));
+
+    st_data_init(data);
+    data->wave_query = (az_wave_query) {sizeof(az_wave_query), 1, AZ_WAVE_PWV3_MONO, 0, 1, 0};
+    assert(track_service_disk_load(ref, ST_DETAIL, data, NULL) == AZ_OK);
+    assert(data->detail[0] == 0x11);
+    assert(strstr(data->files[2], "/.PIONEER/USBANLZ/sample.EXT"));
+
+    az_playlist_entry_v1 page[2];
+    az_playlist_order_v1 order;
+    assert(playlist_snapshot(0, 2, 0, page, 2, &order) == AZ_OK);
+    assert(order.source_generation == ref->source_generation && order.library_id == ref->library_id);
+    assert(order.total == 2 && page[0].track_id == 12 && page[1].track_id == 10);
+}
+
+static void hfs_provider(const char *root, struct st_data *data) {
+    sqlite3 *writer = hfs_sample_library(root, 102);
+    az_track_ref hfs = {.size = sizeof hfs};
+    assert(sdk_track_resolve("mod-a", 0, 10, &hfs) == AZ_OK);
+    hfs_snapshot(&hfs, data);
+
+    make_stick("sdb1", "Shadow");
+    sql(writer, "UPDATE content SET analysisDataFilePath='/.PIONEER/USBANLZ/sample.DAT' WHERE content_id=10");
+    hfs_snapshot(&hfs, data);
+    assert(!sqlite3_close(writer));
+
+    char path[PATH_MAX];
+    snprintf(path, sizeof path, "%s/sdb1/.PIONEER/rekordbox/exportLibrary.db-wal", g_media);
+    FILE *wal = fopen(path, "wb");
+    assert(wal && fputs("pending", wal) >= 0 && !fclose(wal));
+    assert(!track_service_disk_fresh(&hfs, data, NULL));
+    assert(!unlink(path));
+
+    mountinfo_format(root, 103, "hfsplus");
+    assert(!track_service_disk_fresh(&hfs, data, NULL));
+    az_track_ref remounted = {.size = sizeof remounted};
+    assert(sdk_track_resolve("mod-a", 0, 10, &remounted) == AZ_OK);
+    assert(remounted.source_generation != hfs.source_generation && remounted.library_id == hfs.library_id);
+    hfs_snapshot(&remounted, data);
+    puts("HFS+ stored data and playlist order use the hidden export when both directories exist");
+}
+
 int main(int argc, char **argv) {
     st_test_real_worker = argc > 1 && !strcmp(argv[1], "worker");
     /* The FIFO watchdog writes its failure from a signal handler. Keep it
@@ -1028,6 +1112,7 @@ int main(int argc, char **argv) {
     struct st_source rejected;
     assert(st_source_read(0, &rejected) == AZ_STALE);
     assert(!unlink(dbname) && !rename(backup, dbname));
+    hfs_provider(root, data);
     az_data_capabilities caps = {.size = sizeof caps};
     assert(sdk_data_capabilities(&caps) == AZ_OK && !caps.commands);
     az_command_request request = {.size = sizeof request, .version = 1, .operation = AZ_CMD_LOOP_EXIT, .request_id = 7, .expected_load_generation = 3, .deadline_ns = 1};

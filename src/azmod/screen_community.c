@@ -6,7 +6,7 @@
  * tabs: Installed (the quarantine notice, then azcm_info rows), Browse (Home: shelves of tiles; All
  * mods or a category: the catalog as a grid of tiles in one of four orders: cm_browse.h) and Repositories (+ Add repository, Refresh). Pages: an installed mod (state, Turn back on, its
  * own screen), a catalog mod (Install / Update / Remove / Enable / Disable, progress), the
- * trust screen (first install, once), the Add-repository keyboard.
+ * trust screen (first install, once), the repository manager.
  * Reads: community.c through azcm_* (menu.h) and the fetcher's line files
  * (/tmp/az-community/catalog, /status). Writes: only /run/az-community.req (tmp + rename) and
  * the trust flag. Never the network, never a fork. Layout and hit-testing share one function
@@ -47,9 +47,6 @@ enum {
     CMC_APPLY,
     CMC_TRUST_OK,
     CMC_TRUST_NO,
-    CMC_KEY,
-    CMC_KB_OK,
-    CMC_KB_NO,
     CMC_BACK,
     CMC_MODACT,
     CMC_INSTCAT,
@@ -82,7 +79,6 @@ enum {
     CMV_MOD,
     CMV_CAT,
     CMV_TRUST,
-    CMV_KBD,
     CMV_RELOAD,
     CMV_SETTINGS
 };
@@ -251,7 +247,6 @@ static struct {
     long at;    /* 0 = none in flight */
 } g_cm_flip;
 static char g_cm_kb[96];
-static int g_cm_kbnum;
 /* Browse: the view shown (CMB_HOME, CMB_ALL or a cm_browse.h category) and the order; for this
  * EP147 run. */
 static int g_cm_fcat = CMB_HOME, g_cm_sort = CMB_SORT_NAME;
@@ -724,7 +719,6 @@ static const char *cm_crumb_page(azcm_info_t *m) {
     case CMV_MOD: return !azcm_info(g_cm_page, m) ? m->name : 0;
     case CMV_CAT:
     case CMV_TRUST: return g_cm_cat >= 0 && g_cm_cat < g_ncc ? g_cc[g_cm_cat].name : 0;
-    case CMV_KBD: return "Add repository";
     default: return 0;
     }
 }
@@ -911,51 +905,6 @@ static int cm_wrap_from(const azmod_fb *fb, int x, int y, int w, int lh, const c
         p += best;
     }
     return lines;
-}
-/* ---- the keyboard (Add repository): owner/repo or a URL -------------------------- */
-/* Full screen: the geometry of EP147's own search keyboard (key 0.066 of the width at a
- * 0.072 pitch, rows 0.098 of the height with a 0.012 gap; DEL right on row 1, 123 left and
- * SPACE right on row 3), its three rows at the bottom of the full-screen area. */
-#define CMK_KW 0.066f
-#define CMK_PITCH 0.072f
-#define CMK_RH 0.098f
-#define CMK_GAP 0.012f
-static void cm_kbf_rect(const azmod_fb *fb, int row, int k, int nk, int *x, int *y, int *w, int *h) {
-    int bx, by, bw, bh;
-    cm_box(fb, &bx, &by, &bw, &bh);
-    (void) bx;
-    (void) bw;
-    int kh = (int) (CMK_RH * fb->h), kg = (int) (CMK_GAP * fb->h);
-    int y0 = by + bh - 3 * kh - 2 * kg;
-    *y = y0 + row * (kh + kg);
-    *h = kh;
-    if (k < 0) {   /* the specials: -1 DEL (row 0, right), -2 123/abc (row 2, left), -3 SPACE (row 2, right) */
-        if (k == -1) {
-            *w = (int) (CMK_KW * fb->w);
-            *x = (int) (0.960f * fb->w) - *w;
-        } else if (k == -2) {
-            *w = (int) (CMK_KW * fb->w);
-            *x = (int) (0.035f * fb->w);
-        } else {
-            *w = (int) (0.104f * fb->w);
-            *x = (int) (0.960f * fb->w) - *w;
-        }
-        return;
-    }
-    float span = nk * CMK_PITCH - (CMK_PITCH - CMK_KW), st = (1.0f - span) / 2.0f;
-    *x = (int) ((st + k * CMK_PITCH) * fb->w);
-    *w = (int) (CMK_KW * fb->w);
-}
-static const char *CM_KB[2][4] = {{"qwertyuiop", "asdfghjkl", "zxcvbnm", ""}, {"1234567890", "-_./:@", "~+=?&#", ""}};
-static void cm_kb_rect(const azmod_fb *fb, int row, int k, int nk, int *x, int *y, int *w, int *h) {
-    int bx, by, bw, bh;
-    cm_box(fb, &bx, &by, &bw, &bh);
-    int kw = bw / 11, gap = kw / 8, ky = by + bh - 4 * (kw + gap);
-    int rowx = bx + (bw - nk * kw) / 2;
-    *x = rowx + k * kw + gap / 2;
-    *y = ky + row * (kw + gap);
-    *w = kw - gap;
-    *h = kw;
 }
 /* ---- the layout --------------------------------------------------------------------- */
 static az_rect g_cm_area;   /* the mod screen's area, set by cm_layout; w = 0: no screen shown */
@@ -2144,148 +2093,6 @@ static void cm_layout_reload(struct cm_lay *lay) {
     lay->n = n;
 }
 
-/* Add repository: the field and the keyboard. Full screen: a big field and the deck's keyboard. */
-static void cm_layout_kbd_full(struct cm_lay *lay) {
-    azmod_state *s = lay->s;
-    const azmod_fb *fb = lay->fb;
-    cm_ctl *ctl = lay->ctl;
-    int draw = lay->draw;
-    int bx = lay->bx;
-    int bw = lay->bw;
-    int rh = lay->rh;
-    int lh = lay->lh;
-    int dpx = lay->dpx;
-    int pad = lay->pad;
-    int bh3 = lay->bh3;
-    int y = lay->y;
-    int n = lay->n;
-    int fh = rh * 13 / 10, fpx = rh * 52 / 100, bw2 = fb->w * 150 / 1280;
-    if (draw) {
-        c_text(fb, bx + pad, y, 0, lh, "Type owner/repo, a github.com address, or an https:// address ending in azmods-repo.json:", dpx, C_TEXT_DIM);
-        int fw = bw - 2 * pad - 2 * (bw2 + pad);
-        fill_rect(fb, bx + pad, y + lh + pad / 2, fw, fh, 0x00343434u);
-        /* the end of what was typed stays in view: cut from the left */
-        char t[110];
-        snprintf(t, sizeof t, "%s_", g_cm_kb);
-        const char *v = t;
-        while (*v && cm_tw(v, fpx) > fw - 2 * pad) v++;
-        c_text(fb, bx + 2 * pad, y + lh + pad / 2, 0, fh, v, fpx, C_TEXT);
-    }
-    int ky = y + lh + pad / 2 + (fh - bh3) / 2, ax = bx + bw - pad - 2 * bw2 - pad;
-    if (draw) cm_button(fb, ax, ky, bw2, bh3, "Add", 1, g_cm_kb[0] != 0, CM_FOC);
-    CM_CTL(CMC_KB_OK, 0, ax, ky, bw2, bh3);
-    if (draw) cm_button(fb, ax + bw2 + pad, ky, bw2, bh3, "Cancel", 0, 1, CM_FOC);
-    CM_CTL(CMC_KB_NO, 0, ax + bw2 + pad, ky, bw2, bh3);
-    /* whole pieces of an address, one press each */
-    {
-        static const char *SC[3] = {"https://", "github.com/", "/azmods-repo.json"};
-        int sy = y + lh + pad / 2 + fh + pad, sx = bx + pad;
-        for (int k = 0; k < 3; k++) {
-            int sw = cm_tw(SC[k], dpx) + 3 * pad;
-            if (draw) cm_button(fb, sx, sy, sw, bh3, SC[k], 0, 1, CM_FOC);
-            CM_CTL(CMC_KEY, 0x110 + k, sx, sy, sw, bh3);
-            sx += sw + pad;
-        }
-    }
-    for (int r = 0; r < 3; r++) {
-        const char *keys = CM_KB[g_cm_kbnum][r];
-        int nk = (int) strlen(keys);
-        for (int k = -3; k < nk; k++) {
-            if (k < 0 && !((k == -1 && r == 0) || ((k == -2 || k == -3) && r == 2))) continue;
-            int x, yy, w, h;
-            cm_kbf_rect(fb, r, k, nk, &x, &yy, &w, &h);
-            char lab[8];
-            int code;
-            if (k >= 0) {
-                lab[0] = keys[k];
-                lab[1] = 0;
-                code = (unsigned char) keys[k];
-            } else if (k == -1) {
-                snprintf(lab, sizeof lab, "del");
-                code = 0x102;
-            } else if (k == -2) {
-                snprintf(lab, sizeof lab, "%s", g_cm_kbnum ? "abc" : "123");
-                code = 0x100;
-            } else {
-                snprintf(lab, sizeof lab, "space");
-                code = 0x101;
-            }
-            if (draw) {
-                int foc = CM_FOC;
-                fill_rect(fb, x, yy, w, h, foc ? C_FOCUS_BAND : 0x00343434u);
-                if (foc) c_focus_ring(fb, x, yy, w, h);
-                c_text(fb, x, yy, w, h, lab, k >= 0 ? h * 42 / 100 : h * 30 / 100, C_TEXT);
-            }
-            CM_CTL(CMC_KEY, code, x, yy, w, h);
-        }
-    }
-    lay->y = y;
-    lay->n = n;
-}
-
-/* Add repository: the field and the keyboard. */
-static void cm_layout_kbd(struct cm_lay *lay) {
-    azmod_state *s = lay->s;
-    const azmod_fb *fb = lay->fb;
-    cm_ctl *ctl = lay->ctl;
-    int draw = lay->draw;
-    int bx = lay->bx;
-    int bw = lay->bw;
-    int rh = lay->rh;
-    int lh = lay->lh;
-    int px = lay->px;
-    int dpx = lay->dpx;
-    int pad = lay->pad;
-    int bh3 = lay->bh3;
-    int y = lay->y;
-    int n = lay->n;
-    if (draw) {
-        c_text(fb, bx + pad, y, 0, lh, "Type owner/repo, or a github.com address:", dpx, C_TEXT_DIM);
-        fill_rect(fb, bx + pad, y + lh, bw - 2 * pad, rh, 0x00343434u);
-        char t[110];
-        snprintf(t, sizeof t, "%s_", g_cm_kb);
-        c_text(fb, bx + 2 * pad, y + lh, 0, rh, t, px, C_TEXT);
-    }
-    int bw2 = fb->w * 130 / 1280, ky = y + lh + rh + pad;
-    if (draw) cm_button(fb, bx + pad, ky, bw2, bh3, "Add", 1, g_cm_kb[0] != 0, CM_FOC);
-    CM_CTL(CMC_KB_OK, 0, bx + pad, ky, bw2, bh3);
-    if (draw) cm_button(fb, bx + 2 * pad + bw2, ky, bw2, bh3, "Cancel", 0, 1, CM_FOC);
-    CM_CTL(CMC_KB_NO, 0, bx + 2 * pad + bw2, ky, bw2, bh3);
-    for (int r = 0; r < 4; r++) {   /* rows 0-2 keys; row 3: 123/abc, space, del */
-        const char *keys = CM_KB[g_cm_kbnum][r];
-        int nk = r < 3 ? (int) strlen(keys) : 3;
-        for (int k = 0; k < nk; k++) {
-            int x, yy, w, h;
-            cm_kb_rect(fb, r, k, r < 3 ? nk : 3, &x, &yy, &w, &h);
-            if (r == 3) {
-                int kw = w;
-                w = kw * 3;
-                x = bx + (bw - 3 * (kw * 3 + kw / 4)) / 2 + k * (kw * 3 + kw / 4);
-            }
-            char lab[8];
-            int code;
-            if (r < 3) {
-                lab[0] = keys[k];
-                lab[1] = 0;
-                code = (unsigned char) keys[k];
-            } else {
-                static const char *SP[3] = {"123", "space", "del"};
-                snprintf(lab, sizeof lab, "%s", k == 0 && g_cm_kbnum ? "abc" : SP[k]);
-                code = 0x100 + k;
-            }
-            if (draw) {
-                int foc = CM_FOC;
-                fill_rect(fb, x, yy, w, h, foc ? C_FOCUS_BAND : 0x00343434u);
-                if (foc) c_focus_ring(fb, x, yy, w, h);
-                c_text(fb, x, yy, w, h, lab, h * 45 / 100, C_TEXT);
-            }
-            CM_CTL(CMC_KEY, code, x, yy, w, h);
-        }
-    }
-    lay->y = y;
-    lay->n = n;
-}
-
 /* The home page's rail, at its left edge under the header: the Installed, Browse and Repositories
  * tabs, each an icon over its name, and Refresh at the bottom. It stays put while the page scrolls,
  * and like the header its controls come after the page's (cm_home_ctl_at tries them first). */
@@ -2455,10 +2262,6 @@ static int cm_layout_page(struct cm_lay *lay) {
     case CMV_CAT: return cm_layout_cat(lay);
     case CMV_TRUST: cm_layout_trust(lay); break;
     case CMV_RELOAD: cm_layout_reload(lay); break;
-    case CMV_KBD:
-        if (g_cm_full) cm_layout_kbd_full(lay);
-        else cm_layout_kbd(lay);
-        break;
     }
     return 1;
 }
@@ -2731,6 +2534,9 @@ static int cm_page_screen(void) {
            !azcm_info(g_cm_page, &m) && m.state == AZCM_LOADED && m.has_screen &&
            (g_cm_view == CMV_SETTINGS || !(m.screen_flags & AZ_SCREEN_DEDICATED));
 }
+int azmod_cm_screen_owner(const azmod_state *s) {
+    return s->mode == AZ_COMMUNITY && cm_page_screen() ? g_cm_page : -1;
+}
 static void cm_open(int view) {
     if (view != CMV_MOD && view != CMV_SETTINGS) azcm_page_screen(-1, NULL);   /* a row's own screen lasts for its page only */
     if (g_cm_view == CMV_HOME && view != CMV_HOME) {
@@ -2804,16 +2610,6 @@ static void cm_fire_catalog_change(cm_cmod *m, int action) {
     else if (action == CMA_ENABLE) cm_req("enable %s", m->id, 0);
     else if (action == CMA_DISABLE) cm_req("disable %s", m->id, 0);
 }
-static void cm_key_append(char *text, size_t length, char value) {
-    text[length] = value;
-    text[length + 1] = 0;
-}
-static void cm_key_text(int key, char *text, size_t capacity, size_t length) {
-    if (key >= 0x110 && key <= 0x112) {
-        static const char *shortcuts[3] = {"https://", "github.com/", "/azmods-repo.json"};
-        snprintf(text + length, capacity - length, "%s", shortcuts[key - 0x110]);
-    } else if (length + 1 < capacity) cm_key_append(text, length, (char) key);
-}
 static void cm_fire_reload_ok(const cm_ctl *c);
 static void cm_fire_resume(const cm_ctl *c) {
     (void) c;
@@ -2875,12 +2671,39 @@ static void cm_fire_refresh(const cm_ctl *c) {
     (void) c;
     if (!cm_busy()) cm_req("refresh", 0, 0);
 }
+static void cm_addrepo_dismiss(int accepted, void *user) {
+    (void) accepted;
+    (void) user;
+}
+static void cm_addrepo_notice(void) {
+    azcm_confirm("Add repository", "Deck keyboard is unavailable", "OK", cm_addrepo_dismiss, NULL);
+}
+static const char *cm_addrepo_result(int status, const char *address, void *user) {
+    (void) user;
+    if (status == AZ_FAILED)
+        cm_addrepo_notice();
+    if (status != AZ_OK)
+        return NULL;
+    if (!*address || strpbrk(address, " \t\r\n"))
+        return "Enter owner/repo or an HTTPS address without spaces";
+    if (cm_busy())
+        return "Wait for the current repository operation to finish";
+    cm_cpy(g_cm_kb, sizeof g_cm_kb, address);
+    cm_req("addrepo %s", g_cm_kb, NULL);
+    return NULL;
+}
 static void cm_fire_addrepo(const cm_ctl *c) {
     (void) c;
-    if (!cm_busy()) {
-        g_cm_kbnum = 0;
-        cm_open(CMV_KBD);
-    }
+    if (cm_busy())
+        return;
+    const az_text_entry_v1 entry = {
+        .size = sizeof entry, .max_bytes = sizeof g_cm_kb - 1,
+        .title = "Add repository", .initial = g_cm_kb, .submit = "Add",
+        .hint = "Enter owner/repo, a GitHub address, or an HTTPS address ending in azmods-repo.json.",
+        .on_result = cm_addrepo_result,
+    };
+    if (azcm_text_entry(&entry) != AZ_OK)
+        cm_addrepo_notice();
 }
 static void cm_fire_delrepo(const cm_ctl *c) {
     if (!cm_busy() && c->idx < g_ncr)
@@ -2946,28 +2769,6 @@ static void cm_fire_trust_ok(const cm_ctl *c) {
 static void cm_fire_trust_no(const cm_ctl *c) {
     (void) c;
     cm_open(CMV_CAT);
-}
-static void cm_fire_key(const cm_ctl *c) {
-    char *kb = g_cm_kb;
-    size_t cap = sizeof g_cm_kb, length = strlen(kb);
-    if (c->idx == 0x100) g_cm_kbnum = !g_cm_kbnum;
-    else if (c->idx == 0x101) {
-        if (length + 1 < cap && length) cm_key_append(kb, length, ' ');
-    } else if (c->idx == 0x102) {
-        if (length) kb[length - 1] = 0;
-    } else cm_key_text(c->idx, kb, cap, length);
-}
-static void cm_fire_kb_ok(const cm_ctl *c) {
-    (void) c;
-    if (g_cm_kb[0]) {
-        cm_req("addrepo %s", g_cm_kb, 0);
-        g_cm_tab = 2;
-        cm_open(CMV_HOME);
-    }
-}
-static void cm_fire_kb_no(const cm_ctl *c) {
-    (void) c;
-    cm_open(CMV_HOME);
 }
 static void cm_fire_sort(const cm_ctl *c) {
     g_cm_sort = c->idx;
@@ -3061,9 +2862,6 @@ static void cm_fire(const cm_ctl *c) {
         {CMC_ACT, cm_fire_act},
         {CMC_TRUST_OK, cm_fire_trust_ok},
         {CMC_TRUST_NO, cm_fire_trust_no},
-        {CMC_KEY, cm_fire_key},
-        {CMC_KB_OK, cm_fire_kb_ok},
-        {CMC_KB_NO, cm_fire_kb_no},
         {CMC_SORT, cm_fire_sort},
         {CMC_SORTBTN, cm_fire_sortbtn},
         {CMC_SORTOFF, cm_fire_sortoff},
@@ -3255,7 +3053,7 @@ static bool cm_input_description_touch(const struct cm_input_event *in) {
 }
 static void cm_input_page_touch(const struct cm_input_event *in) {
     if (cm_input_description_touch(in)) return;
-    int pad = g_cm_view == CMV_KBD ? 0 : in->fb->h * 8 / 800;
+    int pad = in->fb->h * 8 / 800;
     int k = cm_input_hit(in, pad);
     if (k < 0) return;
     int v = g_cm_view, pg = g_cm_page, tab = g_cm_tab;

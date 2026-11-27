@@ -4,6 +4,8 @@
 #include "library_sql.h"
 #include "sdk_analysis.h"
 #include "utf8_cut.h"
+#define PD_PURE
+#include "pioneer_dir.h"
 #include "../common/azsha256.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -37,50 +39,101 @@ uint64_t st_disk_sig(const char *path) {
     struct stat st;
     return stat(path, &st) ? 0 : st_stat_sig(&st);
 }
-static uint64_t st_mount_id(const char *mount) {
+struct st_mount {
+    uint64_t id;
+    int hfsplus;
+};
+
+static void st_mount_record(const char *line, const char *mount, struct st_mount *found) {
+    unsigned long long id;
+    char point[2048];
+    if (sscanf(line, "%llu %*u %*s %*s %2047s", &id, point) != 2 || strcmp(point, mount))
+        return;
+    const char *fields = strstr(line, " - ");
+    if (fields)
+        *found = (struct st_mount) {id, !strncmp(fields + 3, "hfsplus ", 8)};
+}
+
+static struct st_mount st_mount_read(const char *mount) {
+    struct st_mount found = {0};
     FILE *f = fopen(az_storage_mountinfo(), "re");
-    if (!f) return 0;
-    char line[4096], mp[2048];
-    unsigned long long id = 0, found = 0;
+    if (!f) return found;
+    char line[4096];
     while (fgets(line, sizeof line, f))
-        if (sscanf(line, "%llu %*u %*s %*s %2047s", &id, mp) == 2 && !strcmp(mp, mount)) found = id;
+        st_mount_record(line, mount, &found);
     fclose(f);
     return found;
 }
-static int st_source_probe(int stick, char mount[1024], uint64_t *mount_id, struct stat *sb) {
-    char database[1100];
-    if (!az_storage_stick_mount(stick, mount, 1024)) return 0;
-    *mount_id = st_mount_id(mount);
-    return st_source_path(mount, "/PIONEER/rekordbox/exportLibrary.db", database) &&
-           *mount_id && !stat(database, sb) && S_ISREG(sb->st_mode);
+
+const char *st_source_export(const struct st_source *source) {
+    return source->hfsplus ? PD_DIR_HFS : PD_DIR;
 }
-int st_source_assign(struct st_source *s, uint64_t *generation, int stick, const char *mount, uint64_t mid, struct stat sb) {
+
+int st_source_file(const struct st_source *source, const char *relative, char out[1024]) {
+    if (!relative || !source->hfsplus)
+        return st_source_path(source->mount, relative, out);
+    char physical[2048];
+    int bytes = pd_file_in(physical, sizeof physical, "", st_source_export(source), relative, 0, "");
+    return (unsigned) bytes < sizeof physical && st_source_path(source->mount, physical, out);
+}
+
+int st_source_database(const struct st_source *source, char out[1024]) {
+    return st_source_file(source, "/PIONEER/rekordbox/exportLibrary.db", out);
+}
+
+static int st_database_identity(const struct st_source *source, struct stat *sb) {
+    char path[1024];
+    return st_source_database(source, path) && !stat(path, sb) && S_ISREG(sb->st_mode);
+}
+
+static int st_source_probe(int stick, struct st_source *candidate, struct stat *sb) {
+    if (!az_storage_stick_mount(stick, candidate->mount, sizeof candidate->mount))
+        return 0;
+    struct st_mount before = st_mount_read(candidate->mount);
+    if (!before.id)
+        return 0;
+    candidate->mount_id = before.id;
+    candidate->hfsplus = before.hfsplus;
+    if (!st_database_identity(candidate, sb))
+        return 0;
+    struct st_mount after = st_mount_read(candidate->mount);
+    return before.id == after.id && before.hfsplus == after.hfsplus;
+}
+
+static int st_source_unchanged(const struct st_source *s, const char *mount, uint64_t mid,
+                               int hfsplus, uint64_t device, uint64_t inode) {
+    return s->mount_id == mid && s->device == device && s->inode == inode &&
+           s->hfsplus == hfsplus && !strcmp(s->mount, mount);
+}
+int st_source_assign(struct st_source *s, uint64_t *generation, int stick, const char *mount,
+                     uint64_t mid, int hfsplus, struct stat sb) {
+    if (st_source_unchanged(s, mount, mid, hfsplus, (uint64_t) sb.st_dev, (uint64_t) sb.st_ino))
+        return AZ_OK;
+    memset(s, 0, sizeof *s);
+    if (*generation == UINT64_MAX)
+        return AZ_LIMIT;
     uint64_t lib = (uint64_t) sb.st_dev * 0x9e3779b185ebca87ULL ^ (uint64_t) sb.st_ino;
     if (!lib) lib = 1;
-    if (s->mount_id != mid || s->device != (uint64_t) sb.st_dev || s->inode != (uint64_t) sb.st_ino || strcmp(s->mount, mount)) {
-        memset(s, 0, sizeof *s);
-        if (*generation == UINT64_MAX) return AZ_LIMIT;
-        s->mount_id = mid;
-        s->device = (uint64_t) sb.st_dev;
-        s->inode = (uint64_t) sb.st_ino;
-        s->ref = (az_track_ref) {sizeof(az_track_ref), AZ_DATA_VERSION, (uint64_t) stick + 1, ++*generation, lib, 0, 0};
-        snprintf(s->mount, sizeof s->mount, "%s", mount);
-    }
+    s->mount_id = mid;
+    s->device = (uint64_t) sb.st_dev;
+    s->inode = (uint64_t) sb.st_ino;
+    s->hfsplus = hfsplus;
+    s->ref = (az_track_ref) {sizeof(az_track_ref), AZ_DATA_VERSION, (uint64_t) stick + 1, ++*generation, lib, 0, 0};
+    snprintf(s->mount, sizeof s->mount, "%s", mount);
     return AZ_OK;
 }
 /* Worker only. Resolve by physical USB port and mount lifecycle; never by title/content ID. */
 int st_source_read(int stick, struct st_source *out) {
     if (stick < 0 || stick > 1) return AZ_INVALID;
-    char mount[1024];
+    struct st_source candidate = {0};
     struct stat sb;
-    uint64_t mid = 0;
-    int ok = st_source_probe(stick, mount, &mid, &sb);
     pthread_mutex_lock(&g_st_source_mu);
     struct st_source *source = &g_st_sources[stick];
     int rc = AZ_STALE;
-    if (!ok) memset(source, 0, sizeof *source);
+    if (!st_source_probe(stick, &candidate, &sb)) memset(source, 0, sizeof *source);
     else {
-        rc = st_source_assign(source, &g_st_generation, stick, mount, mid, sb);
+        rc = st_source_assign(source, &g_st_generation, stick, candidate.mount, candidate.mount_id,
+                              candidate.hfsplus, sb);
         if (rc == AZ_OK) *out = *source;
     }
     pthread_mutex_unlock(&g_st_source_mu);
@@ -218,8 +271,8 @@ int st_hash_file(const char *path, uint64_t signature, char digest[65]) {
     return ok;
 }
 int st_resolution_source_equal(const struct st_source *a, const struct st_source *b) {
-    return st_ref_equal(&a->ref, &b->ref) && a->mount_id == b->mount_id &&
-           a->device == b->device && a->inode == b->inode && !strcmp(a->mount, b->mount);
+    return st_ref_equal(&a->ref, &b->ref) &&
+           st_source_unchanged(a, b->mount, b->mount_id, b->hfsplus, b->device, b->inode);
 }
 static void st_row_text(void *stmt, az_track_metadata *metadata) {
     char *texts[] = {metadata->title, metadata->artist, metadata->album, metadata->key};

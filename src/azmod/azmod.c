@@ -42,6 +42,7 @@
 #include "menu.h"
 #include "azconf.h"
 #include "analysis_host.h"
+#include "source_provider_query.h"
 #include "ep147addr.h" /* EP_<v130> -> this build's EP147 address (generated table) */
 #include "ep147png.h"  /* the PNG images in this build's .rodata: where stick art may go */
 #include "bus_cfg.h"   /* settings word, color words and LED blocks the bus threads read */
@@ -735,6 +736,7 @@ static inline uint64_t bus_cfg(void) {
 }
 #include "azmod_internal.h"
 #include "touch_read_guard.h"
+static int sdk_source_browser_filter(uint8_t *frame);
 #include "bus_interpose.c"
 #include "drum_roll_display.c"
 
@@ -1969,44 +1971,8 @@ static void (*g_orig_setvis)(long, int);
 static _Atomic int g_visdbg = 0; /* /home/root/settings/azmod-visdbg */
 static _Atomic int g_browseview_shown = 0;
 static _Atomic unsigned long g_sv_obj, g_bv_obj;
-static _Atomic int g_bv_vis;
-static void setvis_hook(long self, int on) {
-    /* SearchView visible == on the search screen; unlike the byte-32
-     * screen-button bits this also catches touch entry. */
-    unsigned long vt = self > 0x10000 ? *(unsigned long *) self : 0; /* tens of thousands of calls a second */
-    if (vt == SEARCHVIEW_VT) {
-        __atomic_store_n(&g_search_on, on ? 1 : 0, __ATOMIC_RELAXED);
-        __atomic_store_n(&g_sv_obj, (unsigned long) self, __ATOMIC_RELEASE);
-        if (on)
-            nm_view_changed(1); /* Search opening: its keyboard must be home first */
-    } else if (vt == BROWSEVIEW_VT) {
-        __atomic_store_n(&g_bv_obj, (unsigned long) self, __ATOMIC_RELEASE);
-        __atomic_store_n(&g_bv_vis, on ? 1 : 0, __ATOMIC_RELEASE);
-        if (!on)
-            nm_view_changed(0); /* leaving Browse: naming ends */
-        else
-            __atomic_store_n(&g_browseview_shown, 1, __ATOMIC_RELEASE);
-    }
-    if (self == __atomic_load_n(&g_waveview, __ATOMIC_RELAXED))
-        __atomic_store_n(&g_wave_vis, on ? 1 : 0, __ATOMIC_RELAXED);
-    /* Opt-in census of large components' visibility changes (EP147 never calls
-     * setVisible on the WaveformView itself when switching screens). Every
-     * setVisible is ~96,000 calls in a few seconds, so only view-container-sized
-     * components are reported, from their bounds (x@+0x20 y@+0x24 w@+0x28
-     * h@+0x2c). */
-    if (__atomic_load_n(&g_visdbg, __ATOMIC_RELAXED) && self > 0x10000) {
-        /* w and h share one 8-aligned qword at self+0x28 (w low, h high);
-         * self+0x2c alone would fail own_q's alignment check. */
-        uintptr_t wh = 0;
-        if (own_q((uintptr_t) self + 0x28, &wh)) { /* setVisible's own `this` */
-            int W = (int) (uint32_t) wh, H = (int) (uint32_t) (wh >> 32);
-            if (W >= 400 || H >= 300)
-                dbg("SETVIS-BIG self=%p vt=%p on=%d %dx%d\n", (void *) self, *(void **) self, on, W,
-                    H);
-        }
-    }
-    g_orig_setvis(self, on);
-}
+static _Atomic int g_bv_vis, g_sv_vis;
+#include "view_visibility.c"
 #include "beat_fx_panel.c"
 #include "beat_jump.c"
 #include "vinyl_brake.c"
@@ -2019,6 +1985,16 @@ static void setvis_hook(long self, int on) {
 #include "sdk_playlist_order.c"
 #include "playlist_device_sync.c"
 #include "sdk_playlist_move.c"
+#include "source_import_native.c"
+#include "source_provider_catalog_native.c"
+static const char *spr_query_provider(void);
+static void source_provider_query_begin(void *server, void *message, struct azsp_query_scope *scope) {
+    struct import_server owner;
+    void *connection = NULL;
+    if (azsp_carrier_library_media(server) && import_server(server, &owner))
+        connection = owner.connection;
+    azsp_query_begin(server, message, connection, connection ? spr_query_provider() : NULL, scope);
+}
 #include "remote_stems.c"
 #include "libfd.h" /* the library fds azmod's own workers hold, by owner */
 #include "stem_marks.c"
@@ -2153,6 +2129,8 @@ static int lb_showing(uintptr_t c) {
  * reads). */
 static void drag_scroll_to(uintptr_t lb, int row);
 static void drag_end_local(void);
+#include "text_entry_native.c"
+
 static void msg_tick(void) {
     sdk_ui_msg_drain(); /* banners and post_ui calls the community mods queued */
     drag_handoff_drain(); /* a drop or BACK the bus thread recorded: before anything reads the drag */
@@ -2514,9 +2492,11 @@ static void msg_tick(void) {
 #include "clock_native.c" /* the Clock in the place of EP147's status bar readout */
 static void bf_tick(void); /* browse_fields.c */
 static void mp_plan_tick(void); /* menu_plan_set.c */
+static void azsp_runtime_tick(void);
 #include "beatport_service.h"
 static void calltimers_hook(void *self) {
     msg_tick();
+    azsp_runtime_tick();
     playlist_sdk_tick();
     analysis_host_notices(analysis_banner, analysis_diagnostic);
     bt_mods_tick();
@@ -2944,9 +2924,11 @@ static int g_last_click_bit = 0, g_last_back_bit = 0;
 #include "jog_display.c"  /* stem state on the jog display */
 #include "onelibrary_key_emulator.c"
 #include "community.c"       /* community mod host */
+#include "source_provider_runtime.c"
 #include "sdk_input.c"       /* frame and touch filters for community mods */
 #include "sdk_deck.c"        /* community mod services: deck state and events */
 #include "sdk_ui.c"          /* community mod services: banner, confirm, post_ui, threads */
+#include "sdk_text_entry.c"
 #include "ssh_approve.c"     /* remote access for a stick's SSH key, allowed on the deck */
 #include "community_icons.c" /* the Community tiles' icons, decoded by EP147's JUCE on the message thread */
 /* LD_PRELOAD is set at the service level, so azmod.so is loaded into every
@@ -3076,6 +3058,7 @@ __attribute__((constructor)) static void azmod_init(void) {
         g_sdk_sources_on = 0;
         (void) azsdk_sources_configure(0, g_ep147_build, 0);
     }
+    azsp_runtime_start(g_ep147_build);
     wz_restore();          /* Remember Waveform Zoom: the saved zoom, before EP147's main */
     install_banner();        /* unconditional, inert; must precede EP147Application::initialise */
     install_daymode_early(); /* Themes: record EP147's art as it decodes (off only

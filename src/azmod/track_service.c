@@ -32,7 +32,7 @@ static int st_ref_source_current(const az_track_ref *ref, struct st_source *sour
 }
 static int st_database_fresh(const struct st_source *source, const struct st_data *data) {
     char database[1024];
-    return st_source_path(source->mount, "/PIONEER/rekordbox/exportLibrary.db", database) &&
+    return st_source_database(source, database) &&
            !strcmp(database, data->files[0]) && st_database_quiet(data->files[0]) &&
            data->signatures[0] && st_disk_sig(data->files[0]) == data->signatures[0];
 }
@@ -40,7 +40,7 @@ static int st_analysis_files_fresh(const struct st_source *source, const struct 
     for (int i = 1; i < 3; i++) {
         if (data->analysis_paths[i - 1][0]) {
             char current[1024] = "";
-            st_source_path(source->mount, data->analysis_paths[i - 1], current);
+            st_source_file(source, data->analysis_paths[i - 1], current);
             if (strcmp(current, data->files[i])) return 0;
         }
         if (data->files[i][0] && st_disk_sig(data->files[i]) != data->signatures[i]) return 0;
@@ -68,7 +68,7 @@ static int st_resolution_current(const struct st_source *source, const char *dat
     if (!signature || st_source_read((int) source->ref.source_id - 1, &current)) return 0;
     current.ref.track_id = source->ref.track_id;
     return st_resolution_source_equal(source, &current) &&
-           st_source_path(current.mount, "/PIONEER/rekordbox/exportLibrary.db", path) &&
+           st_source_database(&current, path) &&
            !strcmp(database, path) && st_database_quiet(path) && st_disk_sig(path) == signature;
 }
 static int st_disk_source(const az_track_ref *ref, struct st_data *data, struct st_source *source,
@@ -79,7 +79,7 @@ static int st_disk_source(const az_track_ref *ref, struct st_data *data, struct 
         return AZ_STALE;
     }
     /* SQLite and sidecars must use the same canonical physical database path. */
-    if (!st_source_path(src.mount, "/PIONEER/rekordbox/exportLibrary.db", data->files[0])) return AZ_STALE;
+    if (!st_source_database(&src, data->files[0])) return AZ_STALE;
     if (!st_database_quiet(data->files[0])) {
         cached->valid = 0;
         return AZ_STALE;
@@ -136,7 +136,7 @@ static int st_resolve_row(const az_track_ref *ref, uint32_t mask, const struct s
 static void st_disk_metadata(const struct st_source *source, const struct st_resolution *row, uint32_t mask, struct st_data *data) {
     data->view.metadata = row->metadata;
     char real[1024];
-    if (row->content[0] && st_source_path(source->mount, row->content, real) && strlen(real) < sizeof data->view.metadata.path) {
+    if (row->content[0] && st_source_file(source, row->content, real) && strlen(real) < sizeof data->view.metadata.path) {
         snprintf(data->view.metadata.path, sizeof data->view.metadata.path, "%s", real);
         data->view.metadata.valid |= AZ_META_PATH;
     }
@@ -158,7 +158,7 @@ static int st_disk_detail(const az_track_ref *ref, const struct st_source *sourc
     if (slot < 0) return AZ_UNSUPPORTED;
     snprintf(data->analysis_paths[slot], sizeof data->analysis_paths[slot], "%s", relative);
     unsigned file_slot = (unsigned) slot + 1;
-    if (!st_source_path(source->mount, relative, data->files[file_slot])) return AZ_UNSUPPORTED;
+    if (!st_source_file(source, relative, data->files[file_slot])) return AZ_UNSUPPORTED;
     data->signatures[file_slot] = st_disk_sig(data->files[file_slot]);
     if (!data->signatures[file_slot]) return AZ_UNSUPPORTED;
     int rc = st_wave_read(data->files[file_slot], data);
@@ -178,7 +178,7 @@ static int st_read_analysis(const struct st_source *source, const char *analysis
     char relative[1024];
     if (!st_analysis_relative(analysis, file, relative)) return AZ_OK;
     snprintf(data->analysis_paths[file], sizeof data->analysis_paths[file], "%s", relative);
-    if (!st_source_path(source->mount, relative, data->files[file + 1])) return AZ_OK;
+    if (!st_source_file(source, relative, data->files[file + 1])) return AZ_OK;
     data->signatures[file + 1] = st_disk_sig(data->files[file + 1]);
     if (!data->signatures[file + 1]) return AZ_OK;
     *buffer = st_read_file(data->files[file + 1], size);

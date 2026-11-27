@@ -60,7 +60,7 @@ fz_prepare() {
         cp guest/azmod/azconf.c guest/azmod/azconf.h "$dir/" ;;
     bus)
         mkdir -p "$dir/azmod"
-        cp guest/azmod/*.h "$dir/azmod/"
+        cp guest/azmod/*.h guest/azmod/mixer_input.c "$dir/azmod/"
         awk '/^\/\* ---- read\(\): the panel input buses/ {p=1} p' guest/azmod/bus_interpose.c > "$dir/read_path.inc"
         awk '/^static uint16_t crc16_x25\(/ {p=1} p {print} p && /^}/ {exit}' guest/azmod/bus_interpose.c > "$dir/crc.inc"
         cp $FZ_UT/busread_trace_test.c "$dir/"

@@ -46,10 +46,10 @@ struct az_surface {
     int bw, bh;              /* buf's size */
     struct sdk_press press;  /* the touch in progress */
 };
-/* The mods' surfaces, then one of the core's own (SDK_SURF_CORE: the confirm dialog). A mod's
- * handle is range-checked against SDK_SURF_MAX, so no mod can reach the core's. */
+/* Mod handles end at SDK_SURF_MAX. The remaining surfaces belong to core dialogs. */
 #define SDK_SURF_CORE SDK_SURF_MAX
-#define SDK_SURF_ALL (SDK_SURF_MAX + 1)
+#define SDK_SURF_TEXT (SDK_SURF_MAX + 1)
+#define SDK_SURF_ALL (SDK_SURF_MAX + 2)
 #define SDK_MOD_CORE (-2) /* the owner of the core's surface: always live */
 static struct az_surface g_sdk_surf[SDK_SURF_ALL];
 static struct az_surface *g_sdk_focus_surf; /* has the browse knob (overlay thread) */
@@ -484,7 +484,10 @@ static void sdk_overlay_tick(struct overlay_ctx *c) {
     int v = sdk_view_compute(g_state.mode != AZ_CLOSED, g_state.waveform_visible,
                              __atomic_load_n(&g_search_on, __ATOMIC_RELAXED),
                              g_state.source_visible, __atomic_load_n(&g_bv_vis, __ATOMIC_ACQUIRE));
-    __atomic_store_n(&g_sdk_view, v, __ATOMIC_RELAXED);
+    /* A text prompt can cover the sampled stock view. Keep its source surface
+     * mapped until the prompt releases it or the source explicitly leaves. */
+    if (!g_sdk_surf[SDK_SURF_TEXT].show)
+        __atomic_store_n(&g_sdk_view, v, __ATOMIC_RELAXED);
     long long now = now_ms();
     for (int i = 0; i < SDK_SURF_ALL; i++) {
         struct az_surface *p = &g_sdk_surf[i];
@@ -690,8 +693,7 @@ static int sdk_overlay_knob(int dir, int click) {
  * and the mixer read path swallows for g_sdk_focus whatever is open). Whoever had the knob gets
  * it back when it is hidden, if it can still take it. */
 static struct az_surface *g_sdk_core_prev_focus;
-static void sdk_core_surface_init(const az_surface_v1 *d) {
-    struct az_surface *p = &g_sdk_surf[SDK_SURF_CORE];
+static void sdk_modal_init(struct az_surface *p, const az_surface_v1 *d) {
     if (p->used)
         return;
     memset(p, 0, sizeof *p);
@@ -703,25 +705,20 @@ static void sdk_core_surface_init(const az_surface_v1 *d) {
     p->r = (az_rect) {0, 0, 1, 1};
     ov_window_init(&p->w);
 }
-/* 0 = shown with the knob; -1 = the overlay is not up. */
-static int sdk_core_surface_show(az_rect r, int on) {
-    struct az_surface *p = &g_sdk_surf[SDK_SURF_CORE];
-    if (!p->used || !g_sdk_ovc || !sdk_on_overlay())
-        return -1;
-    if (on) {
-        p->r = sdk_rect_clamp(r, g_sdk_ovc->scr_w, g_sdk_ovc->scr_h);
-        p->show = 1;
-        p->redraw = 1;
-        if (g_sdk_focus_surf != p)
-            g_sdk_core_prev_focus = g_sdk_focus_surf;
-        g_sdk_focus_surf = p;
-        __atomic_exchange_n(&g_enc_dir, 0, __ATOMIC_ACQ_REL); /* no turn from before it */
-        __atomic_store_n(&g_sdk_back_pending, 0, __ATOMIC_RELAXED);
-        __atomic_store_n(&g_sdk_focus, 1, __ATOMIC_RELEASE);
-        return 0;
-    }
-    p->show = 0;
-    p->redraw = 1;
+static void sdk_core_surface_init(const az_surface_v1 *d) {
+    sdk_modal_init(&g_sdk_surf[SDK_SURF_CORE], d);
+}
+
+static void sdk_modal_take_focus(struct az_surface *p) {
+    if (g_sdk_focus_surf != p)
+        g_sdk_core_prev_focus = g_sdk_focus_surf;
+    g_sdk_focus_surf = p;
+    __atomic_exchange_n(&g_enc_dir, 0, __ATOMIC_ACQ_REL);
+    __atomic_store_n(&g_sdk_back_pending, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_sdk_focus, 1, __ATOMIC_RELEASE);
+}
+
+static void sdk_modal_restore_focus(struct az_surface *p) {
     if (g_sdk_focus_surf == p) {
         struct az_surface *q = g_sdk_core_prev_focus;
         int back = q && q->used && q->show && q->w.wanted && sdk_mod_live(q->mod) &&
@@ -730,7 +727,23 @@ static int sdk_core_surface_show(az_rect r, int on) {
         __atomic_store_n(&g_sdk_focus, back, __ATOMIC_RELEASE);
     }
     g_sdk_core_prev_focus = NULL;
+}
+
+/* 0 = shown with the knob; -1 = the overlay is not up. */
+static int sdk_modal_show(struct az_surface *p, az_rect r, int on) {
+    if (!p->used || !g_sdk_ovc || !sdk_on_overlay())
+        return -1;
+    p->show = on != 0;
+    p->redraw = 1;
+    if (on) {
+        p->r = sdk_rect_clamp(r, g_sdk_ovc->scr_w, g_sdk_ovc->scr_h);
+        sdk_modal_take_focus(p);
+    } else
+        sdk_modal_restore_focus(p);
     return 0;
+}
+static int sdk_core_surface_show(az_rect r, int on) {
+    return sdk_modal_show(&g_sdk_surf[SDK_SURF_CORE], r, on);
 }
 static void sdk_core_surface_redraw(void) {
     g_sdk_surf[SDK_SURF_CORE].redraw = 1;

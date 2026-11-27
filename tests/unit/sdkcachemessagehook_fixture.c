@@ -5,6 +5,7 @@
 #include "azsources.h"
 #include "native_abi_fixture.h"
 #include "cache_message_fixture.h"
+#include "../azmod/source_provider_query.h"
 #include <stdio.h>
 #define REQUIRE(x, why)                                      \
     do {                                                     \
@@ -15,8 +16,24 @@
     } while (0)
 static int g_sdk_sources_on, g_ep147_build, stage, source_calls, pst_calls;
 static unsigned context_id;
+static unsigned query_begins, query_ends;
 static bool throwing;
 static void *expected_server, *expected_message;
+static struct azsp_query_scope *active_query;
+
+static void source_provider_query_begin(void *server, void *message, struct azsp_query_scope *scope) {
+    REQUIRE(server == expected_server && message == expected_message && !active_query && stage == 0,
+            "provider query starts with the original live message");
+    active_query = scope;
+    ++query_begins;
+}
+
+void azsp_query_end(struct azsp_query_scope *scope) {
+    REQUIRE(scope == active_query && stage == 1, "provider query ends after the original handler");
+    active_query = NULL;
+    ++query_ends;
+}
+
 static void original(void *server, void *message, unsigned parameter) {
     REQUIRE(server == expected_server && message == expected_message && parameter == 37 && stage == 0, "actual native args/order unchanged");
     REQUIRE(((struct fixture_message *) message)->begin[1].value == 117, "original still receives unchanged live input");
@@ -24,6 +41,7 @@ static void original(void *server, void *message, unsigned parameter) {
     fflush(stdout);
     struct azcm_envelope e = {0};
     REQUIRE(azcm_current(server, &e) == (bool) g_sdk_sources_on, "native hook must enter copied message bridge before original");
+    REQUIRE(active_query, "native handler executes inside the provider query");
     if (g_sdk_sources_on) REQUIRE(e.fields[1] == 117 && e.client == context_id && e.selector == context_id + 1, "configured copied scalars inside original");
     message_delete(message);
     expected_message = NULL;
@@ -34,13 +52,13 @@ static void original(void *server, void *message, unsigned parameter) {
 static azsdk_source_message_original g_orig_mlserver_onmsg = original;
 int azsdk_sources_observe_owned_message(void *server, void *out, size_t size) {
     struct azcm_envelope e = {0};
-    REQUIRE(server == expected_server && !out && !size && stage == 1 && !azcm_current(server, &e), "source post-observation after original scope cleanup");
+    REQUIRE(server == expected_server && !out && !size && stage == 1 && !active_query && !azcm_current(server, &e), "source post-observation after original scope cleanup");
     ++source_calls;
     stage = 2;
     return AZS_OK;
 }
 static void pst_msg_done(void *server) {
-    REQUIRE(server == expected_server && stage == (g_sdk_sources_on ? 2 : 1), "playlist post-step keeps original order");
+    REQUIRE(server == expected_server && !active_query && stage == (g_sdk_sources_on ? 2 : 1), "playlist post-step keeps original order");
     ++pst_calls;
     stage = 3;
 }
@@ -60,10 +78,12 @@ static void hook_tail(void *server, void *msg, unsigned param) {
                         expected_message = message_new(context_id, 13);
                         throwing = fail;
                         stage = source_calls = pst_calls = 0;
+                        query_begins = query_ends = 0;
                         unsigned deletions = fixture_exception_deletions;
                         bool caught = !fixture_native_try(hook_forward, NULL);
                         struct azcm_envelope e = {0};
                         REQUIRE(caught == throwing && fixture_exception_deletions == deletions + (unsigned) throwing && !expected_message && !azcm_current(expected_server, &e), "native unwind/normal cleanup remains transparent");
+                        REQUIRE(!active_query && query_begins == 1 && query_ends == 1, "query scope balances on return and unwind");
                         REQUIRE(throwing ? (stage == 1 && !source_calls && !pst_calls) : (stage == 3 && source_calls == g_sdk_sources_on && pst_calls == 1), "post-steps only after normal native return");
                     }
         puts("PASS message-hook: actual tail enters one bridge, preserves input/unwind/postorder;4contexts/bothprofiles");

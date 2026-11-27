@@ -2663,6 +2663,7 @@ static void ov_window_show(struct overlay_ctx *c, struct ov_window *w) {
         if (!w->mapped) {
             XMapRaised(c->dpy, w->id);
             w->mapped = 1;
+            c->need_raise = 1; /* restore layer order when a lower window appears */
             c->dirty = 1;
         } else if (c->need_raise)
             XRaiseWindow(c->dpy, w->id);

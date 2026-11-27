@@ -14,10 +14,10 @@ static uint64_t mounts[2] = {100, 200}, devices[2] = {1, 2}, inodes[2] = {19, 29
 static int az_storage_stick_mount(int stick, char *out, size_t capacity) {
     return snprintf(out, capacity, "/%d", stick) < (int) capacity;
 }
-static uint64_t st_mount_id(const char *mount) { return mounts[mount[1] - '0']; }
-static int st_source_path(const char *mount, const char *relative, char out[1024]) {
-    return snprintf(out, 1024, "%s%s", mount, relative) < 1024;
-}
+struct st_mount;
+struct st_source;
+static struct st_mount st_mount_read(const char *mount);
+static int st_source_database(const struct st_source *source, char out[1024]);
 static int source_stat(const char *path, struct stat *out) {
     unsigned port = (unsigned) (path[1] - '0');
     assert(port < 2);
@@ -30,6 +30,14 @@ static int source_stat(const char *path, struct stat *out) {
 #define stat(path, out) source_stat(path, out)
 #include SOURCE_IDENTITY_INC
 #undef stat
+
+static struct st_mount st_mount_read(const char *mount) {
+    return (struct st_mount) {.id = mounts[mount[1] - '0']};
+}
+
+static int st_source_database(const struct st_source *source, char out[1024]) {
+    return snprintf(out, 1024, "%s/exportLibrary.db", source->mount) < 1024;
+}
 
 int main(void) {
     struct st_source a, b, out;

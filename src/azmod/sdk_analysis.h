@@ -478,21 +478,21 @@ static inline int st_grid_available(const az_track_snapshot *s) {
 struct st_grid_bracket {
     uint32_t lo, hi;
 };
-static inline int st_grid_extent(const az_beat *b, struct st_grid_bracket bracket, double time, int *end) {
+static inline int st_grid_extent(const az_beat *b, struct st_grid_bracket bracket, double time) {
     int extent = compare_timestamps(b[bracket.hi].time_s, b[bracket.lo].time_s, 1, 1000, 1);
     int start = compare_timestamps(time, b[bracket.lo].time_s, 1, 1000, 1);
-    *end = compare_timestamps(time, b[bracket.hi].time_s, 1, 1000, 1);
-    if (extent == AZ_TIME_INVALID || extent != AZ_TIME_AFTER || start == AZ_TIME_INVALID || *end == AZ_TIME_INVALID) return AZ_FAILED;
-    return start == AZ_TIME_BEFORE || *end == AZ_TIME_AFTER ? AZ_NOT_FOUND : AZ_OK;
+    int end = compare_timestamps(time, b[bracket.hi].time_s, 1, 1000, 1);
+    if (extent == AZ_TIME_INVALID || extent != AZ_TIME_AFTER || start == AZ_TIME_INVALID || end == AZ_TIME_INVALID) return AZ_FAILED;
+    return start == AZ_TIME_BEFORE || end == AZ_TIME_AFTER ? AZ_NOT_FOUND : AZ_OK;
 }
 static inline int st_grid_bisect(const az_beat *b, double time, struct st_grid_bracket *bracket) {
     uint32_t mid = bracket->lo + (bracket->hi - bracket->lo) / 2;
     int lower = compare_timestamps(b[mid].time_s, b[bracket->lo].time_s, 1, 1000, 1);
     int upper = compare_timestamps(b[mid].time_s, b[bracket->hi].time_s, 1, 1000, 1);
-    int target = compare_timestamps(b[mid].time_s, time, 1, 1000, 1);
-    if (lower == AZ_TIME_INVALID || upper == AZ_TIME_INVALID || target == AZ_TIME_INVALID ||
+    if (lower == AZ_TIME_INVALID || upper == AZ_TIME_INVALID ||
         lower != AZ_TIME_AFTER || upper != AZ_TIME_BEFORE) return AZ_FAILED;
-    if (target == AZ_TIME_BEFORE || target == AZ_TIME_EQUAL) bracket->lo = mid;
+    /* A tolerance window is unsuitable for choosing between adjacent tempo segments. */
+    if (b[mid].time_s < time) bracket->lo = mid;
     else bracket->hi = mid;
     return AZ_OK;
 }
@@ -509,13 +509,10 @@ static inline int st_grid_time_to_beat(const az_track_snapshot *s, double time, 
     int rc = st_grid_available(s);
     if (rc != AZ_OK) return rc;
     struct st_grid_bracket bracket = {0, s->beat_count - 1};
-    int end;
-    rc = st_grid_extent(s->beats, bracket, time, &end);
+    rc = st_grid_extent(s->beats, bracket, time);
     if (rc != AZ_OK) return rc;
-    if (end == AZ_TIME_EQUAL) {
-        *out = bracket.hi;
-        return AZ_OK;
-    }
+    /* Clamp timestamps accepted within one source tick outside the grid. */
+    time = fmax(s->beats[bracket.lo].time_s, fmin(time, s->beats[bracket.hi].time_s));
     while (bracket.hi - bracket.lo > 1) {
         rc = st_grid_bisect(s->beats, time, &bracket);
         if (rc != AZ_OK) return rc;

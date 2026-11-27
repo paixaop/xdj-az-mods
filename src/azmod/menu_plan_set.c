@@ -27,8 +27,7 @@ static int mp_plan_target(uintptr_t controller, az_plan_set_target_v1 *target)
     struct plsnap selection = plsnap_get();
     *target = (az_plan_set_target_v1){.size = sizeof *target, .version = AZ_DATA_VERSION,
         .playlist_id = mp_plan_playlist(&selection, type)};
-    if (!target->playlist_id || !media_mount(selection.any_media, target->mount,
-                                              sizeof target->mount))
+    if (!target->playlist_id || !media_mount_copy(selection.any_media, target->mount, sizeof target->mount, true))
         return 0;
     if (type == 1)
         snprintf(target->name, sizeof target->name, "%s", selection.sel_title);

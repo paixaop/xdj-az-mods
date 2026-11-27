@@ -74,23 +74,50 @@ static void sdk_plan_set_tick(void)
         c->plan_set_fn(&target, c->plan_set_user);
 }
 
-static bool plan_set_valid(const az_plan_set_target_v1 *target, const az_plan_set_source_v1 *out)
+static bool plan_set_target_valid(const az_plan_set_target_v1 *target)
 {
     return target && target->size >= sizeof *target && target->version == AZ_DATA_VERSION &&
         target->playlist_id && target->mount[0] == '/' &&
-        memchr(target->mount, '\0', sizeof target->mount) &&
-        out && out->size >= sizeof *out && out->version == AZ_DATA_VERSION;
+        memchr(target->mount, '\0', sizeof target->mount);
 }
 
-static int plan_set_usb(const char *mount, az_plan_set_source_v1 *out)
+static bool plan_set_output_valid(const az_plan_set_source_v1 *out)
+{
+    return out && out->size >= sizeof *out && out->version == AZ_DATA_VERSION;
+}
+
+/* The target's mount field is opaque to mods. Carry the complete USB
+ * identity through the callback without depending on a native cache slot. */
+static bool plan_set_mount_route(const az_plan_set_source_v1 *source, char *out, size_t capacity)
+{
+    if (!source->source_generation)
+        return false;
+    int length = snprintf(out, capacity, "/az-plan-set/%u/%016jx/%016jx", source->stick,
+                          (uintmax_t)source->source_generation, (uintmax_t)source->library_id);
+    return length > 0 && (size_t)length < capacity;
+}
+
+static bool plan_set_usb_matches(const char *location, bool is_route, const char *mount,
+                                 const az_plan_set_source_v1 *identity)
+{
+    if (!is_route)
+        return !strcmp(location, mount);
+    char route[sizeof(((az_plan_set_target_v1 *)0)->mount)];
+    return plan_set_mount_route(identity, route, sizeof route) && !strcmp(location, route);
+}
+
+static int plan_set_usb(const char *location, bool is_route, az_plan_set_source_v1 *out)
 {
     for (int stick = 0; stick < 2; ++stick) {
         struct st_source source;
-        if (st_source_read(stick, &source) != AZ_OK || strcmp(mount, source.mount))
+        if (st_source_read(stick, &source) != AZ_OK)
             continue;
-        *out = (az_plan_set_source_v1){.size = sizeof *out, .version = AZ_DATA_VERSION,
+        az_plan_set_source_v1 current = {.size = sizeof current, .version = AZ_DATA_VERSION,
             .stick = (uint32_t)stick, .source_generation = source.ref.source_generation,
             .library_id = source.ref.library_id};
+        if (!plan_set_usb_matches(location, is_route, source.mount, &current))
+            continue;
+        *out = current;
         return AZ_OK;
     }
     return AZ_STALE;
@@ -102,8 +129,8 @@ static int sdk_plan_set_resolve(const char *id, const az_plan_set_target_v1 *tar
     cm_mod *c = cm_self(id, CM_RA(), "plan_set_resolve");
     if (c != plan_set_running() || g_cm_on_ui || !c)
         return AZ_INVALID;
-    if (!plan_set_valid(target, out))
+    if (!plan_set_target_valid(target) || !plan_set_output_valid(out))
         return AZ_INVALID;
-    return plan_set_usb(target->mount, out);
+    return plan_set_usb(target->mount, true, out);
 }
 #endif

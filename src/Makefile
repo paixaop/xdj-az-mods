@@ -80,6 +80,7 @@ endif
 AZMOD_SRCS := azmod/azmod.c azmod/menu.c azmod/text.c azmod/azconf.c
 AZMOD_HDRS := $(wildcard azmod/slip_diagnostic/*) $(wildcard azmod/*.h azmod/*.c azmod/*.inc azmod/*.S azmod/*.def) $(wildcard common/*.h common/*.c common/*.S) common/analysis-policy.def azstem/sdk_native.map
 AZSDK_NATIVE_CFLAGS := $(AZ_UNWIND) -std=gnu11 -O2 $(AZ_WARN) -fPIC $(NO_OUTLINE_ATOMICS) -fvisibility=hidden
+AZ_PROVIDER_OBJS := $(addprefix $(OUT)/,source_provider_query.o source_provider_cache.o source_provider_stream.o source_provider_lifetime.o)
 AZANALYSIS_ARCHIVE := $(abspath $(OUT))/analysis/libanalysis.a
 AZMOD_HDRS += $(shell find analysis ../vendor/analysis -type f) azmod/analysis_runtime.h azmod/analysis_source.h
 $(AZMOD): $(AZMOD_SRCS) $(AZMOD_HDRS) | $(OUT)
@@ -101,6 +102,20 @@ $(AZMOD): $(AZMOD_SRCS) $(AZMOD_HDRS) | $(OUT)
 	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/sdk_command_engine.o azmod/sdk_command_engine.c
 	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/track_storage.o azmod/track_storage.c
 	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/track_service.o azmod/track_service.c
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/source_provider.o azmod/source_provider.c
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/source_import_files.o azmod/source_import_files.c
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/source_import_sql.o azmod/source_import_sql.c
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/source_import_publish.o azmod/source_import_publish.c
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/source_import_analyzer.o azmod/source_import_analyzer.c
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/source_provider_catalog.o azmod/source_provider_catalog.c
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/source_import_format.o azmod/source_import_format.c
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/source_import_worker.o azmod/source_import_worker.c
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/source_provider_dispatch.o azmod/source_provider_dispatch.c
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/source_provider_carrier.o azmod/source_provider_carrier.c
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/source_provider_query.o azmod/source_provider_query.c
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/source_provider_cache.o azmod/source_provider_cache.c
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/source_provider_stream.o azmod/source_provider_stream.c
+	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/source_provider_lifetime.o azmod/source_provider_lifetime.c
 	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/azcache_scopes.o common/azcache_scopes.c
 	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/sdk_command_target.o azmod/sdk_command_target.c
 	$(CC) $(AZSDK_NATIVE_CFLAGS) -c -o $(OUT)/slip_diagnostic.o azmod/slip_diagnostic/diagnostic.c
@@ -116,7 +131,7 @@ $(AZMOD): $(AZMOD_SRCS) $(AZMOD_HDRS) | $(OUT)
 	$(CC) $(AZ_UNWIND) -fPIC -c -o $(OUT)/sdk_cache_entry_asm.o azmod/sdk_cache_entry.S
 	$(CC) $(AZ_UNWIND) -fPIC -c -o $(OUT)/sdk_slip_entry_asm.o azmod/sdk_slip_entry.S
 	$(CC) $(AZ_UNWIND) -fPIC -c -o $(OUT)/sdk_slip_getter_entry.o azmod/sdk_slip_getter_entry.S
-	$(CC) $(AZMOD_CFLAGS) -Wl,--version-script=azstem/sdk_native.map -o $@.full $(AZMOD_SRCS) $(OUT)/beatport_service.o $(OUT)/analysis_runtime.o $(OUT)/analysis_events.o $(OUT)/analysis_owner.o $(OUT)/analysis_source.o $(OUT)/analysis_encoding.o $(OUT)/analysis_host.o $(OUT)/analysis_settings.o $(AZANALYSIS_ARCHIVE) -Wl,--exclude-libs,libanalysis.a $(OUT)/track_service.o $(OUT)/track_storage.o $(OUT)/sdk_command_engine.o $(OUT)/sdk_command_service.o $(OUT)/sdk_status_engine.o $(OUT)/sdk_status_native.o $(OUT)/sdk_status_gui.o $(OUT)/sdk_status_store.o $(OUT)/sdk_status_metrics.o $(OUT)/slip_diagnostic.o $(OUT)/slip_capture.o $(OUT)/slip_diagnostic_entry.o $(OUT)/sdk_command_target.o $(OUT)/azcache_scopes.o $(OUT)/sdk_native_sources.o $(OUT)/sdk_connection_hooks.o $(OUT)/sdk_cache_message.o $(OUT)/sdk_native_slip.o $(OUT)/sdk_slip_hooks.o $(OUT)/sdk_cache_entry.o $(OUT)/sdk_cache_entry_asm.o $(OUT)/sdk_slip_entry_asm.o $(OUT)/sdk_slip_getters.o $(OUT)/sdk_slip_getter_entry.o -ldl -lpthread -Wl,-Bstatic -lXtst -Wl,-Bdynamic -Wl,--exclude-libs,libXtst.a -lX11 -lXext -lfreetype -lm
+	$(CC) $(AZMOD_CFLAGS) -Wl,--version-script=azstem/sdk_native.map -o $@.full $(AZMOD_SRCS) $(OUT)/beatport_service.o $(OUT)/analysis_runtime.o $(OUT)/analysis_events.o $(OUT)/analysis_owner.o $(OUT)/analysis_source.o $(OUT)/analysis_encoding.o $(OUT)/analysis_host.o $(OUT)/analysis_settings.o $(AZANALYSIS_ARCHIVE) -Wl,--exclude-libs,libanalysis.a $(OUT)/track_service.o $(OUT)/track_storage.o $(OUT)/source_provider.o $(OUT)/source_import_files.o $(OUT)/source_import_sql.o $(OUT)/source_import_publish.o $(OUT)/source_import_analyzer.o $(OUT)/source_provider_catalog.o $(OUT)/source_import_format.o $(OUT)/source_import_worker.o $(OUT)/source_provider_dispatch.o $(OUT)/source_provider_carrier.o $(AZ_PROVIDER_OBJS) $(OUT)/sdk_command_engine.o $(OUT)/sdk_command_service.o $(OUT)/sdk_status_engine.o $(OUT)/sdk_status_native.o $(OUT)/sdk_status_gui.o $(OUT)/sdk_status_store.o $(OUT)/sdk_status_metrics.o $(OUT)/slip_diagnostic.o $(OUT)/slip_capture.o $(OUT)/slip_diagnostic_entry.o $(OUT)/sdk_command_target.o $(OUT)/azcache_scopes.o $(OUT)/sdk_native_sources.o $(OUT)/sdk_connection_hooks.o $(OUT)/sdk_cache_message.o $(OUT)/sdk_native_slip.o $(OUT)/sdk_slip_hooks.o $(OUT)/sdk_cache_entry.o $(OUT)/sdk_cache_entry_asm.o $(OUT)/sdk_slip_entry_asm.o $(OUT)/sdk_slip_getters.o $(OUT)/sdk_slip_getter_entry.o -ldl -lpthread -Wl,-Bstatic -lXtst -Wl,-Bdynamic -Wl,--exclude-libs,libXtst.a -lX11 -lXext -lfreetype -lm
 	$(call az_strip_keep_assets,$@)
 	@echo "Built: $@"
 

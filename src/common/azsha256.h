@@ -90,7 +90,7 @@ static void azsha256_final_hex(azsha256_ctx *c, char out[65]) {
         }
     out[64] = 0;
 }
-static void azsha256_hex(const void *data, size_t len, char out[65]) {
+static inline void azsha256_hex(const void *data, size_t len, char out[65]) {
     azsha256_ctx c;
     azsha256_init(&c);
     azsha256_update(&c, data, len);

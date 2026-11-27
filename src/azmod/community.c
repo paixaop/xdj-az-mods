@@ -95,6 +95,19 @@ typedef struct {
     const az_screen_v1 *screen;
     az_plan_set_fn plan_set_fn;
     void *plan_set_user;
+    az_source_provider_v1 source_provider;
+    _Atomic enum az_source_storage_mode source_provider_mode;
+    pthread_mutex_t source_provider_worker;
+    char source_browser_name[32];
+    void (*source_browser_view)(enum az_source_view view, void *user);
+    void *source_browser_user;
+    void (*source_browser_query)(const char *, void *);
+    unsigned char *source_browser_png;
+    int source_browser_png_size;
+    uintptr_t source_browser_image;
+    int source_browser_image_decoded;
+    char source_browser_search[128];
+    int source_browser_search_dirty;
     struct { char k[32]; int v; } cfg[CM_CFG_MAX];
     struct { char k[32]; char v[128]; } cfgs[CM_CFGS_MAX];   /* text settings ("key$=value" lines) */
     int  ncfg, ncfgs, cfg_loaded, cfg_dirty;
@@ -1659,6 +1672,12 @@ static const az_library_v1 *sdk_library_service(uint32_t abi) {
 
 #include "sdk_plan_set.c"
 
+#ifndef SDK_PROC_IMPL
+static int sdk_text_entry(const char *id, const az_text_entry_v1 *entry);
+static int sdk_text_entry_tick(void);
+static void sdk_text_source_changed(const cm_mod *mod);
+#include "sdk_source_browser.c"
+#endif
 static const az_core_v1 g_cm_core = {
     .abi = AZ_MOD_ABI,
     .size = sizeof(az_core_v1),
@@ -1745,6 +1764,8 @@ static const az_core_v1 g_cm_core = {
     .button_press = cm_button_press,
     .button_poll = cm_button_poll,
     .plan_set_resolve = sdk_plan_set_resolve,
+    .source_service = sdk_source_service,
+    .text_entry = sdk_text_entry,
 #endif
 };
 
@@ -2442,6 +2463,7 @@ static void community_tick(void) {
 #ifndef SDK_PROC_IMPL
     sdk_beatport_owner_tick();
     analysis_events_core_tick();
+    sdk_source_browser_tick();
 #endif
     if (!g_cm_n) return;
     sdk_rows_tick();    /* rows of mods that stopped leave the menu, also when none runs */

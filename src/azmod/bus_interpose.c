@@ -1297,53 +1297,7 @@ static void mixer_menu_buttons(uint8_t *b, int crc_in, int menu_open) {
             __atomic_load_n(&g_enc_dir, __ATOMIC_RELAXED), b[6], b[31], b[33]);
 }
 
-/* The mixer/panel bus frame: 96 bytes + CRC-16/X25 at 96/97. */
-static void bus_mixer_frame(uint8_t *b, ssize_t r, uint64_t cfg) {
-    /* Was this frame's CRC valid as it arrived? Every re-stamp is gated on it. Computed
-     * before azmod touches a byte. */
-    int crc_in = r >= 98 && frame_crc_ok(b, 96);
-    bus_capture_mixer_in(b, r);
-    /* A mixer frame with a bad CRC is not input. With a PC attached the panel delivers
-     * 128-byte all-0xFF reads every few seconds, all CRC-invalid; EP147 drops them. Parsed as
-     * buttons, byte 33 = ff is BACK + TAG TRACK + LOAD 1-4 all pressed and byte 34 = ff a
-     * knob jump. Worse, a swallow would re-stamp a valid CRC onto the frame and EP147 would
-     * act on every button at once. So a frame that fails the CRC is passed through untouched
-     * and never read. */
-    if (r >= 98 && !crc_in)
-        return;
-    if (crc_in) /* community mods see only checked input (a short frame carries no CRC) */
-        sdk_filter_raw(AZ_BUS_MIXER_IN, b, (int) r);
-    if (r >= 35) {
-        mixer_drum_tone(b, r);
-        mixer_stem_eq(b, r);
-        mixer_fx_disarm(b, r);
-        int delta;
-        int hold = mixer_browse_knob(b, &delta);
-        /* The Mod Menu's Playlist Editing toggle is the switch, re-evaluated on every mixer
-         * frame: off takes effect at once (the hooks stay, inert); on needs the hooks, which
-         * install only at EP147 start (see pledit_needs_reload). */
-        __atomic_store_n(&g_reorder_enabled, bus_cfg_reorder(cfg), __ATOMIC_RELAXED);
-        if (__atomic_load_n(&g_reorder_enabled, __ATOMIC_RELAXED) && !hold)
-            mixer_reorder_gesture(b, delta);
-        if (knob_anchored)
-            b[34] = knob_anchor; /* sticky freeze; otherwise byte 34 is passthrough */
-        /* Re-stamp after any rewrite above (the byte-34 freeze, the reorder click and BACK
-         * clears). EP147 silently drops a frame whose CRC does not match, so without this a
-         * frozen knob would cut off the whole mixer bus. Recomputing over an unchanged frame
-         * is a no-op. */
-        if (crc_in)
-            frame_crc_stamp(b, 96);
-    }
-    if (r < 12)
-        return;
-    bus_capture_mixer(b, r);
-    mixer_xpad_drum(b, r, cfg);
-    int menu_open = mixer_watchdog();
-    if (r >= 34)
-        mixer_menu_buttons(b, crc_in, menu_open);
-    if (crc_in && sdk_filter_run(AZ_BUS_MIXER_IN, b, (int) r)) /* community mods, after the core */
-        frame_crc_stamp(b, 96);
-}
+#include "mixer_input.c"
 
 /* ---- ErP bus: deck buttons and pads ------------------------------------------- */
 
