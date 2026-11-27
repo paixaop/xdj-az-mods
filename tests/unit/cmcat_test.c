@@ -246,12 +246,12 @@ int main(void) {
     layout(CMV_HOME, 2, -1);
     cm_fire(ctl_p(CMC_ADDREPO, 0));
     CHECK("Add repository opens the native prompt", repo_prompt.on_result &&
-          !strcmp(repo_prompt.title, "Add repository") && !strcmp(repo_prompt.submit, "Add"));
+                                                        !strcmp(repo_prompt.title, "Add repository") && !strcmp(repo_prompt.submit, "Add"));
     unlink(CM_REQ);
     CHECK("An empty address stays open", repo_prompt.on_result(AZ_OK, "", NULL) != NULL);
     CHECK("A line break is refused", repo_prompt.on_result(AZ_OK, "owner/repo\nnext", NULL) != NULL);
     CHECK("Cancel writes no request", !repo_prompt.on_result(AZ_CANCELLED, NULL, NULL) &&
-          access(CM_REQ, F_OK) != 0);
+                                          access(CM_REQ, F_OK) != 0);
     g_cs.state[0] = 0;
     CHECK("A repository address is accepted", !repo_prompt.on_result(AZ_OK, "owner/repo", NULL));
     char request[64] = "";
@@ -395,8 +395,7 @@ int main(void) {
         CHECK("the reload page: \"Community Mods  >  Reload\"", !strcmp(t, "Community Mods  >  Reload"));
         cm_ctl cancel = {CMC_RELOAD_NO, 0, 600, 300, 140, 50};
         struct cm_input_event touch = {
-            .fb = &g_fb, .ctl = &cancel, .n = 1, .tx = 585, .ty = 315, .touched = true
-        };
+            .fb = &g_fb, .ctl = &cancel, .n = 1, .tx = 585, .ty = 315, .touched = true};
         int tab_before = g_cm_tab;
         g_cm_reload_from = CMV_HOME;
         cm_input_page_touch(&touch);

@@ -1,17 +1,15 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* Shared by gesture and SDK writes. Called on the owning library thread. */
-static void *playlist_pdb_connection(void *server)
-{
+static void *playlist_pdb_connection(void *server) {
     uintptr_t svc = 0, lib = 0, db = 0, conn = 0;
     unsigned media = 0;
     if (mlserver_chain(server, &svc, &lib, &db, &media) ||
         !own_q(db + SQLDB_CONN, &conn))
         return NULL;
-    return (void *)conn;
+    return (void *) conn;
 }
 
-static int mv_pdb_sync_status(void *server)
-{
+static int mv_pdb_sync_status(void *server) {
     void *conn = playlist_pdb_connection(server);
     char root[300];
     if (!conn || !sq_resolve() || !cp_mount_of(conn, root, sizeof root))

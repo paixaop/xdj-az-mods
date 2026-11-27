@@ -32,7 +32,7 @@ with tempfile.TemporaryDirectory(prefix='az-sdk-master-') as tmp:
                '-DMASTER_INC="' + str(out / 'master.inc') + '"',
                '-DDECK_DATA_INC="' + str(out / 'deck.inc') + '"',
                str(root / 'tests/unit/sdkmaster_test.c'), str(root / 'src/azmod/track_service.c'),
-               '-Wl,-dead_strip' if sys.platform == 'darwin' else '-Wl,--gc-sections', '-o', str(out / 'master')]
+               '-Wl,-dead_strip' if sys.platform == 'darwin' else '-Wl,--gc-sections', '-lm', '-o', str(out / 'master')]
     san = os.environ.get('SAN', 'plain')
     if san == 'asan':
         command += ['-fsanitize=address,undefined', '-fno-sanitize-recover=all', '-fno-omit-frame-pointer']

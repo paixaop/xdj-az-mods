@@ -100,8 +100,8 @@ struct azspd_deck_watch {
 };
 
 enum azspd_deck_use azspd_deck_observe(struct azspd_deck_watch *watch,
-                                    const struct azstatus_native_v1 *api,
-                                    const struct azstatus_native_receipt *receipt);
+                                       const struct azstatus_native_v1 *api,
+                                       const struct azstatus_native_receipt *receipt);
 
 #pragma GCC visibility pop
 #endif

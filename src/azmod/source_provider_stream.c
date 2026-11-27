@@ -194,8 +194,12 @@ static int stream_destination_clear(const struct azsp_stream *stream) {
 
 static int stream_command(struct azsp_stream *stream, enum azsp_catalog_stream_operation command) {
     const struct azsp_catalog_stream_request request = {
-        .media = stream->media, .id = stream->id, .source = &stream->record.source,
-        .audio = stream->audio, .dat = stream->dat, .record = &stream->record,
+        .media = stream->media,
+        .id = stream->id,
+        .source = &stream->record.source,
+        .audio = stream->audio,
+        .dat = stream->dat,
+        .record = &stream->record,
         .analysis_ticket = &stream->analysis_ticket,
     };
     return azsp_catalog_stream(command, &request);
@@ -224,7 +228,9 @@ static int stream_poll_analysis(struct azsp_stream *stream) {
 }
 
 static int stream_wait_analysis(struct azsp_stream *stream, int (*cancelled)(void *), void *context) {
-    enum { ANALYSIS_ATTEMPTS = 2400 };
+    enum {
+        ANALYSIS_ATTEMPTS = 2400
+    };
     for (unsigned attempt = 0; attempt < ANALYSIS_ATTEMPTS; ++attempt) {
         if (stream_cancelled(cancelled, context))
             return AZ_CANCELLED;
@@ -246,7 +252,9 @@ static int stream_bind_attempt(struct azsp_stream *stream) {
 }
 
 static int stream_bind(struct azsp_stream *stream, int (*cancelled)(void *), void *context) {
-    enum { BIND_ATTEMPTS = 16 };
+    enum {
+        BIND_ATTEMPTS = 16
+    };
     for (unsigned attempt = 0; attempt < BIND_ATTEMPTS; ++attempt) {
         if (stream_cancelled(cancelled, context))
             return AZ_CANCELLED;

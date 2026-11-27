@@ -11,10 +11,14 @@
 #include <sys/stat.h>
 
 static uint64_t mounts[2] = {100, 200}, devices[2] = {1, 2}, inodes[2] = {19, 29};
+static int hfs[2];
 static int az_storage_stick_mount(int stick, char *out, size_t capacity) {
     return snprintf(out, capacity, "/%d", stick) < (int) capacity;
 }
-struct st_mount;
+struct st_mount {
+    uint64_t id;
+    int hfsplus;
+};
 struct st_source;
 static struct st_mount st_mount_read(const char *mount);
 static int st_source_database(const struct st_source *source, char out[1024]);
@@ -32,7 +36,9 @@ static int source_stat(const char *path, struct stat *out) {
 #undef stat
 
 static struct st_mount st_mount_read(const char *mount) {
-    return (struct st_mount) {.id = mounts[mount[1] - '0']};
+    unsigned port = (unsigned) (mount[1] - '0');
+    assert(port < 2);
+    return (struct st_mount) {.id = mounts[port], .hfsplus = hfs[port]};
 }
 
 static int st_source_database(const struct st_source *source, char out[1024]) {
@@ -52,6 +58,10 @@ int main(void) {
     assert(st_source_read(0, &out) == AZ_OK);
     assert(out.ref.library_id == a.ref.library_id);
     assert(out.ref.source_generation != a.ref.source_generation);
+    struct st_source before_filesystem_change = out;
+    hfs[0] = 1;
+    assert(st_source_read(0, &out) == AZ_OK && out.hfsplus);
+    assert(out.ref.source_generation != before_filesystem_change.ref.source_generation);
     assert(st_source_read(1, &out) == AZ_OK && out.ref.source_generation == b.ref.source_generation);
     for (int port = 0; port < 2; ++port) {
         struct st_source old;

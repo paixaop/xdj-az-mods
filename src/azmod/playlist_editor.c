@@ -919,7 +919,7 @@ static void source_keyboard_tick(void) {
     if (g_ep147_build == EPB_V200) {
         uintptr_t view = atomic_load_explicit(&g_sv_obj, memory_order_acquire);
         source_keyboard_update(source_search_keyboard(view, 0x2fd44b8), sdk_source_browser_editing(),
-                               (void (*)(uintptr_t, int))source_keyboard_enable_v200);
+                               (void (*)(uintptr_t, int)) source_keyboard_enable_v200);
     }
 }
 static void bp_key_hook(void *self, void *str) {

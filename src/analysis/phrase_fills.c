@@ -185,14 +185,13 @@ FillDetection fill_growth(ta_context *c, int start, int end, D low, const double
         [GROWTH_THIRD] = (int)parameters[TA_FILL_GROWTH_WINDOW_THIRD_BYTES] / sample_bytes,
         [GROWTH_FOURTH] = (int)parameters[TA_FILL_GROWTH_WINDOW_FOURTH_BYTES] / sample_bytes,
     };
-    int count = (int)parameters[TA_FILL_GROWTH_WINDOW_COUNT];
     int width = (int)parameters[TA_FILL_GROWTH_WINDOW_BEATS];
     int base = end - (int)parameters[TA_FILL_GROWTH_WINDOW_BASE_BACK];
     if (end - start < parameters[TA_FILL_GROWTH_MIN_LENGTH] ||
         base + offsets[GROWTH_FIRST] < 0 || (int64_t)base + offsets[GROWTH_FOURTH] + width > low.n)
         return (FillDetection){ 0 };
     double m[GROWTH_WINDOW_SLOTS];
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < GROWTH_WINDOW_SLOTS; i++) {
         int first = base + offsets[i];
         m[i] = d_sequential(d_view(c, low, first, first + width)) / width;
     }
@@ -324,7 +323,7 @@ int repeated_peak_score(D v, const double *parameters)
     if (v.n > window)
         return 0;
     int peaks[window], n = collect_local_peaks(v, peaks);
-    if (n < parameters[TA_REPEATED_PEAK_MIN_COUNT])
+    if (!n || n < parameters[TA_REPEATED_PEAK_MIN_COUNT])
         return 0;
     int capacity = (int)parameters[TA_REPEATED_PEAK_AMPLITUDE_SLOTS];
     double amplitudes[capacity];

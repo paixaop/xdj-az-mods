@@ -9,7 +9,10 @@
 #include "menu.h"
 #include "sdk_logic.h"
 
-enum { EPB_V130 = 1, EPB_V200 = 2 };
+enum {
+    EPB_V130 = 1,
+    EPB_V200 = 2
+};
 static int g_ep147_build;
 static _Atomic long g_viewleave_n;
 
@@ -26,11 +29,18 @@ static int own_str(uintptr_t address, char *text, size_t size) {
 
 #include "text_entry_native.c"
 
-enum { SDK_SURF_TEXT = 1, None = 0, False = 0 };
+enum {
+    SDK_SURF_TEXT = 1,
+    None = 0,
+    False = 0
+};
 
 struct az_surface {
     int mod, show, redraw;
-    struct { uintptr_t id; int mapped; } w;
+    struct {
+        uintptr_t id;
+        int mapped;
+    } w;
 };
 struct overlay_ctx {
     void *dpy;
@@ -41,8 +51,12 @@ static struct az_surface *g_sdk_focus_surf;
 static struct overlay_ctx ctx = {.scr_w = TE_WIDTH, .scr_h = TE_HEIGHT};
 static struct overlay_ctx *g_sdk_ovc = &ctx;
 static azmod_state g_state;
-static struct { int up; } g_sd_dlg;
-typedef struct { int running; } cm_mod;
+static struct {
+    int up;
+} g_sd_dlg;
+typedef struct {
+    int running;
+} cm_mod;
 static cm_mod g_cm[1] = {{.running = 1}};
 static int on_overlay = 1, screen_owner = -1, create_window = 1;
 static long clock_ms = 3000;
@@ -133,10 +147,12 @@ static void controller_visible(void *c, int visible) {
 }
 static const struct te_native_api native = {
     .widget_construct = create_widget,
-    .controller_construct = create_controller, .controller_visible = controller_visible,
-    .add_listener = add_listener, .set_bounds = set_bounds, .add_to_desktop = add_to_desktop,
-    .set_visible = set_visible
-};
+    .controller_construct = create_controller,
+    .controller_visible = controller_visible,
+    .add_listener = add_listener,
+    .set_bounds = set_bounds,
+    .add_to_desktop = add_to_desktop,
+    .set_visible = set_visible};
 
 static unsigned callbacks;
 static int final_status;
@@ -168,9 +184,7 @@ static void close_ack(void) {
     assert(atomic_load(&te_native_phase) == TE_IDLE);
 }
 static az_text_entry_v1 request(const char *initial) {
-    return (az_text_entry_v1) {.size = sizeof(az_text_entry_v1), .max_bytes = 5,
-                              .title = "Title", .initial = initial, .hint = "Hint",
-                              .on_result = result, .user = &callbacks};
+    return (az_text_entry_v1) {.size = sizeof(az_text_entry_v1), .max_bytes = 5, .title = "Title", .initial = initial, .hint = "Hint", .on_result = result, .user = &callbacks};
 }
 
 static void test_native_keys(void) {

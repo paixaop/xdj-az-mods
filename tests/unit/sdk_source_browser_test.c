@@ -42,23 +42,35 @@ static int g_sdk_in_init = 1;
 static int g_cm_on_ui = 1;
 static int g_cm_loading;
 static int g_nm_hooked = 1;
-static int install_msgtick_hook(const char *who) { assert(*who); return 1; }
+static int install_msgtick_hook(const char *who) {
+    assert(*who);
+    return 1;
+}
 static _Atomic int g_bv_vis, g_sv_vis;
 static _Atomic int g_browseview_shown, g_visdbg, g_wave_vis;
 static _Atomic unsigned long g_bv_obj, g_sv_obj;
 static long g_waveview;
 static int g_search_on, naming_event, forwarded, visibility_logs, readable;
 static int keyboard_transitions;
-enum { SEARCHVIEW_VT = 1, BROWSEVIEW_VT = 2 };
+enum {
+    SEARCHVIEW_VT = 1,
+    BROWSEVIEW_VT = 2
+};
 
 static void nm_view_changed(int search) { naming_event = search + 1; }
-static void forward_visibility(long self, int on) { (void)self; forwarded = on + 1; }
+static void forward_visibility(long self, int on) {
+    (void) self;
+    forwarded = on + 1;
+}
 static void (*g_orig_setvis)(long, int) = forward_visibility;
 static int own_q(uintptr_t ptr, uintptr_t *value) {
-    if (readable) memcpy(value, (const void *)ptr, sizeof *value);
+    if (readable) memcpy(value, (const void *) ptr, sizeof *value);
     return readable;
 }
-static void dbg(const char *format, ...) { assert(format); ++visibility_logs; }
+static void dbg(const char *format, ...) {
+    assert(format);
+    ++visibility_logs;
+}
 static void source_keyboard_tick(void) { ++keyboard_transitions; }
 #include "view_visibility.c"
 static long test_time;
@@ -104,30 +116,44 @@ static int azm_patch_vtable(uintptr_t address, void *hook, void **original) {
     return azm_install_hook(address, hook, original);
 }
 
-static void sdk_text_source_changed(const cm_mod *owner)
-{
-    (void)owner;
+static void sdk_text_source_changed(const cm_mod *owner) {
+    (void) owner;
 }
 
 #include "sdk_source_browser.c"
 
-static struct { char name[64]; } g_nm;
+static struct {
+    char name[64];
+} g_nm;
 static _Atomic int g_nm_dirty;
 static int naming, native_keys, native_actions;
 static int nm_naming(void) { return naming; }
-static void nm_action(int action) { assert(action == 1); g_nm.name[0] = '\0'; }
-static void own_str(uintptr_t address, char *output, size_t capacity) {
-    snprintf(output, capacity, "%s", (const char *)address);
+static void nm_action(int action) {
+    assert(action == 1);
+    g_nm.name[0] = '\0';
 }
-static void stock_key(void *self, void *text) { assert(!self && text); ++native_keys; }
-static void stock_action(void *self, int action) { assert(!self && action == 0); ++native_actions; }
+static void own_str(uintptr_t address, char *output, size_t capacity) {
+    snprintf(output, capacity, "%s", (const char *) address);
+}
+static void stock_key(void *self, void *text) {
+    assert(!self && text);
+    ++native_keys;
+}
+static void stock_action(void *self, int action) {
+    assert(!self && action == 0);
+    ++native_actions;
+}
 static void (*g_orig_sv_key)(void *, void *) = stock_key;
 static void (*g_orig_sv_bs)(void *, int) = stock_action;
 #include "browse_keyboard.c"
 
 static void press_key(const char *text) { sv_key_hook(NULL, &text); }
 
-enum { RAW = 1, MENU = 2, FILTER = 4 };
+enum {
+    RAW = 1,
+    MENU = 2,
+    FILTER = 4
+};
 static int observed, reorder_calls, knob_anchored;
 static uint8_t raw_key, knob_anchor;
 static _Atomic int g_reorder_enabled;
@@ -215,8 +241,7 @@ static void registration(void) {
     const az_source_v1 *api = sdk_source_service(AZ_SOURCE_ABI);
     assert(AZ_SOURCE_HAS(api, register_browser));
     char name[] = "YouTube";
-    az_source_browser_v1 descriptor = {.size = sizeof(descriptor), .name = name,
-                                       .on_view = on_view, .user = &draws};
+    az_source_browser_v1 descriptor = {.size = sizeof(descriptor), .name = name, .on_view = on_view, .user = &draws};
     assert(api->register_browser("wrong", &descriptor) == AZ_INVALID);
     assert(api->register_browser("youtube", NULL) == AZ_INVALID);
     g_sdk_in_init = 0;
@@ -324,9 +349,7 @@ static void native_routing(void) {
     const az_source_v1 *api = sdk_source_service(AZ_SOURCE_ABI);
     assert(AZ_SOURCE_HAS(api, show_view));
     unsigned char png[] = {'x', 0};
-    az_source_browser_v1 descriptor = {.size = sizeof descriptor, .name = "Other",
-        .on_view = on_native_view, .user = &native_draws, .on_query = on_query,
-        .icon_png = png, .icon_bytes = sizeof png};
+    az_source_browser_v1 descriptor = {.size = sizeof descriptor, .name = "Other", .on_view = on_native_view, .user = &native_draws, .on_query = on_query, .icon_png = png, .icon_bytes = sizeof png};
     sdk_source_browser_native_selected();
     sdk_source_browser_tick();
     g_cm_loading = 1;
@@ -411,20 +434,20 @@ static void enable_keyboard(uintptr_t keyboard, int enabled) {
 static void custom_keyboard_without_media(void) {
     unsigned long widget[26] = {0};
     unsigned long view[0x1930 / sizeof(unsigned long)] = {0};
-    view[0x1928 / sizeof(unsigned long)] = (uintptr_t)widget;
+    view[0x1928 / sizeof(unsigned long)] = (uintptr_t) widget;
     widget[0] = 0x100;
     widget[24] = 0x1000;
     readable = 1;
     assert(!source_search_keyboard(0, 0x100));
-    assert(!source_search_keyboard((uintptr_t)view, 0x101));
-    uintptr_t keyboard = source_search_keyboard((uintptr_t)view, 0x100);
-    assert(keyboard == (uintptr_t)widget);
+    assert(!source_search_keyboard((uintptr_t) view, 0x101));
+    uintptr_t keyboard = source_search_keyboard((uintptr_t) view, 0x100);
+    assert(keyboard == (uintptr_t) widget);
     source_keyboard_update(keyboard, 1, enable_keyboard);
     assert(keyboard_enabled == 1);
     widget[24] = 0;
-    source_keyboard_update((uintptr_t)widget, 1, enable_keyboard);
+    source_keyboard_update((uintptr_t) widget, 1, enable_keyboard);
     assert(keyboard_enabled == 1);
-    source_keyboard_update((uintptr_t)widget, 0, enable_keyboard);
+    source_keyboard_update((uintptr_t) widget, 0, enable_keyboard);
     assert(keyboard_enabled == -1);
     source_keyboard_update(0, 0, enable_keyboard);
 }
@@ -432,25 +455,25 @@ static void custom_keyboard_without_media(void) {
 static void firmware_visibility(void) {
     unsigned long object[6] = {SEARCHVIEW_VT};
     readable = 0;
-    setvis_hook((long)object, 1);
+    setvis_hook((long) object, 1);
     assert(g_sv_vis && g_search_on && naming_event == 2 && forwarded == 2);
-    setvis_hook((long)object, 0);
+    setvis_hook((long) object, 0);
     assert(!g_sv_vis && !g_search_on && forwarded == 1 && keyboard_transitions == 2);
     object[0] = BROWSEVIEW_VT;
-    setvis_hook((long)object, 1);
-    assert(g_bv_vis && g_browseview_shown && g_bv_obj == (unsigned long)object);
-    setvis_hook((long)object, 0);
+    setvis_hook((long) object, 1);
+    assert(g_bv_vis && g_browseview_shown && g_bv_obj == (unsigned long) object);
+    setvis_hook((long) object, 0);
     assert(!g_bv_vis && naming_event == 1);
     g_visdbg = 1;
     object[0] = 3;
     object[5] = 401;
-    g_waveview = (long)object;
+    g_waveview = (long) object;
     setvis_hook(0, 3);
     assert(forwarded == 4);
-    setvis_hook((long)object, 1);
+    setvis_hook((long) object, 1);
     assert(!visibility_logs && g_wave_vis);
     readable = 1;
-    setvis_hook((long)object, 0);
+    setvis_hook((long) object, 0);
     assert(visibility_logs == 1 && !g_wave_vis);
 }
 

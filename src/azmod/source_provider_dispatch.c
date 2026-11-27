@@ -48,7 +48,9 @@
 #define TRACK_ID_BYTES 12u
 #define HIERARCHY_LIMIT 32u
 
-struct hierarchy_item { uint32_t words[3]; };
+struct hierarchy_item {
+    uint32_t words[3];
+};
 
 struct hierarchy_view {
     uint16_t category;
@@ -89,8 +91,10 @@ struct search_replay {
 /* Browse load-handler aliases in logical deck order. The native resolver
  * handles their translation to UsecaseTrackLoader registrar keys. */
 static const uint64_t loader_ids[DISPATCH_DECKS] = {
-    UINT64_C(0x01d1a70fb8ad4e4b), UINT64_C(0x00c00e6ca1e71fe2),
-    UINT64_C(0x018cd337caa95a1b), UINT64_C(0x007b3a94b3e32bb2),
+    UINT64_C(0x01d1a70fb8ad4e4b),
+    UINT64_C(0x00c00e6ca1e71fe2),
+    UINT64_C(0x018cd337caa95a1b),
+    UINT64_C(0x007b3a94b3e32bb2),
 };
 
 _Static_assert(offsetof(struct azspd_track_id, padding) == TRACK_ID_BYTES, "native TrackID");
@@ -293,8 +297,10 @@ static bool copy_hierarchy(struct hierarchy_snapshot *snapshot,
 
 static struct hierarchy_view hierarchy_view(const struct hierarchy_snapshot *snapshot) {
     return (struct hierarchy_view) {
-        .category = snapshot->category, .begin = snapshot->items,
-        .end = snapshot->items + snapshot->depth, .capacity = snapshot->items + snapshot->depth,
+        .category = snapshot->category,
+        .begin = snapshot->items,
+        .end = snapshot->items + snapshot->depth,
+        .capacity = snapshot->items + snapshot->depth,
     };
 }
 
@@ -329,7 +335,11 @@ static void dispatch_index(void *loader, uint32_t index, uint32_t count,
                            const struct azspd_track_id *id, const struct hierarchy_view *hierarchy,
                            const uint32_t *sort, const uint8_t *order) {
     struct load_request request = {
-        .indexed = true, .index = index, .count = count, .sort = *sort, .order = *order,
+        .indexed = true,
+        .index = index,
+        .count = count,
+        .sort = *sort,
+        .order = *order,
     };
     if (!intercept_load(loader, &request, id, hierarchy))
         original_index(loader, index, count, id, hierarchy, sort, order);
@@ -509,7 +519,7 @@ static void observe_loaded(struct azspd_deck_watch *watch, const struct azstatus
     if (!receipt->valid || !receipt->load_generation || !current_deck_receipt(api, receipt))
         return;
     int matches = api->track_matches(receipt->deck, receipt->epoch, receipt->load_generation,
-                                    (const unsigned char *) &watch->id);
+                                     (const unsigned char *) &watch->id);
     if (!current_deck_receipt(api, receipt))
         return;
     if (matches) {
@@ -530,8 +540,8 @@ static void observe_deck(struct azspd_deck_watch *watch, const struct azstatus_n
 }
 
 enum azspd_deck_use azspd_deck_observe(struct azspd_deck_watch *watch,
-                                    const struct azstatus_native_v1 *api,
-                                    const struct azstatus_native_receipt *receipt) {
+                                       const struct azstatus_native_v1 *api,
+                                       const struct azstatus_native_receipt *receipt) {
     if (!watch)
         return AZSPD_DECK_PENDING;
     if (watch->use != AZSPD_DECK_RETIRED && observable_deck(watch, api) && newer_deck_receipt(watch, receipt))

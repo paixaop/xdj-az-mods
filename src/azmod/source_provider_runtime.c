@@ -601,6 +601,7 @@ struct spr_replay {
 
 static void spr_record_use(struct spr_replay *replay) {
     struct spr_deck_use *use = replay->use;
+    replay->use = NULL;
     if (!use)
         return;
     if (replay->status != AZ_OK) {
@@ -723,6 +724,7 @@ static void spr_load_done(const struct spr_result *result) {
     {
         struct spr_replay replay __attribute__((cleanup(spr_record_use))) = {.use = use, .status = AZ_OK};
         replay.status = azspd_resume_load(result->ticket, target);
+        spr_record_use(&replay);
         status = replay.status;
     }
     drag_log("source provider load replay: ticket=%llu status=%d target=%u\n",
@@ -738,6 +740,7 @@ static void spr_preview_done(const struct spr_result *result) {
     }
     struct spr_replay replay __attribute__((cleanup(spr_record_use))) = {.use = use, .status = AZ_OK};
     replay.status = azspd_resume_preview(result->ticket);
+    spr_record_use(&replay);
 }
 
 static void spr_mount(void) {

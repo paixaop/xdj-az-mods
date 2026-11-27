@@ -802,17 +802,26 @@ static void settle_registered(Receipt *receipt) {
     complete_receipt(slot);
 }
 static _Thread_local const void *quiet_memory_track;
-static void restore_memory_notice(const void **previous) { quiet_memory_track = *previous; }
+struct MemoryNoticeScope {
+    const void *previous;
+};
+static void memory_notice_scope_init(struct MemoryNoticeScope *scope, const void *track) {
+    scope->previous = quiet_memory_track;
+    quiet_memory_track = track;
+}
+static void memory_notice_scope_drop(struct MemoryNoticeScope *scope) {
+    quiet_memory_track = scope->previous;
+}
 static void memory_notice_hook(void *self, const void *track) {
     if (track && track == quiet_memory_track) return;
     original(void (*)(void *, const void *), &state().memory_notice_original)(self, track);
 }
 static void call_registered(void *payload, const Receipt *receipt) {
-    const void *previous __attribute__((cleanup(restore_memory_notice))) = quiet_memory_track;
+    struct MemoryNoticeScope scope __attribute__((cleanup(memory_notice_scope_drop)));
     Slot *slot = receipt ? registered_slot(receipt->deck, receipt->token) : NULL;
     /* The native registration task hands its TrackID at +0x10 to the
      * success caution. Keep storage, observer updates and manual feedback. */
-    quiet_memory_track = slot && !slot->kind && creating(slot->request.operation) ? (char *) payload + 0x10 : NULL;
+    memory_notice_scope_init(&scope, slot && !slot->kind && creating(slot->request.operation) ? (char *) payload + 0x10 : NULL);
     original(void (*)(void *), &state().registered_original)(payload);
 }
 static void registered_hook(void *payload) {

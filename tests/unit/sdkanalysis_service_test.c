@@ -944,7 +944,7 @@ static void failed_refresh_releases_link(az_track_ref ref, const az_analysis_res
 }
 
 static void beatport_reload_cache(const char *root, const az_analysis_result_v1 *phrases,
-                                 const az_analysis_result_v1 *combined) {
+                                  const az_analysis_result_v1 *combined) {
     const uint32_t both = AZ_DATA_PHRASES | AZ_ANALYSIS_VOCALS;
     analysis_source_input job = {0}, other = {0};
     char original[1024], reload[1024], different[1024], collision[1024];

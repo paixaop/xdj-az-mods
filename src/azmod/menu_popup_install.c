@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* The native menu hook installation and label setup. */
-static void mp_init_names(void)
-{
+static void mp_init_names(void) {
     bn_set(&g_mp_title, "PLAYLIST", 8);
     g_mp_title_s = (uintptr_t) g_mp_title.text;
     bn_set(&g_mp_body, "REMOVE FROM PLAYLIST", 20);
@@ -31,28 +30,25 @@ static void mp_init_names(void)
     g_mp_bf_name_s = (uintptr_t) g_mp_bf_name.text;
 }
 
-static int mp_stock_menu_slots(void)
-{
+static int mp_stock_menu_slots(void) {
     uintptr_t click = 0, result = 0;
     if (img_q(MP_CLICK_SLOT, &click) && click == MP_CLICK_ORIG &&
         img_q(MP_RESULT_SLOT, &result) && result == MP_RESULT_ORIG)
         return 1;
     mp_log("install: slots hold %lx/%lx, not stock -- popup off\n",
-           (unsigned long)click, (unsigned long)result);
+           (unsigned long) click, (unsigned long) result);
     return 0;
 }
 
-static void mp_install_title(void)
-{
+static void mp_install_title(void) {
     uintptr_t paint = 0;
     int rc = g_mp_installed && img_q(MP_WIDGET_PAINT_SLOT, &paint) && paint == MP_WIDGET_PAINT_ORIG
-        ? azm_patch_vtable(MP_WIDGET_PAINT_SLOT, (void *)mp_paint_hook, (void **)&g_mp_orig_paint)
-        : -9;
+                 ? azm_patch_vtable(MP_WIDGET_PAINT_SLOT, (void *) mp_paint_hook, (void **) &g_mp_orig_paint)
+                 : -9;
     mp_log("install: panel title paint=%d\n", rc);
 }
 
-static void mp_install_menu_hooks(void)
-{
+static void mp_install_menu_hooks(void) {
     int r = azm_install_hook(MP_REBUILD, (void *) mp_rebuild_with_plan, (void **) &g_mp_orig_rebuild);
     int p = azm_install_hook(MP_PRODUCER, (void *) mp_producer_hook, (void **) &g_mp_orig_producer);
     int k = r == 1 && p == 1 ? azm_patch_vtable(MP_CLICK_SLOT, (void *) mp_click_with_plan,
@@ -70,8 +66,7 @@ static void mp_install_menu_hooks(void)
 }
 
 /* Install over stock slots only. Each action is gated by its own provider. */
-static void install_menu_popup(void)
-{
+static void install_menu_popup(void) {
     if (AZ_PROBE_ON("/home/root/settings/azmod-menutest.on") ||
         AZ_PROBE_ON("/home/root/settings/azmod-menuprobe.on")) {
         mp_log("install: a menu probe flag is present (it hooks the same functions) -- popup off\n");

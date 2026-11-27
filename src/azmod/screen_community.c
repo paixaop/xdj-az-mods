@@ -2697,8 +2697,11 @@ static void cm_fire_addrepo(const cm_ctl *c) {
     if (cm_busy())
         return;
     const az_text_entry_v1 entry = {
-        .size = sizeof entry, .max_bytes = sizeof g_cm_kb - 1,
-        .title = "Add repository", .initial = g_cm_kb, .submit = "Add",
+        .size = sizeof entry,
+        .max_bytes = sizeof g_cm_kb - 1,
+        .title = "Add repository",
+        .initial = g_cm_kb,
+        .submit = "Add",
         .hint = "Enter owner/repo, a GitHub address, or an HTTPS address ending in azmods-repo.json.",
         .on_result = cm_addrepo_result,
     };

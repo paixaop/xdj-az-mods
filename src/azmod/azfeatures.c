@@ -238,8 +238,7 @@ void az_set(int id, int v) {
         g_changed[id - AZI_REG0] = 1;
     az_publish();
 }
-static void notify_official_change(int id)
-{
+static void notify_official_change(int id) {
     const struct az_row *row = az_row(id);
     if (id < AZF_COUNT && row->d.on_change)
         row->d.on_change(az_get(id), row->d.user);
@@ -608,42 +607,36 @@ int azf_row_lookup(const char *key) {
             return i;
     return -1;
 }
-static bool official_visible(int item)
-{
+static bool official_visible(int item) {
     const struct az_row *row = az_row(item);
     if (!row || row->d.flags & AZ_ROW_HIDDEN)
         return false;
     return !(row->d.flags & AZ_ROW_SHOW_GATED) || g_shown[item];
 }
 
-int azf_official_setting(unsigned index, az_official_setting_v1 *out)
-{
+int azf_official_setting(unsigned index, az_official_setting_v1 *out) {
     if (!out || out->size < sizeof *out)
         return AZ_INVALID;
     if (index >= AZF_COUNT)
         return AZ_NOT_FOUND;
-    int item = (int)index;
+    int item = (int) index;
     if (!az_has_value(item) || !official_visible(item))
         return AZ_EMPTY;
     const struct az_row *row = az_row(item);
-    az_official_setting_v1 value = { .size = out->size, .version = AZ_DATA_VERSION,
-        .kind = az_kind(item), .configured = az_get(item), .effective = az_value(item),
-        .available = az_active(item), .choices = az_n_choices(item) };
+    az_official_setting_v1 value = {.size = out->size, .version = AZ_DATA_VERSION, .kind = az_kind(item), .configured = az_get(item), .effective = az_value(item), .available = az_active(item), .choices = az_n_choices(item)};
     snprintf(value.key, sizeof value.key, "%s", row->d.key);
     snprintf(value.label, sizeof value.label, "%s", row->d.label);
     *out = value;
     return AZ_OK;
 }
 
-static bool official_value_valid(int item, int value)
-{
+static bool official_value_valid(int item, int value) {
     if (az_kind(item) == AZ_ROW_CHOICE)
         return value >= 0 && value < az_n_choices(item);
     return value == 0 || value == 1;
 }
 
-int azf_official_setting_write(const char *key, int expected, int desired)
-{
+int azf_official_setting_write(const char *key, int expected, int desired) {
     int item = azf_row_lookup(key);
     if (item < 0 || !official_visible(item))
         return AZ_NOT_FOUND;

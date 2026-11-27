@@ -125,7 +125,10 @@ static int te_input(const az_event *event, void *user) {
     case AZ_EV_KNOB: state = SC_IN_KNOB; break;
     case AZ_EV_CLICK: state = SC_IN_CLICK; break;
     case AZ_EV_BACK: state = SC_IN_BACK; break;
-    case AZ_EV_TAP: state = SC_IN_TAP; hit = te_button_hit(event); break;
+    case AZ_EV_TAP:
+        state = SC_IN_TAP;
+        hit = te_button_hit(event);
+        break;
     default: return 1;
     }
     int answer = sc_input(&te_dialog.selected, state, event->dir, hit);
@@ -166,8 +169,7 @@ static void te_prefill(const az_text_entry_v1 *entry) {
 
 static int te_overlay_open(void) {
     static const az_surface_v1 desc = {
-        .size = sizeof desc, .on_paint = te_paint, .on_input = te_input
-    };
+        .size = sizeof desc, .on_paint = te_paint, .on_input = te_input};
     struct az_surface *surface = te_surface();
     sdk_modal_init(surface, &desc);
     if (surface->w.id == None)

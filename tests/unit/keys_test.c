@@ -69,25 +69,24 @@ static void table(void) {
         out(" |\n");
     }
 }
-static void official_setting_test(void)
-{
+static void official_setting_test(void) {
     az_defaults();
     az_official_setting_v1 value = {.size = sizeof value};
     int item = azf_row_lookup("stems");
     CHECK("official setting copies the stable key and configured value",
-          item >= 0 && azf_official_setting((unsigned)item, &value) == AZ_OK &&
-          !strcmp(value.key, "stems") && value.configured == az_get(item));
+          item >= 0 && azf_official_setting((unsigned) item, &value) == AZ_OK &&
+              !strcmp(value.key, "stems") && value.configured == az_get(item));
     int old_value = value.configured;
     CHECK("official setting rejects an invalid toggle and stale expected value",
           azf_official_setting_write("stems", old_value, 4) == AZ_INVALID &&
-          azf_official_setting_write("stems", !old_value, !old_value) == AZ_STALE);
+              azf_official_setting_write("stems", !old_value, !old_value) == AZ_STALE);
     CHECK("official setting writes the exact requested toggle value",
           azf_official_setting_write("stems", old_value, !old_value) == AZ_OK &&
-          azf_official_setting((unsigned)item, &value) == AZ_OK && value.configured == !old_value);
+              azf_official_setting((unsigned) item, &value) == AZ_OK && value.configured == !old_value);
     CHECK("official setting enumeration ends explicitly",
           azf_official_setting(AZF_COUNT, &value) == AZ_NOT_FOUND &&
-          azf_official_setting(0, NULL) == AZ_INVALID &&
-          azf_official_setting_write("unknown-test-setting", 0, 1) == AZ_NOT_FOUND);
+              azf_official_setting(0, NULL) == AZ_INVALID &&
+              azf_official_setting_write("unknown-test-setting", 0, 1) == AZ_NOT_FOUND);
 }
 
 int main(int argc, char **argv) {

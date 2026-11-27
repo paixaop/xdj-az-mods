@@ -20,8 +20,7 @@ static long long now_ms;
 static unsigned moves, syncs;
 static int writer_result, sync_result = AZ_PDB_CURRENT;
 
-static int prepare(void *db, const char *sql, int n, void **out, const char **tail)
-{
+static int prepare(void *db, const char *sql, int n, void **out, const char **tail) {
     sqlite3_stmt *statement = NULL;
     int rc = sqlite3_prepare_v2(db, sql, n, &statement, tail);
     *out = statement;
@@ -34,49 +33,58 @@ static const unsigned char *text(void *s, int i) { return sqlite3_column_text(s,
 static int finalize(void *s) { return sqlite3_finalize(s); }
 static int close_db(void *db) { return sqlite3_close(db); }
 
-const struct az_library_sql *az_storage_sql(void)
-{
+const struct az_library_sql *az_storage_sql(void) {
     static const struct az_library_sql api = {
-        .prepare = prepare, .bind_int64 = bind, .step = step, .col_int64 = integer,
-        .col_text = text, .finalize = finalize, .close = close_db
-    };
+        .prepare = prepare, .bind_int64 = bind, .step = step, .col_int64 = integer, .col_text = text, .finalize = finalize, .close = close_db};
     return &api;
 }
 int az_storage_sql_ready(void) { return 1; }
-void *sdk_db_open(const char *path)
-{
+void *sdk_db_open(const char *path) {
     sqlite3 *db = NULL;
     if (fail_open)
         return NULL;
     assert(sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK);
     return db;
 }
-uint64_t st_disk_sig(const char *path) { assert(!strcmp(path, database_path)); return signature; }
-int st_database_quiet(const char *path) { assert(!strcmp(path, database_path)); return quiet; }
-int st_source_database(const struct st_source *source, char out[1024])
-{
+uint64_t st_disk_sig(const char *path) {
+    assert(!strcmp(path, database_path));
+    return signature;
+}
+int st_database_quiet(const char *path) {
+    assert(!strcmp(path, database_path));
+    return quiet;
+}
+int st_source_database(const struct st_source *source, char out[1024]) {
     assert(!strcmp(source->mount, "/usb"));
     snprintf(out, 1024, "%s", database_path);
     return 1;
 }
-int st_source_read(int stick, struct st_source *out)
-{
+int st_source_read(int stick, struct st_source *out) {
     if (stick != 0 || !source_present)
         return AZ_STALE;
     struct stat db;
     assert(stat(database_path, &db) == 0);
-    *out = (struct st_source){ .ref = { .source_generation = generation, .library_id = 23 },
-        .device = (uint64_t)db.st_dev, .inode = (uint64_t)db.st_ino, .mount = "/usb" };
+    *out = (struct st_source) {.ref = {.source_generation = generation, .library_id = 23},
+                               .device = (uint64_t) db.st_dev,
+                               .inode = (uint64_t) db.st_ino,
+                               .mount = "/usb"};
     return AZ_OK;
 }
-int st_resolution_source_equal(const struct st_source *a, const struct st_source *b)
-{
+int st_resolution_source_equal(const struct st_source *a, const struct st_source *b) {
     return a->ref.source_generation == b->ref.source_generation &&
            a->ref.library_id == b->ref.library_id && a->device == b->device && a->inode == b->inode &&
            !strcmp(a->mount, b->mount);
 }
 
-enum { MV_IDLE, MV_ARMED, MV_TAKEN, MV_DONE, MV_SDK_ARMED, MV_SDK_TAKEN, MV_OP_MOVE };
+enum {
+    MV_IDLE,
+    MV_ARMED,
+    MV_TAKEN,
+    MV_DONE,
+    MV_SDK_ARMED,
+    MV_SDK_TAKEN,
+    MV_OP_MOVE
+};
 #define MV_DEADLINE_MS 2500
 #define SQLDB_CONN 16
 #define SQLITE_MAGIC_Q 24
@@ -89,35 +97,32 @@ static struct {
 static int t_pst_own;
 static sqlite3 *active;
 static int autocommit(void *db) { return sqlite3_get_autocommit(db); }
-static const struct { int (*get_autocommit)(void *); } g_sq = { .get_autocommit = autocommit };
+static const struct {
+    int (*get_autocommit)(void *);
+} g_sq = {.get_autocommit = autocommit};
 static int sq_resolve(void) { return 1; }
 static long long drag_now_ms(void) { return now_ms; }
 static int mlserver_chain(void *server, uintptr_t *service, uintptr_t *library,
-                         uintptr_t *db, unsigned *media)
-{
+                          uintptr_t *db, unsigned *media) {
     assert(server == active);
-    *service = *library = *db = (uintptr_t)active;
+    *service = *library = *db = (uintptr_t) active;
     *media = 258;
     return 0;
 }
-static bool own_q(uintptr_t address, uintptr_t *out)
-{
-    uintptr_t offset = address - (uintptr_t)active;
-    *out = offset == SQLDB_CONN ? (uintptr_t)active : SQLITE_MAGIC_OPEN;
+static bool own_q(uintptr_t address, uintptr_t *out) {
+    uintptr_t offset = address - (uintptr_t) active;
+    *out = offset == SQLDB_CONN ? (uintptr_t) active : SQLITE_MAGIC_OPEN;
     return true;
 }
-static int cp_mount_of(void *conn, char *out, size_t cap)
-{
+static int cp_mount_of(void *conn, char *out, size_t cap) {
     assert(conn == active);
     snprintf(out, cap, "%s", native_mount);
     return 1;
 }
-static void sql(const char *statement)
-{
+static void sql(const char *statement) {
     assert(sqlite3_exec(active, statement, NULL, NULL, NULL) == SQLITE_OK);
 }
-static int mv_execute(void *server, FILE *log)
-{
+static int mv_execute(void *server, FILE *log) {
     assert(server == active && !log && t_pst_own == 1);
     assert(g_mv.op == MV_OP_MOVE && g_mv.pl == 5 && g_mv.media == 258);
     assert(g_mv.from == 2 && g_mv.to == 3 && g_mv.cid == 11);
@@ -128,13 +133,11 @@ static int mv_execute(void *server, FILE *log)
         "ELSE sequenceNo END WHERE playlist_id=5");
     return 0;
 }
-static FILE *azlog_open(const char *path, const char *mode)
-{
+static FILE *azlog_open(const char *path, const char *mode) {
     assert(strstr(path, "azmod-libspool") && !strcmp(mode, "a"));
     return NULL;
 }
-static int ls_pdb_sync_root(void *conn, const char *root, const char *src, const char *why, FILE *log)
-{
+static int ls_pdb_sync_root(void *conn, const char *root, const char *src, const char *why, FILE *log) {
     assert(conn == active && !t_pst_own && !src && !log);
     assert(!strcmp(root, "/usb") && strstr(why, "edit op "));
     ++syncs;
@@ -145,45 +148,36 @@ static int ls_pdb_sync_root(void *conn, const char *root, const char *src, const
 
 #define CM_RA() 1
 static int g_cm_on_ui;
-static int st_mod_owner(const char *id, uintptr_t caller, const char *name)
-{
+static int st_mod_owner(const char *id, uintptr_t caller, const char *name) {
     assert(caller == 1 && name[0]);
     return current_owner && (!strcmp(id, "a") || !strcmp(id, "b")) ? 0 : -1;
 }
 static int sdk_sq_resolve(void) { return 1; }
 #include "../../src/azmod/sdk_playlist_bindings.c"
 
-static az_playlist_order_v1 order(unsigned playlist, unsigned offset, az_playlist_entry_v1 *rows, unsigned capacity)
-{
-    az_playlist_order_v1 out = { .size = sizeof out, .version = AZ_DATA_VERSION };
+static az_playlist_order_v1 order(unsigned playlist, unsigned offset, az_playlist_entry_v1 *rows, unsigned capacity) {
+    az_playlist_order_v1 out = {.size = sizeof out, .version = AZ_DATA_VERSION};
     assert(sdk_playlist_order("a", 0, playlist, offset, rows, capacity, &out) == AZ_OK);
     return out;
 }
-static az_playlist_move_v1 prepare_move(void)
-{
+static az_playlist_move_v1 prepare_move(void) {
     az_playlist_entry_v1 entry;
     az_playlist_order_v1 before = order(5, 1, &entry, 1);
     assert(before.total == 3 && before.returned == 1 && entry.position == 2 && entry.track_id == 11);
-    return (az_playlist_move_v1){ .size = sizeof(az_playlist_move_v1), .version = AZ_DATA_VERSION,
-       .playlist_id = 5, .from = 2, .to = 3, .entry_id = entry.entry_id,
-       .source_generation = before.source_generation, .library_id = before.library_id,
-       .revision = before.revision };
+    return (az_playlist_move_v1) {.size = sizeof(az_playlist_move_v1), .version = AZ_DATA_VERSION, .playlist_id = 5, .from = 2, .to = 3, .entry_id = entry.entry_id, .source_generation = before.source_generation, .library_id = before.library_id, .revision = before.revision};
 }
-static uint64_t submit(const az_playlist_move_v1 *request)
-{
+static uint64_t submit(const az_playlist_move_v1 *request) {
     uint64_t id;
     assert(sdk_playlist_move("a", request, &id) == AZ_PENDING);
     return id;
 }
-static az_playlist_move_result_v1 result(uint64_t id, int status)
-{
-    az_playlist_move_result_v1 out = { .size = sizeof out, .version = AZ_DATA_VERSION };
+static az_playlist_move_result_v1 result(uint64_t id, int status) {
+    az_playlist_move_result_v1 out = {.size = sizeof out, .version = AZ_DATA_VERSION};
     assert(sdk_playlist_move_status("a", id, &out) == status);
     return out;
 }
-static void read_guards(void)
-{
-    az_playlist_order_v1 out = { .size = sizeof out, .version = AZ_DATA_VERSION };
+static void read_guards(void) {
+    az_playlist_order_v1 out = {.size = sizeof out, .version = AZ_DATA_VERSION};
     assert(order(6, 0, NULL, 0).total == 0);
     assert(sdk_playlist_order("a", 0, 7, 0, NULL, 0, &out) == AZ_NOT_FOUND);
     assert(sdk_playlist_order("a", 0, 0, 0, NULL, 0, &out) == AZ_INVALID);
@@ -204,13 +198,12 @@ static void read_guards(void)
     g_cm_on_ui = 0;
 }
 
-static void guarded_move(void)
-{
+static void guarded_move(void) {
     az_playlist_move_v1 move = prepare_move();
     uint64_t id = submit(&move), unused = 0;
     assert(sdk_playlist_move("a", &move, &unused) == AZ_BUSY);
     result(id, AZ_PENDING);
-    az_playlist_move_result_v1 foreign = { .size = sizeof foreign, .version = AZ_DATA_VERSION };
+    az_playlist_move_result_v1 foreign = {.size = sizeof foreign, .version = AZ_DATA_VERSION};
     assert(sdk_playlist_move_status("b", id, &foreign) == AZ_STALE);
     assert(sdk_playlist_move_status("a", 0, &foreign) == AZ_INVALID);
     atomic_store(&g_drag_on, 1);
@@ -241,8 +234,7 @@ static void guarded_move(void)
     sql("UPDATE playlist_content SET sequenceNo=CASE rowid WHEN 200 THEN 2 WHEN 300 THEN 3 ELSE sequenceNo END");
 }
 
-static void refused_moves(void)
-{
+static void refused_moves(void) {
     az_playlist_move_v1 move = prepare_move();
     uint64_t receipt = 0;
     assert(sdk_playlist_move("a", NULL, &receipt) == AZ_INVALID);
@@ -283,10 +275,9 @@ static void refused_moves(void)
     assert(result(receipt, AZ_OK).outcome == AZ_PLAYLIST_UNCERTAIN && moves == 2);
 }
 
-static void replaced_database(void)
-{
+static void replaced_database(void) {
     char moved[1024];
-    assert((unsigned)snprintf(moved, sizeof moved, "%s.old", database_path) < sizeof moved);
+    assert((unsigned) snprintf(moved, sizeof moved, "%s.old", database_path) < sizeof moved);
     assert(rename(database_path, moved) == 0);
     sqlite3 *replacement = NULL;
     assert(sqlite3_open(database_path, &replacement) == SQLITE_OK);
@@ -314,8 +305,7 @@ static void replaced_database(void)
     assert(result(receipt, AZ_OK).outcome == AZ_PLAYLIST_MOVED && moves == before + 1);
 }
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     assert(argc == 2);
     database_path = argv[1];
     assert(sqlite3_open(database_path, &active) == SQLITE_OK);

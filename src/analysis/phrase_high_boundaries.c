@@ -17,10 +17,11 @@ static D repeat_bars(ta_context *c, D a, int n, int width)
 static bool low_peak_eligible(int i, D aligned, B flags, int width, const double *parameters)
 {
     int back = (int)parameters[TA_LOW_PEAK_PRIOR_CHANGE_BACK];
+    int bar = i / width;
     double mark = parameters[TA_LOW_PEAK_CHANGE_MARK];
     return i >= back && i < aligned.n &&
            (aligned.v[i] == mark || aligned.v[i - back] == mark ||
-            flags.v[i / width] == parameters[TA_LOW_PEAK_FLAG_MARK]);
+            flags.v[bar] == parameters[TA_LOW_PEAK_FLAG_MARK]);
 }
 
 static bool peak_input_ready(int count, int phase, D changes)

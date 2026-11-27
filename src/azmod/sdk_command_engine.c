@@ -360,16 +360,7 @@ int scmd_admit_batch(struct scmd_engine *e, int owner, const az_cue_batch_reques
                      az_command_completion_fn callback, void *user,
                      const struct scmd_adapter *adapter, az_command_result *out) {
     struct scmd_admission admission = {
-        .engine = e, .owner = owner, .callback = callback, .user = user, .output = out,
-        .adapter = adapter, .batch = batch, .detail = SCMD_DETAIL_ARGUMENTS,
-        .request = {
-            .size = sizeof(az_command_request), .version = AZ_DATA_VERSION,
-            .operation = AZ_CMD_CUE_POINT_SET, .deck = batch->deck,
-            .request_id = batch->request_id, .expected_load_generation = batch->expected_load_generation,
-            .expected_revision = batch->expected_revision, .deadline_ns = batch->deadline_ns,
-            .flags = AZ_COMMAND_PERSIST | AZ_COMMAND_NATIVE_LOAD | AZ_COMMAND_NATIVE_CUE_IDS
-        }
-    };
+        .engine = e, .owner = owner, .callback = callback, .user = user, .output = out, .adapter = adapter, .batch = batch, .detail = SCMD_DETAIL_ARGUMENTS, .request = {.size = sizeof(az_command_request), .version = AZ_DATA_VERSION, .operation = AZ_CMD_CUE_POINT_SET, .deck = batch->deck, .request_id = batch->request_id, .expected_load_generation = batch->expected_load_generation, .expected_revision = batch->expected_revision, .deadline_ns = batch->deadline_ns, .flags = AZ_COMMAND_PERSIST | AZ_COMMAND_NATIVE_LOAD | AZ_COMMAND_NATIVE_CUE_IDS}};
     pthread_mutex_lock(&e->mu);
     int rc = scmd_admit_locked(&admission);
     pthread_mutex_unlock(&e->mu);

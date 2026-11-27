@@ -59,7 +59,7 @@ static bool acquire_reader(struct path_slot *slot) {
     unsigned readers = atomic_load_explicit(&slot->readers, memory_order_relaxed);
     while (!(readers & PATH_EXCLUSIVE)) {
         if (atomic_compare_exchange_weak_explicit(&slot->readers, &readers, readers + 1,
-                                                 memory_order_acquire, memory_order_relaxed))
+                                                  memory_order_acquire, memory_order_relaxed))
             return true;
     }
     return false;
@@ -249,7 +249,8 @@ int azspd_path_watch(const char *path, uint64_t *ticket) {
 static struct azspd_path_state read_path(const struct path_slot *slot) {
     uint64_t counts = atomic_load_explicit(&slot->counts, memory_order_acquire);
     return (struct azspd_path_state) {
-        .opened = (uint32_t) (counts >> 32), .owners = (uint32_t) counts,
+        .opened = (uint32_t) (counts >> 32),
+        .owners = (uint32_t) counts,
         .preview_opened = atomic_load_explicit(&slot->preview_opened, memory_order_acquire),
         .uncertain = atomic_load_explicit(&slot->uncertain, memory_order_acquire),
     };
@@ -269,7 +270,7 @@ int azspd_path_status(uint64_t ticket, struct azspd_path_state *out) {
 static bool stop_path(struct path_slot *slot) {
     unsigned idle = 0;
     if (!atomic_compare_exchange_strong_explicit(&slot->readers, &idle, PATH_EXCLUSIVE,
-                                                memory_order_acquire, memory_order_relaxed))
+                                                 memory_order_acquire, memory_order_relaxed))
         return false;
     struct azspd_path_state state = read_path(slot);
     bool settled = !state.owners && !state.uncertain;
@@ -359,8 +360,8 @@ static int find_controller(const void *manager, const unsigned char *id, const u
     unsigned count;
     uintptr_t vector;
     memcpy(&count, (const unsigned char *) manager + ANALYSIS_COUNT, sizeof(count));
-    memcpy(&vector, (const unsigned char *)manager + ANALYSIS_CONTROLLERS, sizeof(vector));
-    const struct analysis_owner *controllers = (const struct analysis_owner *)vector;
+    memcpy(&vector, (const unsigned char *) manager + ANALYSIS_CONTROLLERS, sizeof(vector));
+    const struct analysis_owner *controllers = (const struct analysis_owner *) vector;
     if (count > 4096 || (count && !controllers))
         return -1;
     for (unsigned i = 0; i < count; ++i) {

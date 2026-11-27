@@ -88,13 +88,11 @@ static int cm_row_lookup(const char *official_key) {
     return azf_row_lookup(official_key);
 }
 
-static int sdk_official_setting_read(uint32_t index, az_official_setting_v1 *out)
-{
+static int sdk_official_setting_read(uint32_t index, az_official_setting_v1 *out) {
     return g_cm_on_ui ? azf_official_setting(index, out) : AZ_INVALID;
 }
 
-static int sdk_official_setting_write(const char *id, const char *key, int expected, int desired)
-{
+static int sdk_official_setting_write(const char *id, const char *key, int expected, int desired) {
     if (!g_cm_on_ui || !cm_self(id, CM_RA(), "official_setting_write"))
         return AZ_INVALID;
     int status = azf_official_setting_write(key, expected, desired);

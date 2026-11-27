@@ -27,8 +27,8 @@ variant("timing-version", "sdk_analysis.h", "s->version != AZ_DATA_VERSION", "0"
 variant("timing-prefix-read", "sdk_analysis.h",
         "memcpy(&size, record, sizeof size);", "size = ((const az_track_snapshot *) record)->size;")
 variant("database-alias", "track_service.c",
-        'if (!st_source_path(src.mount, "/PIONEER/rekordbox/exportLibrary.db", data->files[0])) return AZ_STALE;',
-        'if (snprintf(data->files[0], sizeof data->files[0], "%s/PIONEER/rekordbox/exportLibrary.db", src.mount) >= (int) sizeof data->files[0]) return AZ_FAILED;')
+        'if (!st_source_database(&src, data->files[0])) return AZ_STALE;',
+        'if (snprintf(data->files[0], sizeof data->files[0], "%s/%s/rekordbox/exportLibrary.db", src.mount, st_source_export(&src)) >= (int) sizeof data->files[0]) return AZ_FAILED;')
 variant("missing-parent", "track_storage.c",
         "if (realpath(prefix, parent)) break;\n        if (errno != ENOENT) return 0;",
         "if (realpath(prefix, parent)) break;\n        return 0;")

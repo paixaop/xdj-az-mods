@@ -121,6 +121,7 @@ tail = body[a:]
 prefix = '''#include "azsources.h"
 #include "azcachebirth.h"
 #include "azcacheentry.h"
+#include "source_provider_query.h"
 #include <assert.h>
 #include <stdlib.h>
 // Message-only link: generic dispatcher dependencies must never be called.
@@ -132,13 +133,22 @@ void azsdk_cache_invoke_original(struct azce_call *c) { (void)c;abort(); }
 static int g_sdk_sources_on, stage, owner, source_calls;
 static int g_ep147_build = 1;
 static void *expected_server, *expected_message;
+static struct azsp_query_scope *active_query;
+static void source_provider_query_begin(void *server, void *message, struct azsp_query_scope *scope) {
+    assert(server == expected_server && message == expected_message && !active_query && stage == 0);
+    active_query = scope;
+}
+void azsp_query_end(struct azsp_query_scope *scope) {
+    assert(scope == active_query && stage == 1);
+    active_query = NULL;
+}
 static void original(void *server, void *message, unsigned param) {
     assert(server == expected_server && message == expected_message && param == 37);
-    assert(stage == 0); owner = 2; stage = 1;
+    assert(stage == 0 && active_query); owner = 2; stage = 1;
 }
 static void (*g_orig_mlserver_onmsg)(void *, void *, unsigned) = original;
 int azsdk_sources_observe_owned_message(void *server, void *out, size_t size) {
-    assert(server == expected_server && !out && !size && stage == 1 && owner == 2);
+    assert(server == expected_server && !out && !size && stage == 1 && owner == 2 && !active_query);
     ++source_calls; stage = 2; return AZS_OK;
 }
 static void pst_msg_done(void *server) {
@@ -157,10 +167,14 @@ int main() {
 }
 '''
 original_block = """    /* Original message forwarding boundary. */
-    if (g_sdk_sources_on)
-        azsdk_sources_forward_owned_message(g_ep147_build, server, msg, param, g_orig_mlserver_onmsg);
-    else
-        g_orig_mlserver_onmsg(server, msg, param);"""
+    {
+        struct azsp_query_scope scope __attribute__((cleanup(azsp_query_end)));
+        source_provider_query_begin(server, msg, &scope);
+        if (g_sdk_sources_on)
+            azsdk_sources_forward_owned_message(g_ep147_build, server, msg, param, g_orig_mlserver_onmsg);
+        else
+            g_orig_mlserver_onmsg(server, msg, param);
+    }"""
 observe_line = '    if (g_sdk_sources_on) azsdk_sources_observe_owned_message(server, NULL, 0);'
 needle = original_block + '\n' + observe_line
 assert tail.count(needle) == 1
@@ -168,9 +182,9 @@ pathlib.Path(sys.argv[2], 'bridge.c').write_text(prefix + tail + suffix)
 swapped = observe_line + '\n' + original_block
 pathlib.Path(sys.argv[2], 'bridge-control.c').write_text(prefix + tail.replace(needle, swapped) + suffix)
 PY
-${HOST_CC:-gcc} "${flags[@]}" -Isrc/common "$task_tmp/bridge.c" src/azmod/sdk_cache_message.c src/common/azcache_scopes.c -o "$task_tmp/bridge"
+${HOST_CC:-gcc} "${flags[@]}" -Isrc/common -Isrc/azmod "$task_tmp/bridge.c" src/azmod/sdk_cache_message.c src/common/azcache_scopes.c -o "$task_tmp/bridge"
 "$task_tmp/bridge"
-${HOST_CC:-gcc} "${flags[@]}" -Isrc/common "$task_tmp/bridge-control.c" src/azmod/sdk_cache_message.c src/common/azcache_scopes.c -o "$task_tmp/bridge-control"
+${HOST_CC:-gcc} "${flags[@]}" -Isrc/common -Isrc/azmod "$task_tmp/bridge-control.c" src/azmod/sdk_cache_message.c src/common/azcache_scopes.c -o "$task_tmp/bridge-control"
 if ( ulimit -c 0; "$task_tmp/bridge-control" >"$task_tmp/bridge-control.log" 2>&1 ) 2>/dev/null; then
     echo 'FAIL: post-original source bridge control was not caught' >&2; exit 1
 fi

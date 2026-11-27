@@ -7,10 +7,10 @@
 #include <stdio.h>
 #include <string.h>
 
-#define TRACKS \
-    "SELECT content_id, title, subtitle, bpmx100, length, trackNo, artist_id_artist, artist_id_remixer, " \
-    "artist_id_originalArtist, artist_id_composer, artist_id_lyricist, album_id, genre_id, label_id, key_id, " \
-    "color_id, image_id, djComment, rating, releaseYear, dateAdded, path, fileName, fileType, bitrate, isrc, " \
+#define TRACKS                                                                                                   \
+    "SELECT content_id, title, subtitle, bpmx100, length, trackNo, artist_id_artist, artist_id_remixer, "        \
+    "artist_id_originalArtist, artist_id_composer, artist_id_lyricist, album_id, genre_id, label_id, key_id, "   \
+    "color_id, image_id, djComment, rating, releaseYear, dateAdded, path, fileName, fileType, bitrate, isrc, "   \
     "djPlayCount, isHotCueAutoLoadOn, isKuvoDeliverStatusOn, kuvoDeliveryComment, masterDbId, masterContentId, " \
     "analysisDataFilePath FROM content"
 #define PLAYLISTS "SELECT playlist_id, sequenceNo, name, image_id, attribute, playlist_id_parent FROM playlist"
@@ -44,8 +44,11 @@ static int plaintext_test_key(void *db) { return db ? 0 : 1; }
 
 static sqlite3 *fixture(const char *root) {
     const struct az_library_sql sql = {
-        .open_v2 = open_database, .prepare = prepare, .step = step,
-        .finalize = finalize, .close = close_database,
+        .open_v2 = open_database,
+        .prepare = prepare,
+        .step = step,
+        .finalize = finalize,
+        .close = close_database,
     };
     assert(azsp_catalog_create(root, &sql, plaintext_test_key) == AZ_OK);
     char path[AZ_SOURCE_PATH_BYTES];
@@ -87,7 +90,7 @@ static void expect_ids(sqlite3 *db, const char *query, const int *ids, size_t co
 static void browse_scope(sqlite3 *db) {
     struct azsp_query_scope owner, nested;
     azsp_query_begin(&library_owner, &browse, db, "alpha", &owner);
-    expect_ids(db, TRACKS " ORDER BY content_id", (int[]) {1,3}, 2);
+    expect_ids(db, TRACKS " ORDER BY content_id", (int[]) {1, 3}, 2);
     expect_ids(db, TRACKS " WHERE content_id = 2", (int[]) {2}, 1);
     expect_ids(db, "SELECT artist.artist_id, artist.name FROM artist INNER JOIN ( SELECT DISTINCT artist_id_artist FROM content ) AS sub ON sub.artist_id_artist = artist.artist_id",
                (int[]) {10}, 1);
@@ -99,16 +102,16 @@ static void browse_scope(sqlite3 *db) {
     expect_ids(db, HISTORY, (int[]) {100}, 1);
     expect_ids(db, "SELECT history_id, content_id, sequenceNo FROM history_content WHERE history_id = 200", NULL, 0);
     azsp_query_begin(NULL, &browse, db, "alpha", &nested);
-    expect_ids(db, TRACKS " ORDER BY content_id", (int[]) {1,2,3,4}, 4);
+    expect_ids(db, TRACKS " ORDER BY content_id", (int[]) {1, 2, 3, 4}, 4);
     azsp_query_end(&nested);
-    expect_ids(db, TRACKS, (int[]) {1,3}, 2);
+    expect_ids(db, TRACKS, (int[]) {1, 3}, 2);
     azsp_query_end(&owner);
 }
 
 static void search_scope(sqlite3 *db) {
     struct azsp_query_scope scope;
     azsp_query_begin(&library_owner, &search, db, "alpha", &scope);
-    expect_ids(db, TRACKS, (int[]) {3,1}, 2);
+    expect_ids(db, TRACKS, (int[]) {3, 1}, 2);
     void *stmt = NULL;
     assert(azsp_query_prepare(db, TRACKS, -1, &stmt, NULL, prepare) == SQLITE_OK);
     assert(sqlite3_step(stmt) == SQLITE_ROW);

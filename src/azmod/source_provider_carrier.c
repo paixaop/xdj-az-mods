@@ -53,9 +53,16 @@ enum {
     CARRIER_WAKE_SENDER = 0x415a574b,
 };
 
-struct carrier_owner { void *object, *control; };
-struct carrier_vector { struct carrier_owner *begin, *end, *capacity; };
-struct carrier_list_node { struct carrier_list_node *next, *previous; void *server; };
+struct carrier_owner {
+    void *object, *control;
+};
+struct carrier_vector {
+    struct carrier_owner *begin, *end, *capacity;
+};
+struct carrier_list_node {
+    struct carrier_list_node *next, *previous;
+    void *server;
+};
 
 struct carrier_detection {
     void *path;
@@ -146,9 +153,8 @@ static void carrier_create_library(const struct carrier_vector *workers, const v
     if (created) ((void (**)(void *)) carrier_pointer(created, 0))[1](created);
 }
 
-__attribute__((used, visibility("hidden")))
-void *carrier_factory_hook(const struct carrier_vector *workers, const void *name,
-                           const uint8_t *storage, const uint8_t *config, void **result) {
+__attribute__((used, visibility("hidden"))) void *carrier_factory_hook(const struct carrier_vector *workers, const void *name,
+                                                                       const uint8_t *storage, const uint8_t *config, void **result) {
     carrier_call_factory(workers, name, storage, config, result);
     if (*storage == 2 && carrier_create_owner(&carrier_library))
         carrier_create_library(workers, name, config);
@@ -158,7 +164,7 @@ void *carrier_factory_hook(const struct carrier_vector *workers, const void *nam
 static void carrier_create_repository(void) {
     const uint8_t storage = CARRIER_STORAGE, config = 0;
     void *name;
-    void *server = ((void *(*)(size_t)) CARRIER_NEW)(0x210);
+    void *server = ((void *(*) (size_t) ) CARRIER_NEW)(0x210);
     carrier_string(&name, "TInfRepSrvUsb3");
     ((void (*)(void *, const void *, const uint8_t *, const uint8_t *)) CARRIER_NEW_REPOSITORY)(server, &name, &storage, &config);
     carrier_string_drop(&name);
@@ -168,12 +174,12 @@ static void carrier_create_repository(void) {
 
 static void carrier_add_worker(void *server, uint64_t owner) {
     carrier_put(server, 0x140, owner);
-    carrier_put(server, 0x150, (uintptr_t) ((void *(*)(void *)) CARRIER_WORKER)(server));
+    carrier_put(server, 0x150, (uintptr_t) ((void *(*) (void *) ) CARRIER_WORKER)(server));
 }
 
 static void carrier_configure_library(void **module, void *server) {
     const uint8_t storage = CARRIER_STORAGE;
-    void *observer = ((void *(*)(size_t)) CARRIER_NEW)(0x18);
+    void *observer = ((void *(*) (size_t) ) CARRIER_NEW)(0x18);
     ((void (*)(void *, const uint8_t *)) CARRIER_MOUNT_OBSERVER)(observer, &storage);
     carrier_add_worker(server, UINT64_C(0x40a6b12e49b2a2));
     void (**methods)(void *, void *) = carrier_pointer(server, 0);
@@ -200,11 +206,13 @@ static void carrier_extend_vector(struct carrier_vector *out, struct carrier_own
                                   const struct carrier_vector *source, size_t count, struct carrier_owner owner) {
     memcpy(dest, source->begin, count * sizeof *dest);
     dest[count] = owner;
-    *out = (struct carrier_vector) { dest, dest + count + 1, dest + count + 1 };
+    *out = (struct carrier_vector) {dest, dest + count + 1, dest + count + 1};
 }
 
 static void carrier_library_aggregate(void *self, const struct carrier_vector *inputs, const struct carrier_vector *servers) {
-    enum { stock_count = 17 };
+    enum {
+        stock_count = 17
+    };
     struct carrier_owner elements[stock_count + 1];
     struct carrier_vector extended;
     if (carrier_library.object && servers->end - servers->begin == stock_count) {
@@ -216,7 +224,9 @@ static void carrier_library_aggregate(void *self, const struct carrier_vector *i
 
 static void carrier_repository_aggregate(void *self, const struct carrier_vector *clients,
                                          const struct carrier_vector *servers, const struct carrier_vector *streaming) {
-    enum { stock_count = 5 };
+    enum {
+        stock_count = 5
+    };
     struct carrier_owner elements[stock_count + 1];
     struct carrier_vector extended;
     if (carrier_repository.object && servers->end - servers->begin == stock_count) {
@@ -319,7 +329,7 @@ static unsigned carrier_start_progress(void *controller, const void *path, const
 
 static int carrier_own_mount(unsigned storage, const void *path) {
     if (storage != CARRIER_STORAGE || !atomic_load_explicit(&mount_requested, memory_order_acquire)) return 0;
-    return strcmp(*(const char * const *) path, carrier_root) == 0;
+    return strcmp(*(const char *const *) path, carrier_root) == 0;
 }
 
 static void carrier_queue_mount(void *controller) {
@@ -355,7 +365,7 @@ static unsigned carrier_storage_worker(void *controller, unsigned link, unsigned
 static void carrier_add_dispatch_route(void *dispenser, void *server) {
     unsigned char *object = dispenser;
     struct carrier_list_node *sentinel = (void *) (object + 0x2c0);
-    struct carrier_list_node *node = ((void *(*)(size_t)) CARRIER_NEW)(sizeof *node);
+    struct carrier_list_node *node = ((void *(*) (size_t) ) CARRIER_NEW)(sizeof *node);
     node->server = server;
     append_server_node(node, sentinel);
     size_t *count = (void *) (object + 0x2d0);
@@ -395,8 +405,10 @@ struct carrier_hook {
     uint32_t instructions[4];
 };
 
-#define CARRIER_HOOK(address, name, a, b, c, d) \
-    { (address), carrier_##name, (void **) &(name), {(a), (b), (c), (d)} }
+#define CARRIER_HOOK(address, name, a, b, c, d)                              \
+    {                                                                        \
+        (address), carrier_##name, (void **) &(name), { (a), (b), (c), (d) } \
+    }
 
 static const struct carrier_hook carrier_hooks[] = {
     {0x137bc60, carrier_factory_entry, &library_factory, {0xa9bd7bfd, 0x910003fd, 0x39400044, 0xf9400025}},
@@ -452,7 +464,7 @@ static int carrier_claim_install(int build) {
 }
 
 static void *carrier_create_wake(uint64_t media) {
-    void *message = ((void *(*)(size_t)) CARRIER_NEW)(CARRIER_MESSAGE_SIZE);
+    void *message = ((void *(*) (size_t) ) CARRIER_NEW)(CARRIER_MESSAGE_SIZE);
     ((void (*)(void *, unsigned, unsigned)) CARRIER_MESSAGE_CONSTRUCT)(message, CARRIER_ROOT_MENU, 1);
     unsigned location = CARRIER_ROOT_LOCATION | (unsigned) (media & 0xff);
     ((void (*)(void *, unsigned, unsigned)) CARRIER_MESSAGE_SET_UINT)(message, 0, location);

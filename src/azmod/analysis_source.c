@@ -867,7 +867,7 @@ static int sa_saved_phrases(struct sa_job *j, const uint8_t *dat, size_t dat_siz
     int rc = sa_saved_stream_grid(j, grid, grid_size);
     if (rc != AZ_NOT_FOUND) return rc;
     const uint8_t *phrase = ext_phrases ? sa_find_tag(ext, ext_size, "PSSI", &phrase_size)
-                                       : sa_find_tag(dat, dat_size, "PSSI", &phrase_size);
+                                        : sa_find_tag(dat, dat_size, "PSSI", &phrase_size);
     return sa_saved_phrases_publish(j, grid, grid_size, phrase, phrase_size);
 }
 /* Saved phrase indexes are usable only against the captured native grid. */
@@ -1623,4 +1623,3 @@ void analysis_source_release(analysis_source_input *input) {
     free(input->beats);
     memset(input, 0, sizeof *input);
 }
-

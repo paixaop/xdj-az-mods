@@ -23,7 +23,7 @@ static void sv_key_hook(void *self, void *str) {
     } else if (sdk_source_browser_editing()) {
         char key[16] = "";
         nm_key_text(str, key, sizeof key);
-        (void)sdk_source_browser_key(key);
+        (void) sdk_source_browser_key(key);
     } else {
         g_orig_sv_key(self, str);
     }

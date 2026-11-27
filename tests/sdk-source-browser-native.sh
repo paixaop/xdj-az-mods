@@ -20,8 +20,7 @@ case ${SAN:-plain} in plain) ;; asan) flags+=(-fsanitize=address,undefined -fno-
 "$work/import-queue-test"
 "${HOST_CC:-cc}" "${flags[@]}" tests/unit/source_import_worker_test.c -o "$work/import-worker-test"
 "$work/import-worker-test"
-"${HOST_CC:-cc}" "${flags[@]}" tests/unit/source_import_analyzer_test.c src/azmod/source_import_analyzer.c \
-    src/azmod/track_storage.c -lm -o "$work/import-analyzer-test"
+"${HOST_CC:-cc}" "${flags[@]}" tests/unit/source_import_analyzer_test.c src/azmod/track_storage.c -lm -o "$work/import-analyzer-test"
 "$work/import-analyzer-test"
 "${HOST_CC:-cc}" "${flags[@]}" tests/unit/source_provider_dispatch_test.c -o "$work/source-dispatch-test"
 "$work/source-dispatch-test"
@@ -37,3 +36,7 @@ if [ "$(uname -s)" = Linux ]; then runtime_libs+=(-ldl); fi
 "$work/source-runtime-test"
 "${HOST_CC:-cc}" "${flags[@]}" tests/unit/source_provider_lifetime_test.c -o "$work/source-lifetime-test"
 "$work/source-lifetime-test"
+if [[ $(uname -s) == Linux && $(uname -m) == aarch64 ]]; then
+    "${HOST_CC:-cc}" "${flags[@]}" tests/unit/source_provider_carrier_test.c -ldl -o "$work/source-carrier-test"
+    "$work/source-carrier-test"
+fi

@@ -1389,6 +1389,7 @@ static int frontend_frame_count(const Frontend *f)
 static void frontend_power(ta_context *c, const Frontend *f, Features *features)
 {
     double output[(int)f->parameters[TA_VOCAL_MOTION_POWER_BINS]];
+    memset(output, 0, sizeof output);
     int count = frontend_frame_count(f);
     for (int frame = 0; frame < count; frame++) {
         ta_check(c);
