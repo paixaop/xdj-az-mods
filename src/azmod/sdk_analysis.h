@@ -299,8 +299,8 @@ static inline int st_grid_row(struct st_data *d, const uint8_t *e, uint32_t i) {
         int order = compare_timestamps(milliseconds, hc_be32(e - 4), units, units, 1);
         if (order == AZ_TIME_INVALID || order != AZ_TIME_AFTER) return AZ_FAILED;
     }
-    d->beats[i] = (az_beat) {milliseconds / (double)units,
-                            hc_be16(e + 2) / (double)AZ_ANALYSIS_POLICY_TEMPO_UNITS_PER_BPM, hc_be16(e), 0};
+    d->beats[i] = (az_beat) {milliseconds / (double) units,
+                             hc_be16(e + 2) / (double) AZ_ANALYSIS_POLICY_TEMPO_UNITS_PER_BPM, hc_be16(e), 0};
     if (d->beat_ticks) d->beat_ticks[i] = milliseconds;
     return AZ_OK;
 }

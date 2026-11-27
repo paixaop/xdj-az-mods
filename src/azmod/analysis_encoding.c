@@ -15,7 +15,7 @@ static int sa_result_header_valid(const az_analysis_result_v1 *r) {
 }
 static int sa_result_source_valid(const az_analysis_result_v1 *r) {
     return az_analysis_source_rate_supported(r->source_rate) && r->source_frames &&
-           r->source_frames <= (uint64_t)r->source_rate * AZ_ANALYSIS_POLICY_MAXIMUM_SOURCE_SECONDS;
+           r->source_frames <= (uint64_t) r->source_rate * AZ_ANALYSIS_POLICY_MAXIMUM_SOURCE_SECONDS;
 }
 static int sa_result_counts_valid(const az_analysis_result_v1 *r) {
     return r->beat_count <= AZ_ANALYSIS_POLICY_MAXIMUM_GRID_BEATS &&
@@ -57,8 +57,8 @@ static int sa_result_beats_ordered(const az_analysis_result_v1 *r) {
     for (uint32_t i = 1; i < r->beat_count; i++) {
         int order = compare_timestamps(r->beats[i].time_s, r->beats[i - 1].time_s, 1, r->source_rate, window);
         if (order == AZ_TIME_INVALID || order != AZ_TIME_AFTER) return 0;
-        uint64_t current_ms = (uint64_t)az_analysis_stored_time(r->beats[i].time_s);
-        uint64_t previous_ms = (uint64_t)az_analysis_stored_time(r->beats[i - 1].time_s);
+        uint64_t current_ms = (uint64_t) az_analysis_stored_time(r->beats[i].time_s);
+        uint64_t previous_ms = (uint64_t) az_analysis_stored_time(r->beats[i - 1].time_s);
         order = compare_timestamps(current_ms, previous_ms, units, r->source_rate, window);
         if (order == AZ_TIME_INVALID || order != AZ_TIME_AFTER) return 0;
     }
@@ -106,8 +106,8 @@ static void sa_encode_grid(const az_analysis_result_v1 *r, uint8_t *tag, uint32_
     for (uint32_t i = 0; i < r->beat_count; i++) {
         uint8_t *row = tag + 24 + i * 8;
         sa_typed_put16(row, r->beats[i].beat_in_bar);
-        sa_typed_put16(row + 2, (uint32_t)round(r->beats[i].bpm * AZ_ANALYSIS_POLICY_TEMPO_UNITS_PER_BPM));
-        sa_put32(row + 4, (uint32_t)az_analysis_stored_time(r->beats[i].time_s));
+        sa_typed_put16(row + 2, (uint32_t) round(r->beats[i].bpm * AZ_ANALYSIS_POLICY_TEMPO_UNITS_PER_BPM));
+        sa_put32(row + 4, (uint32_t) az_analysis_stored_time(r->beats[i].time_s));
     }
 }
 static void sa_encode_phrases(const az_analysis_result_v1 *r, uint8_t *tag, uint32_t pn) {

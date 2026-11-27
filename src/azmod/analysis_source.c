@@ -693,7 +693,7 @@ static int sa_grid_encode_row(const struct sa_grid_capture *capture, unsigned fi
     const unsigned phases = AZ_ANALYSIS_POLICY_MAXIMUM_PHASE - AZ_ANALYSIS_POLICY_MINIMUM_PHASE + 1;
     unsigned beat = capture->rows[i].beat_in_bar;
     beat = beat ? beat : (i + phases - first % phases) % phases + AZ_ANALYSIS_POLICY_MINIMUM_PHASE;
-    double ms = (double)capture->ticks[i] * AZ_ANALYSIS_POLICY_STORED_MILLISECONDS_PER_SECOND / capture->rate;
+    double ms = (double) capture->ticks[i] * AZ_ANALYSIS_POLICY_STORED_MILLISECONDS_PER_SECOND / capture->rate;
     double bpm = capture->rows[i].bpm * AZ_ANALYSIS_POLICY_TEMPO_UNITS_PER_BPM;
     if (!az_analysis_phase_supported(beat) || !isfinite(ms) || ms < 0 || ms > UINT32_MAX ||
         !isfinite(bpm) || bpm < 1 || bpm > UINT16_MAX)
