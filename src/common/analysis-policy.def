@@ -1,0 +1,37 @@
+/* SPDX-License-Identifier: GPL-3.0-only */
+/* Core policy and wire format. Native analysis settings come from the model. */
+
+/* P001, P121, P125, core import 9128e8d. */
+AZ_ANALYSIS_SETTING(ALLOWED_RATE_LOW, 44100)
+AZ_ANALYSIS_SETTING(ALLOWED_RATE_HIGH, 48000)
+AZ_ANALYSIS_SETTING(MINIMUM_SOURCE_FRAMES, 2)
+AZ_ANALYSIS_SETTING(MAXIMUM_SOURCE_SECONDS, 1200)
+
+/* P004, P124, core SDK capacities 21e693d. */
+AZ_ANALYSIS_SETTING(MAXIMUM_GRID_BEATS, 32768)
+AZ_ANALYSIS_SETTING(MAXIMUM_PHRASE_COUNT, 1024)
+
+/* P124, core SDK grid validation 9128e8d. */
+AZ_ANALYSIS_SETTING(MINIMUM_PHASE, 1)
+AZ_ANALYSIS_SETTING(MAXIMUM_PHASE, 4)
+
+/* P124, PQTZ unsigned 16-bit centi-BPM wire representation. */
+AZ_ANALYSIS_SETTING(TEMPO_UNITS_PER_BPM, 100)
+
+/* P002, PQTZ timestamp wire representation. */
+AZ_ANALYSIS_SETTING(STORED_MILLISECONDS_PER_SECOND, 1000)
+
+/* P124, core SDK native-grid validation 9128e8d. */
+AZ_ANALYSIS_SETTING(GRID_TOLERANCE_SAMPLES, 1)
+
+/* P002, core floating-offset rounding 9128e8d. */
+AZ_ANALYSIS_SETTING(OFFSET_ROUND_NUMERATOR, 1)
+AZ_ANALYSIS_SETTING(OFFSET_ROUND_DENOMINATOR, 2)
+
+/* P122, core saved score grouping 026ab712, retained in 0a65cbc. */
+AZ_ANALYSIS_SETTING(SAVED_VOCAL_THRESHOLD, 3)
+
+/* P123, core saved interval clipping 026ab712. */
+AZ_ANALYSIS_SETTING(CLIP_SAVED_VOCAL_END, 1)
+/* P123, core timestamp comparison for saved intervals 0a65cbc. */
+AZ_ANALYSIS_SETTING(SAVED_VOCAL_TOLERANCE_SAMPLES, 1)

@@ -15,7 +15,7 @@ typedef struct {
  * during the callback. Cancellation callbacks must support concurrent calls. */
 typedef struct {
     void (*profile)(void *user, const char *stage, double elapsed_seconds);
-    void (*vocal_features)(void *user, const float (*features)[29], uint32_t count);
+    void (*vocal_features)(void *user, const float *features, uint32_t count, uint32_t columns);
     void (*vocal_probabilities)(void *user, const float *probabilities, uint32_t count);
     void *user;
 } ta_diagnostics;

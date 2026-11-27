@@ -4,16 +4,17 @@
 #include <pthread.h>
 typedef struct {
     float *features, *probabilities;
-    uint32_t features_count, probability_count;
+    uint32_t features_count, features_columns, probability_count;
     atomic_uint profile_count, cancel_calls;
     unsigned cancel_after;
 } capture;
-static void features(void *user, const float (*values)[29], uint32_t count) {
+static void features(void *user, const float *values, uint32_t count, uint32_t columns) {
     capture *c = user;
     c->features_count = count;
-    c->features = malloc((size_t)count * sizeof *values);
+    c->features_columns = columns;
+    c->features = malloc((size_t)count * columns * sizeof *values);
     assert(c->features);
-    memcpy(c->features, values, (size_t)count * sizeof *values);
+    memcpy(c->features, values, (size_t)count * columns * sizeof *values);
 }
 static void probabilities(void *user, const float *values, uint32_t count) {
     capture *c = user;
@@ -83,15 +84,17 @@ static void stage_arrays(const ta_request *request) {
     ta_context *c = calloc(1, sizeof *c);
     c->request = request;
     assert(!setjmp(c->failure));
-    Samples baseline = phrase_decode(c);
-    Timing timing = reference_timing(c, 120, 0, 1, 120);
-    Coordinates coordinates = phrase_coordinates(c, baseline, timing);
-    Spectra cqt = opening_spectra(c, baseline.middle, baseline.rate / 8);
-    Spectra fft = phrase_spectra(c, baseline, timing, coordinates, false);
-    Spectra recurrence = phrase_spectra(c, baseline, timing, coordinates, true);
+    double parameters[TA_PHRASE_PARAMETER_COUNT];
+    ta_model_phrase_parameters(c, parameters);
+    Samples baseline = phrase_decode(c, parameters);
+    Timing timing = reference_timing(c, 120, 0, 1, 120, parameters);
+    Coordinates coordinates = phrase_coordinates(c, baseline, timing, parameters);
+    Spectra cqt = opening_spectra(c, baseline.middle, baseline.rate / 8, parameters);
+    Spectra fft = phrase_spectra(c, baseline, timing, coordinates, false, parameters);
+    Spectra recurrence = phrase_spectra(c, baseline, timing, coordinates, true, parameters);
     for (unsigned threads = 2; threads <= 3; threads++) {
         c->execution.phrase_threads = threads;
-        Samples actual = phrase_decode(c);
+        Samples actual = phrase_decode(c, parameters);
         D expected_bands[] = {baseline.low, baseline.middle, baseline.high};
         D actual_bands[] = {actual.low, actual.middle, actual.high};
         for (int band = 0; band < 3; band++) {
@@ -100,11 +103,11 @@ static void stage_arrays(const ta_request *request) {
                            (size_t)actual_bands[band].n * sizeof(double)));
             ta_release(c, actual_bands[band].v);
         }
-        Spectra next = opening_spectra(c, baseline.middle, baseline.rate / 8);
+        Spectra next = opening_spectra(c, baseline.middle, baseline.rate / 8, parameters);
         same_spectra(cqt, next); spectra_release(c, next);
-        next = phrase_spectra(c, baseline, timing, coordinates, false);
+        next = phrase_spectra(c, baseline, timing, coordinates, false, parameters);
         same_spectra(fft, next); spectra_release(c, next);
-        next = phrase_spectra(c, baseline, timing, coordinates, true);
+        next = phrase_spectra(c, baseline, timing, coordinates, true, parameters);
         same_spectra(recurrence, next); spectra_release(c, next);
     }
     ta_cleanup(c);
@@ -153,11 +156,14 @@ int main(int argc, char **argv) {
         if (!reference) {
             reference = result;
             baseline.features = current.features; baseline.features_count = current.features_count;
+            baseline.features_columns = current.features_columns;
             baseline.probabilities = current.probabilities; baseline.probability_count = current.probability_count;
         } else {
             same_result(reference, result);
             assert(current.features_count == baseline.features_count && current.probability_count == baseline.probability_count);
-            assert(!memcmp(current.features, baseline.features, (size_t)current.features_count * 29 * sizeof(float)));
+            assert(current.features_columns == baseline.features_columns && current.features_columns > 0);
+            size_t values = (size_t)current.features_count * current.features_columns;
+            assert(!memcmp(current.features, baseline.features, values * sizeof(float)));
             assert(!memcmp(current.probabilities, baseline.probabilities, (size_t)current.probability_count * sizeof(float)));
             ta_result_free(result); free(current.features); free(current.probabilities);
         }

@@ -8,6 +8,9 @@ void test_phrase_edges_rhythm(ta_context *c);
 void test_phrase_edges_features(ta_context *c);
 void test_phrase_edges_decorators(ta_context *c);
 void test_phrase_edges_high_boundaries(ta_context *c);
+void test_phrase_edges_opening(ta_context *c);
+void test_phrase_edges_snare(ta_context *c);
+void test_phrase_edges_spectra(ta_context *c);
 int main(void)
 {
     ta_context *c = calloc(1, sizeof *c);
@@ -26,6 +29,9 @@ int main(void)
     ta_cleanup(c);
     test_phrase_edges_high_boundaries(c);
     ta_cleanup(c);
+    test_phrase_edges_opening(c);
+    test_phrase_edges_snare(c);
+    test_phrase_edges_spectra(c);
     free(c);
     puts("Phrase edge contracts passed: recovery, fade, roles, beat ownership, timing, buildup and seed votes");
 }

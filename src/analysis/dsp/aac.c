@@ -1,5 +1,6 @@
 #include "allocator.h"
 /* SPDX-License-Identifier: GPL-3.0-only */
+#include "../../common/azanalysis_policy.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -237,7 +238,8 @@ static int ta_aac_apply_edit(ta_aac *a, const unsigned char h[28], unsigned widt
     uint64_t duration = width == 8 ? ta_be64(h + 8) : ta_be32(h + 8);
     uint64_t media = width == 8 ? ta_be64(h + 16) : ta_be32(h + 12);
     if (media >> (width * 8 - 1) || !movie_scale || ta_be32(h + 8 + width * 2) != 0x00010000 ||
-        media > (uint64_t)a->packet_count * 1024 || duration > (uint64_t)movie_scale * 1200) return 0;
+        media > (uint64_t)a->packet_count * 1024 ||
+        duration > (uint64_t)movie_scale * AZ_ANALYSIS_POLICY_MAXIMUM_SOURCE_SECONDS) return 0;
     a->clock.has_edit = 1;
     a->clock.edit_start_frames = media;
     a->clock.presentation_frames = (duration * a->rate + movie_scale / 2) / movie_scale;
@@ -330,14 +332,14 @@ static int ta_aac_mp4_config(ta_aac *a, MP4D_track_t *track)
     mp4AudioSpecificConfig config = { 0 };
     if (NeAACDecAudioSpecificConfig(track->dsi, track->dsi_bytes, &config) != 0 || !ta_aac_lc_config(&config)) return 0;
     if (config.channelsConfiguration < 1 || config.channelsConfiguration > 2 ||
-        (config.samplingFrequency != 44100 && config.samplingFrequency != 48000) ||
+        !az_analysis_source_rate_supported(config.samplingFrequency) ||
         track->timescale != config.samplingFrequency) return 0;
     a->rate = (unsigned)config.samplingFrequency;
     a->channels = config.channelsConfiguration;
     a->asc_size = track->dsi_bytes;
     memcpy(a->asc, track->dsi, a->asc_size);
     a->packet_count = track->sample_count;
-    return (uint64_t)a->packet_count * 1024 <= (uint64_t)a->rate * 1200;
+    return (uint64_t)a->packet_count * 1024 <= (uint64_t)a->rate * AZ_ANALYSIS_POLICY_MAXIMUM_SOURCE_SECONDS;
 }
 static int ta_aac_packet_range(const ta_aac *a, uint64_t offset, unsigned size, uint64_t previous_end)
 {
@@ -438,7 +440,8 @@ static int ta_aac_adts(ta_aac *a)
         if (!ta_aac_adts_packet(a, h, &at)) return 0;
     }
     a->clock.kind = TA_DECODE_AAC_ENCODED;
-    return a->packet_count && (uint64_t)a->packet_count * 1024 <= (uint64_t)a->rate * 1200;
+    return a->packet_count &&
+           (uint64_t)a->packet_count * 1024 <= (uint64_t)a->rate * AZ_ANALYSIS_POLICY_MAXIMUM_SOURCE_SECONDS;
 }
 static int ta_aac_reset(ta_aac *a)
 {

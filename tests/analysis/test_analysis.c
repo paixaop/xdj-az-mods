@@ -128,7 +128,7 @@ static void put32(FILE *f, unsigned x)
     put16(f, x & 65535);
     put16(f, x >> 16);
 }
-static void phrase_check(unsigned rate)
+static void phrase_check(unsigned rate, const char *assets)
 {
     char file[] = "/tmp/track-analysis-pcm-XXXXXX";
     int fd = mkstemp(file);
@@ -162,6 +162,7 @@ static void phrase_check(unsigned rate)
     for (int i = 0; i < 256; i++)
         beats[i] = (az_beat){ .time_s = i * 0.5, .bpm = 120, .beat_in_bar = i % 4 + 1 };
     ta_request r = { .audio_path = file,
+                     .assets_path = assets,
                      .beats = beats,
                      .beat_count = 256,
                      .needed = AZ_DATA_PHRASES,
@@ -217,8 +218,8 @@ int main(int argc, char **argv)
     execution_contracts();
     decode_checks(argv[1]);
     vocals_check(argv[1], argv[2]);
-    phrase_check(44100);
-    phrase_check(48000);
+    phrase_check(44100, argv[2]);
+    phrase_check(48000, argv[2]);
     ta_context *c = calloc(1, sizeof *c);
     assert(c);
     if (!setjmp(c->failure)) {

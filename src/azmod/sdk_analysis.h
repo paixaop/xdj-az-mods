@@ -3,13 +3,14 @@
 #ifndef AZMOD_SDK_ANALYSIS_H
 #define AZMOD_SDK_ANALYSIS_H
 #include "../common/aztimestamp.h"
+#include "../common/azanalysis_policy.h"
 #include "azmod-mod.h"
 #include "hc_anlz.h"
 #include <math.h>
 #include <string.h>
-#define ST_BEATS 32768
+#define ST_BEATS AZ_ANALYSIS_POLICY_MAXIMUM_GRID_BEATS
 #define ST_CUES 256
-#define ST_PHRASES 1024
+#define ST_PHRASES AZ_ANALYSIS_POLICY_MAXIMUM_PHRASE_COUNT
 #define ST_WAVE 4096
 #define ST_FILE_MAX (16u * 1024u * 1024u)
 struct st_data {
@@ -293,11 +294,13 @@ static inline uint16_t st_ps16(const uint8_t *t, size_t off, uint16_t count, int
 }
 static inline int st_grid_row(struct st_data *d, const uint8_t *e, uint32_t i) {
     uint32_t milliseconds = hc_be32(e + 4);
+    const unsigned units = AZ_ANALYSIS_POLICY_STORED_MILLISECONDS_PER_SECOND;
     if (i) {
-        int order = compare_timestamps(milliseconds, hc_be32(e - 4), 1000, 1000, 1);
+        int order = compare_timestamps(milliseconds, hc_be32(e - 4), units, units, 1);
         if (order == AZ_TIME_INVALID || order != AZ_TIME_AFTER) return AZ_FAILED;
     }
-    d->beats[i] = (az_beat) {milliseconds / 1000.0, hc_be16(e + 2) / 100.0, hc_be16(e), 0};
+    d->beats[i] = (az_beat) {milliseconds / (double) units,
+                             hc_be16(e + 2) / (double) AZ_ANALYSIS_POLICY_TEMPO_UNITS_PER_BPM, hc_be16(e), 0};
     if (d->beat_ticks) d->beat_ticks[i] = milliseconds;
     return AZ_OK;
 }
